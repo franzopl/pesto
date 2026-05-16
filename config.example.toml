@@ -1,0 +1,17 @@
+# Example pesto configuration.
+# Copy to `config.toml` and adjust. Any field can be overridden by a CLI flag.
+
+[server]
+host = "news.example.com"
+port = 563
+ssl = true
+connections = 10
+
+[auth]
+username = "your_username"
+password = "your_password"
+
+[posting]
+from = "poster <poster@example.com>"
+groups = ["alt.binaries.test"]
+article_size = 768000   # target size of each segment, in bytes

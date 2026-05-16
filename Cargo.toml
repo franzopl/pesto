@@ -1,0 +1,30 @@
+[package]
+name = "pesto"
+version = "0.1.0"
+edition = "2021"
+description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation"
+license = "MIT"
+
+[[bin]]
+name = "pesto"
+path = "src/main.rs"
+
+[lib]
+name = "pesto"
+path = "src/lib.rs"
+
+[dependencies]
+# Added as the ROADMAP.md phases progress:
+# tokio = { version = "1", features = ["full"] }
+# tokio-rustls = "0.26"
+# rustls = "0.23"
+# clap = { version = "4", features = ["derive"] }
+# serde = { version = "1", features = ["derive"] }
+# toml = "0.8"
+# anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
