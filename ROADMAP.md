@@ -11,12 +11,12 @@ Each phase must leave the program in a working, testable state.
 - [x] TOML config loading + merge with flags
 - [x] Basic CI (`fmt`, `clippy`, `test`)
 
-## Phase 1 — yEnc encoding
+## Phase 1 — yEnc encoding ✅
 
-- [ ] yEnc encoder following the specification (escaping of `=`, NUL, CR, LF)
-- [ ] `=ybegin` / `=yend` lines with CRC32
-- [ ] File segmentation into parts (`=ypart` for multi-part)
-- [ ] Tests against known yEnc vectors
+- [x] yEnc encoder following the specification (escaping of `=`, NUL, CR, LF)
+- [x] `=ybegin` / `=yend` lines with CRC32
+- [x] File segmentation into parts (`=ypart` for multi-part)
+- [x] Tests against known yEnc vectors
 
 ## Phase 2 — NNTP client
 
