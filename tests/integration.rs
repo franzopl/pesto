@@ -93,6 +93,7 @@ async fn posts_every_segment_to_a_mock_server() {
         from: "tester <t@pesto.test>".to_string(),
         groups: vec!["alt.binaries.test".to_string()],
         article_size: 100,
+        obfuscate: false,
     };
 
     let outcome = post_files(&config, std::slice::from_ref(&path))

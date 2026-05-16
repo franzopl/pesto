@@ -53,6 +53,10 @@ struct Cli {
     #[arg(short, long, value_name = "PATH")]
     out: Option<PathBuf>,
 
+    /// Post under random subjects and yEnc file names.
+    #[arg(long)]
+    obfuscate: bool,
+
     /// Files to post.
     #[arg(required = true, value_name = "FILE")]
     files: Vec<PathBuf>,
@@ -76,6 +80,7 @@ impl Cli {
                 Some(self.groups.clone())
             },
             article_size: None,
+            obfuscate: if self.obfuscate { Some(true) } else { None },
         }
     }
 }

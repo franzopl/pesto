@@ -50,7 +50,14 @@ Each phase must leave the program in a working, testable state.
 
 **The MVP is complete.** `pesto` posts files to Usenet and writes an `.nzb`.
 
-## Phase 6 — `upapasta` integration
+## Phase 6 — Posting obfuscation ✅
+
+- [x] `--obfuscate` flag and `obfuscate` config option
+- [x] Random subject and yEnc file name per file
+- [x] Real file name preserved in the `.nzb` `<file name>` attribute
+- [x] Tests for obfuscated-name generation and `.nzb` output
+
+## Phase 7 — `upapasta` integration
 
 - [ ] Stabilize the public API of `lib.rs`
 - [ ] Document integration points
@@ -60,7 +67,6 @@ Each phase must leave the program in a working, testable state.
 
 - Compression / RAR creation before posting
 - PAR2 file generation
-- Subject/file name obfuscation
 - Resume of interrupted posts
 - Rate limiting
 - Multiple servers / failover

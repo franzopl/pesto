@@ -15,3 +15,4 @@ password = "your_password"
 from = "poster <poster@example.com>"
 groups = ["alt.binaries.test"]
 article_size = 768000   # target size of each segment, in bytes
+obfuscate = false       # post under random subjects and yEnc file names

@@ -56,6 +56,14 @@ impl Article {
     }
 }
 
+/// Generate a random 32-hex-character name, used to obfuscate the subject and
+/// yEnc file name when posting. Each call yields a fresh value.
+pub fn obfuscated_name() -> String {
+    let high = RandomState::new().build_hasher().finish();
+    let low = RandomState::new().build_hasher().finish();
+    format!("{high:016x}{low:016x}")
+}
+
 /// Build a default subject line for one part of a file.
 ///
 /// Single-part files use just the name; multi-part files append `(part/total)`.
@@ -105,5 +113,14 @@ mod tests {
     fn default_subject_handles_single_and_multi_part() {
         assert_eq!(default_subject("file.bin", 1, 1), "file.bin");
         assert_eq!(default_subject("file.bin", 2, 5), "file.bin (2/5)");
+    }
+
+    #[test]
+    fn obfuscated_name_is_unique_32_hex_chars() {
+        let a = obfuscated_name();
+        let b = obfuscated_name();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 }

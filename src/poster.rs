@@ -28,8 +28,11 @@ const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// A posted segment, retained for later `.nzb` generation (phase 4).
 #[derive(Debug, Clone)]
 pub struct PostedSegment {
-    /// Name of the source file this segment belongs to.
+    /// Real name of the source file on disk.
     pub file_name: String,
+    /// Name the segment was posted under (random when obfuscation is on,
+    /// otherwise equal to `file_name`).
+    pub posting_name: String,
     /// Total size of the source file, in bytes.
     pub file_size: u64,
     /// 1-based part number.
@@ -56,7 +59,10 @@ pub struct PostOutcome {
 /// Metadata about one input file.
 struct FileMeta {
     path: PathBuf,
-    name: String,
+    /// The file's real name on disk.
+    real_name: String,
+    /// The name used on the wire — random when obfuscation is on.
+    posting_name: String,
     size: u64,
 }
 
@@ -118,14 +124,20 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         if !md.is_file() {
             bail!("`{}` is not a regular file", path.display());
         }
-        let name = path
+        let real_name = path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("invalid file name: `{}`", path.display()))?
             .to_string();
+        let posting_name = if config.obfuscate {
+            crate::article::obfuscated_name()
+        } else {
+            real_name.clone()
+        };
         metas.push(FileMeta {
             path: path.clone(),
-            name,
+            real_name,
+            posting_name,
             size: md.len(),
         });
     }
@@ -251,7 +263,7 @@ async fn worker(shared: Arc<Shared>) {
         };
 
         let encoded = yenc::encode_part(
-            &meta.name,
+            &meta.posting_name,
             meta.size,
             yenc::PartSpec {
                 number: item.part,
@@ -267,7 +279,7 @@ async fn worker(shared: Arc<Shared>) {
             message_id: message_id.clone(),
             from: shared.config.from.clone(),
             newsgroups: shared.config.groups.clone(),
-            subject: default_subject(&meta.name, item.part, item.total),
+            subject: default_subject(&meta.posting_name, item.part, item.total),
         };
         let payload = article.serialize(&encoded.body);
 
@@ -305,7 +317,8 @@ async fn worker(shared: Arc<Shared>) {
 
         if posted {
             shared.results.lock().unwrap().push(PostedSegment {
-                file_name: meta.name.clone(),
+                file_name: meta.real_name.clone(),
+                posting_name: meta.posting_name.clone(),
                 file_size: meta.size,
                 part: item.part,
                 total: item.total,
@@ -360,7 +373,7 @@ async fn connect_and_auth(config: &Config) -> Result<Connection> {
 fn record_failure(shared: &Shared, meta: &FileMeta, item: &WorkItem, error: &str) {
     shared.failures.lock().unwrap().push(format!(
         "{} part {}/{}: {error}",
-        meta.name, item.part, item.total
+        meta.real_name, item.part, item.total
     ));
 }
 
@@ -409,7 +422,8 @@ mod tests {
     fn meta(name: &str, size: u64) -> FileMeta {
         FileMeta {
             path: PathBuf::from(name),
-            name: name.to_string(),
+            real_name: name.to_string(),
+            posting_name: name.to_string(),
             size,
         }
     }

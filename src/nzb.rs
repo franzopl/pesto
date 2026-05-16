@@ -49,10 +49,14 @@ fn write_file(
     segs: &[PostedSegment],
 ) {
     let first = &segs[0];
-    let subject = default_subject(&first.file_name, 1, first.total);
+    // The subject reflects the posting name (random under obfuscation); the
+    // real file name is preserved in the `name` attribute so a downloader can
+    // restore it even when the wire artifacts are obfuscated.
+    let subject = default_subject(&first.posting_name, 1, first.total);
 
     out.push_str(&format!(
-        "  <file poster=\"{}\" date=\"{}\" subject=\"{}\">\n",
+        "  <file name=\"{}\" poster=\"{}\" date=\"{}\" subject=\"{}\">\n",
+        escape(&first.file_name),
         escape(poster),
         date,
         escape(&subject),
@@ -102,6 +106,7 @@ mod tests {
     fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         PostedSegment {
             file_name: name.to_string(),
+            posting_name: name.to_string(),
             file_size: 1000,
             part,
             total,
@@ -135,6 +140,24 @@ mod tests {
         assert!(!xml.contains("<id-a1@pesto>"));
         assert!(xml.contains("<group>alt.test</group>"));
         assert!(xml.contains("bytes=\"500\" number=\"2\""));
+    }
+
+    #[test]
+    fn obfuscated_subject_keeps_real_name_in_attribute() {
+        let segment = PostedSegment {
+            file_name: "secret-movie.mkv".to_string(),
+            posting_name: "deadbeefcafe0000".to_string(),
+            file_size: 1000,
+            part: 1,
+            total: 1,
+            message_id: "<id@x>".to_string(),
+            bytes: 500,
+        };
+        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment]);
+        // The subject is the obfuscated name; the real name lives in `name`.
+        assert!(xml.contains("subject=\"deadbeefcafe0000\""));
+        assert!(xml.contains("name=\"secret-movie.mkv\""));
+        assert!(!xml.contains("subject=\"secret-movie.mkv\""));
     }
 
     #[test]

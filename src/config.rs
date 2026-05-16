@@ -51,6 +51,7 @@ pub struct PostingSection {
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
+    pub obfuscate: Option<bool>,
 }
 
 impl FileConfig {
@@ -75,6 +76,7 @@ pub struct Overrides {
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
+    pub obfuscate: Option<bool>,
 }
 
 /// Fully resolved, validated configuration.
@@ -89,6 +91,8 @@ pub struct Config {
     pub from: String,
     pub groups: Vec<String>,
     pub article_size: usize,
+    /// When true, post under random subjects and yEnc file names.
+    pub obfuscate: bool,
 }
 
 impl Config {
@@ -129,6 +133,7 @@ impl Config {
                 .article_size
                 .or(file.posting.article_size)
                 .unwrap_or(DEFAULT_ARTICLE_SIZE),
+            obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or(false),
         })
     }
 }

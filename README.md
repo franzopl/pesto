@@ -62,6 +62,7 @@ pesto \
 | `--from <FROM>` | `From` header for posted articles |
 | `--groups <G,...>` | Newsgroups to post to (comma-separated) |
 | `-o`, `--out <PATH>` | Path of the `.nzb` file to write |
+| `--obfuscate` | Post under random subjects and yEnc file names |
 
 ### Exit codes
 
@@ -73,6 +74,14 @@ pesto \
 
 On Ctrl-C, `pesto` stops taking new segments, lets in-flight ones finish, and
 still writes an `.nzb` for whatever was posted.
+
+### Obfuscation
+
+With `--obfuscate`, each file is posted under a random subject and a random
+yEnc file name, so nothing on the wire reveals the real file name. The real
+name is preserved only in the generated `.nzb`, in the `name` attribute of the
+`<file>` element — keep the `.nzb` to restore it. Without the `.nzb` an
+obfuscated post cannot be reassembled or named.
 
 ## Development
 
