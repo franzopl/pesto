@@ -390,13 +390,28 @@ pesto --no-upload movie.mkv
 
 ### NZB output path
 
+By default the `.nzb` (and `.nfo` when `--nfo` is enabled) are saved in the
+current working directory, named after the uploaded file or folder.
+
+Use `--nzb-dir` or `output.nzb_dir` to redirect all output files to a fixed
+directory. `~` is expanded to the home directory.
+
 ```bash
-# Explicit path
+# Explicit path for a single run
 pesto --out /nzbs/movie.nzb movie.mkv
 
-# Save in a directory; filename derived from the upload name
-pesto --nzb-dir /nzbs/ movie.mkv
+# Fixed output directory via flag
+pesto --nzb-dir ~/nzb/pesto movie.mkv
+
+# Fixed output directory via config (recommended)
+# ~/.config/pesto/config.toml
+# [output]
+# nzb_dir = "~/nzb/pesto"
+# nfo     = true
 ```
+
+With the config above, `pesto arquivo.mkv` saves `~/nzb/pesto/arquivo.nzb`
+and `~/nzb/pesto/arquivo.nfo` on every run without any extra flags.
 
 ---
 
