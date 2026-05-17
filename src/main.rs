@@ -497,20 +497,27 @@ async fn run_single_upload(
     // ─────────────────────────────────────────────────────────────────────────
 
     // Derive NZB path: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
+    // Always use the original entry_paths for the stem so obfuscation/compression
+    // does not leak the randomised archive name into the output filenames.
     let nzb_out_path: Option<PathBuf> = params
         .out
         .clone()
         .or_else(|| params.nzb_default.as_deref().map(PathBuf::from))
         .or_else(|| {
-            let stem = upload_root(&inputs).or_else(|| {
-                inputs.first().map(|f| {
-                    PathBuf::from(f.name.split('/').next().unwrap_or(&f.name))
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            })?;
+            let stem = entry_paths
+                .first()
+                .and_then(|p| if p.is_dir() { p.file_name() } else { p.file_stem() })
+                .map(|s| s.to_string_lossy().into_owned())
+                .or_else(|| upload_root(&inputs))
+                .or_else(|| {
+                    inputs.first().map(|f| {
+                        PathBuf::from(f.name.split('/').next().unwrap_or(&f.name))
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                })?;
             let filename = format!("{stem}.nzb");
             let path = if let Some(dir) = &config.nzb_dir {
                 expand_tilde(dir).join(&filename)
@@ -1089,7 +1096,12 @@ async fn main() -> Result<()> {
     }
 
     // ── Single upload (normal mode) ───────────────────────────────────────────
-    let label = format!("{}", std::process::id());
+    let label = cli
+        .files
+        .first()
+        .and_then(|p| if p.is_dir() { p.file_name() } else { p.file_stem() })
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{}", std::process::id()));
     let result = run_single_upload(&params, &cli.files, &label).await?;
 
     if result.cancelled {
