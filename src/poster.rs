@@ -1129,8 +1129,6 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn message_id_domain_is_random() {
         let a = crate::article::generate_message_id(None);

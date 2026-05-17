@@ -121,6 +121,8 @@ async fn posts_every_segment_to_a_mock_server() {
         date: None,
         no_archive: false,
         message_id_domain: None,
+        post_hook: None,
+        nfo: false,
     };
 
     let inputs = vec![pesto::walk::InputFile {
