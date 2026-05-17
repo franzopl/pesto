@@ -509,8 +509,11 @@ async fn run_single_upload(
         .or_else(|| {
             let stem = entry_paths
                 .first()
-                .and_then(|p| if p.is_dir() { p.file_name() } else { p.file_stem() })
-                .map(|s| s.to_string_lossy().into_owned())
+                .and_then(|p| p.file_name())
+                .map(|s| {
+                    let p = std::path::Path::new(s);
+                    p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+                })
                 .or_else(|| upload_root(&inputs))
                 .or_else(|| {
                     inputs.first().map(|f| {
@@ -1104,11 +1107,18 @@ async fn main() -> Result<()> {
     }
 
     // ── Single upload (normal mode) ───────────────────────────────────────────
+    // Derive a human-readable label from the first input path without any
+    // blocking filesystem calls (no is_dir/stat in the async executor).
+    // file_name() returns the last path component; we strip a known extension
+    // with file_stem() only when the OsStr round-trip gives us one.
     let label = cli
         .files
         .first()
-        .and_then(|p| if p.is_dir() { p.file_name() } else { p.file_stem() })
-        .map(|s| s.to_string_lossy().into_owned())
+        .and_then(|p| p.file_name())
+        .map(|s| {
+            let p = std::path::Path::new(s);
+            p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+        })
         .unwrap_or_else(|| format!("{}", std::process::id()));
     let result = run_single_upload(&params, &cli.files, &label).await?;
 
