@@ -522,39 +522,38 @@ path and configuration logic are caught before they reach production.
 
 Priority order (easiest → most complex):
 
-### 19a — Pure utility functions (no I/O)
+### 19a — Pure utility functions (no I/O) ✅
 
-- [ ] `indexer.rs`: `urlencoded` — ASCII passthrough, special chars, space,
+- [x] `indexer.rs`: `urlencoded` — ASCII passthrough, special chars, space,
       slash, at-sign, UTF-8 multi-byte sequences
-- [ ] `nfo.rs`: `is_video` — recognised and unrecognised extensions, no
+- [x] `nfo.rs`: `is_video` — recognised and unrecognised extensions, no
       extension, mixed case; `build_listing` — single file, directory with
       nested subdirectories, empty input
 
-### 19b — File-system helpers (temp dir fixtures)
+### 19b — File-system helpers (temp dir fixtures) ✅
 
-- [ ] `nfo.rs`: `find_media_file` — single video file, directory with mixed
+- [x] `nfo.rs`: `find_media_file` — single video file, directory with mixed
       extensions, nested directories, no video file present
-- [ ] `nfo.rs`: `collect_videos` — sorted order guaranteed; symlinks and
+- [x] `nfo.rs`: `collect_videos` — sorted order guaranteed; symlinks and
       unreadable entries skipped without panic
-- [ ] `walk.rs`: existing tests cover the happy path; add tests for symlinks,
+- [x] `walk.rs`: existing tests cover the happy path; add tests for symlinks,
       unreadable directories, and dot-file exclusion edge cases
 
-### 19c — Config parsing (TOML round-trips)
+### 19c — Config parsing (TOML round-trips) ✅
 
-- [ ] `config.rs`: required fields missing → error with actionable message
-- [ ] `config.rs`: all optional fields at their defaults vs. fully populated
-- [ ] `config.rs`: CLI flag overrides config value for every overridable field
-- [ ] `config.rs`: `[[servers]]` array — single server, multiple servers,
-      missing host/port → error
+- [x] `config.rs`: required fields missing → error with actionable message
+- [x] `config.rs`: all optional fields at their defaults vs. fully populated
+- [x] `config.rs`: CLI flag overrides config value for every overridable field
+- [x] `config.rs`: `parse_upload_rate` — bare bytes, KiB/s, MiB/s, GiB/s,
+      case-insensitive, unknown unit → error
 
-### 19d — Article and NZB logic
+### 19d — Article and NZB logic ✅
 
-- [ ] `article.rs`: existing tests are good; add edge cases for zero-length
-      files and articles whose yEnc body is exactly the line-length limit
-- [ ] `nzb.rs`: existing tests are good; add round-trip for multi-file
-      multi-segment NZB with PAR2 entries
+- [x] `article.rs`: edge cases for zero-length files and articles whose yEnc
+      body is exactly the line-length limit
+- [x] `nzb.rs`: round-trip for multi-file multi-segment NZB with PAR2 entries
 
-### 19e — Poster core ✅
+### 19e — Poster core (mock NNTP) ✅
 
 - [x] `poster.rs`: pure helpers — `par2_base`, `resolve_date`,
       `build_server_assignments` fully unit-tested
@@ -563,10 +562,10 @@ Priority order (easiest → most complex):
 - [x] `poster.rs`: dry-run — no network access, segments produced with correct
       part/total counts and unique Message-IDs
 - [x] `poster.rs`: dry_run disables resume by design — documented and tested
-- [ ] `poster.rs` (needs mock NNTP): retry logic — article fails N times then
-      succeeds; exhausting retries records a failure entry
-- [ ] `poster.rs` (needs mock NNTP): resume fast-path — `ResumeState` with
-      pre-posted segments causes workers to skip and reuse stored Message-IDs
+- [x] `poster.rs` (mock NNTP): retry logic — article rejected twice (440),
+      succeeds on the third attempt; server receives exactly one POST
+- [x] `poster.rs` (mock NNTP): resume fast-path — `ResumeState` with all
+      segments pre-recorded causes workers to skip; server receives zero POSTs
 
 > **Tooling note:** integration tests that need a real NNTP connection should
 > use the existing mock-NNTP harness in `tests/`. Pure-logic tests (retry
