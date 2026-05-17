@@ -18,7 +18,11 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 ///
 /// Runs `mediainfo` when a media file can be identified; falls back to a plain
 /// directory listing otherwise. Returns `None` when there are no paths.
-pub fn generate(paths: &[PathBuf]) -> Option<String> {
+///
+/// When `strip_path` is `true` (i.e. `--obfuscate=full`), the `Complete name`
+/// line emitted by mediainfo is removed so the NFO does not reveal the original
+/// file path to anyone who receives it alongside the `.nzb`.
+pub fn generate(paths: &[PathBuf], strip_path: bool) -> Option<String> {
     if paths.is_empty() {
         return None;
     }
@@ -27,11 +31,20 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
     let media_target = find_media_file(paths);
     if let Some(ref target) = media_target {
         if let Ok(output) = run_mediainfo(target) {
-            return Some(output);
+            let content = if strip_path {
+                strip_complete_name(&output)
+            } else {
+                output
+            };
+            return Some(content);
         }
     }
 
-    // Fall back to a listing.
+    // Fall back to a listing — directory listings always show real names, so
+    // omit them entirely under full obfuscation.
+    if strip_path {
+        return None;
+    }
     Some(build_listing(paths))
 }
 
@@ -81,6 +94,16 @@ fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(child);
         }
     }
+}
+
+/// Remove the `Complete name` line from mediainfo output so the file path is
+/// not exposed when obfuscation is active.
+fn strip_complete_name(output: &str) -> String {
+    output
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("Complete name"))
+        .flat_map(|l| [l, "\n"])
+        .collect()
 }
 
 fn run_mediainfo(path: &Path) -> std::io::Result<String> {
@@ -248,7 +271,7 @@ mod tests {
 
     #[test]
     fn generate_returns_none_for_empty_paths() {
-        assert!(generate(&[]).is_none());
+        assert!(generate(&[], false).is_none());
     }
 
     #[test]
@@ -257,9 +280,30 @@ mod tests {
         let f = dir.path().join("data.nzb");
         fs::write(&f, b"content").unwrap();
 
-        let result = generate(&[f]);
+        let result = generate(&[f], false);
         assert!(result.is_some());
         let listing = result.unwrap();
         assert!(listing.contains("data.nzb"));
+    }
+
+    #[test]
+    fn generate_returns_none_for_non_video_when_strip_path() {
+        // With obfuscate=full, directory listings reveal real names, so the
+        // NFO must be suppressed entirely when no media file is found.
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("data.nzb");
+        fs::write(&f, b"content").unwrap();
+
+        assert!(generate(&[f], true).is_none());
+    }
+
+    #[test]
+    fn strip_complete_name_removes_only_that_line() {
+        let input = "General\nComplete name                            : /home/user/movie.mkv\nFormat                                   : Matroska\n";
+        let output = strip_complete_name(input);
+        assert!(!output.contains("Complete name"));
+        assert!(!output.contains("movie.mkv"));
+        assert!(output.contains("General"));
+        assert!(output.contains("Format"));
     }
 }

@@ -621,6 +621,7 @@ async fn run_single_upload(
                     &config.groups,
                     &outcome.segments,
                     &nzb_meta,
+                    config.obfuscate == pesto::config::ObfuscateMode::Full,
                 );
                 tokio::fs::write(out, &xml)
                     .await
@@ -725,7 +726,7 @@ async fn run_single_upload(
                     .map(|d| d.join(format!("{entry_label}.nfo")))
             });
             if let Some(ref nfo_out) = base {
-                match pesto::nfo::generate(entry_paths) {
+                match pesto::nfo::generate(entry_paths, config.obfuscate == pesto::config::ObfuscateMode::Full) {
                     Some(content) => match pesto::nfo::write(nfo_out, &content) {
                         Ok(()) => {
                             println!("wrote nfo:  {}", nfo_out.display());
@@ -879,7 +880,7 @@ async fn run_batch(
                 password: config.nzb_password.clone(),
                 category: config.nzb_category.clone(),
             };
-            let xml = pesto::nzb::generate(&config.from, &config.groups, &all_segments, &nzb_meta);
+            let xml = pesto::nzb::generate(&config.from, &config.groups, &all_segments, &nzb_meta, config.obfuscate == pesto::config::ObfuscateMode::Full);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;

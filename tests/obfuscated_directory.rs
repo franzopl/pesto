@@ -121,23 +121,24 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     subjects.dedup();
     assert_eq!(subjects.len(), expected.len(), "obfuscated names collided");
 
-    // The `.nzb` keeps the real relative paths in `name`, and never leaks one
-    // into a `subject`.
+    // With obfuscate=full the `name=` attribute must also be the randomised
+    // token, not the real path — nothing in the .nzb reveals the original name.
     let nzb = pesto::nzb::generate(
         &config.from,
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
+        true,
     );
     for rel in &expected {
         assert!(
-            nzb.contains(&format!("name=\"{rel}\"")),
-            "nzb missing `{rel}`"
+            !nzb.contains(&format!("name=\"{rel}\"")),
+            "real path `{rel}` leaked into nzb name= attribute"
         );
     }
     assert!(
-        !nzb.contains("subject=\"Show"),
-        "a real path leaked into an nzb subject"
+        !nzb.contains("subject=\"Show") && !nzb.contains("name=\"Show"),
+        "a real path leaked into the nzb"
     );
 
     std::fs::remove_dir_all(&root).ok();
