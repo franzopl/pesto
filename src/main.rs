@@ -123,6 +123,11 @@ struct Cli {
     #[arg(short, long, value_name = "PATH")]
     out: Option<PathBuf>,
 
+    /// Directory where `.nzb` files are saved; filename derived from upload
+    /// name [config: output.nzb_dir]. Overridden by --out.
+    #[arg(long, value_name = "DIR")]
+    nzb_dir: Option<PathBuf>,
+
     /// Obfuscation mode: `none`, `subject` or `full`. A bare `--obfuscate`
     /// means `full` [config: posting.obfuscate, default none].
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1,
@@ -276,6 +281,7 @@ impl Cli {
             nzb_name: self.nzb_name.clone(),
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
+            nzb_dir: self.nzb_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
             no_upload: self.no_upload,
         }
     }

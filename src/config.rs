@@ -266,6 +266,8 @@ pub struct Overrides {
     pub nzb_password: Option<String>,
     /// `.nzb` category meta.
     pub nzb_category: Option<String>,
+    /// Directory where `.nzb` files are saved by default.
+    pub nzb_dir: Option<String>,
     /// When true, skip the indexer NZB upload for this run.
     pub no_upload: bool,
 }
@@ -490,7 +492,7 @@ impl Config {
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: cli.nzb_category.or(file.output.nzb_category),
-            nzb_dir: file.output.nzb_dir,
+            nzb_dir: cli.nzb_dir.or(file.output.nzb_dir),
             indexer_url: file.output.indexer.url,
             indexer_api_key: file.output.indexer.api_key,
             indexer_category: file.output.indexer.category,
