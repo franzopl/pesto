@@ -3,14 +3,17 @@
 //! Parses the CLI, resolves the configuration, posts the given files to Usenet
 //! and writes an `.nzb` file describing the result.
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use pesto::compress::{compress, random_password, ArchiveFormat};
 use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
 use pesto::nzb::NzbMeta;
+use pesto::poster::PostedSegment;
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -40,6 +43,10 @@ EXAMPLES:
   pesto --out up.nzb a.bin b.bin  post two files and write an .nzb
   pesto --par2 15 movie.mkv       post with 15% PAR2 recovery data
   pesto --dry-run movie.mkv       encode only, never touch the network
+  pesto --each ./Season01/        post each episode as a separate upload
+  pesto --season ./Season01/      post each episode + a combined season NZB
+  pesto --each --jobs 4 ./shows/  post up to 4 entries in parallel
+  pesto --watch ./incoming/       watch a folder and post new entries
 
 By default pesto posts under a freshly generated random identity. Set
 [posting].from (or --from) only if you need a fixed one.";
@@ -187,6 +194,44 @@ struct Cli {
     #[arg(long)]
     no_nfo: bool,
 
+    /// Output format: `terminal` (default human-readable panel) or `json`
+    /// (newline-delimited JSON events on stdout, for machine consumers like
+    /// `upapasta`).
+    #[arg(long, value_name = "FORMAT", default_value = "terminal")]
+    output_format: String,
+
+    /// Treat each top-level entry in a directory argument as an independent
+    /// upload with its own NZB. PAR2 and NZB naming follow the entry name.
+    /// Combine with --jobs for parallel uploads.
+    #[arg(long)]
+    each: bool,
+
+    /// Like --each, but also produces one consolidated NZB for the whole
+    /// directory. The consolidated NZB is named after the directory.
+    #[arg(long)]
+    season: bool,
+
+    /// Number of independent uploads to run in parallel when --each or
+    /// --season is active. Default 1 (sequential). 0 means one per logical CPU.
+    #[arg(long, value_name = "N", default_value = "1")]
+    jobs: usize,
+
+    /// Watch DIR for new entries and post each one automatically, implying
+    /// --each. On completion each entry is moved to --watch-done (or deleted).
+    /// Exits cleanly on SIGTERM / Ctrl-C after finishing any in-progress upload.
+    #[arg(long, value_name = "DIR")]
+    watch: Option<PathBuf>,
+
+    /// Destination directory for entries processed by --watch. When omitted,
+    /// completed entries are deleted.
+    #[arg(long, value_name = "DIR")]
+    watch_done: Option<PathBuf>,
+
+    /// How often (in seconds) to poll the watched directory for new entries
+    /// [config: watch.poll_interval, default 30].
+    #[arg(long, value_name = "SECS", default_value = "30")]
+    watch_interval: u64,
+
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
     #[arg(value_name = "PATH")]
@@ -241,46 +286,37 @@ impl Cli {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+/// Parameters for a single upload job that don't change between entries.
+struct UploadParams {
+    config: Arc<Config>,
+    /// The raw `--password` flag value (used to detect "was it auto-generated?").
+    archive_password_raw: Option<String>,
+    nzb_default: Option<String>,
+    json_mode: bool,
+    out: Option<PathBuf>,
+}
 
-    // `pesto --config` with no value: launch the interactive setup wizard.
-    if matches!(cli.config, Some(None)) {
-        return run_wizard();
-    }
+/// The result of a single upload (one entry in `--each` / `--season`).
+struct UploadResult {
+    segments: Vec<PostedSegment>,
+    cancelled: bool,
+    had_failures: bool,
+}
 
-    // `pesto` with nothing to post: show the orientation screen and stop.
-    if cli.files.is_empty() {
-        print_welcome();
-        return Ok(());
-    }
+/// Run one complete upload: expand `entry_paths`, compress, nfo, post, write NZB.
+///
+/// Returns the posted segments so the caller can build a consolidated season NZB.
+async fn run_single_upload(
+    params: &UploadParams,
+    entry_paths: &[PathBuf],
+    entry_label: &str,
+) -> Result<UploadResult> {
+    let config = &params.config;
 
-    // Resolve which config file to read: an explicit `--config PATH`, else the
-    // default path when it exists, else nothing (flags must supply the rest).
-    let (file_config, nzb_default) = match &cli.config {
-        Some(Some(path)) => (FileConfig::load(path)?, None),
-        _ => match config::default_config_path().filter(|p| p.exists()) {
-            Some(path) => {
-                eprintln!("using config: {}", path.display());
-                let fc = FileConfig::load(&path)?;
-                let nzb = fc.output.nzb.clone();
-                (fc, nzb)
-            }
-            None => (FileConfig::default(), None),
-        },
-    };
-    let nzb_default = nzb_default.or_else(|| file_config.output.nzb.clone());
-
-    let config = Config::resolve(file_config, cli.overrides())?;
-
-    // Expand the path arguments: directories are walked recursively so the
-    // whole tree is posted as one upload.
-    let mut inputs = pesto::walk::expand_inputs(&cli.files)?;
+    let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
 
-    // Compute SHA-256 hashes of the original files for .nfo generation.
-    // This must happen before compression replaces `inputs` with an archive.
+    // SHA-256 hashes for .nfo generation, computed before compression.
     let nfo_entries: Option<Vec<pesto::nfo::NfoEntry>> =
         if !config.no_nfo && !config.par2_only && !config.dry_run {
             let entries = inputs
@@ -302,28 +338,25 @@ async fn main() -> Result<()> {
             None
         };
 
-    // Install the terminal progress panel early so it covers both compression
-    // and posting. The renderer owns all terminal drawing.
-    let (progress_tx, renderer) = pesto::progress::spawn_terminal_renderer();
+    let (progress_tx, renderer) = if params.json_mode {
+        pesto::progress::spawn_json_emitter()
+    } else {
+        pesto::progress::spawn_terminal_renderer()
+    };
 
-    // ── Compression (Phase 13) ────────────────────────────────────────────
-    // Resolve whether to compress and with what format/password.
+    // ── Compression ──────────────────────────────────────────────────────────
     let compress_format_str: Option<String> = config
         .compress_format
         .clone()
         .or_else(|| {
-            // --password implies compression with the default format.
             if config.compress_password.is_some() {
                 Some("7z".to_string())
             } else {
                 None
             }
         });
-
-    // The password is already resolved in overrides() (random generation happened there).
     let effective_password: Option<String> = config.compress_password.clone();
 
-    // Perform compression and replace `inputs` with the single archive.
     let compress_temp_dir: Option<PathBuf>;
     if let Some(fmt_str) = &compress_format_str {
         let format = ArchiveFormat::parse(fmt_str)
@@ -331,14 +364,10 @@ async fn main() -> Result<()> {
                 "unknown compression format `{fmt_str}`; supported: 7z, zip, rar"
             ))?;
 
-        // Reject --password without --compress for rar (needs rar binary) at
-        // an early, clear point rather than deep in the compression step.
         if format == ArchiveFormat::Rar && effective_password.is_some() {
-            // rar uses -hp for header encryption; warn user it needs rar binary
             eprintln!("note: rar password protection requires the `rar` binary in PATH");
         }
 
-        // Derive the archive stem from the upload root or the first file name.
         let archive_stem = upload_root(&inputs)
             .or_else(|| {
                 inputs.first().map(|f| {
@@ -351,7 +380,6 @@ async fn main() -> Result<()> {
             })
             .unwrap_or_else(|| "archive".to_string());
 
-        // With --obfuscate full, randomise the archive name too.
         let archive_stem = if config.obfuscate == ObfuscateMode::Full {
             pesto::article::obfuscated_name()
         } else {
@@ -359,25 +387,16 @@ async fn main() -> Result<()> {
         };
 
         let tmp_dir = std::env::temp_dir()
-            .join(format!("pesto_compress_{}", std::process::id()));
+            .join(format!("pesto_compress_{}_{}", std::process::id(), entry_label));
         compress_temp_dir = Some(tmp_dir.clone());
 
-        // Collect the unique filesystem roots to pass to the compressor.
-        // For a directory upload this is the set of root directories; for
-        // loose files it's each file's path individually.
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
-
-        // Sum of input sizes: a tight upper bound for the archive in store mode.
-        let compress_input_bytes: u64 = fs_paths
-            .iter()
-            .map(|p| dir_or_file_size(p))
-            .sum();
+        let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
 
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
             total_bytes: compress_input_bytes,
         });
 
-        // Poll the archive file size every 200 ms while the compressor runs.
         let archive_path_for_poll = tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
         let poll_tx = progress_tx.clone();
         let poll_path = archive_path_for_poll.clone();
@@ -394,8 +413,6 @@ async fn main() -> Result<()> {
             }
         });
 
-        // Run the blocking compressor on a dedicated thread so the tokio
-        // scheduler (and the progress renderer) stay responsive.
         let compress_inputs = fs_paths.clone();
         let compress_stem = archive_stem.clone();
         let compress_dest = tmp_dir.clone();
@@ -415,7 +432,6 @@ async fn main() -> Result<()> {
         poll_handle.abort();
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
 
-        // Replace the input list with the single archive file.
         let archive_name = result.path
             .file_name()
             .unwrap_or_default()
@@ -427,8 +443,7 @@ async fn main() -> Result<()> {
         }];
 
         if let Some(pw) = &effective_password {
-            // Print when password was auto-generated (--password with no value).
-            let was_auto = cli.archive_password.as_deref() == Some("");
+            let was_auto = params.archive_password_raw.as_deref() == Some("");
             if was_auto {
                 println!("archive password: {pw}");
             }
@@ -436,9 +451,9 @@ async fn main() -> Result<()> {
     } else {
         compress_temp_dir = None;
     }
-    // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // Prepend a .nfo article as the very first upload item.
+    // Prepend .nfo article.
     let nfo_temp_dir: Option<PathBuf>;
     if let Some(entries) = nfo_entries {
         let upload_name = upload_root(&inputs)
@@ -451,7 +466,7 @@ async fn main() -> Result<()> {
             }))
             .unwrap_or_else(|| "upload".to_string());
         let nfo_content = pesto::nfo::build(&upload_name, &entries);
-        let tmp = std::env::temp_dir().join(format!("pesto_nfo_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("pesto_nfo_{}_{}", std::process::id(), entry_label));
         std::fs::create_dir_all(&tmp)
             .context("creating .nfo temp directory")?;
         let nfo_path = tmp.join(format!("{upload_name}.nfo"));
@@ -466,20 +481,15 @@ async fn main() -> Result<()> {
         nfo_temp_dir = None;
     }
 
-    // Derive the resume state path from the NZB output path when known.
-    // We compute the NZB path early (before posting) so we can derive the
-    // resume sidecar name, even though we write the NZB after posting.
-    let nzb_out_path: Option<PathBuf> = cli
+    // Derive NZB path.
+    let nzb_out_path: Option<PathBuf> = params
         .out
         .clone()
-        .or_else(|| nzb_default.as_deref().map(PathBuf::from))
+        .or_else(|| params.nzb_default.as_deref().map(PathBuf::from))
         .or_else(|| {
-            // For a directory upload the first file's name starts with the
-            // root folder, e.g. "season01/ep01.mkv" → stem "season01".
             inputs.first().and_then(|f| {
                 let top = f.name.split('/').next()?;
                 if top != f.name {
-                    // It really is a directory upload.
                     Some(PathBuf::from(format!("{top}.nzb")))
                 } else {
                     None
@@ -491,7 +501,7 @@ async fn main() -> Result<()> {
         .map(|p| p.with_extension("pesto-state"));
 
     let outcome = pesto::poster::post_files_with_progress(
-        &config,
+        config,
         &inputs,
         Some(progress_tx),
         resume_path.as_deref(),
@@ -499,24 +509,21 @@ async fn main() -> Result<()> {
     .await?;
     let _ = renderer.await;
 
-    if config.par2_only {
-        println!("PAR2 generation complete.");
-    } else {
-        println!("posted {} segment(s)", outcome.segments.len());
-    }
-
-    // Aggregate view of what was uploaded across the whole tree.
-    let files_word = if file_count == 1 { "file" } else { "files" };
-    let size = pesto::progress::format_size(total_bytes);
-    if folder_count > 0 {
-        let folders_word = if folder_count == 1 {
-            "subfolder"
+    if !params.json_mode {
+        if config.par2_only {
+            println!("PAR2 generation complete.");
         } else {
-            "subfolders"
-        };
-        println!("upload: {file_count} {files_word} · {folder_count} {folders_word} · {size}");
-    } else {
-        println!("upload: {file_count} {files_word} · {size}");
+            println!("posted {} segment(s)", outcome.segments.len());
+        }
+
+        let files_word = if file_count == 1 { "file" } else { "files" };
+        let size = pesto::progress::format_size(total_bytes);
+        if folder_count > 0 {
+            let folders_word = if folder_count == 1 { "subfolder" } else { "subfolders" };
+            println!("upload: {file_count} {files_word} · {folder_count} {folders_word} · {size}");
+        } else {
+            println!("upload: {file_count} {files_word} · {size}");
+        }
     }
 
     if outcome.cancelled {
@@ -529,20 +536,19 @@ async fn main() -> Result<()> {
         }
     }
 
-    // `.nzb` destination: `--out` wins, then the config's output.nzb, then —
-    // for a directory upload — a name derived from the root folder.
-    let out = cli
+    // Write NZB.
+    let out = params
         .out
         .clone()
-        .or_else(|| nzb_default.map(PathBuf::from))
+        .or_else(|| params.nzb_default.clone().map(PathBuf::from))
         .or_else(|| upload_root(&inputs).map(|root| PathBuf::from(format!("{root}.nzb"))));
-    if let Some(out) = &out {
+
+    let nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
             if outcome.segments.is_empty() {
                 eprintln!("no segments posted — skipping nzb output");
+                None
             } else {
-                // Build NZB metadata: explicit flags win; archive password
-                // falls back as the password meta when --nzb-password is absent.
                 let nzb_meta = NzbMeta {
                     name: config.nzb_name.clone(),
                     password: config
@@ -560,40 +566,45 @@ async fn main() -> Result<()> {
                 tokio::fs::write(out, &xml)
                     .await
                     .with_context(|| format!("writing nzb file `{}`", out.display()))?;
-                println!("wrote nzb: {}", out.display());
+                if params.json_mode {
+                    let path_esc = out.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+                    println!(r#"{{"type":"nzb_written","path":"{path_esc}"}}"#);
+                } else {
+                    println!("wrote nzb: {}", out.display());
+                }
+                Some(xml)
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-                // Upload to indexer when configured and not suppressed.
-                if !config.no_upload {
-                    if let Some(url) = &config.indexer_url {
-                        if let Some(api_key) = &config.indexer_api_key {
-                            let nzb_name = out
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "upload.nzb".into());
-                            let cat = config
-                                .indexer_category
-                                .as_deref()
-                                .or(config.nzb_category.as_deref());
-                            match pesto::indexer::upload_nzb(
-                                url,
-                                api_key,
-                                cat,
-                                &nzb_name,
-                                xml,
-                            )
-                            .await
-                            {
-                                Ok(()) => println!("uploaded nzb to indexer: {url}"),
-                                Err(e) => eprintln!("indexer upload failed: {e}"),
-                            }
-                        }
+    // Upload to indexer when configured and not suppressed.
+    if let Some(xml) = nzb_xml {
+        if !config.no_upload {
+            if let Some(url) = &config.indexer_url {
+                if let Some(api_key) = &config.indexer_api_key {
+                    let nzb_name = out
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "upload.nzb".into());
+                    let cat = config
+                        .indexer_category
+                        .as_deref()
+                        .or(config.nzb_category.as_deref());
+                    match pesto::indexer::upload_nzb(url, api_key, cat, &nzb_name, xml).await {
+                        Ok(()) => println!("uploaded nzb to indexer: {url}"),
+                        Err(e) => eprintln!("indexer upload failed: {e}"),
                     }
                 }
             }
         }
     }
 
-    // Clean up temporary directories.
+    // Cleanup temp dirs.
     if let Some(dir) = compress_temp_dir {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -601,33 +612,384 @@ async fn main() -> Result<()> {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Exit codes: 130 for an interrupt, 1 for any failed segment, 0 otherwise.
-    if outcome.cancelled {
+    Ok(UploadResult {
+        segments: outcome.segments,
+        cancelled: outcome.cancelled,
+        had_failures: !outcome.failures.is_empty(),
+    })
+}
+
+/// Enumerate top-level entries of `dir` (files and subdirectories), sorted by name.
+fn top_level_entries(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading directory `{}`", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    Ok(entries)
+}
+
+/// Run `--each` / `--season` batch over all top-level entries of the given directories.
+///
+/// Returns all collected segments (for season NZB consolidation) and whether
+/// any upload was cancelled or had failures.
+async fn run_batch(
+    params: Arc<UploadParams>,
+    dirs: &[PathBuf],
+    jobs: usize,
+    season_nzb: Option<PathBuf>,
+) -> Result<(Vec<PostedSegment>, bool, bool)> {
+    // Collect all entries from every directory argument.
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        let md = std::fs::metadata(dir)
+            .with_context(|| format!("reading `{}`", dir.display()))?;
+        if md.is_dir() {
+            entries.extend(top_level_entries(dir)?);
+        } else {
+            // A plain file is its own "entry".
+            entries.push(dir.clone());
+        }
+    }
+
+    if entries.is_empty() {
+        anyhow::bail!("no entries found to post");
+    }
+
+    let effective_jobs = if jobs == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        jobs
+    };
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
+    let mut all_segments: Vec<PostedSegment> = Vec::new();
+    let mut any_cancelled = false;
+    let mut any_failures = false;
+
+    let mut handles = Vec::new();
+    for entry in &entries {
+        let entry = entry.clone();
+        let params = Arc::clone(&params);
+        let sem = Arc::clone(&semaphore);
+        let label = entry
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "entry".to_string());
+
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await.expect("semaphore closed");
+            if !params.json_mode {
+                println!("\n── {} ──", label);
+            }
+            run_single_upload(&params, &[entry], &label).await
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(result)) => {
+                all_segments.extend(result.segments);
+                if result.cancelled { any_cancelled = true; }
+                if result.had_failures { any_failures = true; }
+            }
+            Ok(Err(e)) => {
+                eprintln!("upload error: {e:#}");
+                any_failures = true;
+            }
+            Err(e) => {
+                eprintln!("upload task panicked: {e}");
+                any_failures = true;
+            }
+        }
+    }
+
+    // Write consolidated season NZB when requested.
+    if let Some(season_path) = season_nzb {
+        if !all_segments.is_empty() {
+            let config = &params.config;
+            let nzb_meta = NzbMeta {
+                name: config.nzb_name.clone(),
+                password: config.nzb_password.clone(),
+                category: config.nzb_category.clone(),
+            };
+            let xml = pesto::nzb::generate(
+                &config.from,
+                &config.groups,
+                &all_segments,
+                &nzb_meta,
+            );
+            tokio::fs::write(&season_path, &xml)
+                .await
+                .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
+            if !params.json_mode {
+                println!("\nwrote season nzb: {}", season_path.display());
+            } else {
+                let path_esc = season_path.display().to_string()
+                    .replace('\\', "\\\\").replace('"', "\\\"");
+                println!(r#"{{"type":"nzb_written","path":"{path_esc}","season":true}}"#);
+            }
+
+            // Upload consolidated NZB to indexer when configured.
+            if !config.no_upload {
+                if let Some(url) = &config.indexer_url {
+                    if let Some(api_key) = &config.indexer_api_key {
+                        let nzb_name = season_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "season.nzb".into());
+                        let cat = config
+                            .indexer_category
+                            .as_deref()
+                            .or(config.nzb_category.as_deref());
+                        match pesto::indexer::upload_nzb(url, api_key, cat, &nzb_name, xml).await {
+                            Ok(()) => println!("uploaded season nzb to indexer: {url}"),
+                            Err(e) => eprintln!("indexer upload failed (season nzb): {e}"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((all_segments, any_cancelled, any_failures))
+}
+
+/// Run `--watch DIR`: poll for new entries and post each one automatically.
+///
+/// Exits cleanly on SIGTERM or Ctrl-C after finishing any in-progress upload.
+async fn run_watch(
+    params: Arc<UploadParams>,
+    watch_dir: &Path,
+    watch_done: Option<&Path>,
+    poll_interval: u64,
+    jobs: usize,
+) -> Result<()> {
+    use tokio::signal;
+
+    eprintln!("watching {} (poll every {}s)", watch_dir.display(), poll_interval);
+
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_clone = Arc::clone(&shutdown);
+
+    // Listen for Ctrl-C / SIGTERM on a background task.
+    tokio::spawn(async move {
+        let ctrl_c = async { signal::ctrl_c().await.ok(); };
+        #[cfg(unix)]
+        let sigterm = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("SIGTERM handler")
+                .recv()
+                .await;
+        };
+        #[cfg(not(unix))]
+        let sigterm = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm => {},
+        }
+        eprintln!("\nshutdown requested — finishing in-progress uploads");
+        shutdown_clone.notify_waiters();
+    });
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    // Pre-populate seen with whatever is already there so we don't re-post on startup.
+    if let Ok(existing) = top_level_entries(watch_dir) {
+        for e in existing {
+            seen.insert(e);
+        }
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(if jobs == 0 {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    } else {
+        jobs
+    }));
+
+    loop {
+        // Check for shutdown between polls.
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(poll_interval)) => {}
+            _ = shutdown.notified() => { break; }
+        }
+
+        let entries = match top_level_entries(watch_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("watch: error reading {}: {e}", watch_dir.display());
+                continue;
+            }
+        };
+
+        for entry in entries {
+            if seen.contains(&entry) {
+                continue;
+            }
+            seen.insert(entry.clone());
+
+            let params = Arc::clone(&params);
+            let sem = Arc::clone(&semaphore);
+            let watch_done = watch_done.map(PathBuf::from);
+            let label = entry
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "entry".to_string());
+
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                if !params.json_mode {
+                    println!("\n── watch: {} ──", label);
+                }
+                match run_single_upload(&params, std::slice::from_ref(&entry), &label).await {
+                    Ok(_) => {
+                        // Move or delete the completed entry.
+                        if let Some(done_dir) = &watch_done {
+                            let dest = done_dir.join(entry.file_name().unwrap_or_default());
+                            if let Err(e) = std::fs::rename(&entry, &dest) {
+                                eprintln!("watch: could not move `{}` to `{}`: {e}",
+                                    entry.display(), dest.display());
+                            }
+                        } else {
+                            // Delete completed entry.
+                            let is_dir = entry.is_dir();
+                            let result = if is_dir {
+                                std::fs::remove_dir_all(&entry)
+                            } else {
+                                std::fs::remove_file(&entry)
+                            };
+                            if let Err(e) = result {
+                                eprintln!("watch: could not delete `{}`: {e}", entry.display());
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("watch: upload failed for `{}`: {e:#}", entry.display()),
+                }
+            });
+        }
+    }
+
+    // Wait for all in-progress uploads (drain the semaphore).
+    let effective_jobs = if jobs == 0 {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    } else {
+        jobs
+    };
+    let _ = semaphore.acquire_many(effective_jobs as u32).await;
+    eprintln!("watch: all uploads finished, exiting");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // `pesto --config` with no value: launch the interactive setup wizard.
+    if matches!(cli.config, Some(None)) {
+        return run_wizard();
+    }
+
+    // `pesto` with nothing to post and no --watch: show the orientation screen.
+    let has_work = !cli.files.is_empty() || cli.watch.is_some();
+    if !has_work {
+        print_welcome();
+        return Ok(());
+    }
+
+    // Resolve config file.
+    let (file_config, nzb_default) = match &cli.config {
+        Some(Some(path)) => (FileConfig::load(path)?, None),
+        _ => match config::default_config_path().filter(|p| p.exists()) {
+            Some(path) => {
+                eprintln!("using config: {}", path.display());
+                let fc = FileConfig::load(&path)?;
+                let nzb = fc.output.nzb.clone();
+                (fc, nzb)
+            }
+            None => (FileConfig::default(), None),
+        },
+    };
+    let nzb_default = nzb_default.or_else(|| file_config.output.nzb.clone());
+    let config = Arc::new(Config::resolve(file_config, cli.overrides())?);
+    let json_mode = cli.output_format.trim().eq_ignore_ascii_case("json");
+
+    let params = Arc::new(UploadParams {
+        config: Arc::clone(&config),
+        archive_password_raw: cli.archive_password.clone(),
+        nzb_default: nzb_default.map(|s| s.to_string()),
+        json_mode,
+        out: cli.out.clone(),
+    });
+
+    // ── --watch mode ──────────────────────────────────────────────────────────
+    if let Some(watch_dir) = &cli.watch {
+        return run_watch(
+            params,
+            watch_dir,
+            cli.watch_done.as_deref(),
+            cli.watch_interval,
+            cli.jobs,
+        )
+        .await;
+    }
+
+    // ── --each / --season batch mode ─────────────────────────────────────────
+    let batch_mode = cli.each || cli.season;
+    if batch_mode {
+        // For --season, derive the consolidated NZB path from the first directory arg.
+        let season_nzb: Option<PathBuf> = if cli.season {
+            cli.out.clone().or_else(|| {
+                cli.files.iter().find_map(|p| {
+                    let md = std::fs::metadata(p).ok()?;
+                    if md.is_dir() {
+                        let name = p.file_name()?.to_string_lossy();
+                        Some(PathBuf::from(format!("{name}.nzb")))
+                    } else {
+                        None
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        let (_, any_cancelled, any_failures) =
+            run_batch(params, &cli.files, cli.jobs, season_nzb).await?;
+
+        if any_cancelled {
+            std::process::exit(130);
+        }
+        if any_failures {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // ── Single upload (normal mode) ───────────────────────────────────────────
+    let label = format!("{}", std::process::id());
+    let result = run_single_upload(&params, &cli.files, &label).await?;
+
+    if result.cancelled {
         std::process::exit(130);
     }
-    if !outcome.failures.is_empty() {
+    if result.had_failures {
         std::process::exit(1);
     }
     Ok(())
 }
 
 /// Collect the unique filesystem paths to pass to the compressor.
-///
-/// For a directory upload (files whose `name` contains `/`), the root folder
-/// is the common ancestor on disk. For loose files each path is its own root.
-/// Deduplication is important: a directory with many files should produce one
-/// root entry (the directory itself), not one entry per file.
 fn collect_compress_roots(inputs: &[pesto::walk::InputFile]) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for input in inputs {
-        // depth of the relative name (number of `/`-separated components).
-        // A loose file (depth == 1) is its own root; no ancestor stripping needed.
         let depth = input.name.split('/').count();
         let root = if depth <= 1 {
             input.path.clone()
         } else {
-            // Strip `depth` components off the filesystem path to reach the
-            // directory that contains the top-level folder.
             input
                 .path
                 .ancestors()
@@ -647,8 +1009,7 @@ fn collect_compress_roots(inputs: &[pesto::walk::InputFile]) -> Vec<PathBuf> {
     }
 }
 
-/// The single root folder shared by every input, or `None` for loose files
-/// or a mix of roots. Used to name the `.nzb` after the uploaded directory.
+/// The single root folder shared by every input, or `None` for loose files.
 fn upload_root(inputs: &[pesto::walk::InputFile]) -> Option<String> {
     let mut root: Option<&str> = None;
     for input in inputs {
@@ -679,8 +1040,6 @@ fn dir_or_file_size(path: &Path) -> u64 {
 }
 
 /// Aggregate the upload as `(file count, subfolder count, total bytes)`.
-/// A subfolder is any directory *below* a root folder (its relative path
-/// contains a `/`); the root folder itself and loose files contribute none.
 fn upload_summary(inputs: &[pesto::walk::InputFile]) -> (usize, usize, u64) {
     let mut subfolders = std::collections::BTreeSet::new();
     let mut bytes = 0u64;
@@ -727,8 +1086,7 @@ fn print_welcome() {
     }
 }
 
-/// Run the interactive setup wizard: prompt for the essential settings and
-/// write them to the default config path.
+/// Run the interactive setup wizard.
 fn run_wizard() -> Result<()> {
     let path = config::default_config_path()
         .context("cannot locate a config directory: set $HOME or $XDG_CONFIG_HOME")?;
@@ -800,8 +1158,6 @@ fn run_wizard() -> Result<()> {
     Ok(())
 }
 
-/// Prompt for a line of input, returning `default` when the user enters
-/// nothing.
 fn ask(label: &str, default: &str) -> Result<String> {
     if default.is_empty() {
         print!("{label}: ");
@@ -821,7 +1177,6 @@ fn ask(label: &str, default: &str) -> Result<String> {
     })
 }
 
-/// Prompt repeatedly until the user supplies a non-empty value.
 fn ask_required(label: &str) -> Result<String> {
     loop {
         let value = ask(label, "")?;
@@ -832,7 +1187,6 @@ fn ask_required(label: &str) -> Result<String> {
     }
 }
 
-/// Escape a string for embedding inside a TOML double-quoted value.
 fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -869,7 +1223,6 @@ mod tests {
 
     #[test]
     fn collect_compress_roots_loose_file_is_the_file_itself() {
-        // A single loose file must resolve to itself, not to its parent dir.
         let files = vec![InputFile {
             path: PathBuf::from("/media/downloads/movie.mkv"),
             name: "movie.mkv".to_string(),
@@ -882,7 +1235,6 @@ mod tests {
 
     #[test]
     fn collect_compress_roots_directory_input_strips_correctly() {
-        // Files under Show/ → root is the dir containing Show/.
         let files = vec![
             InputFile {
                 path: PathBuf::from("/media/Show/ep01.mkv"),

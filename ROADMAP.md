@@ -160,11 +160,32 @@ original directory layout — not just a flat list of files.
 - [x] Aggregate counts (files, subfolders, total size) in the summary output
 - [x] `--help`, `README` and `config.example.toml` updated for folder uploads
 
-## Phase 10 — `upapasta` integration
+## Phase 10 — `upapasta` integration ✅
 
-- [ ] Stabilize the public API of `lib.rs`
-- [ ] Document integration points
-- [ ] Adapt the `upapasta` posting flow to use `pesto`
+`upapasta` is a Python orchestrator that wraps `nyuu` for the actual posting
+step. Replacing `nyuu` with `pesto` removes the Node.js dependency and brings
+the full Rust performance to the pipeline.
+
+The bridge between the two programs is `--output-format json`: `pesto`
+emits newline-delimited JSON events to stdout; `upapasta` reads them to drive
+its own progress display and obtain the final NZB path.
+
+- [x] Stabilize the public API of `lib.rs` (types and functions needed by
+      a Rust consumer; keep the `async fn post(config, files)` surface minimal)
+- [x] Document all JSON event types emitted by `--output-format json` so
+      `upapasta` can parse them reliably
+- [x] In `upapasta`: replace the `nyuu` subprocess call in `upfolder.py` with
+      a `pesto` subprocess call; parse JSON events for progress and NZB path
+      (nyuu kept as automatic fallback when pesto is not in PATH)
+- [ ] Verify that the `upapasta` obfuscation / PAR2 / compression pipeline
+      produces the same result when using `pesto` instead of `nyuu`
+- [ ] Update `upapasta` install instructions and `README` to reflect the new
+      dependency (Rust binary instead of Node.js)
+
+> **Decision point:** `upapasta` still handles PAR2, compression (RAR/7z),
+> metadata enrichment, history, and webhooks. `pesto` owns *only* the
+> yEnc + NNTP + PAR2 + NZB layer. Do not duplicate orchestration logic in
+> `pesto`; keep both tools thin and composable.
 
 ## Phase 11 — Reliability & resilience ✅
 
@@ -238,6 +259,47 @@ compressed media).
       SABnzbd can extract automatically
 - [x] PAR2 computed over the archive; temporary archive deleted after posting
 
+## Phase 14 — Batch and watch modes ✅
+
+Derived from `upapasta` use-cases that belong in the posting layer rather than
+the orchestrator.
+
+### 14-pre-a — `--each`: per-file releases from a directory ✅
+
+- [x] When a directory is given with `--each`, treat each top-level entry
+      (file or subfolder) as an independent upload with its own NZB
+- [x] PAR2 and NZB naming follow the entry name; output files placed next to
+      the directory (or in `--out` destination if specified)
+- [x] Runs sequentially; combine with `--jobs` (below) for parallelism
+
+### 14-pre-b — `--season`: batch NZB for TV seasons ✅
+
+- [x] Post each file in a directory independently (same as `--each`) **and**
+      produce one consolidated season NZB that references all message IDs
+- [x] Consolidated NZB takes the directory name; individual NZBs are still
+      written alongside each file
+- [x] Use case: TV season folder where each episode is a separate Usenet post
+      but indexers want a single NZB for the whole season
+
+### 14-pre-c — `--jobs N`: parallel independent uploads ✅
+
+- [x] When `--each` or `--season` produces multiple independent uploads, run
+      up to N of them in parallel (each with its own connection pool)
+- [x] Default: 1 (sequential); `--jobs 0` means number of logical CPUs
+- [ ] Total connection count across all jobs must not exceed `connections * N`
+      to avoid overloading the server
+
+### 14-pre-d — Watch / daemon mode ✅
+
+- [x] `--watch DIR`: poll DIR for new entries and post each automatically
+- [x] Optionally imply `--each` so each new entry becomes its own release
+- [x] Configurable poll interval (`--watch-interval`, default 30 s)
+- [x] On SIGTERM/Ctrl-C: finish any in-progress upload, then exit cleanly
+- [x] Move completed entries to a `--watch-done DIR` folder (or delete) so
+      they are not re-posted on the next poll
+- [x] Designed for headless/server environments; integrates with `upapasta`
+      as a replacement for its `--watch` mode
+
 ## Phase 14 — Posting features
 
 ### 14a — Cross-posting optimisation
@@ -295,6 +357,27 @@ compressed media).
 - [x] Contents: upload name, total size, file list, SHA-256 hashes of
       original files, date
 - [x] `--no-nfo` flag to skip generation
+
+## Phase 15d — NFO enrichment (post-MVP)
+
+`upapasta` generates rich NFOs with video codec info (via `ffprobe`/`mediainfo`)
+and optional TMDb movie/TV metadata. This phase brings equivalent capability to
+`pesto` so the tool can be used standalone without the Python orchestrator.
+
+- [ ] `--nfo-template PATH`: load an NFO template from disk; placeholders:
+      `{{name}}`, `{{size}}`, `{{files}}`, `{{sha256}}`, `{{date}}`
+- [ ] `--mediainfo`: if `mediainfo` or `ffprobe` is found on PATH, append the
+      output to the generated NFO for video files
+- [ ] `[output.tmdb]` config section: `api_key`; if set, pesto resolves the
+      upload name against the TMDb API and injects `{{title}}`, `{{year}}`,
+      `{{synopsis}}`, `{{imdb_id}}` into the template and the NZB `<meta>` tags
+- [ ] Auto-detect category from upload name (regex-based: Anime, TV show,
+      Movie, Generic) and expose as `{{category}}` template placeholder; also
+      written to `<meta type="category">` unless `--nzb-category` overrides it
+
+> This phase is deliberately placed *after* `upapasta` integration is complete.
+> While `upapasta` still wraps `pesto`, metadata enrichment stays in the Python
+> layer. Only implement here once `pesto` is used standalone for rich uploads.
 
 ## Phase 16 — Observability & UX
 
