@@ -141,6 +141,8 @@ pub struct FileConfig {
     pub posting: PostingSection,
     #[serde(default)]
     pub output: OutputSection,
+    #[serde(default)]
+    pub compression: CompressionSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -186,6 +188,13 @@ pub struct OutputSection {
     pub nzb: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionSection {
+    /// Archive format: `"7z"` (default), `"zip"`, or `"rar"`.
+    pub format: Option<String>,
+}
+
 impl FileConfig {
     /// Load and parse a TOML config file.
     pub fn load(path: &Path) -> Result<Self> {
@@ -221,6 +230,11 @@ pub struct Overrides {
     pub verify: Option<bool>,
     /// Maximum upload rate in bytes/sec; `0` means unlimited.
     pub upload_rate: Option<u64>,
+    /// Archive format to use when compressing (`"7z"`, `"zip"`, `"rar"`).
+    /// `None` means no compression unless `compress_password` is set.
+    pub compress_format: Option<String>,
+    /// Password for the archive, already resolved (random generation done by caller).
+    pub compress_password: Option<String>,
 }
 
 /// Fully resolved, validated configuration.
@@ -259,6 +273,11 @@ pub struct Config {
     pub resume: bool,
     /// Maximum upload rate in bytes/sec across all connections; 0 = unlimited.
     pub upload_rate: u64,
+    /// Archive format to use before posting. `None` = no compression.
+    pub compress_format: Option<String>,
+    /// Password for the archive. `None` = no password.
+    /// Set by `--password`; stored in the `.nzb` `<meta type="password">`.
+    pub compress_password: Option<String>,
 }
 
 impl Config {
@@ -417,6 +436,8 @@ impl Config {
                     0
                 }
             },
+            compress_format: cli.compress_format.or(file.compression.format),
+            compress_password: cli.compress_password,
         })
     }
 }

@@ -5,6 +5,7 @@
 //! the development plan.
 
 pub mod article;
+pub mod compress;
 pub mod config;
 pub mod nntp;
 pub mod nzb;

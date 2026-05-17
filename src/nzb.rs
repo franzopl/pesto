@@ -10,7 +10,15 @@ use crate::article::default_subject;
 use crate::poster::PostedSegment;
 
 /// Generate the contents of an `.nzb` file describing the posted segments.
-pub fn generate(poster: &str, groups: &[String], segments: &[PostedSegment]) -> String {
+///
+/// When `password` is `Some`, a `<meta type="password">` element is emitted
+/// so NZBGet / SABnzbd can extract a password-protected archive automatically.
+pub fn generate(
+    poster: &str,
+    groups: &[String],
+    segments: &[PostedSegment],
+    password: Option<&str>,
+) -> String {
     let date = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -23,6 +31,13 @@ pub fn generate(poster: &str, groups: &[String], segments: &[PostedSegment]) -> 
          \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n",
     );
     out.push_str("<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n");
+
+    if let Some(pw) = password {
+        out.push_str(&format!(
+            "  <head><meta type=\"password\">{}</meta></head>\n",
+            escape(pw)
+        ));
+    }
 
     // Segments arrive sorted by (file_name, part); group consecutive runs.
     let mut i = 0;
@@ -117,7 +132,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_a_well_formed_skeleton() {
-        let xml = generate("p <p@x>", &["alt.test".into()], &[]);
+        let xml = generate("p <p@x>", &["alt.test".into()], &[], None);
         assert!(xml.starts_with("<?xml version=\"1.0\""));
         assert!(xml.contains("<nzb xmlns="));
         assert!(xml.trim_end().ends_with("</nzb>"));
@@ -131,7 +146,7 @@ mod tests {
             seg("a.bin", 2, 2, "<id-a2@pesto>"),
             seg("b.bin", 1, 1, "<id-b1@pesto>"),
         ];
-        let xml = generate("poster <p@x>", &["alt.test".into()], &segments);
+        let xml = generate("poster <p@x>", &["alt.test".into()], &segments, None);
 
         assert_eq!(xml.matches("<file ").count(), 2);
         assert_eq!(xml.matches("<segment ").count(), 3);
@@ -153,7 +168,7 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
         };
-        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment]);
+        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], None);
         // The subject is the obfuscated name; the real name lives in `name`.
         assert!(xml.contains("subject=\"deadbeefcafe0000\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
@@ -163,7 +178,7 @@ mod tests {
     #[test]
     fn xml_special_characters_are_escaped() {
         let segments = vec![seg("a&b<c>.bin", 1, 1, "<i@x>")];
-        let xml = generate("a \"b\" & <c>", &["alt.test".into()], &segments);
+        let xml = generate("a \"b\" & <c>", &["alt.test".into()], &segments, None);
         assert!(xml.contains("poster=\"a &quot;b&quot; &amp; &lt;c&gt;\""));
         assert!(xml.contains("a&amp;b&lt;c&gt;.bin"));
     }

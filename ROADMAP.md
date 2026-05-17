@@ -215,19 +215,28 @@ original directory layout — not just a flat list of files.
       the buffer immediately after yEnc encoding; `--par2-only` path returns
       after each article; resume fast-path also returns without allocation
 
-## Phase 13 — Compression before posting
+## Phase 13 — Compression before posting ✅
 
-Pre-process files into a compressed archive before encoding and uploading.
-Compatibility with standard Usenet clients (NZBGet / SABnzbd / Unrar) requires
-the RAR format for most workflows.
+Bundle files into a single archive before yEnc-encoding and uploading.
+The default format is **7z in store mode** (no compression — PAR2 handles
+integrity; store keeps the pipeline fast and avoids double-compressing already
+compressed media).
 
-- [ ] `--compress` flag and `compress` config option (`rar`, `zip`, `none`)
-- [ ] Invoke `rar` / `zip` as a subprocess, or use a pure-Rust implementation
-      (`zip` crate; RAR requires a native binary due to licensing)
-- [ ] Pipe the archive stream directly into the posting pipeline to avoid
-      writing an intermediate file to disk
-- [ ] PAR2 is computed over the compressed archive, not the original files
-- [ ] Remove temporary archive after posting (or keep with `--keep-archive`)
+- [x] `--compress [FORMAT]` flag — bundle without password; FORMAT one of
+      `7z` (default), `zip`, `rar`
+- [x] `--password [PASSWORD]` flag — bundle with password; bare flag generates
+      a random 24-character alphanumeric password and prints it; does NOT imply
+      `--compress` independently (each flag has its own purpose)
+- [x] `[compression] format` config key; `--compress` / `--password` override it
+- [x] `7z` and `zip` via the `7z` CLI (p7zip); `rar` via the `rar` binary
+      (not distributed; user must install separately)
+- [x] 7z with password uses `-mhe=on` (encrypts archive headers, hiding file
+      names); zip uses standard password (no header encryption — zip spec
+      limitation); rar uses `-hp` (header encryption)
+- [x] With `--obfuscate full`, the archive file name is randomised (32-hex)
+- [x] Password stored in `<meta type="password">` in the `.nzb` so NZBGet /
+      SABnzbd can extract automatically
+- [x] PAR2 computed over the archive; temporary archive deleted after posting
 
 ## Phase 14 — Posting features
 

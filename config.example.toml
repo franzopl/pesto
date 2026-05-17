@@ -92,6 +92,20 @@ groups = ["alt.binaries.test"]
 # 0 or omitted means unlimited. Also settable with --rate.
 # upload_rate = "0"
 
+[compression]
+# Bundle files into an archive before posting. Default: disabled.
+#
+# format — archive format to use. Default: "7z" (store mode, no compression).
+#   "7z"  via p7zip; encrypts headers too when a password is set (-mhe=on)
+#   "zip" via p7zip; standard zip with optional password (no header encryption)
+#   "rar" via rar binary (not distributed; must be in PATH)
+#
+# Use --compress [FORMAT] on the CLI to enable for a single run.
+# Use --password [PASSWORD] to add a password (implies --compress).
+# Omitting FORMAT or leaving format unset defaults to "7z".
+#
+# format = "7z"
+
 [output]
 # nzb — default path for the generated .nzb file. Overridden by --out.
 # When unset, an .nzb is written only if --out is given — except for a

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use pesto::compress::{compress, random_password, ArchiveFormat};
 use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
 
 /// One-line summary shown at the top of `--help`.
@@ -146,6 +147,18 @@ struct Cli {
     #[arg(long, value_name = "RATE")]
     rate: Option<String>,
 
+    /// Bundle all files into an archive before posting. Optional FORMAT:
+    /// `7z` (default, store mode), `zip` (via 7z), or `rar` (requires rar in
+    /// PATH) [config: compression.format].
+    #[arg(long, value_name = "FORMAT", num_args = 0..=1, default_missing_value = "7z")]
+    compress: Option<String>,
+
+    /// Bundle files into a password-protected archive before posting. Optional
+    /// PASSWORD: if omitted, a random 24-character password is generated and
+    /// printed. Implies `--compress` with the configured or default format.
+    #[arg(long = "password", value_name = "PASSWORD", num_args = 0..=1)]
+    archive_password: Option<Option<String>>,
+
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
     #[arg(value_name = "PATH")]
@@ -185,6 +198,12 @@ impl Cli {
                 .map(parse_upload_rate)
                 .transpose()
                 .unwrap_or(None),
+            compress_format: self.compress.clone(),
+            // Resolve archive_password: Some(None) → generate random now,
+            // Some(Some(s)) → use s, None → no password.
+            compress_password: self.archive_password.as_ref().map(|pw| {
+                pw.clone().unwrap_or_else(random_password)
+            }),
         }
     }
 }
@@ -224,8 +243,103 @@ async fn main() -> Result<()> {
 
     // Expand the path arguments: directories are walked recursively so the
     // whole tree is posted as one upload.
-    let inputs = pesto::walk::expand_inputs(&cli.files)?;
+    let mut inputs = pesto::walk::expand_inputs(&cli.files)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
+
+    // ── Compression (Phase 13) ────────────────────────────────────────────
+    // Resolve whether to compress and with what format/password.
+    let compress_format_str: Option<String> = config
+        .compress_format
+        .clone()
+        .or_else(|| {
+            // --password implies compression with the default format.
+            if config.compress_password.is_some() {
+                Some("7z".to_string())
+            } else {
+                None
+            }
+        });
+
+    // The password is already resolved in overrides() (random generation happened there).
+    let effective_password: Option<String> = config.compress_password.clone();
+
+    // Perform compression and replace `inputs` with the single archive.
+    let compress_temp_dir: Option<PathBuf>;
+    if let Some(fmt_str) = &compress_format_str {
+        let format = ArchiveFormat::parse(fmt_str)
+            .ok_or_else(|| anyhow::anyhow!(
+                "unknown compression format `{fmt_str}`; supported: 7z, zip, rar"
+            ))?;
+
+        // Reject --password without --compress for rar (needs rar binary) at
+        // an early, clear point rather than deep in the compression step.
+        if format == ArchiveFormat::Rar && effective_password.is_some() {
+            // rar uses -hp for header encryption; warn user it needs rar binary
+            eprintln!("note: rar password protection requires the `rar` binary in PATH");
+        }
+
+        // Derive the archive stem from the upload root or the first file name.
+        let archive_stem = upload_root(&inputs)
+            .or_else(|| {
+                inputs.first().map(|f| {
+                    PathBuf::from(&f.name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+            .unwrap_or_else(|| "archive".to_string());
+
+        // With --obfuscate full, randomise the archive name too.
+        let archive_stem = if config.obfuscate == ObfuscateMode::Full {
+            pesto::article::obfuscated_name()
+        } else {
+            archive_stem
+        };
+
+        let tmp_dir = std::env::temp_dir()
+            .join(format!("pesto_compress_{}", std::process::id()));
+        compress_temp_dir = Some(tmp_dir.clone());
+
+        // Collect the unique filesystem roots to pass to the compressor.
+        // For a directory upload this is the set of root directories; for
+        // loose files it's each file's path individually.
+        let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
+
+        eprintln!("compressing {} item(s) to {}.{}...",
+            fs_paths.len(), archive_stem, format.extension());
+
+        let result = compress(
+            &fs_paths,
+            &archive_stem,
+            &tmp_dir,
+            format,
+            effective_password.as_deref(),
+        )?;
+
+        // Replace the input list with the single archive file.
+        let archive_name = result.path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        inputs = vec![pesto::walk::InputFile {
+            path: result.path,
+            name: archive_name,
+        }];
+
+        if let Some(pw) = &effective_password {
+            // Print when password was auto-generated (--password with no value).
+            let was_auto = cli.archive_password.as_ref().map(|p| p.is_none()).unwrap_or(false);
+            if was_auto {
+                println!("archive password: {pw}");
+            }
+        }
+    } else {
+        compress_temp_dir = None;
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     // Derive the resume state path from the NZB output path when known.
     // We compute the NZB path early (before posting) so we can derive the
@@ -305,13 +419,18 @@ async fn main() -> Result<()> {
             if outcome.segments.is_empty() {
                 eprintln!("no segments posted — skipping nzb output");
             } else {
-                let xml = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments);
+                let xml = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, effective_password.as_deref());
                 tokio::fs::write(out, xml)
                     .await
                     .with_context(|| format!("writing nzb file `{}`", out.display()))?;
                 println!("wrote nzb: {}", out.display());
             }
         }
+    }
+
+    // Clean up the temporary compression directory after posting.
+    if let Some(dir) = compress_temp_dir {
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Exit codes: 130 for an interrupt, 1 for any failed segment, 0 otherwise.
@@ -322,6 +441,37 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Collect the unique filesystem paths to pass to the compressor.
+///
+/// For a directory upload (files whose `name` contains `/`), the root folder
+/// is the common ancestor on disk. For loose files each path is its own root.
+/// Deduplication is important: a directory with many files should produce one
+/// root entry (the directory itself), not one entry per file.
+fn collect_compress_roots(inputs: &[pesto::walk::InputFile]) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for input in inputs {
+        // depth of the relative name (number of `/`-separated components)
+        let depth = input.name.split('/').count();
+        // Strip that many components off the filesystem path to reach the root.
+        let root = input
+            .path
+            .ancestors()
+            .nth(depth)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| input.path.clone());
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    // For plain files the "root" is the file itself; use `path` directly.
+    if roots.is_empty() {
+        inputs.iter().map(|f| f.path.clone()).collect()
+    } else {
+        roots
+    }
 }
 
 /// The single root folder shared by every input, or `None` for loose files
