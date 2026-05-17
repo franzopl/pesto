@@ -60,10 +60,11 @@ Each phase must leave the program in a working, testable state.
 ## Phase 7 — PAR2 generation
 
 Own pure-Rust PAR2 creator — no `par2cmdline` / `parpar` dependency. Parity is
-computed in the *same single read pass* used for posting: each slice, as it is
-read and yEnc-encoded for upload, is also accumulated into the Reed-Solomon
-recovery buffers. The PAR2 slice size is aligned with the yEnc article size,
-so one read block is one article and one input slice.
+computed in the *same single read pass* used for posting: each article, as it
+is read and yEnc-encoded for upload, is also accumulated into the Reed-Solomon
+recovery buffers. A PAR2 input slice groups several consecutive articles, since
+Reed-Solomon cost grows with `file_size² / par2_slice_size`; the group size
+targets ~1000 input slices to keep the encode affordable for large files.
 
 ### 7a — GF(2^16) field and Reed-Solomon matrix
 
