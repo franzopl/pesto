@@ -370,4 +370,55 @@ mod tests {
         assert_eq!(part.begin, 101);
         assert_eq!(part.end, 150);
     }
+
+    #[test]
+    fn encode_part_empty_data_zero_length_segment() {
+        // An empty file produces one segment with no data bytes.
+        let part = encode_part(
+            "empty.bin",
+            0,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            &[],
+            128,
+            None,
+        );
+        let body = String::from_utf8(part.body).unwrap();
+        // Control lines still present and consistent.
+        assert!(body.contains("size=0"));
+        assert!(body.contains("=yend size=0 crc32="));
+        // begin=1, end=0 for an empty part (offset + len = 0 + 0).
+        assert_eq!(part.begin, 1);
+        assert_eq!(part.end, 0);
+        assert_eq!(part.crc32, crc32(&[]));
+    }
+
+    #[test]
+    fn segments_file_exactly_article_size_yields_one_segment() {
+        assert_eq!(segments(128, 128), vec![(0, 128)]);
+    }
+
+    #[test]
+    fn segments_file_one_byte_over_article_size_yields_two_segments() {
+        assert_eq!(segments(129, 128), vec![(0, 128), (128, 1)]);
+    }
+
+    #[test]
+    fn body_length_matches_line_length_exactly() {
+        // A single segment whose data is exactly line_len bytes should produce
+        // a single encoded line (no premature wrap, no missing trailing CRLF).
+        let data: Vec<u8> = vec![0x00; 128]; // 128 bytes, none critical
+        let encoded = encode(&data, 128);
+        // Exactly 128 encoded bytes + CRLF; no mid-line CRLF.
+        let newline_count = encoded.windows(2).filter(|w| w == b"\r\n").count();
+        assert_eq!(
+            newline_count, 1,
+            "expected exactly one CRLF for a full line"
+        );
+        // Round-trip.
+        assert_eq!(decode(&encoded), data);
+    }
 }

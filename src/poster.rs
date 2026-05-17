@@ -1129,13 +1129,223 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::config::{Config, FileConfig, ObfuscateMode, Overrides};
+    use crate::walk::InputFile;
+    use tempfile::TempDir;
+
     #[test]
     fn message_id_domain_is_random() {
         let a = crate::article::generate_message_id(None);
         let b = crate::article::generate_message_id(None);
-        // Two consecutive IDs must differ and must not contain a fixed domain.
         assert_ne!(a, b);
         assert!(a.contains('@'));
         assert!(!a.contains("blocknews") && !a.contains("pesto"));
+    }
+
+    // ── par2_base ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn par2_base_single_component() {
+        assert_eq!(par2_base("movie.mkv"), "movie.mkv");
+    }
+
+    #[test]
+    fn par2_base_relative_path_returns_root_folder() {
+        assert_eq!(par2_base("Season01/ep01.mkv"), "Season01");
+        assert_eq!(par2_base("a/b/c.bin"), "a");
+    }
+
+    #[test]
+    fn par2_base_empty_string() {
+        // Should not panic; returns the whole (empty) string.
+        assert_eq!(par2_base(""), "");
+    }
+
+    // ── resolve_date ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_date_none_omits_header() {
+        assert_eq!(resolve_date(None), None);
+    }
+
+    #[test]
+    fn resolve_date_now_returns_rfc2822() {
+        let d = resolve_date(Some("now")).unwrap();
+        // Should look like "Mon, 01 Jan 2024 00:00:00 +0000".
+        assert!(d.ends_with("+0000"));
+        assert!(d.contains(':'));
+    }
+
+    #[test]
+    fn resolve_date_random_returns_rfc2822() {
+        let d = resolve_date(Some("random")).unwrap();
+        assert!(d.ends_with("+0000"));
+    }
+
+    #[test]
+    fn resolve_date_fixed_is_returned_verbatim() {
+        let fixed = "Tue, 14 Jan 2025 10:00:00 +0000";
+        assert_eq!(resolve_date(Some(fixed)).as_deref(), Some(fixed));
+    }
+
+    // ── build_server_assignments ──────────────────────────────────────────────
+
+    fn server(connections: usize) -> ServerEntry {
+        ServerEntry {
+            host: "h".into(),
+            port: 563,
+            ssl: true,
+            connections,
+            username: None,
+            password: None,
+            retry_delay: 1,
+        }
+    }
+
+    #[test]
+    fn single_server_all_workers_assigned_to_it() {
+        let servers = vec![server(8)];
+        let assignments = build_server_assignments(&servers, 4);
+        assert_eq!(assignments, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn two_servers_workers_distributed_by_connection_count() {
+        // Server 0 has 2 connections, server 1 has 4.
+        let servers = vec![server(2), server(4)];
+        let assignments = build_server_assignments(&servers, 6);
+        assert_eq!(assignments[..2], [0, 0]);
+        assert_eq!(assignments[2..], [1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn worker_count_less_than_total_connections_stops_early() {
+        let servers = vec![server(8), server(8)];
+        let assignments = build_server_assignments(&servers, 3);
+        assert_eq!(assignments.len(), 3);
+        // All from server 0 since it has 8 slots and we only need 3.
+        assert!(assignments.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn worker_count_exceeds_total_connections_fills_round_robin() {
+        let servers = vec![server(1), server(1)];
+        // 4 workers but only 2 total connection slots.
+        let assignments = build_server_assignments(&servers, 4);
+        assert_eq!(assignments.len(), 4);
+    }
+
+    // ── RateLimiter ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn rate_limiter_zero_rate_never_sleeps() {
+        let mut rl = RateLimiter::new(0);
+        let start = Instant::now();
+        rl.acquire(1_000_000).await;
+        // Should return almost instantly (< 10 ms).
+        assert!(start.elapsed() < Duration::from_millis(10));
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_large_bucket_does_not_sleep_for_small_request() {
+        // 10 MiB/s bucket, request 1 KiB — tokens are available immediately.
+        let mut rl = RateLimiter::new(10 * 1024 * 1024);
+        let start = Instant::now();
+        rl.acquire(1024).await;
+        assert!(start.elapsed() < Duration::from_millis(10));
+    }
+
+    // ── dry-run integration ───────────────────────────────────────────────────
+
+    fn dry_run_config() -> Config {
+        let mut file = FileConfig::default();
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        Config::resolve(
+            file,
+            Overrides {
+                dry_run: Some(true),
+                par2: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dry_run_produces_segments_without_network() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("sample.bin");
+        std::fs::write(&f, &vec![0u8; 1500]).unwrap();
+
+        let files = vec![InputFile {
+            path: f.clone(),
+            name: "sample.bin".into(),
+        }];
+
+        let config = dry_run_config();
+        let outcome = post_files(&config, &files).await.unwrap();
+
+        // Two segments (1500 bytes / 768 000 default = 1 here, but article_size
+        // default is 768 000 so 1500 bytes → 1 segment).
+        assert!(!outcome.segments.is_empty());
+        assert!(outcome.failures.is_empty());
+        assert!(!outcome.cancelled);
+        assert_eq!(outcome.segments[0].file_name, "sample.bin");
+    }
+
+    #[tokio::test]
+    async fn dry_run_multi_segment_file() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("big.bin");
+        // Use a tiny article_size to force multiple segments.
+        std::fs::write(&f, &vec![0u8; 300]).unwrap();
+
+        let files = vec![InputFile {
+            path: f,
+            name: "big.bin".into(),
+        }];
+
+        let mut config = dry_run_config();
+        config.article_size = 100;
+        let outcome = post_files(&config, &files).await.unwrap();
+
+        // 300 bytes / 100 = 3 segments.
+        assert_eq!(outcome.segments.len(), 3);
+        for (i, seg) in outcome.segments.iter().enumerate() {
+            assert_eq!(seg.part, (i + 1) as u32);
+            assert_eq!(seg.total, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn dry_run_ignores_resume_state_by_design() {
+        // Resume is explicitly disabled in dry_run mode (post_files_with_progress
+        // checks `config.resume && !config.dry_run`). Segments get fresh
+        // Message-IDs even when a state file with recorded entries is present.
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("r.bin");
+        std::fs::write(&f, &vec![0u8; 100]).unwrap();
+
+        let state_path = dir.path().join("r.bin.pesto-state");
+        let mut state = crate::resume::ResumeState::default();
+        state.record("r.bin", 1, "<stored-id@pesto>");
+        state.save(&state_path).unwrap();
+
+        let files = vec![InputFile {
+            path: f,
+            name: "r.bin".into(),
+        }];
+
+        let mut config = dry_run_config();
+        config.resume = true; // resume flag set but dry_run overrides it
+
+        let outcome = post_files_with_progress(&config, &files, None, Some(&state_path))
+            .await
+            .unwrap();
+
+        // Segment is present but Message-ID is a fresh one, not the stored one.
+        assert_eq!(outcome.segments.len(), 1);
+        assert_ne!(outcome.segments[0].message_id, "<stored-id@pesto>");
     }
 }

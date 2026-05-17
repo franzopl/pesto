@@ -305,4 +305,60 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
     }
+
+    #[test]
+    fn serialize_empty_body_produces_valid_structure() {
+        let article = Article {
+            message_id: "<id@pesto>".into(),
+            from: "p <p@x.com>".into(),
+            newsgroups: vec!["alt.test".into()],
+            subject: "empty.bin".into(),
+            date: None,
+            no_archive: false,
+        };
+        let serialized = String::from_utf8(article.serialize(b"")).unwrap();
+        // Header block ends with \r\n\r\n; body is empty.
+        assert!(serialized.ends_with("\r\n\r\n"));
+        // All four mandatory headers are present.
+        assert!(serialized.contains("From:"));
+        assert!(serialized.contains("Newsgroups:"));
+        assert!(serialized.contains("Subject:"));
+        assert!(serialized.contains("Message-ID:"));
+    }
+
+    #[test]
+    fn serialize_omits_date_and_x_no_archive_when_not_set() {
+        let article = Article {
+            message_id: "<id@pesto>".into(),
+            from: "p <p@x.com>".into(),
+            newsgroups: vec!["alt.test".into()],
+            subject: "f".into(),
+            date: None,
+            no_archive: false,
+        };
+        let serialized = String::from_utf8(article.serialize(b"")).unwrap();
+        assert!(!serialized.contains("Date:"));
+        assert!(!serialized.contains("X-No-Archive"));
+    }
+
+    #[test]
+    fn format_rfc2822_leap_day() {
+        // 2024-02-29 00:00:00 UTC — verified: days from epoch = 19782.
+        // 19782 * 86400 = 1709164800
+        let t = UNIX_EPOCH + Duration::from_secs(1709164800);
+        let s = format_rfc2822(t);
+        assert_eq!(s, "Thu, 29 Feb 2024 00:00:00 +0000");
+    }
+
+    #[test]
+    fn default_subject_single_part_has_no_parens() {
+        let s = default_subject("movie.mkv", 1, 1);
+        assert!(!s.contains('('));
+        assert_eq!(s, "movie.mkv");
+    }
+
+    #[test]
+    fn default_subject_last_part() {
+        assert_eq!(default_subject("f.bin", 10, 10), "f.bin (10/10)");
+    }
 }

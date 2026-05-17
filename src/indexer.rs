@@ -52,7 +52,7 @@ pub async fn upload_nzb(
 }
 
 /// Minimal percent-encoding for query parameter values.
-fn urlencoded(s: &str) -> String {
+pub(crate) fn urlencoded(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -67,4 +67,50 @@ fn urlencoded(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::urlencoded;
+
+    #[test]
+    fn ascii_alphanumeric_passthrough() {
+        assert_eq!(urlencoded("ABCxyz019"), "ABCxyz019");
+    }
+
+    #[test]
+    fn unreserved_chars_passthrough() {
+        assert_eq!(urlencoded("-_.~"), "-_.~");
+    }
+
+    #[test]
+    fn space_encoded() {
+        assert_eq!(urlencoded("hello world"), "hello%20world");
+    }
+
+    #[test]
+    fn slash_encoded() {
+        assert_eq!(urlencoded("a/b"), "a%2fb");
+    }
+
+    #[test]
+    fn at_sign_encoded() {
+        assert_eq!(urlencoded("user@host"), "user%40host");
+    }
+
+    #[test]
+    fn ampersand_encoded() {
+        assert_eq!(urlencoded("a&b=c"), "a%26b%3dc");
+    }
+
+    #[test]
+    fn utf8_multibyte_encoded() {
+        // "ã" is U+00E3, encoded as 0xC3 0xA3 in UTF-8.
+        assert_eq!(urlencoded("ã"), "%c3%a3");
+    }
+
+    #[test]
+    fn empty_string() {
+        assert_eq!(urlencoded(""), "");
+    }
 }

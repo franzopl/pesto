@@ -131,3 +131,135 @@ fn append_dir_listing(dir: &Path, buf: &mut String, depth: usize) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // ── is_video ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_video_known_extensions() {
+        for ext in &["mkv", "mp4", "avi", "ts", "m2ts", "mov"] {
+            let p = PathBuf::from(format!("file.{ext}"));
+            assert!(is_video(&p), "{ext} should be recognised as video");
+        }
+    }
+
+    #[test]
+    fn is_video_unknown_extension() {
+        assert!(!is_video(&PathBuf::from("file.txt")));
+        assert!(!is_video(&PathBuf::from("file.nfo")));
+        assert!(!is_video(&PathBuf::from("file.nzb")));
+    }
+
+    #[test]
+    fn is_video_no_extension() {
+        assert!(!is_video(&PathBuf::from("README")));
+    }
+
+    #[test]
+    fn is_video_mixed_case() {
+        assert!(is_video(&PathBuf::from("movie.MKV")));
+        assert!(is_video(&PathBuf::from("clip.Mp4")));
+    }
+
+    // ── build_listing ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_listing_single_file() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("sample.txt");
+        fs::write(&f, b"hello").unwrap();
+
+        let listing = build_listing(&[f]);
+        assert!(listing.contains("sample.txt"));
+        assert!(listing.contains("5 bytes"));
+    }
+
+    #[test]
+    fn build_listing_empty_input() {
+        let listing = build_listing(&[]);
+        assert!(listing.is_empty());
+    }
+
+    #[test]
+    fn build_listing_directory_with_nested_files() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("a.txt"), b"aa").unwrap();
+        fs::write(dir.path().join("b.txt"), b"bbb").unwrap();
+
+        let listing = build_listing(&[dir.path().to_path_buf()]);
+        assert!(listing.contains("b.txt"));
+        assert!(listing.contains("sub/"));
+        assert!(listing.contains("a.txt"));
+    }
+
+    // ── find_media_file ───────────────────────────────────────────────────────
+
+    #[test]
+    fn find_media_file_single_video() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("movie.mkv");
+        fs::write(&f, b"").unwrap();
+
+        let result = find_media_file(&[f.clone()]);
+        assert_eq!(result, Some(f));
+    }
+
+    #[test]
+    fn find_media_file_no_video() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("readme.txt");
+        fs::write(&f, b"").unwrap();
+
+        assert_eq!(find_media_file(&[f]), None);
+    }
+
+    #[test]
+    fn find_media_file_returns_alphabetically_first() {
+        let dir = TempDir::new().unwrap();
+        let a = dir.path().join("ep02.mkv");
+        let b = dir.path().join("ep01.mkv");
+        fs::write(&a, b"").unwrap();
+        fs::write(&b, b"").unwrap();
+
+        let result = find_media_file(&[dir.path().to_path_buf()]);
+        assert_eq!(result.unwrap().file_name().unwrap(), "ep01.mkv");
+    }
+
+    #[test]
+    fn find_media_file_recurses_into_subdirectory() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("season1");
+        fs::create_dir(&sub).unwrap();
+        let f = sub.join("ep01.mp4");
+        fs::write(&f, b"").unwrap();
+
+        let result = find_media_file(&[dir.path().to_path_buf()]);
+        assert_eq!(result, Some(f));
+    }
+
+    // ── generate ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn generate_returns_none_for_empty_paths() {
+        assert!(generate(&[]).is_none());
+    }
+
+    #[test]
+    fn generate_falls_back_to_listing_for_non_video() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("data.nzb");
+        fs::write(&f, b"content").unwrap();
+
+        let result = generate(&[f]);
+        assert!(result.is_some());
+        let listing = result.unwrap();
+        assert!(listing.contains("data.nzb"));
+    }
+}

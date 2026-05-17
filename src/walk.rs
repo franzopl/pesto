@@ -257,4 +257,50 @@ mod tests {
         assert!(expand_inputs(&[a, b]).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn symlinks_inside_directory_are_skipped() {
+        let dir = temp_dir();
+        let root = dir.join("show");
+        touch(&root.join("ep01.mkv"));
+
+        // Create a symlink inside the directory; it should be skipped.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("ep01.mkv"), root.join("link.mkv")).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, skip the symlink part of this test.
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+
+        let out = expand_inputs(std::slice::from_ref(&root)).unwrap();
+        // Only the real file; the symlink is silently skipped.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "show/ep01.mkv");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_paths_list_is_an_error() {
+        assert!(expand_inputs(&[]).is_err());
+    }
+
+    #[test]
+    fn output_is_sorted_by_name() {
+        let dir = temp_dir();
+        touch(&dir.join("z.bin"));
+        touch(&dir.join("a.bin"));
+        touch(&dir.join("m.bin"));
+
+        let out =
+            expand_inputs(&[dir.join("z.bin"), dir.join("a.bin"), dir.join("m.bin")]).unwrap();
+        let names: Vec<&str> = out.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["a.bin", "m.bin", "z.bin"]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

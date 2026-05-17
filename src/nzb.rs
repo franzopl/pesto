@@ -232,4 +232,66 @@ mod tests {
         assert!(!xml.contains("<head>"));
         assert!(!xml.contains("<meta"));
     }
+
+    #[test]
+    fn multi_file_multi_segment_with_par2() {
+        let groups = vec!["alt.test".into()];
+        let segments = vec![
+            seg("movie.mkv", 1, 3, "<a1@x>"),
+            seg("movie.mkv", 2, 3, "<a2@x>"),
+            seg("movie.mkv", 3, 3, "<a3@x>"),
+            seg("movie.par2", 1, 1, "<p1@x>"),
+            seg("movie.vol00+01.par2", 1, 1, "<p2@x>"),
+        ];
+        let xml = generate("poster <p@x>", &groups, &segments, &no_meta());
+
+        // Three distinct <file> blocks.
+        assert_eq!(xml.matches("<file ").count(), 3);
+        // Five <segment> entries total.
+        assert_eq!(xml.matches("<segment ").count(), 5);
+        // PAR2 files appear.
+        assert!(xml.contains("name=\"movie.par2\""));
+        assert!(xml.contains("name=\"movie.vol00+01.par2\""));
+        // Multi-part subject rendered correctly for movie.mkv.
+        assert!(xml.contains("subject=\"movie.mkv (1/3)\""));
+    }
+
+    #[test]
+    fn multiple_groups_all_emitted() {
+        let groups = vec!["alt.binaries.a".into(), "alt.binaries.b".into()];
+        let xml = generate(
+            "p <p@x>",
+            &groups,
+            &[seg("f.bin", 1, 1, "<id@x>")],
+            &no_meta(),
+        );
+        assert!(xml.contains("<group>alt.binaries.a</group>"));
+        assert!(xml.contains("<group>alt.binaries.b</group>"));
+        assert_eq!(xml.matches("<group>").count(), 2);
+    }
+
+    #[test]
+    fn single_part_subject_has_no_part_indicator() {
+        let xml = generate(
+            "p <p@x>",
+            &["alt.test".into()],
+            &[seg("file.bin", 1, 1, "<id@x>")],
+            &no_meta(),
+        );
+        assert!(xml.contains("subject=\"file.bin\""));
+        assert!(!xml.contains("(1/1)"));
+    }
+
+    #[test]
+    fn only_password_meta_emits_head_without_name_or_category() {
+        let meta = NzbMeta {
+            name: None,
+            password: Some("hunter2".into()),
+            category: None,
+        };
+        let xml = generate("p <p@x>", &["alt.test".into()], &[], &meta);
+        assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
+        assert!(!xml.contains("type=\"name\""));
+        assert!(!xml.contains("type=\"category\""));
+    }
 }

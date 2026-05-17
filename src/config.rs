@@ -645,4 +645,195 @@ mod tests {
         assert_eq!(file.posting.obfuscate, Some(ObfuscateMode::Full));
         assert_eq!(ObfuscateMode::default(), ObfuscateMode::None);
     }
+
+    // ── parse_upload_rate ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_rate_bare_bytes() {
+        assert_eq!(parse_upload_rate("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn parse_rate_kib() {
+        assert_eq!(parse_upload_rate("10 KiB/s").unwrap(), 10 * 1024);
+    }
+
+    #[test]
+    fn parse_rate_mib() {
+        assert_eq!(parse_upload_rate("50 MiB/s").unwrap(), 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_rate_mb_case_insensitive() {
+        assert_eq!(parse_upload_rate("2 MB/s").unwrap(), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_rate_gib() {
+        assert_eq!(parse_upload_rate("1 GiB/s").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_rate_unknown_unit_errors() {
+        assert!(parse_upload_rate("10 TiB/s").is_err());
+    }
+
+    #[test]
+    fn parse_rate_not_a_number_errors() {
+        assert!(parse_upload_rate("fast").is_err());
+    }
+
+    // ── [[servers]] array ─────────────────────────────────────────────────────
+
+    fn base_overrides() -> Overrides {
+        Overrides {
+            groups: Some(vec!["alt.test".into()]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn single_servers_entry_becomes_primary() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [[servers]]
+            host = "news.example.com"
+            port = 119
+            ssl = false
+            connections = 8
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::resolve(file, base_overrides()).unwrap();
+        assert_eq!(cfg.host, "news.example.com");
+        assert_eq!(cfg.port, 119);
+        assert!(!cfg.ssl);
+        assert_eq!(cfg.connections, 8);
+        assert!(cfg.extra_servers.is_empty());
+    }
+
+    #[test]
+    fn multiple_servers_first_is_primary_rest_are_extra() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [[servers]]
+            host = "primary.example.com"
+            [[servers]]
+            host = "backup.example.com"
+            connections = 2
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::resolve(file, base_overrides()).unwrap();
+        assert_eq!(cfg.host, "primary.example.com");
+        assert_eq!(cfg.extra_servers.len(), 1);
+        assert_eq!(cfg.extra_servers[0].host, "backup.example.com");
+        assert_eq!(cfg.extra_servers[0].connections, 2);
+    }
+
+    #[test]
+    fn servers_entry_missing_host_errors() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [[servers]]
+            port = 119
+            "#,
+        )
+        .unwrap();
+
+        assert!(Config::resolve(file, base_overrides()).is_err());
+    }
+
+    #[test]
+    fn extra_server_missing_host_errors() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [[servers]]
+            host = "primary.example.com"
+            [[servers]]
+            port = 119
+            "#,
+        )
+        .unwrap();
+
+        assert!(Config::resolve(file, base_overrides()).is_err());
+    }
+
+    #[test]
+    fn total_connections_sums_all_servers() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [[servers]]
+            host = "a.example.com"
+            connections = 4
+            [[servers]]
+            host = "b.example.com"
+            connections = 2
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::resolve(file, base_overrides()).unwrap();
+        assert_eq!(cfg.total_connections(), 6);
+    }
+
+    // ── CLI overrides ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_overrides_article_size_and_retries() {
+        let mut file = FileConfig::default();
+        file.server.host = Some("h".into());
+        file.posting.groups = Some(vec!["a.b".into()]);
+        file.posting.article_size = Some(500_000);
+        file.posting.retries = Some(2);
+
+        let cli = Overrides {
+            article_size: Some(999_000),
+            retries: Some(5),
+            ..Default::default()
+        };
+
+        let cfg = Config::resolve(file, cli).unwrap();
+        assert_eq!(cfg.article_size, 999_000);
+        assert_eq!(cfg.retries, 5);
+    }
+
+    #[test]
+    fn dry_run_does_not_require_host() {
+        let mut file = FileConfig::default();
+        file.posting.groups = Some(vec!["a.b".into()]);
+
+        let cli = Overrides {
+            dry_run: Some(true),
+            ..Default::default()
+        };
+
+        let cfg = Config::resolve(file, cli).unwrap();
+        assert!(cfg.dry_run);
+        assert_eq!(cfg.host, "localhost");
+    }
+
+    #[test]
+    fn par2_only_does_not_require_host_or_groups() {
+        let file = FileConfig::default();
+
+        let cli = Overrides {
+            par2_only: Some(true),
+            ..Default::default()
+        };
+
+        let cfg = Config::resolve(file, cli).unwrap();
+        assert!(cfg.par2_only);
+    }
+
+    #[test]
+    fn missing_groups_errors_for_normal_post() {
+        let mut file = FileConfig::default();
+        file.server.host = Some("h".into());
+        // No groups set anywhere.
+
+        assert!(Config::resolve(file, Overrides::default()).is_err());
+    }
 }
