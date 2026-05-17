@@ -30,6 +30,12 @@ const MAX_POST_ATTEMPTS: u32 = 3;
 const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// Maximum memory to use for PAR2 recovery slices (in bytes).
 const MAX_PAR2_MEMORY: usize = 1_000_000_000; // 1 GB
+/// Target number of PAR2 input slices. Reed-Solomon encoding cost grows with
+/// `file_size² / par2_slice_size`, so tying the PAR2 slice to the (small)
+/// article size makes large files quadratically expensive. Several articles
+/// are grouped into one PAR2 slice to keep the input-block count near this
+/// target, which is the dominant lever on PAR2 CPU cost.
+const TARGET_PAR2_SLICES: usize = 1000;
 
 /// A posted segment, retained for later `.nzb` generation.
 #[derive(Debug, Clone)]
@@ -101,6 +107,8 @@ struct Shared {
 
 /// Post every file in `files` to the groups configured in `config`.
 pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcome> {
+    configure_rayon();
+
     let mut metas = Vec::with_capacity(files.len());
     for path in files {
         let md = tokio::fs::metadata(path)
@@ -242,6 +250,67 @@ fn par2_temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id()))
 }
 
+/// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure
+/// SIMD/ALU work; sibling hyperthreads contend for the same execution ports
+/// and add almost nothing, so one worker per logical CPU only heats the
+/// machine. Called once; a no-op if a global pool already exists.
+fn configure_rayon() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(physical_core_count())
+            .build_global();
+    });
+}
+
+/// Number of physical CPU cores, derived from `/proc/cpuinfo` by counting
+/// distinct `(physical id, core id)` pairs. Falls back to the logical CPU
+/// count when that information is unavailable.
+fn physical_core_count() -> usize {
+    use std::collections::HashSet;
+    if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let (mut phys, mut core): (Option<String>, Option<String>) = (None, None);
+        for line in info.lines() {
+            if line.trim().is_empty() {
+                if let (Some(p), Some(c)) = (phys.take(), core.take()) {
+                    seen.insert((p, c));
+                }
+            } else if let Some((key, val)) = line.split_once(':') {
+                match key.trim() {
+                    "physical id" => phys = Some(val.trim().to_string()),
+                    "core id" => core = Some(val.trim().to_string()),
+                    _ => {}
+                }
+            }
+        }
+        if !seen.is_empty() {
+            return seen.len();
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Pad the accumulated real bytes to the full PAR2 slice size, hand the slice
+/// to the recovery encoder and, when `checksums` is `Some` (first pass only),
+/// record its IFSC checksum. Leaves `accum` empty for the next slice.
+fn feed_par2_slice(
+    accum: &mut Vec<u8>,
+    par2_slice_size: usize,
+    enc: &mut RecoveryEncoder,
+    checksums: Option<&mut Vec<SliceChecksum>>,
+) {
+    let mut padded = std::mem::replace(accum, Vec::with_capacity(par2_slice_size));
+    padded.resize(par2_slice_size, 0);
+    if let Some(checksums) = checksums {
+        checksums.push(slice_checksum(&padded));
+    }
+    tokio::task::block_in_place(|| enc.add_slice(padded));
+}
+
 fn domain_from(from: &str) -> String {
     if let Some(rest) = from.rsplit('@').next().filter(|_| from.contains('@')) {
         let domain = rest.trim_end_matches('>').trim();
@@ -257,13 +326,32 @@ async fn producer(
     tx_opt: Option<tokio::sync::mpsc::Sender<PostTask>>,
     shared: Arc<Shared>,
 ) -> Result<()> {
-    let mut total_slices = 0;
+    let article_size = shared.config.article_size;
+
+    // Article count per file — one article is one posted segment.
+    let mut per_file_articles = Vec::with_capacity(metas.len());
+    let mut total_articles = 0usize;
     for meta in &metas {
-        total_slices += yenc::segments(meta.size, shared.config.article_size).len();
+        let n = yenc::segments(meta.size, article_size).len();
+        per_file_articles.push(n);
+        total_articles += n;
     }
 
+    // A PAR2 input slice spans `articles_per_slice` consecutive articles, so
+    // the input-block count stays near `TARGET_PAR2_SLICES`. Posting still
+    // uses the unchanged per-article segmentation; only the encoder sees the
+    // larger slice.
+    let articles_per_slice = total_articles.div_ceil(TARGET_PAR2_SLICES).max(1);
+    let par2_slice_size = articles_per_slice * article_size;
+
+    // PAR2 splits each file independently; a file's last slice is zero-padded.
+    let total_slices: usize = per_file_articles
+        .iter()
+        .map(|&n| n.div_ceil(articles_per_slice))
+        .sum();
+
     let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
-    let slices_per_pass = (MAX_PAR2_MEMORY / shared.config.article_size).max(1);
+    let slices_per_pass = (MAX_PAR2_MEMORY / par2_slice_size).max(1);
 
     let mut passes = Vec::new();
     if recovery_count > 0 {
@@ -290,7 +378,7 @@ async fn producer(
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         let mut encoder = if rec_count > 0 {
             Some(RecoveryEncoder::new(
-                shared.config.article_size,
+                par2_slice_size,
                 total_slices,
                 exp_start,
                 rec_count,
@@ -300,12 +388,19 @@ async fn producer(
         };
 
         for (file_idx, meta) in metas.iter().enumerate() {
-            let segments = yenc::segments(meta.size, shared.config.article_size);
+            let segments = yenc::segments(meta.size, article_size);
             let total_parts = segments.len() as u32;
 
             let mut file = File::open(&meta.path)
                 .await
                 .with_context(|| format!("opening `{}`", meta.path.display()))?;
+
+            // Real bytes of the PAR2 input slice currently being assembled.
+            let mut par2_accum: Vec<u8> = if encoder.is_some() {
+                Vec::with_capacity(par2_slice_size)
+            } else {
+                Vec::new()
+            };
 
             for (i, (offset, len)) in segments.into_iter().enumerate() {
                 if shared.cancelled.load(Ordering::Relaxed) {
@@ -317,23 +412,25 @@ async fn producer(
                     .await
                     .with_context(|| format!("reading `{}`", meta.path.display()))?;
 
-                if pass_idx == 0 {
-                    // In the first pass the encoder is `Some` exactly when PAR2
-                    // is enabled, so all PAR2 per-slice work is gated on it —
-                    // no hashing or checksums are computed when `--par2 0`.
-                    if let Some(enc) = &mut encoder {
+                // The encoder is `Some` exactly when PAR2 is enabled, so all
+                // PAR2 work — hashing, checksums, recovery — is gated on it.
+                if let Some(enc) = &mut encoder {
+                    if pass_idx == 0 {
                         par2_files[file_idx].update(&buf);
-
-                        let mut padded = buf.clone();
-                        padded.resize(shared.config.article_size, 0);
-                        all_checksums[file_idx].push(slice_checksum(&padded));
-
-                        // The encoder takes ownership of `padded`; it is the
-                        // single PAR2 copy of this slice (the other owned copy,
-                        // `buf`, is moved into the posting channel below).
-                        tokio::task::block_in_place(|| enc.add_slice(padded));
                     }
+                    // Append the article to the current PAR2 slice. Every
+                    // article but a file's last is exactly `article_size`, so
+                    // the accumulator reaches `par2_slice_size` precisely on
+                    // the K-th article; a short final article falls through to
+                    // the partial-slice flush after the loop.
+                    par2_accum.extend_from_slice(&buf);
+                    if par2_accum.len() >= par2_slice_size {
+                        let checksums = (pass_idx == 0).then_some(&mut all_checksums[file_idx]);
+                        feed_par2_slice(&mut par2_accum, par2_slice_size, enc, checksums);
+                    }
+                }
 
+                if pass_idx == 0 {
                     if let Some(tx) = &tx_opt {
                         if tx.send(PostTask {
                             meta: meta.clone(),
@@ -347,10 +444,14 @@ async fn producer(
                     } else {
                         shared.progress.segment_done(buf.len() as u64);
                     }
-                } else if let Some(enc) = &mut encoder {
-                    let mut padded = buf;
-                    padded.resize(shared.config.article_size, 0);
-                    tokio::task::block_in_place(|| enc.add_slice(padded));
+                }
+            }
+
+            // Flush the file's final, partial PAR2 slice (zero-padded).
+            if let Some(enc) = &mut encoder {
+                if !par2_accum.is_empty() {
+                    let checksums = (pass_idx == 0).then_some(&mut all_checksums[file_idx]);
+                    feed_par2_slice(&mut par2_accum, par2_slice_size, enc, checksums);
                 }
             }
         }
@@ -369,7 +470,7 @@ async fn producer(
                     hashes.push(fh);
                 }
 
-                let main_b = packet::main_body(shared.config.article_size as u64, &file_ids);
+                let main_b = packet::main_body(par2_slice_size as u64, &file_ids);
                 rsid = packet::recovery_set_id(&main_b);
                 let pkt_main = packet::serialize_packet(&rsid, &packet::TYPE_MAIN, &main_b);
                 let pkt_creator = packet::serialize_packet(&rsid, &packet::TYPE_CREATOR, &packet::creator_body("pesto"));

@@ -175,7 +175,10 @@ impl RecoveryEncoder {
                 tables.push((v_tl_l, v_tl_h, v_th_l, v_th_h, v_hl_l, v_hl_h, v_hh_l, v_hh_h, table_low, table_high));
             }
 
-            let chunk_size = 32768; // 64KB L1 blocking
+            // 16384 words == 32 KiB, the size of one L1 data cache line set:
+            // the recovery chunk then stays L1-resident across all queued
+            // input slices. A 64 KiB chunk spills L1 and defeats the blocking.
+            let chunk_size = 16384;
             for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
                 let byte_offset = chunk_idx * chunk_size * 2;
                 let byte_len = buffer_chunk.len() * 2;
@@ -262,7 +265,7 @@ impl RecoveryEncoder {
                 tables.push((table_low, table_high));
             }
 
-            let chunk_size = 32768;
+            let chunk_size = 16384;
             for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
                 let byte_offset = chunk_idx * chunk_size * 2;
                 let byte_len = buffer_chunk.len() * 2;
