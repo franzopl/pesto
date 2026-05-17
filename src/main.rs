@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use pesto::compress::{compress, random_password, ArchiveFormat};
 use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
+use pesto::nzb::NzbMeta;
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -162,6 +163,30 @@ struct Cli {
           num_args = 0..=1, default_missing_value = "")]
     archive_password: Option<String>,
 
+    /// Friendly display name emitted as `<meta type="name">` in the `.nzb`
+    /// (shown by NZBGet / SABnzbd) [config: output.nzb_name].
+    #[arg(long, value_name = "NAME")]
+    nzb_name: Option<String>,
+
+    /// Extraction password written to `<meta type="password">` in the `.nzb`;
+    /// defaults to the archive password when `--password` is set
+    /// [config: output.nzb_password].
+    #[arg(long, value_name = "PASS")]
+    nzb_password: Option<String>,
+
+    /// Category written to `<meta type="category">` in the `.nzb`
+    /// [config: output.nzb_category].
+    #[arg(long, value_name = "CAT")]
+    nzb_category: Option<String>,
+
+    /// Skip the automatic NZB upload to the configured indexer for this run.
+    #[arg(long)]
+    no_upload: bool,
+
+    /// Skip `.nfo` article generation (default: generate when posting).
+    #[arg(long)]
+    no_nfo: bool,
+
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
     #[arg(value_name = "PATH")]
@@ -202,13 +227,16 @@ impl Cli {
                 .transpose()
                 .unwrap_or(None),
             compress_format: self.compress.clone(),
-            // Resolve archive_password: Some(None) → generate random now,
-            // Some(Some(s)) → use s, None → no password.
             // None → no password; Some("") → bare --password → random;
             // Some(s) → explicit password.
             compress_password: self.archive_password.as_deref().map(|pw| {
                 if pw.is_empty() { random_password() } else { pw.to_string() }
             }),
+            nzb_name: self.nzb_name.clone(),
+            nzb_password: self.nzb_password.clone(),
+            nzb_category: self.nzb_category.clone(),
+            no_upload: self.no_upload,
+            no_nfo: self.no_nfo,
         }
     }
 }
@@ -250,6 +278,29 @@ async fn main() -> Result<()> {
     // whole tree is posted as one upload.
     let mut inputs = pesto::walk::expand_inputs(&cli.files)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
+
+    // Compute SHA-256 hashes of the original files for .nfo generation.
+    // This must happen before compression replaces `inputs` with an archive.
+    let nfo_entries: Option<Vec<pesto::nfo::NfoEntry>> =
+        if !config.no_nfo && !config.par2_only && !config.dry_run {
+            let entries = inputs
+                .iter()
+                .map(|f| -> Result<pesto::nfo::NfoEntry> {
+                    let sha256 = pesto::nfo::sha256_file(&f.path).with_context(|| {
+                        format!("computing SHA-256 of `{}`", f.path.display())
+                    })?;
+                    let size = f.path.metadata().map(|m| m.len()).unwrap_or(0);
+                    Ok(pesto::nfo::NfoEntry {
+                        name: f.name.clone(),
+                        size,
+                        sha256,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Some(entries)
+        } else {
+            None
+        };
 
     // Install the terminal progress panel early so it covers both compression
     // and posting. The renderer owns all terminal drawing.
@@ -387,6 +438,34 @@ async fn main() -> Result<()> {
     }
     // ─────────────────────────────────────────────────────────────────────
 
+    // Prepend a .nfo article as the very first upload item.
+    let nfo_temp_dir: Option<PathBuf>;
+    if let Some(entries) = nfo_entries {
+        let upload_name = upload_root(&inputs)
+            .or_else(|| inputs.first().map(|f| {
+                PathBuf::from(&f.name)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            }))
+            .unwrap_or_else(|| "upload".to_string());
+        let nfo_content = pesto::nfo::build(&upload_name, &entries);
+        let tmp = std::env::temp_dir().join(format!("pesto_nfo_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)
+            .context("creating .nfo temp directory")?;
+        let nfo_path = tmp.join(format!("{upload_name}.nfo"));
+        std::fs::write(&nfo_path, nfo_content.as_bytes())
+            .context("writing .nfo temp file")?;
+        inputs.insert(0, pesto::walk::InputFile {
+            path: nfo_path,
+            name: format!("{upload_name}.nfo"),
+        });
+        nfo_temp_dir = Some(tmp);
+    } else {
+        nfo_temp_dir = None;
+    }
+
     // Derive the resume state path from the NZB output path when known.
     // We compute the NZB path early (before posting) so we can derive the
     // resume sidecar name, even though we write the NZB after posting.
@@ -462,17 +541,63 @@ async fn main() -> Result<()> {
             if outcome.segments.is_empty() {
                 eprintln!("no segments posted — skipping nzb output");
             } else {
-                let xml = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, effective_password.as_deref());
-                tokio::fs::write(out, xml)
+                // Build NZB metadata: explicit flags win; archive password
+                // falls back as the password meta when --nzb-password is absent.
+                let nzb_meta = NzbMeta {
+                    name: config.nzb_name.clone(),
+                    password: config
+                        .nzb_password
+                        .clone()
+                        .or_else(|| effective_password.clone()),
+                    category: config.nzb_category.clone(),
+                };
+                let xml = pesto::nzb::generate(
+                    &config.from,
+                    &config.groups,
+                    &outcome.segments,
+                    &nzb_meta,
+                );
+                tokio::fs::write(out, &xml)
                     .await
                     .with_context(|| format!("writing nzb file `{}`", out.display()))?;
                 println!("wrote nzb: {}", out.display());
+
+                // Upload to indexer when configured and not suppressed.
+                if !config.no_upload {
+                    if let Some(url) = &config.indexer_url {
+                        if let Some(api_key) = &config.indexer_api_key {
+                            let nzb_name = out
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "upload.nzb".into());
+                            let cat = config
+                                .indexer_category
+                                .as_deref()
+                                .or(config.nzb_category.as_deref());
+                            match pesto::indexer::upload_nzb(
+                                url,
+                                api_key,
+                                cat,
+                                &nzb_name,
+                                xml,
+                            )
+                            .await
+                            {
+                                Ok(()) => println!("uploaded nzb to indexer: {url}"),
+                                Err(e) => eprintln!("indexer upload failed: {e}"),
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    // Clean up the temporary compression directory after posting.
+    // Clean up temporary directories.
     if let Some(dir) = compress_temp_dir {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    if let Some(dir) = nfo_temp_dir {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -495,21 +620,26 @@ async fn main() -> Result<()> {
 fn collect_compress_roots(inputs: &[pesto::walk::InputFile]) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     for input in inputs {
-        // depth of the relative name (number of `/`-separated components)
+        // depth of the relative name (number of `/`-separated components).
+        // A loose file (depth == 1) is its own root; no ancestor stripping needed.
         let depth = input.name.split('/').count();
-        // Strip that many components off the filesystem path to reach the root.
-        let root = input
-            .path
-            .ancestors()
-            .nth(depth)
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| input.path.clone());
+        let root = if depth <= 1 {
+            input.path.clone()
+        } else {
+            // Strip `depth` components off the filesystem path to reach the
+            // directory that contains the top-level folder.
+            input
+                .path
+                .ancestors()
+                .nth(depth)
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| input.path.clone())
+        };
         if !roots.contains(&root) {
             roots.push(root);
         }
     }
-    // For plain files the "root" is the file itself; use `path` directly.
     if roots.is_empty() {
         inputs.iter().map(|f| f.path.clone()).collect()
     } else {
@@ -735,5 +865,37 @@ mod tests {
         assert_eq!(upload_root(&inputs(&["a.bin"])), None);
         assert_eq!(upload_root(&inputs(&["A/x.bin", "B/y.bin"])), None);
         assert_eq!(upload_root(&inputs(&["Show/ep01.bin", "loose.bin"])), None);
+    }
+
+    #[test]
+    fn collect_compress_roots_loose_file_is_the_file_itself() {
+        // A single loose file must resolve to itself, not to its parent dir.
+        let files = vec![InputFile {
+            path: PathBuf::from("/media/downloads/movie.mkv"),
+            name: "movie.mkv".to_string(),
+        }];
+        assert_eq!(
+            collect_compress_roots(&files),
+            vec![PathBuf::from("/media/downloads/movie.mkv")]
+        );
+    }
+
+    #[test]
+    fn collect_compress_roots_directory_input_strips_correctly() {
+        // Files under Show/ → root is the dir containing Show/.
+        let files = vec![
+            InputFile {
+                path: PathBuf::from("/media/Show/ep01.mkv"),
+                name: "Show/ep01.mkv".to_string(),
+            },
+            InputFile {
+                path: PathBuf::from("/media/Show/ep02.mkv"),
+                name: "Show/ep02.mkv".to_string(),
+            },
+        ];
+        assert_eq!(
+            collect_compress_roots(&files),
+            vec![PathBuf::from("/media")]
+        );
     }
 }

@@ -32,6 +32,14 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        nzb_name: None,
+        nzb_password: None,
+        nzb_category: None,
+        indexer_url: None,
+        indexer_api_key: None,
+        indexer_category: None,
+        no_upload: false,
+        no_nfo: false,
     }
 }
 
@@ -100,7 +108,7 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
 
     // The `.nzb` keeps the real relative paths in `name`, and never leaks one
     // into a `subject`.
-    let nzb = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, None);
+    let nzb = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, &pesto::nzb::NzbMeta::default());
     for rel in &expected {
         assert!(nzb.contains(&format!("name=\"{rel}\"")), "nzb missing `{rel}`");
     }

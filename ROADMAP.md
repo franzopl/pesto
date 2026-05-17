@@ -269,29 +269,32 @@ compressed media).
 - [ ] `--message-id-domain` flag
 - [ ] Validate that the value is a syntactically valid domain label
 
-## Phase 15 — NZB & metadata
+## Phase 15 — NZB & metadata ✅
 
-### 15a — Extended NZB metadata
+### 15a — Extended NZB metadata ✅
 
-- [ ] `--nzb-name`, `--nzb-password`, `--nzb-category` flags and
-      corresponding config keys
-- [ ] Emit `<meta type="name">`, `<meta type="password">` and
+- [x] `--nzb-name`, `--nzb-password`, `--nzb-category` flags and
+      corresponding config keys (`output.nzb_name`, `output.nzb_password`,
+      `output.nzb_category`)
+- [x] Emit `<meta type="name">`, `<meta type="password">` and
       `<meta type="category">` elements in the `.nzb` when set
-- [ ] Compatible with NZBGet and SABnzbd metadata conventions
+- [x] Compatible with NZBGet and SABnzbd metadata conventions
+- [x] Archive password from `--password` still populates `<meta type="password">`
+      when `--nzb-password` is not explicitly set
 
-### 15b — Automatic NZB upload to indexers
+### 15b — Automatic NZB upload to indexers ✅
 
-- [ ] `[output.indexer]` config section: `url`, `api_key`, `category`
-- [ ] After a successful post, upload the generated `.nzb` via the indexer
-      Newznab/NZBgeek API
-- [ ] `--no-upload` flag to suppress the upload for a single run
+- [x] `[output.indexer]` config section: `url`, `api_key`, `category`
+- [x] After a successful post, upload the generated `.nzb` via the Newznab API
+      (`POST /api?t=addnzb&apikey=KEY&cat=CATEGORY` with multipart `nzbfile`)
+- [x] `--no-upload` flag to suppress the upload for a single run
 
-### 15c — `.nfo` generation
+### 15c — `.nfo` generation ✅
 
-- [ ] Generate a `.nfo` article as the first article of the set
-- [ ] Contents: upload name, total size, file list, SHA-256 hashes of
+- [x] Generate a `.nfo` article as the first article of the set
+- [x] Contents: upload name, total size, file list, SHA-256 hashes of
       original files, date
-- [ ] `--no-nfo` flag to skip generation
+- [x] `--no-nfo` flag to skip generation
 
 ## Phase 16 — Observability & UX
 
@@ -352,7 +355,7 @@ and PAR2 recovery writing were silent (or a single `eprintln!`).
 
 ## Phase 17 — Security & privacy
 
-### 17a — Password-protected RAR archives
+### 17a — Password-protected RAR archives ✅
 
 Standard Usenet clients (NZBGet, SABnzbd) do not understand custom encryption
 applied before yEnc. What they do support is the `<meta type="password">` NZB
@@ -361,13 +364,14 @@ archives** (`rar -p` / `rar -hp`). Encryption at this level is therefore
 implemented as part of Phase 13 (compression), not as a separate byte-stream
 cipher.
 
-- [ ] `--password <pass>` flag and `posting.password` config option
-- [ ] When compressing to RAR (Phase 13), pass `-p<pass>` (encrypt data) or
-      `-hp<pass>` (encrypt headers + data, hides filenames) to `rar`
-- [ ] Store the password in `<meta type="password">` in the `.nzb` so
+- [x] `--password <pass>` flag and `posting.password` config option
+      (implemented in Phase 13 as `--password` / `compress_password`)
+- [x] When compressing to RAR (Phase 13), pass `-hp<pass>` (header encryption,
+      hides filenames) to `rar`; ZIP uses standard password; 7z uses `-mhe=on`
+- [x] Store the password in `<meta type="password">` in the `.nzb` so
       NZBGet / SABnzbd can extract automatically
-- [ ] Document that this requires Phase 13 compression to be active; without
-      RAR, the flag is rejected with a clear error message
+- [x] Requires Phase 13 compression to be active; `--password` without
+      `--compress` implies `--compress 7z` (default format)
 
 > **Note on AES-256-GCM:** encrypting the raw byte stream before yEnc-encoding
 > was considered but removed from scope. No standard download client understands

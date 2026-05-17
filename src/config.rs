@@ -186,6 +186,28 @@ pub struct PostingSection {
 pub struct OutputSection {
     /// Default path for the generated `.nzb`. Overridden by `--out`.
     pub nzb: Option<String>,
+    /// Friendly name emitted as `<meta type="name">` in the `.nzb`.
+    pub nzb_name: Option<String>,
+    /// Extraction password emitted as `<meta type="password">` in the `.nzb`.
+    /// Defaults to the archive password when `--password` is set.
+    pub nzb_password: Option<String>,
+    /// Category emitted as `<meta type="category">` in the `.nzb`.
+    pub nzb_category: Option<String>,
+    /// Newznab indexer upload configuration.
+    #[serde(default)]
+    pub indexer: IndexerSection,
+}
+
+/// Newznab API configuration for automatic NZB upload after posting.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexerSection {
+    /// Base URL of the indexer (e.g. `https://my.indexer.example`).
+    pub url: Option<String>,
+    /// Newznab API key.
+    pub api_key: Option<String>,
+    /// Category ID or name to assign the upload.
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -235,6 +257,16 @@ pub struct Overrides {
     pub compress_format: Option<String>,
     /// Password for the archive, already resolved (random generation done by caller).
     pub compress_password: Option<String>,
+    /// Friendly name for the `.nzb` `<meta type="name">` element.
+    pub nzb_name: Option<String>,
+    /// Explicit `.nzb` password meta. Falls back to `compress_password`.
+    pub nzb_password: Option<String>,
+    /// `.nzb` category meta.
+    pub nzb_category: Option<String>,
+    /// When true, skip the indexer NZB upload for this run.
+    pub no_upload: bool,
+    /// When true, skip `.nfo` article generation.
+    pub no_nfo: bool,
 }
 
 /// Fully resolved, validated configuration.
@@ -278,6 +310,21 @@ pub struct Config {
     /// Password for the archive. `None` = no password.
     /// Set by `--password`; stored in the `.nzb` `<meta type="password">`.
     pub compress_password: Option<String>,
+    /// Friendly name for `<meta type="name">` in the `.nzb`.
+    pub nzb_name: Option<String>,
+    /// Explicit password for `<meta type="password">` in the `.nzb`.
+    /// Falls back to `compress_password` when absent.
+    pub nzb_password: Option<String>,
+    /// Category for `<meta type="category">` in the `.nzb`.
+    pub nzb_category: Option<String>,
+    /// Newznab indexer to upload the `.nzb` to after posting.
+    pub indexer_url: Option<String>,
+    pub indexer_api_key: Option<String>,
+    pub indexer_category: Option<String>,
+    /// Skip the indexer upload for this run.
+    pub no_upload: bool,
+    /// Skip `.nfo` article generation.
+    pub no_nfo: bool,
 }
 
 impl Config {
@@ -438,6 +485,14 @@ impl Config {
             },
             compress_format: cli.compress_format.or(file.compression.format),
             compress_password: cli.compress_password,
+            nzb_name: cli.nzb_name.or(file.output.nzb_name),
+            nzb_password: cli.nzb_password.or(file.output.nzb_password),
+            nzb_category: cli.nzb_category.or(file.output.nzb_category),
+            indexer_url: file.output.indexer.url,
+            indexer_api_key: file.output.indexer.api_key,
+            indexer_category: file.output.indexer.category,
+            no_upload: cli.no_upload,
+            no_nfo: cli.no_nfo,
         })
     }
 }

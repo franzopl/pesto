@@ -106,6 +106,14 @@ async fn posts_every_segment_to_a_mock_server() {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        nzb_name: None,
+        nzb_password: None,
+        nzb_category: None,
+        indexer_url: None,
+        indexer_api_key: None,
+        indexer_category: None,
+        no_upload: false,
+        no_nfo: false,
     };
 
     let inputs = vec![pesto::walk::InputFile {
@@ -125,7 +133,7 @@ async fn posts_every_segment_to_a_mock_server() {
     assert_eq!(posts.load(Ordering::Relaxed), 3);
 
     // The collected segments must be enough to build a valid .nzb.
-    let nzb = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, None);
+    let nzb = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, &pesto::nzb::NzbMeta::default());
     assert_eq!(nzb.matches("<segment ").count(), 3);
     assert!(nzb.contains("<file "));
 }

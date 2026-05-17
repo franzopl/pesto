@@ -9,15 +9,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::article::default_subject;
 use crate::poster::PostedSegment;
 
+/// NZB `<head>` metadata fields emitted as `<meta type="...">` elements.
+///
+/// All fields are optional. NZBGet and SABnzbd recognise `name`, `password`
+/// and `category` natively; other values are ignored by those clients but
+/// kept in the XML for informational use.
+#[derive(Debug, Default, Clone)]
+pub struct NzbMeta {
+    /// Friendly display name for the download (`<meta type="name">`).
+    pub name: Option<String>,
+    /// Extraction password (`<meta type="password">`).
+    /// Set this from the archive password when `--nzb-password` is absent.
+    pub password: Option<String>,
+    /// Indexer / downloader category (`<meta type="category">`).
+    pub category: Option<String>,
+}
+
 /// Generate the contents of an `.nzb` file describing the posted segments.
 ///
-/// When `password` is `Some`, a `<meta type="password">` element is emitted
-/// so NZBGet / SABnzbd can extract a password-protected archive automatically.
+/// [`NzbMeta`] fields are emitted as `<meta>` elements in the `<head>` block.
 pub fn generate(
     poster: &str,
     groups: &[String],
     segments: &[PostedSegment],
-    password: Option<&str>,
+    meta: &NzbMeta,
 ) -> String {
     let date = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -32,11 +47,26 @@ pub fn generate(
     );
     out.push_str("<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n");
 
-    if let Some(pw) = password {
-        out.push_str(&format!(
-            "  <head><meta type=\"password\">{}</meta></head>\n",
-            escape(pw)
-        ));
+    // Collect only the meta fields that are set.
+    let metas: Vec<(&str, &str)> = [
+        ("name", meta.name.as_deref()),
+        ("password", meta.password.as_deref()),
+        ("category", meta.category.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|s| (k, s)))
+    .collect();
+
+    if !metas.is_empty() {
+        out.push_str("  <head>\n");
+        for (k, v) in &metas {
+            out.push_str(&format!(
+                "    <meta type=\"{}\">{}</meta>\n",
+                k,
+                escape(v)
+            ));
+        }
+        out.push_str("  </head>\n");
     }
 
     // Segments arrive sorted by (file_name, part); group consecutive runs.
@@ -130,9 +160,13 @@ mod tests {
         }
     }
 
+    fn no_meta() -> NzbMeta {
+        NzbMeta::default()
+    }
+
     #[test]
     fn empty_input_yields_a_well_formed_skeleton() {
-        let xml = generate("p <p@x>", &["alt.test".into()], &[], None);
+        let xml = generate("p <p@x>", &["alt.test".into()], &[], &no_meta());
         assert!(xml.starts_with("<?xml version=\"1.0\""));
         assert!(xml.contains("<nzb xmlns="));
         assert!(xml.trim_end().ends_with("</nzb>"));
@@ -146,7 +180,7 @@ mod tests {
             seg("a.bin", 2, 2, "<id-a2@pesto>"),
             seg("b.bin", 1, 1, "<id-b1@pesto>"),
         ];
-        let xml = generate("poster <p@x>", &["alt.test".into()], &segments, None);
+        let xml = generate("poster <p@x>", &["alt.test".into()], &segments, &no_meta());
 
         assert_eq!(xml.matches("<file ").count(), 2);
         assert_eq!(xml.matches("<segment ").count(), 3);
@@ -168,7 +202,7 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
         };
-        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], None);
+        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta());
         // The subject is the obfuscated name; the real name lives in `name`.
         assert!(xml.contains("subject=\"deadbeefcafe0000\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
@@ -178,8 +212,28 @@ mod tests {
     #[test]
     fn xml_special_characters_are_escaped() {
         let segments = vec![seg("a&b<c>.bin", 1, 1, "<i@x>")];
-        let xml = generate("a \"b\" & <c>", &["alt.test".into()], &segments, None);
+        let xml = generate("a \"b\" & <c>", &["alt.test".into()], &segments, &no_meta());
         assert!(xml.contains("poster=\"a &quot;b&quot; &amp; &lt;c&gt;\""));
         assert!(xml.contains("a&amp;b&lt;c&gt;.bin"));
+    }
+
+    #[test]
+    fn meta_fields_emitted_in_head() {
+        let meta = NzbMeta {
+            name: Some("My Upload".into()),
+            password: Some("s3cr3t".into()),
+            category: Some("TV > HD".into()),
+        };
+        let xml = generate("p <p@x>", &["alt.test".into()], &[], &meta);
+        assert!(xml.contains("<meta type=\"name\">My Upload</meta>"));
+        assert!(xml.contains("<meta type=\"password\">s3cr3t</meta>"));
+        assert!(xml.contains("<meta type=\"category\">TV &gt; HD</meta>"));
+    }
+
+    #[test]
+    fn no_head_block_when_meta_is_empty() {
+        let xml = generate("p <p@x>", &["alt.test".into()], &[], &no_meta());
+        assert!(!xml.contains("<head>"));
+        assert!(!xml.contains("<meta"));
     }
 }
