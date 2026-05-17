@@ -11,18 +11,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// collide, even within the same nanosecond.
 static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a `Message-ID` of the form `<timestamp.seq.random@domain>`.
+/// Generate a `Message-ID` of the form `<timestamp.seq.random@random-domain>`.
 ///
-/// Uniqueness comes from three parts: a nanosecond timestamp, a monotonic
-/// per-process counter, and a random value seeded by [`RandomState`].
-pub fn generate_message_id(domain: &str) -> String {
+/// The domain is always a freshly randomised label so no fixed identifier
+/// (server hostname, user address) leaks through the Message-ID header.
+/// Uniqueness further relies on a nanosecond timestamp, a monotonic
+/// per-process counter, and an OS-seeded random value.
+pub fn generate_message_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let seq = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let random = RandomState::new().build_hasher().finish();
-    format!("<{nanos:x}.{seq:x}.{random:x}@{domain}>")
+    let domain = random_alpha(8 + rand_u64() as usize % 8); // 8..=15 chars
+    let tld = ["com", "net", "org"][rand_u64() as usize % 3];
+    format!("<{nanos:x}.{seq:x}.{random:x}@{domain}.{tld}>")
 }
 
 /// The headers of a single Usenet article.
@@ -120,15 +124,15 @@ mod tests {
 
     #[test]
     fn message_id_is_bracketed_and_domain_qualified() {
-        let id = generate_message_id("pesto");
+        let id = generate_message_id();
         assert!(id.starts_with('<') && id.ends_with('>'));
-        assert!(id.contains("@pesto"));
+        assert!(id.contains('@'));
     }
 
     #[test]
     fn message_ids_are_unique() {
-        let a = generate_message_id("pesto");
-        let b = generate_message_id("pesto");
+        let a = generate_message_id();
+        let b = generate_message_id();
         assert_ne!(a, b);
     }
 

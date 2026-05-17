@@ -77,7 +77,7 @@ struct Shared {
     config: Config,
     /// Server list in failover order (primary first).
     servers: Vec<ServerEntry>,
-    domain: String,
+
     results: Mutex<Vec<PostedSegment>>,
     failures: Mutex<Vec<String>>,
     /// Progress channel; `None` keeps the poster silent (library default).
@@ -241,7 +241,7 @@ pub async fn post_files_with_progress(
     let shared = Arc::new(Shared {
         config: config.clone(),
         servers,
-        domain: domain_from(&config.from),
+
         results: Mutex::new(Vec::new()),
         failures: Mutex::new(Vec::new()),
         events,
@@ -451,16 +451,6 @@ fn par2_output_dir(meta: &FileMeta) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn domain_from(from: &str) -> String {
-    if let Some(rest) = from.rsplit('@').next().filter(|_| from.contains('@')) {
-        let domain = rest.trim_end_matches('>').trim();
-        if !domain.is_empty() {
-            return domain.to_string();
-        }
-    }
-    "pesto".to_string()
 }
 
 async fn producer(
@@ -972,7 +962,7 @@ async fn worker(
             shared.config.line_length,
             None,
         );
-        let message_id = generate_message_id(&shared.domain);
+        let message_id = generate_message_id();
         let article = Article {
             message_id: message_id.clone(),
             from: shared.config.from.clone(),
@@ -1121,10 +1111,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn domain_is_extracted_from_from_header() {
-        assert_eq!(domain_from("poster <p@example.com>"), "example.com");
-        assert_eq!(domain_from("a@b.net"), "b.net");
-        assert_eq!(domain_from("no-at-sign"), "pesto");
-        assert_eq!(domain_from(""), "pesto");
+    fn message_id_domain_is_random() {
+        let a = crate::article::generate_message_id();
+        let b = crate::article::generate_message_id();
+        // Two consecutive IDs must differ and must not contain a fixed domain.
+        assert_ne!(a, b);
+        assert!(a.contains('@'));
+        assert!(!a.contains("blocknews") && !a.contains("pesto"));
     }
 }
