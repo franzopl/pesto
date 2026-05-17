@@ -1074,6 +1074,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    print_header();
+
     // Resolve config file.
     let (file_config, nzb_default) = match &cli.config {
         Some(Some(path)) => (FileConfig::load(path)?, None),
@@ -1250,6 +1252,14 @@ fn upload_summary(inputs: &[pesto::walk::InputFile]) -> (usize, usize, u64) {
 }
 
 /// Print the orientation screen shown when `pesto` is run with no files.
+fn print_header() {
+    eprintln!(
+        "pesto v{} — fast, lean Usenet poster",
+        env!("CARGO_PKG_VERSION")
+    );
+    eprintln!("{}", "─".repeat(48));
+}
+
 fn print_welcome() {
     let cfg = config::default_config_path();
     let cfg_exists = cfg.as_deref().map(Path::exists).unwrap_or(false);
