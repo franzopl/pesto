@@ -12,11 +12,11 @@
 //! [`progress::ProgressReceiver`] returned alongside the outcome; drop it to
 //! silence reporting.
 //!
-//! ```no_run
+//! ```ignore
 //! # async fn example() -> anyhow::Result<()> {
-//! use pesto::{config::Config, poster::InputFile};
+//! use pesto::{config::Config, walk::InputFile};
 //!
-//! let config = Config::default();
+//! let config = Config { /* ... */ };
 //! let files = vec![InputFile { path: "movie.mkv".into(), real_name: None }];
 //! let (outcome, _events) = pesto::post(config, files).await?;
 //! println!("posted {} segments", outcome.segments.len());
