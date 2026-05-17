@@ -77,19 +77,29 @@ pub fn parse_upload_rate(s: &str) -> Result<u64> {
 
 /// Path of the config file `pesto` loads when `--config` is not given.
 ///
-/// Follows the XDG Base Directory spec: `$XDG_CONFIG_HOME/pesto/config.toml`,
-/// falling back to `$HOME/.config/pesto/config.toml`. Returns `None` only when
-/// neither environment variable is set.
+/// On Unix: follows the XDG Base Directory spec (`$XDG_CONFIG_HOME/pesto/config.toml`),
+/// falling back to `$HOME/.config/pesto/config.toml`.
+/// On Windows: uses `%APPDATA%\pesto\config.toml`.
+/// Returns `None` only when the relevant environment variable is not set.
 pub fn default_config_path() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(xdg).join("pesto").join("config.toml"));
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA").map(|appdata| {
+            PathBuf::from(appdata).join("pesto").join("config.toml")
+        })
     }
-    std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".config")
-            .join("pesto")
-            .join("config.toml")
-    })
+    #[cfg(not(windows))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(xdg).join("pesto").join("config.toml"));
+        }
+        std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home)
+                .join(".config")
+                .join("pesto")
+                .join("config.toml")
+        })
+    }
 }
 
 /// How much of a post to obfuscate.
