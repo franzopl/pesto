@@ -154,11 +154,12 @@ struct Cli {
     compress: Option<String>,
 
     /// Bundle files into a password-protected archive before posting. Optional
-    /// PASSWORD: if omitted (`--password` alone), a random 24-character
-    /// password is generated and printed; use `--password=mypass` to set one
-    /// explicitly. Implies `--compress` with the configured or default format.
-    #[arg(long = "password", value_name = "PASSWORD", num_args = 0..=1, require_equals = true)]
-    archive_password: Option<Option<String>>,
+    /// PASSWORD: bare `--password` generates a random 24-character password
+    /// and prints it; `--password=mypass` uses an explicit one. Implies
+    /// `--compress` with the configured or default format.
+    #[arg(long = "password", value_name = "PASSWORD",
+          num_args = 0..=1, default_missing_value = "", require_equals = true)]
+    archive_password: Option<String>,
 
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
@@ -202,8 +203,10 @@ impl Cli {
             compress_format: self.compress.clone(),
             // Resolve archive_password: Some(None) → generate random now,
             // Some(Some(s)) → use s, None → no password.
-            compress_password: self.archive_password.as_ref().map(|pw| {
-                pw.clone().unwrap_or_else(random_password)
+            // None → no password; Some("") → bare --password → random;
+            // Some(s) → explicit password.
+            compress_password: self.archive_password.as_deref().map(|pw| {
+                if pw.is_empty() { random_password() } else { pw.to_string() }
             }),
         }
     }
@@ -373,7 +376,7 @@ async fn main() -> Result<()> {
 
         if let Some(pw) = &effective_password {
             // Print when password was auto-generated (--password with no value).
-            let was_auto = cli.archive_password.as_ref().map(|p| p.is_none()).unwrap_or(false);
+            let was_auto = cli.archive_password.as_deref() == Some("");
             if was_auto {
                 println!("archive password: {pw}");
             }
