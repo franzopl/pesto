@@ -268,9 +268,10 @@ fn walk_tree(
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
             let size = file_sizes.get(&canonical).copied().unwrap_or(0);
             let size_str = format_size(size);
-            state
-                .lines
-                .push(format!("{}{}{} [{}]", prefix, pointer, display_name, size_str));
+            state.lines.push(format!(
+                "{}{}{} [{}]",
+                prefix, pointer, display_name, size_str
+            ));
         }
     }
 }
@@ -324,7 +325,10 @@ fn build_folder_nfo(dir: &Path) -> String {
     lines.push(format!("|{}|", center("*** GENERAL STATISTICS ***", 78)));
     lines.push(format!("+{}+", "-".repeat(78)));
     lines.push(String::new());
-    lines.push(format!("  > Total Size:         {}", format_size(total_size)));
+    lines.push(format!(
+        "  > Total Size:         {}",
+        format_size(total_size)
+    ));
     lines.push(format!("  > Directories:        {}", tree.dir_count));
     lines.push(format!("  > Total Files:        {}", tree.file_count));
     lines.push("  > Files by Type:".to_string());

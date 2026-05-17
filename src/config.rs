@@ -801,10 +801,8 @@ mod tests {
 
     #[test]
     fn extra_server_missing_host_error_is_actionable() {
-        let file: FileConfig = toml::from_str(
-            "[[servers]]\nhost = \"primary\"\n[[servers]]\nport = 119\n",
-        )
-        .unwrap();
+        let file: FileConfig =
+            toml::from_str("[[servers]]\nhost = \"primary\"\n[[servers]]\nport = 119\n").unwrap();
         let err = Config::resolve(file, base_overrides()).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("host"), "expected 'host' in error: {msg}");
@@ -1040,7 +1038,10 @@ mod tests {
     fn toml_unknown_field_is_rejected() {
         let result: Result<FileConfig, _> =
             toml::from_str("[server]\nhost = \"h\"\nunknown_key = true\n");
-        assert!(result.is_err(), "deny_unknown_fields should reject unknown keys");
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields should reject unknown keys"
+        );
     }
 
     #[test]
@@ -1294,9 +1295,10 @@ mod tests {
 
     #[test]
     fn cli_upload_rate_wins_over_file_upload_rate() {
-        let file: FileConfig =
-            toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\nupload_rate=\"100 MiB/s\"\n")
-                .unwrap();
+        let file: FileConfig = toml::from_str(
+            "[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\nupload_rate=\"100 MiB/s\"\n",
+        )
+        .unwrap();
         let cfg = Config::resolve(
             file,
             Overrides {
@@ -1310,9 +1312,10 @@ mod tests {
 
     #[test]
     fn file_upload_rate_used_when_cli_absent() {
-        let file: FileConfig =
-            toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\nupload_rate=\"1 KiB/s\"\n")
-                .unwrap();
+        let file: FileConfig = toml::from_str(
+            "[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\nupload_rate=\"1 KiB/s\"\n",
+        )
+        .unwrap();
         let cfg = Config::resolve(file, Overrides::default()).unwrap();
         assert_eq!(cfg.upload_rate, 1024);
     }

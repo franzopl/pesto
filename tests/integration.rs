@@ -293,8 +293,7 @@ async fn retry_succeeds_after_transient_failures() {
     }
 
     // Single-segment file (80 bytes < article_size 100).
-    let path = std::env::temp_dir()
-        .join(format!("pesto_retry_{}.bin", std::process::id()));
+    let path = std::env::temp_dir().join(format!("pesto_retry_{}.bin", std::process::id()));
     std::fs::write(&path, vec![0x42u8; 80]).unwrap();
 
     let config = make_config(addr.port());
@@ -372,7 +371,11 @@ async fn resume_skips_already_posted_segments() {
         "expected 0 POSTs but server saw some — resume did not skip"
     );
     // Stored Message-IDs are reused verbatim in the outcome.
-    let ids: Vec<&str> = outcome.segments.iter().map(|s| s.message_id.as_str()).collect();
+    let ids: Vec<&str> = outcome
+        .segments
+        .iter()
+        .map(|s| s.message_id.as_str())
+        .collect();
     assert!(ids.contains(&"seg1@preposted.example"));
     assert!(ids.contains(&"seg2@preposted.example"));
     assert!(ids.contains(&"seg3@preposted.example"));

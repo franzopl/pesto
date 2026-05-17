@@ -880,7 +880,13 @@ async fn run_batch(
                 password: config.nzb_password.clone(),
                 category: config.nzb_category.clone(),
             };
-            let xml = pesto::nzb::generate(&config.from, &config.groups, &all_segments, &nzb_meta, config.obfuscate == pesto::config::ObfuscateMode::Full);
+            let xml = pesto::nzb::generate(
+                &config.from,
+                &config.groups,
+                &all_segments,
+                &nzb_meta,
+                config.obfuscate == pesto::config::ObfuscateMode::Full,
+            );
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
