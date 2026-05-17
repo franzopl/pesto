@@ -380,7 +380,6 @@ async fn run_single_upload(
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
-
     let (progress_tx, renderer) = if params.json_mode {
         pesto::progress::spawn_json_emitter()
     } else {
@@ -536,10 +535,12 @@ async fn run_single_upload(
         .as_ref()
         .map(|p| p.with_extension("pesto-state"));
     // Output NZB path gets a version suffix when the base already exists.
-    let nzb_out_path: Option<PathBuf> = nzb_base_path.as_ref().map(|p| {
+    let nzb_out_path: Option<PathBuf> = if let Some(p) = &nzb_base_path {
         let base = p.with_extension("");
-        next_free_versioned_path(&base, "nzb")
-    });
+        Some(next_free_versioned_path(&base, "nzb").await)
+    } else {
+        None
+    };
 
     let outcome = pesto::poster::post_files_with_progress(
         config,
@@ -1338,23 +1339,21 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Return `base.ext` if it does not exist, otherwise `base.v2.ext`,
 /// `base.v3.ext`, … until a free slot is found.
-fn next_free_versioned_path(base: &Path, ext: &str) -> PathBuf {
+/// Uses async I/O so it never blocks the tokio executor.
+async fn next_free_versioned_path(base: &Path, ext: &str) -> PathBuf {
     let candidate = base.with_extension(ext);
-    if !candidate.exists() {
+    if !tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
         return candidate;
     }
     let mut v = 2u32;
     loop {
-        let stem = base
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let stem = base.file_name().unwrap_or_default().to_string_lossy();
         let versioned = base
             .parent()
             .unwrap_or(Path::new("."))
             .join(format!("{stem}.v{v}"))
             .with_extension(ext);
-        if !versioned.exists() {
+        if !tokio::fs::try_exists(&versioned).await.unwrap_or(false) {
             return versioned;
         }
         v += 1;
