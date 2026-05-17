@@ -177,9 +177,9 @@ its own progress display and obtain the final NZB path.
 - [x] In `upapasta`: replace the `nyuu` subprocess call in `upfolder.py` with
       a `pesto` subprocess call; parse JSON events for progress and NZB path
       (nyuu kept as automatic fallback when pesto is not in PATH)
-- [ ] Verify that the `upapasta` obfuscation / PAR2 / compression pipeline
+- [x] Verify that the `upapasta` obfuscation / PAR2 / compression pipeline
       produces the same result when using `pesto` instead of `nyuu`
-- [ ] Update `upapasta` install instructions and `README` to reflect the new
+- [x] Update `upapasta` install instructions and `README` to reflect the new
       dependency (Rust binary instead of Node.js)
 
 > **Decision point:** `upapasta` still handles PAR2, compression (RAR/7z),
