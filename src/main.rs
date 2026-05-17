@@ -190,10 +190,6 @@ struct Cli {
     #[arg(long)]
     no_upload: bool,
 
-    /// Skip `.nfo` article generation (default: generate when posting).
-    #[arg(long)]
-    no_nfo: bool,
-
     /// Output format: `terminal` (default human-readable panel) or `json`
     /// (newline-delimited JSON events on stdout, for machine consumers like
     /// `upapasta`).
@@ -281,7 +277,6 @@ impl Cli {
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
             no_upload: self.no_upload,
-            no_nfo: self.no_nfo,
         }
     }
 }
@@ -303,7 +298,7 @@ struct UploadResult {
     had_failures: bool,
 }
 
-/// Run one complete upload: expand `entry_paths`, compress, nfo, post, write NZB.
+/// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
 ///
 /// Returns the posted segments so the caller can build a consolidated season NZB.
 async fn run_single_upload(
@@ -315,28 +310,6 @@ async fn run_single_upload(
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
-
-    // SHA-256 hashes for .nfo generation, computed before compression.
-    let nfo_entries: Option<Vec<pesto::nfo::NfoEntry>> =
-        if !config.no_nfo && !config.par2_only && !config.dry_run {
-            let entries = inputs
-                .iter()
-                .map(|f| -> Result<pesto::nfo::NfoEntry> {
-                    let sha256 = pesto::nfo::sha256_file(&f.path).with_context(|| {
-                        format!("computing SHA-256 of `{}`", f.path.display())
-                    })?;
-                    let size = f.path.metadata().map(|m| m.len()).unwrap_or(0);
-                    Ok(pesto::nfo::NfoEntry {
-                        name: f.name.clone(),
-                        size,
-                        sha256,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Some(entries)
-        } else {
-            None
-        };
 
     let (progress_tx, renderer) = if params.json_mode {
         pesto::progress::spawn_json_emitter()
@@ -452,34 +425,6 @@ async fn run_single_upload(
         compress_temp_dir = None;
     }
     // ─────────────────────────────────────────────────────────────────────────
-
-    // Prepend .nfo article.
-    let nfo_temp_dir: Option<PathBuf>;
-    if let Some(entries) = nfo_entries {
-        let upload_name = upload_root(&inputs)
-            .or_else(|| inputs.first().map(|f| {
-                PathBuf::from(&f.name)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            }))
-            .unwrap_or_else(|| "upload".to_string());
-        let nfo_content = pesto::nfo::build(&upload_name, &entries);
-        let tmp = std::env::temp_dir().join(format!("pesto_nfo_{}_{}", std::process::id(), entry_label));
-        std::fs::create_dir_all(&tmp)
-            .context("creating .nfo temp directory")?;
-        let nfo_path = tmp.join(format!("{upload_name}.nfo"));
-        std::fs::write(&nfo_path, nfo_content.as_bytes())
-            .context("writing .nfo temp file")?;
-        inputs.insert(0, pesto::walk::InputFile {
-            path: nfo_path,
-            name: format!("{upload_name}.nfo"),
-        });
-        nfo_temp_dir = Some(tmp);
-    } else {
-        nfo_temp_dir = None;
-    }
 
     // Derive NZB path.
     let nzb_out_path: Option<PathBuf> = params
@@ -606,9 +551,6 @@ async fn run_single_upload(
 
     // Cleanup temp dirs.
     if let Some(dir) = compress_temp_dir {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    if let Some(dir) = nfo_temp_dir {
         let _ = std::fs::remove_dir_all(&dir);
     }
 

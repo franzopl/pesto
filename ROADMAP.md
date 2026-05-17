@@ -351,29 +351,12 @@ the orchestrator.
       (`POST /api?t=addnzb&apikey=KEY&cat=CATEGORY` with multipart `nzbfile`)
 - [x] `--no-upload` flag to suppress the upload for a single run
 
-### 15c — `.nfo` generation ✅
+### 15c — `.nfo` generation ~~(removed)~~
 
-- [x] Generate a `.nfo` article as the first article of the set
-- [x] Contents: upload name, total size, file list, SHA-256 hashes of
-      original files, date
-- [x] `--no-nfo` flag to skip generation
-
-## Phase 15d — NFO enrichment (post-MVP)
-
-`upapasta` generates rich NFOs with video codec info (via `ffprobe`/`mediainfo`)
-and optional TMDb movie/TV metadata. This phase brings equivalent capability to
-`pesto` so the tool can be used standalone without the Python orchestrator.
-
-- [ ] `--nfo-template PATH`: load an NFO template from disk; placeholders:
-      `{{name}}`, `{{size}}`, `{{files}}`, `{{sha256}}`, `{{date}}`
-- [ ] `--mediainfo`: if `mediainfo` or `ffprobe` is found on PATH, append the
-      output to the generated NFO for video files
-- [ ] `[output.tmdb]` config section: `api_key`; if set, pesto resolves the
-      upload name against the TMDb API and injects `{{title}}`, `{{year}}`,
-      `{{synopsis}}`, `{{imdb_id}}` into the template and the NZB `<meta>` tags
-- [ ] Auto-detect category from upload name (regex-based: Anime, TV show,
-      Movie, Generic) and expose as `{{category}}` template placeholder; also
-      written to `<meta type="category">` unless `--nzb-category` overrides it
+`.nfo` generation was removed from `pesto`. The correct practice is for the
+`.nfo` file to be produced externally (e.g. by `upapasta`) and passed as a
+regular input file. `pesto` treats it like any other file and posts it
+alongside the rest. There is no special `.nfo` handling in the poster.
 
 > This phase is deliberately placed *after* `upapasta` integration is complete.
 > While `upapasta` still wraps `pesto`, metadata enrichment stays in the Python
