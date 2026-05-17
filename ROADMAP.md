@@ -310,12 +310,28 @@ the RAR format for most workflows.
 
 ## Phase 17 — Security & privacy
 
-### 17a — Content encryption
+### 17a — Password-protected RAR archives
 
-- [ ] `--encrypt <password>` flag and `encrypt` config option
-- [ ] Encrypt each file with AES-256-GCM before yEnc-encoding; store the
-      password in `<meta type="password">` in the `.nzb`
-- [ ] Pure-Rust implementation (`aes-gcm` crate); no external binary
+Standard Usenet clients (NZBGet, SABnzbd) do not understand custom encryption
+applied before yEnc. What they do support is the `<meta type="password">` NZB
+field, which they use automatically when extracting **password-protected RAR
+archives** (`rar -p` / `rar -hp`). Encryption at this level is therefore
+implemented as part of Phase 13 (compression), not as a separate byte-stream
+cipher.
+
+- [ ] `--password <pass>` flag and `posting.password` config option
+- [ ] When compressing to RAR (Phase 13), pass `-p<pass>` (encrypt data) or
+      `-hp<pass>` (encrypt headers + data, hides filenames) to `rar`
+- [ ] Store the password in `<meta type="password">` in the `.nzb` so
+      NZBGet / SABnzbd can extract automatically
+- [ ] Document that this requires Phase 13 compression to be active; without
+      RAR, the flag is rejected with a clear error message
+
+> **Note on AES-256-GCM:** encrypting the raw byte stream before yEnc-encoding
+> was considered but removed from scope. No standard download client understands
+> this layer, so the downloaded files would be undecryptable without a custom
+> tool. If archival-only encryption ever becomes a requirement it should be
+> tracked as a separate, clearly non-interoperable feature.
 
 ### 17b — Configurable `Message-ID` domain
 
