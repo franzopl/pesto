@@ -400,6 +400,66 @@ pesto --nzb-dir /nzbs/ movie.mkv
 
 ---
 
+## Post-upload hooks
+
+Any executable script placed in `~/.config/pesto/hooks/` is run automatically
+after each successful upload, in alphabetical order. Each script receives the
+following environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `PESTO_NZB` | Absolute path to the generated `.nzb` file |
+| `PESTO_NFO` | Absolute path to the `.nfo` file (empty when `--nfo` was not used) |
+| `PESTO_NAME` | Release name / entry label |
+| `PESTO_BYTES` | Total bytes posted (decimal string) |
+| `PESTO_GROUP` | First Usenet newsgroup |
+| `PESTO_PASSWORD` | Archive password (empty when none) |
+| `PESTO_SERVER` | NNTP server hostname |
+
+Scripts must have the executable bit set on Unix (`chmod +x`). On Windows,
+files with `.exe`, `.cmd`, `.bat`, `.ps1`, or `.py` extensions are recognised
+automatically.
+
+A hook that exits non-zero is logged and skipped; the remaining hooks still
+run. Hooks are suppressed for `--par2-only`, `--dry-run`, and failed uploads.
+
+You can also run a one-off command for a single invocation with `--post-hook`:
+
+```bash
+pesto --post-hook 'notify-send "pesto" "Upload done: $PESTO_NAME"' movie.mkv
+```
+
+### NFO generation
+
+Pass `--nfo` to generate a `.nfo` text file alongside the `.nzb`. pesto runs
+`mediainfo` on the first video file it finds; for generic folders it falls back
+to a recursive directory listing. The path is exposed as `PESTO_NFO` to every
+hook script.
+
+```bash
+pesto --nfo movie.mkv
+```
+
+### Bundled examples
+
+The [`examples/hooks/`](examples/hooks/) directory contains ready-to-use hook
+scripts:
+
+| Script | Description |
+|--------|-------------|
+| [`print-vars.sh`](examples/hooks/print-vars.sh) | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
+| [`curupira.sh`](examples/hooks/curupira.sh) | Uploads the `.nzb` (and optional `.nfo`) to [Curupira.cc](https://curupira.cc) via its REST API |
+
+To install a hook:
+
+```bash
+cp examples/hooks/curupira.sh ~/.config/pesto/hooks/
+chmod +x ~/.config/pesto/hooks/curupira.sh
+# edit API_KEY inside the file
+```
+
+---
+
 ## All flags
 
 | Flag | Config key | Default | Description |
