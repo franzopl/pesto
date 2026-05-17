@@ -401,7 +401,11 @@ async fn producer(
     // the input-block count stays near `TARGET_PAR2_SLICES`. Posting still
     // uses the unchanged per-article segmentation; only the encoder sees the
     // larger slice.
-    let articles_per_slice = total_articles.div_ceil(TARGET_PAR2_SLICES).max(1);
+    //
+    // For very large datasets, we increase the slice count up to the PAR2
+    // limit of 32,768 to keep the memory footprint of each slice reasonable.
+    let target_slices = (total_articles / 10).clamp(TARGET_PAR2_SLICES, 32768);
+    let articles_per_slice = total_articles.div_ceil(target_slices).max(1);
     let par2_slice_size = articles_per_slice * article_size;
 
     // PAR2 splits each file independently; a file's last slice is zero-padded.
@@ -409,6 +413,20 @@ async fn producer(
         .iter()
         .map(|&n| n.div_ceil(articles_per_slice))
         .sum();
+
+    // The sum might slightly exceed the block limit if many files have small
+    // trailing fragments; if so, we must increase the slice size.
+    let (par2_slice_size, total_slices) = if total_slices > 32768 {
+        let mut articles = articles_per_slice;
+        let mut count = total_slices;
+        while count > 32768 {
+            articles += 1;
+            count = per_file_articles.iter().map(|&n| n.div_ceil(articles)).sum();
+        }
+        (articles * article_size, count)
+    } else {
+        (par2_slice_size, total_slices)
+    };
 
     let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
     let slices_per_pass = (MAX_PAR2_MEMORY / par2_slice_size).max(1);

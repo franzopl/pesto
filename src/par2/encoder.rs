@@ -92,7 +92,12 @@ impl RecoveryEncoder {
             "slice length must equal the slice size"
         );
         self.queued_slices.push(slice);
-        if self.queued_slices.len() >= 64 {
+
+        // Process if we hit the count limit (cache blocking) or a memory limit
+        // (to keep the footprint lean). 256 MB is enough to amortize the flush
+        // cost even for very few slices.
+        let queued_bytes = self.queued_slices.len() * self.slice_words * 2;
+        if self.queued_slices.len() >= 64 || queued_bytes >= 256 * 1024 * 1024 {
             self.flush();
         }
     }
