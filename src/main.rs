@@ -58,6 +58,10 @@ struct Cli {
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1, default_missing_value = "full")]
     obfuscate: Option<ObfuscateMode>,
 
+    /// Percentage of PAR2 recovery data to generate (0 to disable).
+    #[arg(long, value_name = "PERCENT")]
+    par2: Option<u8>,
+
     /// Skip network posting and just measure generation speed.
     #[arg(long)]
     dry_run: bool,
@@ -87,6 +91,7 @@ impl Cli {
             article_size: None,
             obfuscate: self.obfuscate,
             dry_run: if self.dry_run { Some(true) } else { None },
+            par2: self.par2,
         }
     }
 }

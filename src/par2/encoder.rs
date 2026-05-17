@@ -10,6 +10,7 @@
 //! `coeff(j, e) = 2^(logbase_j * e)`.
 
 use md5::{Digest, Md5};
+use rayon::prelude::*;
 
 use super::gf16::{input_logbases, Gf16, ORDER};
 use super::packet::{md5, SliceChecksum};
@@ -34,7 +35,9 @@ pub struct RecoveryEncoder {
     slice_words: usize,
     /// `logbase` exponent of each input slice, by global slice index.
     logbases: Vec<u32>,
-    /// One accumulator buffer per recovery block; index = recovery exponent.
+    /// The starting exponent for the first buffer.
+    exponent_start: u32,
+    /// One accumulator buffer per recovery block; index = recovery exponent - exponent_start.
     buffers: Vec<Vec<u16>>,
     /// Number of input slices fed so far.
     next_index: usize,
@@ -43,12 +46,12 @@ pub struct RecoveryEncoder {
 impl RecoveryEncoder {
     /// Create an encoder for `total_input_slices` input slices of `slice_size`
     /// bytes each, producing `recovery_count` recovery blocks (exponents
-    /// `0..recovery_count`).
+    /// `exponent_start..exponent_start + recovery_count`).
     ///
     /// # Panics
     ///
     /// Panics if `slice_size` is not a positive multiple of 4.
-    pub fn new(slice_size: usize, total_input_slices: usize, recovery_count: usize) -> Self {
+    pub fn new(slice_size: usize, total_input_slices: usize, exponent_start: u32, recovery_count: usize) -> Self {
         assert!(
             slice_size > 0 && slice_size.is_multiple_of(4),
             "slice size must be a positive multiple of 4"
@@ -57,6 +60,7 @@ impl RecoveryEncoder {
             gf: Gf16::new(),
             slice_words: slice_size / 2,
             logbases: input_logbases(total_input_slices),
+            exponent_start,
             buffers: vec![vec![0u16; slice_size / 2]; recovery_count],
             next_index: 0,
         }
@@ -79,31 +83,37 @@ impl RecoveryEncoder {
         self.next_index += 1;
         let logbase = self.logbases[index] as u64;
 
-        for (exponent, buffer) in self.buffers.iter_mut().enumerate() {
-            // coeff(index, exponent) = 2^(logbase * exponent); its discrete
-            // log is that product, so multiplication needs no extra lookup.
+        self.buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
+            let exponent = self.exponent_start + i as u32;
             let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-            for (word, chunk) in buffer.iter_mut().zip(slice.chunks_exact(2)) {
-                let input = u16::from_le_bytes([chunk[0], chunk[1]]);
-                if input != 0 {
-                    *word ^= self.gf.exp(log_coeff + self.gf.discrete_log(input) as u32);
-                }
+            let coeff = self.gf.exp(log_coeff);
+
+            let mut table_low = [0u16; 256];
+            let mut table_high = [0u16; 256];
+            for b in 0..=255 {
+                table_low[b as usize] = self.gf.mul(b as u16, coeff);
+                table_high[b as usize] = self.gf.mul((b as u16) << 8, coeff);
             }
-        }
+
+            for (word, chunk) in buffer.iter_mut().zip(slice.chunks_exact(2)) {
+                *word ^= table_low[chunk[0] as usize] ^ table_high[chunk[1] as usize];
+            }
+        });
     }
 
     /// Consume the encoder and return the finished recovery slices.
     pub fn finish(self) -> Vec<RecoverySlice> {
+        let exponent_start = self.exponent_start;
         self.buffers
             .into_iter()
             .enumerate()
-            .map(|(exponent, buffer)| {
+            .map(|(i, buffer)| {
                 let mut data = Vec::with_capacity(buffer.len() * 2);
                 for word in buffer {
                     data.extend_from_slice(&word.to_le_bytes());
                 }
                 RecoverySlice {
-                    exponent: exponent as u32,
+                    exponent: exponent_start + i as u32,
                     data,
                 }
             })
@@ -186,7 +196,7 @@ mod tests {
     fn recovery_exponent_zero_is_the_xor_of_all_inputs() {
         let a = [0x10u8, 0x20, 0x30, 0x40];
         let b = [0x01u8, 0x02, 0x03, 0x04];
-        let mut encoder = RecoveryEncoder::new(4, 2, 1);
+        let mut encoder = RecoveryEncoder::new(4, 2, 0, 1);
         encoder.add_slice(&a);
         encoder.add_slice(&b);
         let recovery = encoder.finish();
@@ -200,7 +210,7 @@ mod tests {
     fn recovery_exponent_one_scales_a_single_input_by_its_base() {
         let gf = Gf16::new();
         let slice = [0x34u8, 0x12, 0x78, 0x56]; // words 0x1234, 0x5678
-        let mut encoder = RecoveryEncoder::new(4, 1, 2);
+        let mut encoder = RecoveryEncoder::new(4, 1, 0, 2);
         encoder.add_slice(&slice);
         let recovery = encoder.finish();
 

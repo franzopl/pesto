@@ -87,11 +87,11 @@ so one read block is one article and one input slice.
 
 ### 7d — Pipeline integration
 
-- [ ] Refactor the poster into a single-reader producer feeding the posting
+- [x] Refactor the poster into a single-reader producer feeding the posting
       pool through a bounded channel
-- [ ] Compute parity during the read pass; post PAR2 articles after the data
-- [ ] Include the PAR2 files in the `.nzb`
-- [ ] `--par2 <percent>` flag and config option; 10% default
+- [x] Compute parity during the read pass; post PAR2 articles after the data
+- [x] Include the PAR2 files in the `.nzb`
+- [x] `--par2 <percent>` flag and config option; 10% default
 
 ### 7e — Performance
 

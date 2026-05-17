@@ -95,6 +95,7 @@ async fn posts_every_segment_to_a_mock_server() {
         article_size: 100,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
+        par2: 0,
     };
 
     let outcome = post_files(&config, std::slice::from_ref(&path))

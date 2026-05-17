@@ -35,7 +35,7 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
 
     // 2. Slices and checksums
     let mut slice_checksums = Vec::new();
-    let mut encoder = RecoveryEncoder::new(slice_size, total_slices, recovery_count);
+    let mut encoder = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count);
 
     for chunk in original_data.chunks(slice_size) {
         let mut padded = chunk.to_vec();

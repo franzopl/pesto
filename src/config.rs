@@ -69,6 +69,7 @@ pub struct PostingSection {
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
     pub obfuscate: Option<ObfuscateMode>,
+    pub par2: Option<u8>,
 }
 
 impl FileConfig {
@@ -95,6 +96,7 @@ pub struct Overrides {
     pub article_size: Option<usize>,
     pub obfuscate: Option<ObfuscateMode>,
     pub dry_run: Option<bool>,
+    pub par2: Option<u8>,
 }
 
 /// Fully resolved, validated configuration.
@@ -113,6 +115,8 @@ pub struct Config {
     pub obfuscate: ObfuscateMode,
     /// If true, skip the network and just simulate posting.
     pub dry_run: bool,
+    /// Percentage of PAR2 recovery data to generate (0 to disable).
+    pub par2: u8,
 }
 
 impl Config {
@@ -162,6 +166,7 @@ impl Config {
                 .unwrap_or(DEFAULT_ARTICLE_SIZE),
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
             dry_run,
+            par2: cli.par2.or(file.posting.par2).unwrap_or(10),
         })
     }
 }
