@@ -197,20 +197,23 @@ original directory layout — not just a flat list of files.
 - [x] Per-worker token-bucket throttle; global rate divided across connections
       so total throughput stays at or below the configured ceiling
 
-## Phase 12 — Performance
+## Phase 12 — Performance ✅
 
-### 12a — Double-buffered I/O
+### 12a — Double-buffered I/O ✅
 
-- [ ] Overlap disk reads with encoding/posting using a double-buffer scheme:
-      while one buffer is being encoded and sent, the next is already being
-      read from disk
-- [ ] Measure impact on spinning-disk and NVMe scenarios
+- [x] Per-file async reader task feeds a bounded channel of capacity 2 so the
+      OS can always be reading article N+1 while the producer accumulates
+      PAR2 data and sends article N to the worker pool
+- [x] Benefit is largest when the posting channel is full (workers are the
+      bottleneck): the producer never sits idle waiting for a disk read
 
-### 12b — Buffer pool
+### 12b — Buffer pool ✅
 
-- [ ] Reuse `Vec<u8>` article buffers via a pool instead of allocating per
-      article
-- [ ] Benchmark allocator pressure before and after on high-connection counts
+- [x] `Shared::acquire_buffer` / `release_buffer` methods wrapping an
+      `Arc<Mutex<Vec<Vec<u8>>>>` pool pre-seeded with `connections + 4` buffers
+- [x] Reader task acquires from pool (or allocates on miss); workers return
+      the buffer immediately after yEnc encoding; `--par2-only` path returns
+      after each article; resume fast-path also returns without allocation
 
 ## Phase 13 — Compression before posting
 

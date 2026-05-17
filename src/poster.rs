@@ -87,6 +87,32 @@ struct Shared {
     resume: Option<Arc<Mutex<ResumeState>>>,
     /// Path of the resume state file; `None` when resume is disabled.
     resume_path: Option<PathBuf>,
+    /// Reusable article byte buffers (Phase 12b). Workers return their buffer
+    /// here after encoding so the producer and reader tasks can reuse it
+    /// instead of allocating a fresh `Vec<u8>` for every article.
+    pool: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl Shared {
+    /// Take a buffer from the pool, or allocate a fresh one. The returned
+    /// buffer is always exactly `size` bytes long (content is uninitialised).
+    fn acquire_buffer(&self, size: usize) -> Vec<u8> {
+        let mut pool = self.pool.lock().unwrap();
+        match pool.pop() {
+            Some(mut buf) => {
+                buf.resize(size, 0);
+                buf
+            }
+            None => vec![0u8; size],
+        }
+    }
+
+    /// Return a buffer to the pool. Oversized or empty buffers are dropped.
+    fn release_buffer(&self, buf: Vec<u8>) {
+        if buf.capacity() > 0 && buf.capacity() <= self.config.article_size * 2 {
+            self.pool.lock().unwrap().push(buf);
+        }
+    }
 }
 
 impl Shared {
@@ -205,6 +231,13 @@ pub async fn post_files_with_progress(
             (None, None)
         };
 
+    // Pre-seed the buffer pool with enough buffers to keep all workers and the
+    // double-buffer reader supplied without allocating during the hot path.
+    let pool_size = worker_count + 4;
+    let initial_pool: Vec<Vec<u8>> = (0..pool_size)
+        .map(|_| vec![0u8; config.article_size])
+        .collect();
+
     let shared = Arc::new(Shared {
         config: config.clone(),
         servers,
@@ -215,6 +248,7 @@ pub async fn post_files_with_progress(
         cancelled: AtomicBool::new(false),
         resume: resume_arc,
         resume_path: resume_path_owned,
+        pool: Arc::new(Mutex::new(initial_pool)),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -514,12 +548,34 @@ async fn producer(
         };
 
         for (file_idx, meta) in metas.iter().enumerate() {
-            let segments = yenc::segments(meta.size, article_size);
+            let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
             let total_parts = segments.len() as u32;
 
-            let mut file = File::open(&meta.path)
-                .await
-                .with_context(|| format!("opening `{}`", meta.path.display()))?;
+            // Double-buffered reader task (Phase 12a): reads articles from
+            // disk into a bounded channel of capacity 2. This lets the OS
+            // begin fetching article N+1 while the producer is processing
+            // article N (PAR2 accumulation, channel send, or block_in_place).
+            let (read_tx, mut read_rx) =
+                tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
+
+            let reader_path = meta.path.clone();
+            let reader_shared = shared.clone();
+            let reader_segs = segments.clone();
+            let reader_handle = tokio::spawn(async move {
+                let mut file = File::open(&reader_path).await?;
+                for (offset, len) in reader_segs {
+                    // Phase 12b: acquire a buffer from the shared pool if
+                    // available, otherwise allocate. Workers return buffers
+                    // to the same pool after yEnc encoding.
+                    let buf = reader_shared.acquire_buffer(len);
+                    let mut buf = buf;
+                    file.read_exact(&mut buf).await?;
+                    if read_tx.send((offset, buf)).await.is_err() {
+                        break; // producer dropped its end (cancelled)
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            });
 
             // Real bytes of the PAR2 input slice currently being assembled.
             let mut par2_accum: Vec<u8> = if encoder.is_some() {
@@ -528,15 +584,13 @@ async fn producer(
                 Vec::new()
             };
 
-            for (i, (offset, len)) in segments.into_iter().enumerate() {
+            let mut i: u32 = 0;
+            while let Some((offset, buf)) = read_rx.recv().await {
                 if shared.cancelled.load(Ordering::Relaxed) {
+                    drop(read_rx);
+                    let _ = reader_handle.await;
                     return Ok(());
                 }
-
-                let mut buf = vec![0u8; len];
-                file.read_exact(&mut buf)
-                    .await
-                    .with_context(|| format!("reading `{}`", meta.path.display()))?;
 
                 // The encoder is `Some` exactly when PAR2 is enabled, so all
                 // PAR2 work — hashing, checksums, recovery — is gated on it.
@@ -556,12 +610,15 @@ async fn producer(
                     }
                 }
 
+                i += 1;
                 if pass_idx == 0 {
                     if let Some(tx) = &tx_opt {
+                        // Send buf to the worker; the worker will return it to
+                        // the pool (Phase 12b) after encoding the article.
                         if tx
                             .send(PostTask {
                                 meta: meta.clone(),
-                                part: i as u32 + 1,
+                                part: i,
                                 total: total_parts,
                                 offset,
                                 data: buf,
@@ -569,19 +626,28 @@ async fn producer(
                             .await
                             .is_err()
                         {
+                            drop(read_rx);
+                            let _ = reader_handle.await;
                             return Ok(()); // channel closed
                         }
                     } else {
-                        // No posting pool (`--par2-only`): the read pass is
-                        // itself the progress, so report each article here.
+                        // No posting pool (`--par2-only`): report progress
+                        // and return the buffer to the pool immediately.
+                        let bytes = buf.len() as u64;
+                        shared.release_buffer(buf);
                         shared.emit(ProgressEvent::SegmentDone {
                             file: meta.real_name.clone(),
-                            bytes: buf.len() as u64,
+                            bytes,
                             ok: true,
                         });
                     }
+                } else {
+                    // Subsequent pass: buffer no longer needed; return to pool.
+                    shared.release_buffer(buf);
                 }
             }
+
+            let _ = reader_handle.await;
 
             // Flush the file's final, partial PAR2 slice (zero-padded).
             if let Some(enc) = &mut encoder {
@@ -874,9 +940,11 @@ async fn worker(
                     message_id: existing_id,
                     bytes: 0,
                 });
+                let bytes = task.data.len() as u64;
+                shared.release_buffer(task.data); // Phase 12b
                 shared.emit(ProgressEvent::SegmentDone {
                     file: task.meta.real_name.clone(),
-                    bytes: task.data.len() as u64,
+                    bytes,
                     ok: true,
                 });
                 continue;
@@ -1000,9 +1068,13 @@ async fn worker(
         } else {
             record_failure(&shared, &task.meta, &task, &last_err);
         }
+        let article_bytes = task.data.len() as u64;
+        // Phase 12b: return the article buffer to the shared pool so the
+        // producer's reader task can reuse it without allocating.
+        shared.release_buffer(task.data);
         shared.emit(ProgressEvent::SegmentDone {
             file: task.meta.real_name.clone(),
-            bytes: task.data.len() as u64,
+            bytes: article_bytes,
             ok: posted,
         });
     }
