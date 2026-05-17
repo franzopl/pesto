@@ -779,6 +779,290 @@ mod tests {
         assert_eq!(cfg.total_connections(), 6);
     }
 
+    // ── error messages are actionable ────────────────────────────────────────
+
+    #[test]
+    fn missing_host_error_mentions_host() {
+        let mut file = FileConfig::default();
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        let err = Config::resolve(file, Overrides::default()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("host"), "expected 'host' in error: {msg}");
+    }
+
+    #[test]
+    fn missing_groups_error_mentions_groups() {
+        let mut file = FileConfig::default();
+        file.server.host = Some("h".into());
+        let err = Config::resolve(file, Overrides::default()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("groups"), "expected 'groups' in error: {msg}");
+    }
+
+    #[test]
+    fn extra_server_missing_host_error_is_actionable() {
+        let file: FileConfig = toml::from_str(
+            "[[servers]]\nhost = \"primary\"\n[[servers]]\nport = 119\n",
+        )
+        .unwrap();
+        let err = Config::resolve(file, base_overrides()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("host"), "expected 'host' in error: {msg}");
+    }
+
+    // ── all defaults ──────────────────────────────────────────────────────────
+
+    fn minimal_file() -> FileConfig {
+        let mut f = FileConfig::default();
+        f.server.host = Some("h".into());
+        f.posting.groups = Some(vec!["alt.test".into()]);
+        f
+    }
+
+    #[test]
+    fn all_numeric_defaults_match_constants() {
+        let cfg = Config::resolve(minimal_file(), Overrides::default()).unwrap();
+        assert_eq!(cfg.port, DEFAULT_PORT);
+        assert_eq!(cfg.connections, DEFAULT_CONNECTIONS);
+        assert_eq!(cfg.article_size, DEFAULT_ARTICLE_SIZE);
+        assert_eq!(cfg.line_length, DEFAULT_LINE_LENGTH);
+        assert_eq!(cfg.retries, DEFAULT_RETRIES);
+        assert_eq!(cfg.retry_delay, DEFAULT_RETRY_DELAY);
+        assert_eq!(cfg.par2, DEFAULT_PAR2);
+    }
+
+    #[test]
+    fn all_boolean_defaults_are_correct() {
+        let cfg = Config::resolve(minimal_file(), Overrides::default()).unwrap();
+        assert!(cfg.ssl, "ssl should default to true");
+        assert!(!cfg.dry_run);
+        assert!(!cfg.par2_only);
+        assert!(!cfg.verify);
+        assert!(!cfg.resume);
+        assert!(!cfg.no_archive);
+        assert!(cfg.history, "history should default to true");
+        assert!(!cfg.nfo);
+    }
+
+    #[test]
+    fn optional_string_fields_default_to_none() {
+        let cfg = Config::resolve(minimal_file(), Overrides::default()).unwrap();
+        assert!(cfg.username.is_none());
+        assert!(cfg.password.is_none());
+        assert!(cfg.compress_format.is_none());
+        assert!(cfg.compress_password.is_none());
+        assert!(cfg.nzb_name.is_none());
+        assert!(cfg.nzb_password.is_none());
+        assert!(cfg.nzb_category.is_none());
+        assert!(cfg.nzb_dir.is_none());
+        assert!(cfg.date.is_none());
+        assert!(cfg.message_id_domain.is_none());
+        assert!(cfg.post_hook.is_none());
+        assert!(cfg.notify_webhook.is_none());
+        assert!(cfg.notify_ntfy.is_none());
+        assert!(cfg.notify.is_none());
+        assert_eq!(cfg.upload_rate, 0);
+    }
+
+    #[test]
+    fn from_is_generated_randomly_when_not_set() {
+        // Without a pinned `from`, each resolve produces a different identity.
+        let a = Config::resolve(minimal_file(), Overrides::default())
+            .unwrap()
+            .from;
+        let b = Config::resolve(minimal_file(), Overrides::default())
+            .unwrap()
+            .from;
+        assert_ne!(a, b, "random from should differ between calls");
+        assert!(a.contains('@'), "from should be address-shaped");
+    }
+
+    #[test]
+    fn retries_zero_is_clamped_to_one() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                retries: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.retries, 1);
+    }
+
+    // ── TOML round-trips ──────────────────────────────────────────────────────
+
+    #[test]
+    fn toml_server_section_is_parsed() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [server]
+            host = "news.example.com"
+            port = 119
+            ssl = false
+            connections = 8
+            retry_delay = 5
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::resolve(
+            file,
+            Overrides {
+                groups: Some(vec!["alt.test".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.host, "news.example.com");
+        assert_eq!(cfg.port, 119);
+        assert!(!cfg.ssl);
+        assert_eq!(cfg.connections, 8);
+        assert_eq!(cfg.retry_delay, 5);
+    }
+
+    #[test]
+    fn toml_auth_section_sets_credentials() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [server]
+            host = "h"
+            [auth]
+            username = "alice"
+            password = "s3cr3t"
+            [posting]
+            groups = ["alt.test"]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::resolve(file, Overrides::default()).unwrap();
+        assert_eq!(cfg.username.as_deref(), Some("alice"));
+        assert_eq!(cfg.password.as_deref(), Some("s3cr3t"));
+    }
+
+    #[test]
+    fn toml_posting_section_sets_all_fields() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [server]
+            host = "h"
+            [posting]
+            groups = ["alt.test"]
+            from = "Bot <bot@example.com>"
+            article_size = 500000
+            line_length = 64
+            retries = 5
+            par2 = 20
+            verify = true
+            obfuscate = "subject"
+            date = "now"
+            no_archive = true
+            message_id_domain = "example.com"
+            upload_rate = "10 MiB/s"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::resolve(file, Overrides::default()).unwrap();
+        assert_eq!(cfg.from, "Bot <bot@example.com>");
+        assert_eq!(cfg.article_size, 500_000);
+        assert_eq!(cfg.line_length, 64);
+        assert_eq!(cfg.retries, 5);
+        assert_eq!(cfg.par2, 20);
+        assert!(cfg.verify);
+        assert_eq!(cfg.obfuscate, ObfuscateMode::Subject);
+        assert_eq!(cfg.date.as_deref(), Some("now"));
+        assert!(cfg.no_archive);
+        assert_eq!(cfg.message_id_domain.as_deref(), Some("example.com"));
+        assert_eq!(cfg.upload_rate, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn toml_output_section_sets_fields() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [server]
+            host = "h"
+            [posting]
+            groups = ["alt.test"]
+            [output]
+            nzb_name = "My Release"
+            nzb_category = "TV > HD"
+            nzb_dir = "/tmp/nzb"
+            history = false
+            resume = true
+            post_hook = "notify.sh"
+            nfo = true
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::resolve(file, Overrides::default()).unwrap();
+        assert_eq!(cfg.nzb_name.as_deref(), Some("My Release"));
+        assert_eq!(cfg.nzb_category.as_deref(), Some("TV > HD"));
+        assert_eq!(cfg.nzb_dir.as_deref(), Some("/tmp/nzb"));
+        assert!(!cfg.history);
+        assert!(cfg.resume);
+        assert_eq!(cfg.post_hook.as_deref(), Some("notify.sh"));
+        assert!(cfg.nfo);
+    }
+
+    #[test]
+    fn toml_compression_section_sets_format() {
+        let file: FileConfig = toml::from_str(
+            "[server]\nhost = \"h\"\n[posting]\ngroups = [\"a\"]\n[compression]\nformat = \"rar\"\n",
+        )
+        .unwrap();
+        let cfg = Config::resolve(file, Overrides::default()).unwrap();
+        assert_eq!(cfg.compress_format.as_deref(), Some("rar"));
+    }
+
+    #[test]
+    fn toml_notify_section_sets_webhook_and_ntfy() {
+        let file: FileConfig = toml::from_str(
+            r#"
+            [server]
+            host = "h"
+            [posting]
+            groups = ["alt.test"]
+            [notify]
+            webhook_url = "https://discord.com/api/webhooks/x"
+            ntfy_topic = "my-alerts"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::resolve(file, Overrides::default()).unwrap();
+        assert_eq!(
+            cfg.notify_webhook.as_deref(),
+            Some("https://discord.com/api/webhooks/x")
+        );
+        assert_eq!(cfg.notify_ntfy.as_deref(), Some("my-alerts"));
+    }
+
+    #[test]
+    fn toml_unknown_field_is_rejected() {
+        let result: Result<FileConfig, _> =
+            toml::from_str("[server]\nhost = \"h\"\nunknown_key = true\n");
+        assert!(result.is_err(), "deny_unknown_fields should reject unknown keys");
+    }
+
+    #[test]
+    fn file_config_load_from_disk() {
+        use std::io::Write as _;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            f,
+            "[server]\nhost = \"disk-host\"\n[posting]\ngroups = [\"a\"]\n"
+        )
+        .unwrap();
+        let loaded = FileConfig::load(f.path()).unwrap();
+        assert_eq!(loaded.server.host.as_deref(), Some("disk-host"));
+    }
+
+    #[test]
+    fn file_config_load_missing_file_errors() {
+        let err = FileConfig::load(std::path::Path::new("/no/such/file.toml")).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reading config file"));
+    }
+
     // ── CLI overrides ─────────────────────────────────────────────────────────
 
     #[test]
@@ -835,5 +1119,201 @@ mod tests {
         // No groups set anywhere.
 
         assert!(Config::resolve(file, Overrides::default()).is_err());
+    }
+
+    #[test]
+    fn cli_overrides_ssl_and_connections() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                ssl: Some(false),
+                connections: Some(16),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!cfg.ssl);
+        assert_eq!(cfg.connections, 16);
+    }
+
+    #[test]
+    fn cli_overrides_username_and_password() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                username: Some("alice".into()),
+                password: Some("hunter2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.username.as_deref(), Some("alice"));
+        assert_eq!(cfg.password.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn cli_overrides_line_length_and_retry_delay() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                line_length: Some(64),
+                retry_delay: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.line_length, 64);
+        assert_eq!(cfg.retry_delay, 10);
+    }
+
+    #[test]
+    fn cli_overrides_obfuscate_and_par2() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                obfuscate: Some(ObfuscateMode::Full),
+                par2: Some(25),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.obfuscate, ObfuscateMode::Full);
+        assert_eq!(cfg.par2, 25);
+    }
+
+    #[test]
+    fn cli_overrides_verify_resume_no_archive() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                verify: Some(true),
+                resume: Some(true),
+                no_archive: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(cfg.verify);
+        assert!(cfg.resume);
+        assert!(cfg.no_archive);
+    }
+
+    #[test]
+    fn cli_overrides_date_and_message_id_domain() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                date: Some("random".into()),
+                message_id_domain: Some("example.net".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.date.as_deref(), Some("random"));
+        assert_eq!(cfg.message_id_domain.as_deref(), Some("example.net"));
+    }
+
+    #[test]
+    fn cli_overrides_from_and_groups() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                from: Some("Bot <bot@x>".into()),
+                groups: Some(vec!["alt.binaries.test".into(), "alt.test".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.from, "Bot <bot@x>");
+        assert_eq!(cfg.groups, vec!["alt.binaries.test", "alt.test"]);
+    }
+
+    #[test]
+    fn cli_overrides_upload_rate() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                upload_rate: Some(5 * 1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.upload_rate, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn cli_overrides_compress_format_and_password() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                compress_format: Some("zip".into()),
+                compress_password: Some("pass123".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.compress_format.as_deref(), Some("zip"));
+        assert_eq!(cfg.compress_password.as_deref(), Some("pass123"));
+    }
+
+    #[test]
+    fn cli_overrides_nzb_metadata() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                nzb_name: Some("My Show S01".into()),
+                nzb_password: Some("abc".into()),
+                nzb_category: Some("TV".into()),
+                nzb_dir: Some("/out".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.nzb_name.as_deref(), Some("My Show S01"));
+        assert_eq!(cfg.nzb_password.as_deref(), Some("abc"));
+        assert_eq!(cfg.nzb_category.as_deref(), Some("TV"));
+        assert_eq!(cfg.nzb_dir.as_deref(), Some("/out"));
+    }
+
+    #[test]
+    fn cli_overrides_history_and_nfo_and_post_hook() {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                history: Some(false),
+                nfo: Some(true),
+                post_hook: Some("notify.sh".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!cfg.history);
+        assert!(cfg.nfo);
+        assert_eq!(cfg.post_hook.as_deref(), Some("notify.sh"));
+    }
+
+    #[test]
+    fn cli_upload_rate_wins_over_file_upload_rate() {
+        let file: FileConfig =
+            toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\nupload_rate=\"100 MiB/s\"\n")
+                .unwrap();
+        let cfg = Config::resolve(
+            file,
+            Overrides {
+                upload_rate: Some(1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.upload_rate, 1024);
+    }
+
+    #[test]
+    fn file_upload_rate_used_when_cli_absent() {
+        let file: FileConfig =
+            toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\nupload_rate=\"1 KiB/s\"\n")
+                .unwrap();
+        let cfg = Config::resolve(file, Overrides::default()).unwrap();
+        assert_eq!(cfg.upload_rate, 1024);
     }
 }
