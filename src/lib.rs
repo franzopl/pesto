@@ -28,7 +28,6 @@ pub mod article;
 pub mod compress;
 pub mod config;
 pub mod indexer;
-pub mod nfo;
 pub mod nntp;
 pub mod nzb;
 pub mod par2;

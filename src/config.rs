@@ -265,8 +265,6 @@ pub struct Overrides {
     pub nzb_category: Option<String>,
     /// When true, skip the indexer NZB upload for this run.
     pub no_upload: bool,
-    /// When true, skip `.nfo` article generation.
-    pub no_nfo: bool,
 }
 
 /// Fully resolved, validated configuration.
@@ -323,8 +321,6 @@ pub struct Config {
     pub indexer_category: Option<String>,
     /// Skip the indexer upload for this run.
     pub no_upload: bool,
-    /// Skip `.nfo` article generation.
-    pub no_nfo: bool,
 }
 
 impl Config {
@@ -492,7 +488,6 @@ impl Config {
             indexer_api_key: file.output.indexer.api_key,
             indexer_category: file.output.indexer.category,
             no_upload: cli.no_upload,
-            no_nfo: cli.no_nfo,
         })
     }
 }
