@@ -315,6 +315,19 @@ and PAR2 recovery writing were silent (or a single `eprintln!`).
 - [x] Five new `ProgressEvent` variants: `CompressStarted`, `CompressProgress`,
       `CompressDone`, `Par2WriteStarted`, `Par2SliceWritten`
 
+### 16b — CLI bug fixes ✅
+
+- [x] `--password` bare flag (no value → random password) failed when
+      followed by another flag; fixed by switching from `Option<Option<String>>`
+      to `Option<String>` with `default_missing_value = ""`
+- [x] `--obfuscate` without a value consumed the following positional file
+      argument as its MODE; fixed with `require_equals = true`
+- [x] `--password` (archive) and `--password` (server auth) were two flags
+      with the same long name; server auth flag renamed to `--auth-password`
+- [x] `Message-ID` domain leaked the user's server hostname (e.g.
+      `blocknews.net`); `generate_message_id()` now generates a random
+      8–15 character domain + random TLD per article, independent of `from`
+
 ### 16c — JSON output mode
 
 - [ ] `--output-format json` flag
