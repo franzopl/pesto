@@ -1345,14 +1345,24 @@ mod tests {
         std::fs::write(&f2, &vec![0u8; 100]).unwrap();
 
         let files = vec![
-            InputFile { path: f1, name: "b.bin".into() },
-            InputFile { path: f2, name: "a.bin".into() },
+            InputFile {
+                path: f1,
+                name: "b.bin".into(),
+            },
+            InputFile {
+                path: f2,
+                name: "a.bin".into(),
+            },
         ];
 
         let config = dry_run_config();
         let outcome = post_files(&config, &files).await.unwrap();
 
-        let names: Vec<&str> = outcome.segments.iter().map(|s| s.file_name.as_str()).collect();
+        let names: Vec<&str> = outcome
+            .segments
+            .iter()
+            .map(|s| s.file_name.as_str())
+            .collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "segments should be sorted by file name");
@@ -1366,7 +1376,10 @@ mod tests {
         let f = dir.path().join("secret.mkv");
         std::fs::write(&f, &vec![0u8; 100]).unwrap();
 
-        let files = vec![InputFile { path: f, name: "secret.mkv".into() }];
+        let files = vec![InputFile {
+            path: f,
+            name: "secret.mkv".into(),
+        }];
 
         let mut file_cfg = crate::config::FileConfig::default();
         file_cfg.posting.groups = Some(vec!["alt.test".into()]);

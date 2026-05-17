@@ -79,7 +79,14 @@ pub fn generate(
             .iter()
             .take_while(|s| &s.file_name == name)
             .count();
-        write_file(&mut out, poster, groups, date, &segments[i..i + count], obfuscate_names);
+        write_file(
+            &mut out,
+            poster,
+            groups,
+            date,
+            &segments[i..i + count],
+            obfuscate_names,
+        );
         i += count;
     }
 
@@ -189,7 +196,13 @@ mod tests {
             seg("a.bin", 2, 2, "<id-a2@pesto>"),
             seg("b.bin", 1, 1, "<id-b1@pesto>"),
         ];
-        let xml = generate("poster <p@x>", &["alt.test".into()], &segments, &no_meta(), false);
+        let xml = generate(
+            "poster <p@x>",
+            &["alt.test".into()],
+            &segments,
+            &no_meta(),
+            false,
+        );
 
         assert_eq!(xml.matches("<file ").count(), 2);
         assert_eq!(xml.matches("<segment ").count(), 3);
@@ -211,7 +224,13 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
         };
-        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta(), false);
+        let xml = generate(
+            "poster <p@x>",
+            &["alt.test".into()],
+            &[segment],
+            &no_meta(),
+            false,
+        );
         // The subject is the obfuscated name; the real name lives in `name`.
         assert!(xml.contains("subject=\"deadbeefcafe0000\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
@@ -229,7 +248,13 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
         };
-        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta(), true);
+        let xml = generate(
+            "poster <p@x>",
+            &["alt.test".into()],
+            &[segment],
+            &no_meta(),
+            true,
+        );
         // Both subject= and name= must show only the obfuscated token.
         assert!(xml.contains("subject=\"deadbeefcafe0000\""));
         assert!(xml.contains("name=\"deadbeefcafe0000\""));
@@ -239,7 +264,13 @@ mod tests {
     #[test]
     fn xml_special_characters_are_escaped() {
         let segments = vec![seg("a&b<c>.bin", 1, 1, "<i@x>")];
-        let xml = generate("a \"b\" & <c>", &["alt.test".into()], &segments, &no_meta(), false);
+        let xml = generate(
+            "a \"b\" & <c>",
+            &["alt.test".into()],
+            &segments,
+            &no_meta(),
+            false,
+        );
         assert!(xml.contains("poster=\"a &quot;b&quot; &amp; &lt;c&gt;\""));
         assert!(xml.contains("a&amp;b&lt;c&gt;.bin"));
     }
@@ -321,7 +352,13 @@ mod tests {
     #[test]
     fn escape_apostrophe() {
         let segments = vec![seg("it's.bin", 1, 1, "<id@x>")];
-        let xml = generate("p <p@x>", &["alt.test".into()], &segments, &no_meta(), false);
+        let xml = generate(
+            "p <p@x>",
+            &["alt.test".into()],
+            &segments,
+            &no_meta(),
+            false,
+        );
         assert!(xml.contains("it&apos;s.bin"), "apostrophe must be escaped");
         assert!(!xml.contains("it's.bin"));
     }
@@ -345,7 +382,13 @@ mod tests {
             seg("big.bin", 2, 5, "<a2@x>"),
             seg("big.bin", 3, 5, "<a3@x>"),
         ];
-        let xml = generate("p <p@x>", &["alt.test".into()], &segments, &no_meta(), false);
+        let xml = generate(
+            "p <p@x>",
+            &["alt.test".into()],
+            &segments,
+            &no_meta(),
+            false,
+        );
         assert!(xml.contains("subject=\"big.bin (1/5)\""));
         assert!(!xml.contains("(2/5)"));
     }
@@ -360,7 +403,13 @@ mod tests {
 
     #[test]
     fn date_attribute_is_a_nonzero_number() {
-        let xml = generate("p <p@x>", &["alt.test".into()], &[seg("f.bin", 1, 1, "<id@x>")], &no_meta(), false);
+        let xml = generate(
+            "p <p@x>",
+            &["alt.test".into()],
+            &[seg("f.bin", 1, 1, "<id@x>")],
+            &no_meta(),
+            false,
+        );
         // Extract the date="..." value from the <file> element.
         let date_str = xml
             .lines()

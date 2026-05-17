@@ -314,8 +314,7 @@ mod tests {
     #[tokio::test]
     async fn authenticate_accepted_without_password() {
         // Server grants access on AUTHINFO USER alone (code 281).
-        let (mut conn, _server) =
-            mock_conn(b"281 Authentication accepted\r\n").await;
+        let (mut conn, _server) = mock_conn(b"281 Authentication accepted\r\n").await;
         conn.authenticate("user", "pass").await.unwrap();
     }
 
