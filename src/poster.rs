@@ -136,12 +136,22 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         initial_segments += yenc::segments(meta.size, config.article_size).len() as u64;
     }
 
-    let worker_count = config
-        .connections
-        .max(1)
-        .min(initial_segments.max(1) as usize);
+    let worker_count = if config.par2_only {
+        0
+    } else {
+        config
+            .connections
+            .max(1)
+            .min(initial_segments.max(1) as usize)
+    };
 
-    if config.dry_run {
+    if config.par2_only {
+        eprintln!(
+            "PAR2 ONLY: generating parity for {} file(s) as {} segment(s) (no network, no .nzb)",
+            metas.len(),
+            initial_segments,
+        );
+    } else if config.dry_run {
         eprintln!(
             "DRY RUN: processing {} file(s) as {} segment(s) over {} thread(s) (no network)",
             metas.len(),
@@ -181,16 +191,20 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
     let done = Arc::new(AtomicBool::new(false));
     let monitor_handle = tokio::spawn(monitor(shared.clone(), done.clone()));
 
-    let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
-    let rx = Arc::new(tokio::sync::Mutex::new(rx));
-
     let mut handles = Vec::with_capacity(worker_count);
-    for _ in 0..worker_count {
-        handles.push(tokio::spawn(worker(shared.clone(), rx.clone())));
-    }
+    let tx_opt = if worker_count > 0 {
+        let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        for _ in 0..worker_count {
+            handles.push(tokio::spawn(worker(shared.clone(), rx.clone())));
+        }
+        Some(tx)
+    } else {
+        None
+    };
 
     // Producer runs in this thread
-    if let Err(e) = producer(metas, tx, shared.clone()).await {
+    if let Err(e) = producer(metas, tx_opt, shared.clone()).await {
         shared.cancelled.store(true, Ordering::Relaxed);
         eprintln!("producer error: {e:#}");
     }
@@ -227,7 +241,7 @@ fn domain_from(from: &str) -> String {
 
 async fn producer(
     metas: Vec<Arc<FileMeta>>,
-    tx: tokio::sync::mpsc::Sender<PostTask>,
+    tx_opt: Option<tokio::sync::mpsc::Sender<PostTask>>,
     shared: Arc<Shared>,
 ) -> Result<()> {
     let mut total_slices = 0;
@@ -301,14 +315,18 @@ async fn producer(
                         tokio::task::block_in_place(|| enc.add_slice(&padded));
                     }
 
-                    if tx.send(PostTask {
-                        meta: meta.clone(),
-                        part: i as u32 + 1,
-                        total: total_parts,
-                        offset,
-                        data: buf,
-                    }).await.is_err() {
-                        return Ok(()); // channel closed
+                    if let Some(tx) = &tx_opt {
+                        if tx.send(PostTask {
+                            meta: meta.clone(),
+                            part: i as u32 + 1,
+                            total: total_parts,
+                            offset,
+                            data: buf,
+                        }).await.is_err() {
+                            return Ok(()); // channel closed
+                        }
+                    } else {
+                        shared.progress.segment_done(buf.len() as u64);
                     }
                 } else if let Some(enc) = &mut encoder {
                     let mut padded = buf;
@@ -348,13 +366,19 @@ async fn producer(
                     base_packets.extend(pkt_ifsc);
                 }
 
-                par2_dir = Some(std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id())));
-                tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
+                if shared.config.par2_only {
+                    par2_dir = Some(metas[0].path.parent().unwrap_or(std::path::Path::new("")).to_path_buf());
+                } else {
+                    par2_dir = Some(std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id())));
+                    tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
+                }
 
                 let index_name = layout::index_name(&metas[0].real_name);
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
-                push_par2_file(&index_path, index_name, &shared, &tx).await?;
+                if let Some(tx) = &tx_opt {
+                    push_par2_file(&index_path, index_name, &shared, tx).await?;
+                }
             }
 
             let volumes = layout::plan_volumes(recovery_count as u32);
@@ -373,7 +397,9 @@ async fn producer(
                 file.write_all(&pkt).await?;
 
                 if slice.exponent == vol.first + vol.count - 1 {
-                    push_par2_file(&vol_path, vol_name, &shared, &tx).await?;
+                    if let Some(tx) = &tx_opt {
+                        push_par2_file(&vol_path, vol_name, &shared, tx).await?;
+                    }
                 }
             }
         }

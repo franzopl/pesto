@@ -97,6 +97,7 @@ pub struct Overrides {
     pub obfuscate: Option<ObfuscateMode>,
     pub dry_run: Option<bool>,
     pub par2: Option<u8>,
+    pub par2_only: Option<bool>,
 }
 
 /// Fully resolved, validated configuration.
@@ -117,6 +118,8 @@ pub struct Config {
     pub dry_run: bool,
     /// Percentage of PAR2 recovery data to generate (0 to disable).
     pub par2: u8,
+    /// Only generate PAR2 files without uploading them.
+    pub par2_only: bool,
 }
 
 impl Config {
@@ -126,8 +129,9 @@ impl Config {
     /// Returns an error if a required field (host, from, groups) is missing.
     pub fn resolve(file: FileConfig, cli: Overrides) -> Result<Self> {
         let dry_run = cli.dry_run.unwrap_or(false);
+        let par2_only = cli.par2_only.unwrap_or(false);
 
-        let host = if dry_run {
+        let host = if dry_run || par2_only {
             cli.host
                 .or(file.server.host)
                 .unwrap_or_else(|| "localhost".into())
@@ -137,16 +141,22 @@ impl Config {
                 .context("no `host` set: provide [server].host or --host")?
         };
 
-        let from = cli
-            .from
-            .or(file.posting.from)
-            .context("no `from` set: provide [posting].from or --from")?;
+        let from = if par2_only {
+            cli.from.or(file.posting.from).unwrap_or_else(|| "none".into())
+        } else {
+            cli.from
+                .or(file.posting.from)
+                .context("no `from` set: provide [posting].from or --from")?
+        };
 
-        let groups = cli
-            .groups
-            .or(file.posting.groups)
-            .filter(|g| !g.is_empty())
-            .context("no `groups` set: provide [posting].groups or --groups")?;
+        let groups = if par2_only {
+            cli.groups.or(file.posting.groups).unwrap_or_else(|| vec!["none".into()])
+        } else {
+            cli.groups
+                .or(file.posting.groups)
+                .filter(|g| !g.is_empty())
+                .context("no `groups` set: provide [posting].groups or --groups")?
+        };
 
         Ok(Config {
             host,
@@ -167,6 +177,7 @@ impl Config {
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(10),
+            par2_only,
         })
     }
 }

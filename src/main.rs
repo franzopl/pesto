@@ -62,6 +62,10 @@ struct Cli {
     #[arg(long, value_name = "PERCENT")]
     par2: Option<u8>,
 
+    /// Only generate PAR2 files without uploading them.
+    #[arg(long)]
+    par2_only: bool,
+
     /// Skip network posting and just measure generation speed.
     #[arg(long)]
     dry_run: bool,
@@ -92,6 +96,7 @@ impl Cli {
             obfuscate: self.obfuscate,
             dry_run: if self.dry_run { Some(true) } else { None },
             par2: self.par2,
+            par2_only: if self.par2_only { Some(true) } else { None },
         }
     }
 }
@@ -109,7 +114,12 @@ async fn main() -> Result<()> {
 
     let outcome = pesto::poster::post_files(&config, &cli.files).await?;
 
-    println!("posted {} segment(s)", outcome.segments.len());
+    if config.par2_only {
+        println!("PAR2 generation complete.");
+    } else {
+        println!("posted {} segment(s)", outcome.segments.len());
+    }
+
     if outcome.cancelled {
         eprintln!("interrupted — stopped before posting every requested segment");
     }
@@ -121,14 +131,16 @@ async fn main() -> Result<()> {
     }
 
     if let Some(out) = &cli.out {
-        if outcome.segments.is_empty() {
-            eprintln!("no segments posted — skipping nzb output");
-        } else {
-            let xml = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments);
-            tokio::fs::write(out, xml)
-                .await
-                .with_context(|| format!("writing nzb file `{}`", out.display()))?;
-            println!("wrote nzb: {}", out.display());
+        if !config.par2_only {
+            if outcome.segments.is_empty() {
+                eprintln!("no segments posted — skipping nzb output");
+            } else {
+                let xml = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments);
+                tokio::fs::write(out, xml)
+                    .await
+                    .with_context(|| format!("writing nzb file `{}`", out.display()))?;
+                println!("wrote nzb: {}", out.display());
+            }
         }
     }
 
