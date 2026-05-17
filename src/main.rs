@@ -704,18 +704,24 @@ async fn run_single_upload(
             None
         };
 
-        // Run the post-upload hook.
+        let hook_env = HookEnv {
+            nzb_path: out.as_deref(),
+            nfo_path: nfo_path.as_deref(),
+            name: entry_label,
+            total_bytes,
+            group: config.groups.first().map(String::as_str),
+            password: effective_password.as_deref(),
+            server: &config.host,
+        };
+
+        // Run --post-hook command.
         if let Some(cmd) = &config.post_hook {
-            run_post_hook(PostHookArgs {
-                cmd,
-                nzb_path: out.as_deref(),
-                nfo_path: nfo_path.as_deref(),
-                name: entry_label,
-                total_bytes,
-                group: config.groups.first().map(String::as_str),
-                password: effective_password.as_deref(),
-                server: &config.host,
-            });
+            run_post_hook(cmd, &hook_env);
+        }
+
+        // Run every executable script found in ~/.config/pesto/hooks/.
+        if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
+            run_hooks_dir(&hooks_dir, &hook_env);
         }
     }
 
@@ -1199,8 +1205,7 @@ fn print_welcome() {
     }
 }
 
-struct PostHookArgs<'a> {
-    cmd: &'a str,
+struct HookEnv<'a> {
     nzb_path: Option<&'a std::path::Path>,
     nfo_path: Option<&'a std::path::Path>,
     name: &'a str,
@@ -1210,42 +1215,95 @@ struct PostHookArgs<'a> {
     server: &'a str,
 }
 
-/// Execute the post-upload hook command with upload details as environment variables.
-///
-/// The hook is run via the OS shell (`sh -c` on Unix, `cmd /c` on Windows) so
-/// any interpreter (bash, Python, PowerShell script) works as long as the OS
-/// can launch it. Errors are logged but never abort the caller.
-fn run_post_hook(args: PostHookArgs<'_>) {
-    let PostHookArgs { cmd, nzb_path, nfo_path, name, total_bytes, group, password, server } = args;
-    #[cfg(unix)]
-    let mut child = std::process::Command::new("sh");
-    #[cfg(unix)]
-    child.args(["-c", cmd]);
-
-    #[cfg(windows)]
-    let mut child = std::process::Command::new("cmd");
-    #[cfg(windows)]
-    child.args(["/c", cmd]);
-
-    child.env("PESTO_NAME", name);
-    child.env("PESTO_BYTES", total_bytes.to_string());
-    child.env("PESTO_SERVER", server);
-    child.env("PESTO_GROUP", group.unwrap_or(""));
-    child.env("PESTO_PASSWORD", password.unwrap_or(""));
+fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
+    child.env("PESTO_NAME", env.name);
+    child.env("PESTO_BYTES", env.total_bytes.to_string());
+    child.env("PESTO_SERVER", env.server);
+    child.env("PESTO_GROUP", env.group.unwrap_or(""));
+    child.env("PESTO_PASSWORD", env.password.unwrap_or(""));
     child.env(
         "PESTO_NZB",
-        nzb_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        env.nzb_path
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     );
     child.env(
         "PESTO_NFO",
-        nfo_path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        env.nfo_path
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     );
+}
 
+/// Execute a shell command as a post-upload hook.
+///
+/// Runs via `sh -c` on Unix and `cmd /c` on Windows so any interpreter works.
+/// Errors are logged but never abort the caller.
+fn run_post_hook(cmd: &str, env: &HookEnv<'_>) {
+    #[cfg(unix)]
+    let mut child = {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    #[cfg(windows)]
+    let mut child = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", cmd]);
+        c
+    };
+    apply_hook_env(&mut child, env);
     match child.status() {
         Ok(s) if s.success() => println!("post-hook exited ok"),
         Ok(s) => eprintln!("post-hook exited with status {s}"),
         Err(e) => eprintln!("post-hook failed to start: {e}"),
     }
+}
+
+/// Run every executable file in `hooks_dir`, sorted by name.
+///
+/// Each script is executed directly (not via a shell) so it must have a
+/// shebang line on Unix or a registered extension on Windows. Errors per
+/// script are logged individually; one failing hook does not skip the rest.
+fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
+    let Ok(entries) = std::fs::read_dir(hooks_dir) else {
+        return;
+    };
+    let mut scripts: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_executable(p))
+        .collect();
+    scripts.sort();
+    for script in &scripts {
+        println!("running hook: {}", script.display());
+        let mut child = std::process::Command::new(script);
+        apply_hook_env(&mut child, env);
+        match child.status() {
+            Ok(s) if s.success() => println!("  hook exited ok"),
+            Ok(s) => eprintln!("  hook exited with status {s}"),
+            Err(e) => eprintln!("  hook failed to start: {e}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("exe" | "cmd" | "bat" | "ps1" | "py")
+    )
 }
 
 /// Run the interactive setup wizard.

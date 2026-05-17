@@ -77,6 +77,12 @@ pub fn parse_upload_rate(s: &str) -> Result<u64> {
 
 /// Path of the config file `pesto` loads when `--config` is not given.
 ///
+/// Returns the pesto config directory (the parent folder of `config.toml`).
+/// Same logic as [`default_config_path`] without the filename component.
+pub fn config_dir() -> Option<PathBuf> {
+    default_config_path().and_then(|p| p.parent().map(PathBuf::from))
+}
+
 /// On Unix: follows the XDG Base Directory spec (`$XDG_CONFIG_HOME/pesto/config.toml`),
 /// falling back to `$HOME/.config/pesto/config.toml`.
 /// On Windows: uses `%APPDATA%\pesto\config.toml`.
