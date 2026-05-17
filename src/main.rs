@@ -513,7 +513,7 @@ async fn run_single_upload(
             })?;
             let filename = format!("{stem}.nzb");
             let path = if let Some(dir) = &config.nzb_dir {
-                PathBuf::from(dir).join(&filename)
+                expand_tilde(dir).join(&filename)
             } else {
                 PathBuf::from(filename)
             };
@@ -1304,6 +1304,21 @@ fn is_executable(path: &std::path::Path) -> bool {
             .as_deref(),
         Some("exe" | "cmd" | "bat" | "ps1" | "py")
     )
+}
+
+/// Expand a leading `~` to the user's home directory.
+/// Returns the path unchanged when `~` is not present or `$HOME` is unset.
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    } else if path == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(path)
 }
 
 /// Run the interactive setup wizard.
