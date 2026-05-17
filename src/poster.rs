@@ -1318,6 +1318,182 @@ mod tests {
         }
     }
 
+    // ── par2_output_dir ───────────────────────────────────────────────────────
+
+    fn meta_with_name(path: &std::path::Path, name: &str) -> FileMeta {
+        FileMeta {
+            path: path.to_path_buf(),
+            real_name: name.into(),
+            subject_name: name.into(),
+            yenc_name: name.into(),
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn par2_output_dir_loose_file_is_parent_dir() {
+        // A single-component name like "movie.mkv" lives directly next to the file.
+        let path = std::path::PathBuf::from("/data/movie.mkv");
+        let meta = meta_with_name(&path, "movie.mkv");
+        assert_eq!(par2_output_dir(&meta), std::path::Path::new("/data"));
+    }
+
+    #[test]
+    fn par2_output_dir_nested_file_strips_depth() {
+        // "Season01/ep01.mkv" has depth 2, so par2 dir is 2 levels up.
+        let path = std::path::PathBuf::from("/data/Season01/ep01.mkv");
+        let meta = meta_with_name(&path, "Season01/ep01.mkv");
+        assert_eq!(par2_output_dir(&meta), std::path::Path::new("/data"));
+    }
+
+    #[test]
+    fn par2_output_dir_three_levels_deep() {
+        let path = std::path::PathBuf::from("/srv/a/b/c.bin");
+        let meta = meta_with_name(&path, "a/b/c.bin");
+        assert_eq!(par2_output_dir(&meta), std::path::Path::new("/srv"));
+    }
+
+    // ── physical_core_count ───────────────────────────────────────────────────
+
+    #[test]
+    fn physical_core_count_is_at_least_one() {
+        assert!(physical_core_count() >= 1);
+    }
+
+    // ── Shared buffer pool ────────────────────────────────────────────────────
+
+    fn minimal_shared(article_size: usize) -> Arc<Shared> {
+        use crate::config::{FileConfig, Overrides};
+        let mut file = FileConfig::default();
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        let mut config = Config::resolve(
+            file,
+            Overrides {
+                dry_run: Some(true),
+                par2: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        config.article_size = article_size;
+        Arc::new(Shared {
+            config,
+            servers: vec![],
+            results: Mutex::new(Vec::new()),
+            failures: Mutex::new(Vec::new()),
+            events: None,
+            cancelled: AtomicBool::new(false),
+            resume: None,
+            resume_path: None,
+            pool: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    #[test]
+    fn buffer_pool_reuses_released_buffer() {
+        let shared = minimal_shared(1024);
+        let buf = shared.acquire_buffer(1024);
+        let cap = buf.capacity();
+        shared.release_buffer(buf);
+        let buf2 = shared.acquire_buffer(1024);
+        // Reused buffer has at least the same capacity as the released one.
+        assert!(buf2.capacity() >= cap);
+        assert_eq!(buf2.len(), 1024);
+    }
+
+    #[test]
+    fn buffer_pool_drops_oversized_buffers() {
+        // article_size = 100; a buffer with capacity > 200 must not be pooled.
+        let shared = minimal_shared(100);
+        let big = vec![0u8; 300]; // capacity >> article_size * 2
+        shared.release_buffer(big);
+        // Pool should be empty — allocates fresh on next acquire.
+        assert!(shared.pool.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn buffer_pool_acquire_fresh_when_empty() {
+        let shared = minimal_shared(512);
+        let buf = shared.acquire_buffer(256);
+        assert_eq!(buf.len(), 256);
+    }
+
+    // ── record_failure ────────────────────────────────────────────────────────
+
+    #[test]
+    fn record_failure_appends_description() {
+        let shared = minimal_shared(1024);
+        let path = std::path::PathBuf::from("ep.mkv");
+        let meta = meta_with_name(&path, "ep.mkv");
+        let task = PostTask {
+            meta: Arc::new(meta),
+            part: 2,
+            total: 5,
+            offset: 0,
+            data: vec![],
+        };
+        record_failure(&shared, &task.meta, &task, "timeout");
+        let failures = shared.failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("ep.mkv"));
+        assert!(failures[0].contains("2/5"));
+        assert!(failures[0].contains("timeout"));
+    }
+
+    // ── multi-file dry-run ordering ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_segments_sorted_by_filename_then_part() {
+        let dir = TempDir::new().unwrap();
+        let f1 = dir.path().join("b.bin");
+        let f2 = dir.path().join("a.bin");
+        std::fs::write(&f1, &vec![0u8; 100]).unwrap();
+        std::fs::write(&f2, &vec![0u8; 100]).unwrap();
+
+        let files = vec![
+            InputFile { path: f1, name: "b.bin".into() },
+            InputFile { path: f2, name: "a.bin".into() },
+        ];
+
+        let config = dry_run_config();
+        let outcome = post_files(&config, &files).await.unwrap();
+
+        let names: Vec<&str> = outcome.segments.iter().map(|s| s.file_name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "segments should be sorted by file name");
+    }
+
+    // ── obfuscation in dry-run ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_subject_obfuscation_hides_real_name_in_subject() {
+        let dir = TempDir::new().unwrap();
+        let f = dir.path().join("secret.mkv");
+        std::fs::write(&f, &vec![0u8; 100]).unwrap();
+
+        let files = vec![InputFile { path: f, name: "secret.mkv".into() }];
+
+        let mut file_cfg = crate::config::FileConfig::default();
+        file_cfg.posting.groups = Some(vec!["alt.test".into()]);
+        let config = Config::resolve(
+            file_cfg,
+            Overrides {
+                dry_run: Some(true),
+                par2: Some(0),
+                obfuscate: Some(crate::config::ObfuscateMode::Subject),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let outcome = post_files(&config, &files).await.unwrap();
+        assert_eq!(outcome.segments.len(), 1);
+        // file_name keeps the real name; subject_name is randomised.
+        assert_eq!(outcome.segments[0].file_name, "secret.mkv");
+        assert_ne!(outcome.segments[0].subject_name, "secret.mkv");
+    }
+
     #[tokio::test]
     async fn dry_run_ignores_resume_state_by_design() {
         // Resume is explicitly disabled in dry_run mode (post_files_with_progress

@@ -211,8 +211,25 @@ fn tls_config() -> Result<ClientConfig> {
 }
 
 #[cfg(test)]
+impl Connection {
+    /// Construct a `Connection` from any bidirectional stream. Used in tests to
+    /// inject a mock transport without opening a real TCP/TLS connection.
+    fn from_stream(
+        s: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    ) -> Self {
+        Connection {
+            stream: BufReader::new(Box::new(s)),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt as _;
+
     use super::*;
+
+    // ── Response::parse ───────────────────────────────────────────────────────
 
     #[test]
     fn parses_well_formed_responses() {
@@ -232,6 +249,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_response_with_no_trailing_text() {
+        let r = Response::parse("240\r\n").unwrap();
+        assert_eq!(r.code, 240);
+        assert_eq!(r.text, "");
+    }
+
+    #[test]
+    fn parses_response_without_line_ending() {
+        // Bare response line (no \r\n) should still parse.
+        let r = Response::parse("200 ok").unwrap();
+        assert_eq!(r.code, 200);
+        assert_eq!(r.text, "ok");
+    }
+
+    // ── dot_stuff ─────────────────────────────────────────────────────────────
+
+    #[test]
     fn dot_stuffs_lines_starting_with_dot() {
         let mut out = Vec::new();
         dot_stuff(b".hello\r\nworld\r\n.dot\r\n", &mut out);
@@ -243,5 +277,135 @@ mod tests {
         let mut out = Vec::new();
         dot_stuff(b"a.b\r\nc\r\n", &mut out);
         assert_eq!(out, b"a.b\r\nc\r\n");
+    }
+
+    #[test]
+    fn dot_stuff_empty_input_produces_empty_output() {
+        let mut out = Vec::new();
+        dot_stuff(b"", &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dot_stuff_single_dot_at_buffer_start() {
+        // A single `.` with no newline — the very first byte is at line start.
+        let mut out = Vec::new();
+        dot_stuff(b".", &mut out);
+        assert_eq!(out, b"..");
+    }
+
+    #[test]
+    fn dot_stuff_consecutive_dot_lines() {
+        let mut out = Vec::new();
+        dot_stuff(b".a\r\n.b\r\n", &mut out);
+        assert_eq!(out, b"..a\r\n..b\r\n");
+    }
+
+    // ── Connection protocol (mock stream) ─────────────────────────────────────
+
+    /// Write `responses` to the server half of a duplex pair before the test
+    /// begins so they are immediately available for the `Connection` to read.
+    async fn mock_conn(responses: &[u8]) -> (Connection, tokio::io::DuplexStream) {
+        let (client, mut server) = tokio::io::duplex(4096);
+        server.write_all(responses).await.unwrap();
+        (Connection::from_stream(client), server)
+    }
+
+    #[tokio::test]
+    async fn authenticate_accepted_without_password() {
+        // Server grants access on AUTHINFO USER alone (code 281).
+        let (mut conn, _server) =
+            mock_conn(b"281 Authentication accepted\r\n").await;
+        conn.authenticate("user", "pass").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticate_requires_and_then_accepts_password() {
+        // Server sends 381, then 281 after the password.
+        let (mut conn, _server) = mock_conn(
+            b"381 Password required\r\n\
+              281 Authentication accepted\r\n",
+        )
+        .await;
+        conn.authenticate("user", "s3cr3t").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_rejected_returns_error() {
+        // Any code other than 281/381 on AUTHINFO USER is an error.
+        let (mut conn, _server) = mock_conn(b"502 Service permanently unavailable\r\n").await;
+        let err = conn.authenticate("user", "pass").await.unwrap_err();
+        assert!(err.to_string().contains("AUTHINFO USER rejected"));
+    }
+
+    #[tokio::test]
+    async fn authenticate_password_rejected_returns_error() {
+        let (mut conn, _server) = mock_conn(
+            b"381 Password required\r\n\
+              481 Authentication failed\r\n",
+        )
+        .await;
+        let err = conn.authenticate("user", "wrong").await.unwrap_err();
+        assert!(err.to_string().contains("authentication rejected"));
+    }
+
+    #[tokio::test]
+    async fn post_succeeds_on_240() {
+        // Server responds 340 (send article), then 240 (article received).
+        let (mut conn, _server) = mock_conn(
+            b"340 Send article\r\n\
+              240 Article received\r\n",
+        )
+        .await;
+        conn.post(b"From: x\r\n\r\nbody\r\n").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_not_permitted_returns_error() {
+        // Server responds to POST with something other than 340.
+        let (mut conn, _server) = mock_conn(b"440 Posting not permitted\r\n").await;
+        let err = conn.post(b"article").await.unwrap_err();
+        assert!(err.to_string().contains("POST not permitted"));
+    }
+
+    #[tokio::test]
+    async fn post_rejected_441_returns_error() {
+        let (mut conn, _server) = mock_conn(
+            b"340 Send article\r\n\
+              441 Posting failed\r\n",
+        )
+        .await;
+        let err = conn.post(b"article").await.unwrap_err();
+        assert!(err.to_string().contains("441"));
+    }
+
+    #[tokio::test]
+    async fn stat_article_found_returns_true() {
+        let (mut conn, _server) = mock_conn(b"223 0 <mid@host> Article exists\r\n").await;
+        assert!(conn.stat("mid@host").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stat_article_not_found_returns_false() {
+        let (mut conn, _server) = mock_conn(b"430 No such article\r\n").await;
+        assert!(!conn.stat("missing@host").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stat_unexpected_code_returns_error() {
+        let (mut conn, _server) = mock_conn(b"503 Program fault\r\n").await;
+        let err = conn.stat("mid@host").await.unwrap_err();
+        assert!(err.to_string().contains("unexpected STAT response"));
+    }
+
+    #[tokio::test]
+    async fn read_response_detects_closed_connection() {
+        // An empty stream simulates a server that closes the connection.
+        let (mut conn, server) = mock_conn(b"").await;
+        drop(server); // close the write end
+        let err = conn.stat("x@y").await.unwrap_err();
+        // The STAT command writes to the stream, which may fail, or the
+        // subsequent read detects EOF. Either way we get an error.
+        let _ = err; // presence of an error is what we assert
     }
 }
