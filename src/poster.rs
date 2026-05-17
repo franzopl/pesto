@@ -19,8 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::article::{
     default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article,
 };
-use crate::config::{Config, ObfuscateMode, ServerEntry};
-use crate::nntp::Connection;
+use crate::config::{Config, ObfuscateMode};
+use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
 use crate::par2::encoder::{slice_checksum, FileHasher, RecoveryEncoder};
 use crate::par2::layout;
 use crate::par2::packet::{self, SliceChecksum};
@@ -78,7 +78,7 @@ struct PostTask {
 struct Shared {
     config: Config,
     /// Server list in failover order (primary first).
-    servers: Vec<ServerEntry>,
+    servers: Arc<Vec<crate::config::ServerEntry>>,
 
     results: Mutex<Vec<PostedSegment>>,
     failures: Mutex<Vec<String>>,
@@ -200,7 +200,7 @@ pub async fn post_files_with_progress(
         initial_segments += yenc::segments(meta.size, config.article_size).len() as u64;
     }
 
-    let servers: Vec<ServerEntry> = config.all_servers().collect();
+    let servers: Arc<Vec<crate::config::ServerEntry>> = Arc::new(config.all_servers().collect());
     let total_conns = config.total_connections();
 
     let worker_count = if config.par2_only {
@@ -290,17 +290,9 @@ pub async fn post_files_with_progress(
     let tx_opt = if worker_count > 0 {
         let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        // Distribute workers across servers according to each server's
-        // configured connection count. Workers beyond the total are assigned
-        // round-robin so we never exceed `worker_count`.
-        let server_assignments = build_server_assignments(&shared.servers, worker_count);
-        for (idx, primary_server_idx) in server_assignments.into_iter().enumerate() {
-            handles.push(tokio::spawn(worker(
-                shared.clone(),
-                rx.clone(),
-                idx,
-                primary_server_idx,
-            )));
+        let pool = ConnectionPool::build(shared.servers.clone(), worker_count);
+        for (idx, slot) in pool.into_slots().into_iter().enumerate() {
+            handles.push(tokio::spawn(worker(shared.clone(), rx.clone(), idx, slot)));
         }
         Some(tx)
     } else {
@@ -817,31 +809,6 @@ async fn push_par2_file(
     Ok(())
 }
 
-/// Assign workers to servers according to each server's `connections` count.
-///
-/// Returns a `Vec<usize>` of length `worker_count` where each element is the
-/// index of the server that worker should connect to first.
-fn build_server_assignments(servers: &[ServerEntry], worker_count: usize) -> Vec<usize> {
-    let mut assignments = Vec::with_capacity(worker_count);
-    let mut remaining = worker_count;
-    'outer: for (si, server) in servers.iter().enumerate() {
-        for _ in 0..server.connections {
-            if remaining == 0 {
-                break 'outer;
-            }
-            assignments.push(si);
-            remaining -= 1;
-        }
-    }
-    // If all server connection slots are exhausted before worker_count is
-    // reached (e.g. worker_count was clamped to segment count), fill the
-    // rest round-robin.
-    while assignments.len() < worker_count {
-        assignments.push(assignments.len() % servers.len());
-    }
-    assignments
-}
-
 /// Per-worker token-bucket rate limiter.
 struct RateLimiter {
     /// Bytes per second; 0 = unlimited.
@@ -886,11 +853,8 @@ async fn worker(
     shared: Arc<Shared>,
     rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PostTask>>>,
     conn_id: usize,
-    primary_server_idx: usize,
+    mut slot: ConnectionSlot,
 ) {
-    let mut conn: Option<Connection> = None;
-    let mut server_idx = primary_server_idx;
-    let server_count = shared.servers.len();
     let mut rate_limiter = RateLimiter::new(
         // Divide the global rate across all workers proportionally.
         if shared.config.upload_rate > 0 {
@@ -980,34 +944,26 @@ async fn worker(
             rate_limiter.acquire(payload.len()).await;
 
             let max_attempts = shared.config.retries;
-            // Try up to `max_attempts` times, rotating servers on each
-            // connection failure so the next attempt uses a different server.
+            // Try up to `max_attempts` times; on any failure `slot.invalidate()`
+            // drops the bad connection and rotates to the next server so the
+            // next attempt targets a different one.
             for attempt in 1..=max_attempts {
-                if conn.is_none() {
-                    let server = &shared.servers[server_idx];
-                    let backoff = Duration::from_secs(server.retry_delay);
-                    match connect_and_auth_server(server).await {
-                        Ok(c) => conn = Some(c),
-                        Err(e) => {
-                            last_err = format!(
-                                "connect to {} (server {}): {e:#}",
-                                server.host, server_idx
-                            );
-                            // Rotate to the next server for the next attempt.
-                            server_idx = (server_idx + 1) % server_count;
-                            if attempt < max_attempts {
-                                tokio::time::sleep(backoff).await;
-                            }
-                            continue;
+                let conn = match slot.ensure_connected().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        last_err = format!("{e:#}");
+                        let backoff = slot.retry_delay();
+                        if attempt < max_attempts {
+                            tokio::time::sleep(backoff).await;
                         }
+                        continue;
                     }
-                }
-                let connection = conn.as_mut().expect("connection established above");
-                match connection.post(&payload).await {
+                };
+                match conn.post(&payload).await {
                     Ok(()) => {
                         // Optionally verify the article was accepted by STAT.
                         if shared.config.verify {
-                            match connection.stat(&message_id).await {
+                            match conn.stat(&message_id).await {
                                 Ok(true) => {
                                     posted = true;
                                     break;
@@ -1016,13 +972,11 @@ async fn worker(
                                     last_err = format!(
                                         "STAT: article {message_id} not found after posting"
                                     );
-                                    conn = None;
-                                    server_idx = (server_idx + 1) % server_count;
+                                    slot.invalidate();
                                 }
                                 Err(e) => {
                                     last_err = format!("STAT: {e:#}");
-                                    conn = None;
-                                    server_idx = (server_idx + 1) % server_count;
+                                    slot.invalidate();
                                 }
                             }
                         } else {
@@ -1032,11 +986,10 @@ async fn worker(
                     }
                     Err(e) => {
                         last_err = format!("{e:#}");
-                        conn = None;
-                        server_idx = (server_idx + 1) % server_count;
+                        slot.invalidate();
                     }
                 }
-                let backoff = Duration::from_secs(shared.servers[server_idx].retry_delay);
+                let backoff = slot.retry_delay();
                 if attempt < max_attempts {
                     tokio::time::sleep(backoff).await;
                 }
@@ -1077,19 +1030,7 @@ async fn worker(
     }
 
     shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
-
-    if let Some(mut connection) = conn {
-        connection.quit().await;
-    }
-}
-
-async fn connect_and_auth_server(server: &ServerEntry) -> Result<Connection> {
-    let mut conn = Connection::connect(&server.host, server.port, server.ssl).await?;
-    if let Some(username) = &server.username {
-        let password = server.password.as_deref().unwrap_or("");
-        conn.authenticate(username, password).await?;
-    }
-    Ok(conn)
+    slot.quit().await;
 }
 
 /// Compute the `Date:` header value from the config `date` option.
@@ -1187,53 +1128,6 @@ mod tests {
     fn resolve_date_fixed_is_returned_verbatim() {
         let fixed = "Tue, 14 Jan 2025 10:00:00 +0000";
         assert_eq!(resolve_date(Some(fixed)).as_deref(), Some(fixed));
-    }
-
-    // ── build_server_assignments ──────────────────────────────────────────────
-
-    fn server(connections: usize) -> ServerEntry {
-        ServerEntry {
-            host: "h".into(),
-            port: 563,
-            ssl: true,
-            connections,
-            username: None,
-            password: None,
-            retry_delay: 1,
-        }
-    }
-
-    #[test]
-    fn single_server_all_workers_assigned_to_it() {
-        let servers = vec![server(8)];
-        let assignments = build_server_assignments(&servers, 4);
-        assert_eq!(assignments, vec![0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn two_servers_workers_distributed_by_connection_count() {
-        // Server 0 has 2 connections, server 1 has 4.
-        let servers = vec![server(2), server(4)];
-        let assignments = build_server_assignments(&servers, 6);
-        assert_eq!(assignments[..2], [0, 0]);
-        assert_eq!(assignments[2..], [1, 1, 1, 1]);
-    }
-
-    #[test]
-    fn worker_count_less_than_total_connections_stops_early() {
-        let servers = vec![server(8), server(8)];
-        let assignments = build_server_assignments(&servers, 3);
-        assert_eq!(assignments.len(), 3);
-        // All from server 0 since it has 8 slots and we only need 3.
-        assert!(assignments.iter().all(|&s| s == 0));
-    }
-
-    #[test]
-    fn worker_count_exceeds_total_connections_fills_round_robin() {
-        let servers = vec![server(1), server(1)];
-        // 4 workers but only 2 total connection slots.
-        let assignments = build_server_assignments(&servers, 4);
-        assert_eq!(assignments.len(), 4);
     }
 
     // ── RateLimiter ───────────────────────────────────────────────────────────
@@ -1378,7 +1272,7 @@ mod tests {
         config.article_size = article_size;
         Arc::new(Shared {
             config,
-            servers: vec![],
+            servers: Arc::new(vec![]),
             results: Mutex::new(Vec::new()),
             failures: Mutex::new(Vec::new()),
             events: None,
