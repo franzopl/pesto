@@ -93,9 +93,16 @@ so one read block is one article and one input slice.
 - [x] Include the PAR2 files in the `.nzb`
 - [x] `--par2 <percent>` flag and config option; 10% default
 
-### 7e — Performance
+### 7e — Performance ✅
 
-- [ ] SIMD GF multiply; recovery buffers partitioned across threads
+- [x] SIMD GF multiply (AVX2 `pshufb` GF(2^16)), scalar fallback
+- [x] Recovery buffers partitioned across threads (`rayon`)
+- [x] `block_in_place` so the CPU-bound encoder does not stall the runtime
+
+### 7f — Generation modes ✅
+
+- [x] `--par2-only` flag: write parity files next to the source, no posting
+- [x] `--dry-run` flag: process files without touching the network
 
 ## Phase 8 — `upapasta` integration
 

@@ -41,7 +41,7 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
         let mut padded = chunk.to_vec();
         padded.resize(slice_size, 0);
         slice_checksums.push(slice_checksum(&padded));
-        encoder.add_slice(&padded);
+        encoder.add_slice(padded);
     }
 
     let recovery_slices = encoder.finish();

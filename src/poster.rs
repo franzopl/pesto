@@ -213,6 +213,13 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         let _ = handle.await;
     }
 
+    // The PAR2 files posted in normal mode are written to a per-process temp
+    // directory purely as an intermediate; remove it once posting is done.
+    // (`--par2-only` writes next to the source files and must be kept.)
+    if !config.par2_only {
+        let _ = tokio::fs::remove_dir_all(par2_temp_dir()).await;
+    }
+
     done.store(true, Ordering::Relaxed);
     let _ = monitor_handle.await;
     cancel_handle.abort();
@@ -227,6 +234,12 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         failures,
         cancelled,
     })
+}
+
+/// Per-process temp directory holding the intermediate PAR2 files written
+/// during a normal posting run. Removed once posting finishes.
+fn par2_temp_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id()))
 }
 
 fn domain_from(from: &str) -> String {
@@ -305,14 +318,20 @@ async fn producer(
                     .with_context(|| format!("reading `{}`", meta.path.display()))?;
 
                 if pass_idx == 0 {
-                    par2_files[file_idx].update(&buf);
-
-                    let mut padded = buf.clone();
-                    padded.resize(shared.config.article_size, 0);
-                    all_checksums[file_idx].push(slice_checksum(&padded));
-
+                    // In the first pass the encoder is `Some` exactly when PAR2
+                    // is enabled, so all PAR2 per-slice work is gated on it —
+                    // no hashing or checksums are computed when `--par2 0`.
                     if let Some(enc) = &mut encoder {
-                        tokio::task::block_in_place(|| enc.add_slice(&padded));
+                        par2_files[file_idx].update(&buf);
+
+                        let mut padded = buf.clone();
+                        padded.resize(shared.config.article_size, 0);
+                        all_checksums[file_idx].push(slice_checksum(&padded));
+
+                        // The encoder takes ownership of `padded`; it is the
+                        // single PAR2 copy of this slice (the other owned copy,
+                        // `buf`, is moved into the posting channel below).
+                        tokio::task::block_in_place(|| enc.add_slice(padded));
                     }
 
                     if let Some(tx) = &tx_opt {
@@ -331,7 +350,7 @@ async fn producer(
                 } else if let Some(enc) = &mut encoder {
                     let mut padded = buf;
                     padded.resize(shared.config.article_size, 0);
-                    tokio::task::block_in_place(|| enc.add_slice(&padded));
+                    tokio::task::block_in_place(|| enc.add_slice(padded));
                 }
             }
         }
@@ -369,7 +388,7 @@ async fn producer(
                 if shared.config.par2_only {
                     par2_dir = Some(metas[0].path.parent().unwrap_or(std::path::Path::new("")).to_path_buf());
                 } else {
-                    par2_dir = Some(std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id())));
+                    par2_dir = Some(par2_temp_dir());
                     tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
                 }
 

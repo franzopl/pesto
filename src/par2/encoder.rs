@@ -73,17 +73,20 @@ impl RecoveryEncoder {
 
     /// Feed one input slice, already zero-padded to the slice size.
     ///
+    /// Ownership of `slice` is taken so the encoder can queue it for batched
+    /// processing without an extra copy on the read hot path.
+    ///
     /// # Panics
     ///
     /// Panics if the slice length is wrong or more slices are fed than the
     /// `total_input_slices` declared at construction.
-    pub fn add_slice(&mut self, slice: &[u8]) {
+    pub fn add_slice(&mut self, slice: Vec<u8>) {
         assert_eq!(
             slice.len(),
             self.slice_words * 2,
             "slice length must equal the slice size"
         );
-        self.queued_slices.push(slice.to_vec());
+        self.queued_slices.push(slice);
         if self.queued_slices.len() >= 64 {
             self.flush();
         }
@@ -376,8 +379,8 @@ mod tests {
         let a = [0x10u8, 0x20, 0x30, 0x40];
         let b = [0x01u8, 0x02, 0x03, 0x04];
         let mut encoder = RecoveryEncoder::new(4, 2, 0, 1);
-        encoder.add_slice(&a);
-        encoder.add_slice(&b);
+        encoder.add_slice(a.to_vec());
+        encoder.add_slice(b.to_vec());
         let recovery = encoder.finish();
 
         let expected: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
@@ -390,7 +393,7 @@ mod tests {
         let gf = Gf16::new();
         let slice = [0x34u8, 0x12, 0x78, 0x56]; // words 0x1234, 0x5678
         let mut encoder = RecoveryEncoder::new(4, 1, 0, 2);
-        encoder.add_slice(&slice);
+        encoder.add_slice(slice.to_vec());
         let recovery = encoder.finish();
 
         // base of input block 0 is 2; exponent 1 -> each word multiplied by 2.
