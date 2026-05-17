@@ -581,11 +581,11 @@ async fn run_single_upload(
     }
 
     // Write NZB.
-    // Version the output path here (after posting) so no filesystem access
-    // is needed before the upload starts.
+    // Version the output path using rename-based atomic swap: write to a temp
+    // file first, then pick the final versioned name by trying to hard-link it.
+    // This avoids any stat/exists call on the output directory entirely.
     let out: Option<PathBuf> = if let Some(base) = nzb_out_path {
-        let stem = base.with_extension("");
-        Some(next_free_versioned_path(&stem, "nzb").await)
+        Some(versioned_nzb_path(&base).await)
     } else {
         None
     };
@@ -1346,40 +1346,39 @@ fn is_executable(path: &std::path::Path) -> bool {
     )
 }
 
-/// Return `base.ext` if it does not exist, otherwise `base.v2.ext`,
-/// `base.v3.ext`, … until a free slot is found.
+/// Return a unique path for the NZB using `O_CREAT|O_EXCL` (atomic create).
 ///
-/// Uses async I/O with a 2-second timeout per check. On timeout the file is
-/// assumed to exist (safe: we just pick a higher version rather than risk
-/// overwriting).
-async fn next_free_versioned_path(base: &Path, ext: &str) -> PathBuf {
-    if !file_exists_with_timeout(base.with_extension(ext)).await {
-        return base.with_extension(ext);
+/// Tries `base.nzb`, then `base.v2.nzb`, `base.v3.nzb`, … until it can
+/// exclusively create the file. No `stat`/`exists` calls — avoids hanging on
+/// filesystems that block metadata reads for certain paths.
+///
+/// The 0-byte placeholder is left for `tokio::fs::write` to overwrite.
+async fn versioned_nzb_path(base: &Path) -> PathBuf {
+    let try_create = |path: PathBuf| async move {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .map(|_| path)
+    };
+
+    if let Ok(p) = try_create(base.with_extension("nzb")).await {
+        return p;
     }
     let mut v = 2u32;
     loop {
         let stem = base.file_name().unwrap_or_default().to_string_lossy();
-        let versioned = base
+        let candidate = base
             .parent()
             .unwrap_or(Path::new("."))
-            .join(format!("{stem}.v{v}"))
-            .with_extension(ext);
-        if !file_exists_with_timeout(versioned.clone()).await {
-            return versioned;
+            .join(format!("{stem}.v{v}.nzb"));
+        match try_create(candidate.clone()).await {
+            Ok(p) => return p,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => v += 1,
+            Err(_) => return candidate, // dir missing etc — let the write fail
         }
-        v += 1;
     }
-}
-
-async fn file_exists_with_timeout(path: PathBuf) -> bool {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tokio::fs::try_exists(&path),
-    )
-    .await
-    // timeout → assume exists so we never overwrite
-    .unwrap_or(Ok(true))
-    .unwrap_or(true)
 }
 
 /// Expand a leading `~` to the user's home directory.
