@@ -72,7 +72,11 @@ async fn par2_only_directory_repair_recreates_tree() {
         indexer_api_key: None,
         indexer_category: None,
         no_upload: false,
-        no_nfo: false,
+        nzb_dir: None,
+        date: None,
+        no_archive: false,
+        message_id_domain: None,
+
     };
 
     let inputs = expand_inputs(std::slice::from_ref(&show)).unwrap();

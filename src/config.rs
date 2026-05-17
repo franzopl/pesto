@@ -189,6 +189,13 @@ pub struct PostingSection {
     pub verify: Option<bool>,
     /// Maximum upload rate as a human-readable string, e.g. `"50 MiB/s"`.
     pub upload_rate: Option<String>,
+    /// `Date:` header mode: `"now"`, `"random"`, or an RFC 2822 timestamp.
+    pub date: Option<String>,
+    /// Add `X-No-Archive: yes` to every posted article.
+    pub no_archive: Option<bool>,
+    /// Fixed domain for `Message-ID` generation. When absent a random domain
+    /// is generated per article.
+    pub message_id_domain: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -280,6 +287,12 @@ pub struct Overrides {
     pub nzb_dir: Option<String>,
     /// When true, skip the indexer NZB upload for this run.
     pub no_upload: bool,
+    /// `Date:` header mode: `"now"`, `"random"`, or a fixed RFC 2822 string.
+    pub date: Option<String>,
+    /// Add `X-No-Archive: yes` to every posted article.
+    pub no_archive: Option<bool>,
+    /// Fixed domain for `Message-ID`. `None` = random per article.
+    pub message_id_domain: Option<String>,
 }
 
 /// Fully resolved, validated configuration.
@@ -306,6 +319,13 @@ pub struct Config {
     pub retries: u32,
     /// How much of each post to obfuscate.
     pub obfuscate: ObfuscateMode,
+    /// `Date:` header mode: `"now"`, `"random"`, or an RFC 2822 timestamp.
+    /// `None` means omit the header (server fills it in).
+    pub date: Option<String>,
+    /// Add `X-No-Archive: yes` to every posted article.
+    pub no_archive: bool,
+    /// Fixed domain for `Message-ID`. `None` = random per article.
+    pub message_id_domain: Option<String>,
     /// If true, skip the network and just simulate posting.
     pub dry_run: bool,
     /// Percentage of PAR2 recovery data to generate (0 to disable).
@@ -507,6 +527,9 @@ impl Config {
             indexer_api_key: file.output.indexer.api_key,
             indexer_category: file.output.indexer.category,
             no_upload: cli.no_upload,
+            date: cli.date.or(file.posting.date),
+            no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
+            message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
         })
     }
 }

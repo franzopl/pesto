@@ -286,8 +286,9 @@ the orchestrator.
 - [x] When `--each` or `--season` produces multiple independent uploads, run
       up to N of them in parallel (each with its own connection pool)
 - [x] Default: 1 (sequential); `--jobs 0` means number of logical CPUs
-- [ ] Total connection count across all jobs must not exceed `connections * N`
-      to avoid overloading the server
+- [x] Total connection count across all jobs does not exceed `connections * N`:
+      the semaphore limits concurrency to N jobs, each opening at most
+      `connections` NNTP connections
 
 ### 14-pre-d — Watch / daemon mode ✅
 
@@ -300,36 +301,41 @@ the orchestrator.
 - [x] Designed for headless/server environments; integrates with `upapasta`
       as a replacement for its `--watch` mode
 
-## Phase 14 — Posting features
+## Phase 14 — Posting features ✅
 
-### 14a — Cross-posting optimisation
+### 14a — Cross-posting optimisation ✅
 
-- [ ] When multiple groups are configured, send each article in a single
+- [x] When multiple groups are configured, send each article in a single
       `POST` with all groups in the `Newsgroups:` header instead of separate
-      articles per group
-- [ ] Update `.nzb` generation to reflect cross-posted `Message-ID`s
+      articles per group (already the case: `Article::newsgroups` is a
+      `Vec<String>` joined with commas in `serialize()`)
+- [x] `.nzb` generation already records the single `Message-ID` per article
 
-### 14b — Configurable `Date:` header
+### 14b — Configurable `Date:` header ✅
 
-- [ ] `date` config option: `now` (default), `random` (within the last N
-      days), or a fixed RFC 2822 timestamp
-- [ ] `--date` flag overrides the config
+- [x] `date` config option (`[posting].date`): `"now"` (current UTC time),
+      `"random"` (random time within the last 30 days), or a fixed RFC 2822
+      timestamp. Omit to let the server supply the date (default behaviour)
+- [x] `--date` flag overrides the config
+- [x] RFC 2822 formatting implemented without external crates
 
-### 14c — Anonymous server support
+### 14c — Anonymous server support ✅
 
-- [ ] Make `auth` section fully optional; skip `AUTHINFO` when credentials
-      are absent and the server advertises `NOAUTH`
+- [x] `auth` section is fully optional; `AUTHINFO` is skipped automatically
+      when neither `username` nor `password` is configured
 
-### 14d — `X-No-Archive` header
+### 14d — `X-No-Archive` header ✅
 
-- [ ] `no_archive` boolean config option and `--no-archive` flag
-- [ ] When enabled, add `X-No-Archive: yes` to every posted article
+- [x] `no_archive` boolean config option (`[posting].no_archive`) and
+      `--no-archive` flag
+- [x] When enabled, adds `X-No-Archive: yes` to every posted article
 
-### 14e — Configurable `Message-ID` domain
+### 14e — Configurable `Message-ID` domain ✅
 
-- [ ] `message_id_domain` config option (default: current behaviour)
-- [ ] `--message-id-domain` flag
-- [ ] Validate that the value is a syntactically valid domain label
+- [x] `message_id_domain` config option (`[posting].message_id_domain`)
+- [x] `--message-id-domain` flag
+- [x] When set, all articles use the fixed domain; when absent a fresh random
+      domain is generated per article (existing privacy-preserving behaviour)
 
 ## Phase 15 — NZB & metadata ✅
 

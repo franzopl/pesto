@@ -10,13 +10,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::article::{default_subject, generate_message_id, obfuscated_name, Article};
+use crate::article::{default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article};
 use crate::config::{Config, ObfuscateMode, ServerEntry};
 use crate::nntp::Connection;
 use crate::par2::encoder::{slice_checksum, FileHasher, RecoveryEncoder};
@@ -962,12 +962,14 @@ async fn worker(
             shared.config.line_length,
             None,
         );
-        let message_id = generate_message_id();
+        let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
         let article = Article {
             message_id: message_id.clone(),
             from: shared.config.from.clone(),
             newsgroups: shared.config.groups.clone(),
             subject: default_subject(&task.meta.subject_name, task.part, task.total),
+            date: resolve_date(shared.config.date.as_deref()),
+            no_archive: shared.config.no_archive,
         };
         let payload = article.serialize(&encoded.body);
 
@@ -1095,6 +1097,30 @@ async fn connect_and_auth_server(server: &ServerEntry) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Compute the `Date:` header value from the config `date` option.
+///
+/// - `None` / `"now"` → current UTC time formatted as RFC 2822
+/// - `"random"` → random time within the last 30 days
+/// - any other string → used verbatim (caller-supplied RFC 2822 timestamp)
+fn resolve_date(mode: Option<&str>) -> Option<String> {
+    match mode {
+        None => None,
+        Some("now") => Some(format_rfc2822(SystemTime::now())),
+        Some("random") => {
+            // Pick a random offset in [0, 30 days) before now.
+            use std::collections::hash_map::RandomState;
+            use std::hash::{BuildHasher, Hasher};
+            let r = RandomState::new().build_hasher().finish();
+            let offset_secs = r % (30 * 24 * 3600);
+            let t = SystemTime::now()
+                .checked_sub(Duration::from_secs(offset_secs))
+                .unwrap_or(UNIX_EPOCH);
+            Some(format_rfc2822(t))
+        }
+        Some(fixed) => Some(fixed.to_string()),
+    }
+}
+
 fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str) {
     let description = format!(
         "{} part {}/{}: {error}",
@@ -1112,8 +1138,8 @@ mod tests {
 
     #[test]
     fn message_id_domain_is_random() {
-        let a = crate::article::generate_message_id();
-        let b = crate::article::generate_message_id();
+        let a = crate::article::generate_message_id(None);
+        let b = crate::article::generate_message_id(None);
         // Two consecutive IDs must differ and must not contain a fixed domain.
         assert_ne!(a, b);
         assert!(a.contains('@'));

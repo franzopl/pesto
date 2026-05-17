@@ -195,6 +195,24 @@ struct Cli {
     #[arg(long)]
     no_upload: bool,
 
+    /// `Date:` header for each article: `now` (current time), `random`
+    /// (random time within the last 30 days), or a fixed RFC 2822 timestamp.
+    /// Omit to let the server supply the date [config: posting.date].
+    #[arg(long, value_name = "DATE")]
+    date: Option<String>,
+
+    /// Add `X-No-Archive: yes` to every posted article to request that
+    /// servers and search engines do not archive the post
+    /// [config: posting.no_archive].
+    #[arg(long)]
+    no_archive: bool,
+
+    /// Fixed domain component for generated `Message-ID` headers
+    /// (e.g. `example.com`). When omitted a random domain is generated per
+    /// article [config: posting.message_id_domain].
+    #[arg(long, value_name = "DOMAIN")]
+    message_id_domain: Option<String>,
+
     /// Output format: `terminal` (default human-readable panel) or `json`
     /// (newline-delimited JSON events on stdout, for machine consumers like
     /// `upapasta`).
@@ -283,6 +301,9 @@ impl Cli {
             nzb_category: self.nzb_category.clone(),
             nzb_dir: self.nzb_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
             no_upload: self.no_upload,
+            date: self.date.clone(),
+            no_archive: if self.no_archive { Some(true) } else { None },
+            message_id_domain: self.message_id_domain.clone(),
         }
     }
 }
