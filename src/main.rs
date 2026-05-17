@@ -219,6 +219,17 @@ struct Cli {
     #[arg(long, value_name = "FORMAT", default_value = "terminal")]
     output_format: String,
 
+    /// Accepted for backward compatibility; pesto does not generate .nfo files.
+    /// Pass the .nfo as a regular input file instead.
+    #[arg(long, hide = true)]
+    no_nfo: bool,
+
+    /// Skip writing to the shared upload history
+    /// (~/.config/upapasta/history.jsonl) for this run
+    /// [config: output.history = false].
+    #[arg(long)]
+    no_history: bool,
+
     /// Treat each top-level entry in a directory argument as an independent
     /// upload with its own NZB. PAR2 and NZB naming follow the entry name.
     /// Combine with --jobs for parallel uploads.
@@ -301,6 +312,7 @@ impl Cli {
             nzb_category: self.nzb_category.clone(),
             nzb_dir: self.nzb_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
             no_upload: self.no_upload,
+            history: if self.no_history { Some(false) } else { None },
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
@@ -316,6 +328,8 @@ struct UploadParams {
     nzb_default: Option<String>,
     json_mode: bool,
     out: Option<PathBuf>,
+    /// Write a history record to history.jsonl after each successful upload.
+    write_history: bool,
 }
 
 /// The result of a single upload (one entry in `--each` / `--season`).
@@ -334,6 +348,7 @@ async fn run_single_upload(
     entry_label: &str,
 ) -> Result<UploadResult> {
     let config = &params.config;
+    let upload_start = std::time::Instant::now();
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
@@ -548,6 +563,35 @@ async fn run_single_upload(
                 } else {
                     println!("wrote nzb: {}", out.display());
                 }
+
+                // Append to shared history catalog.
+                if params.write_history && !config.par2_only && !config.dry_run {
+                    let obf_name = if config.obfuscate != pesto::config::ObfuscateMode::None {
+                        Some(entry_label)
+                    } else {
+                        None
+                    };
+                    let par2_str;
+                    let par2_pct = if config.par2 > 0 {
+                        par2_str = format!("{}%", config.par2);
+                        Some(par2_str.as_str())
+                    } else {
+                        None
+                    };
+                    pesto::history::record_upload(&pesto::history::UploadRecord {
+                        name: entry_label,
+                        obfuscated_name: obf_name,
+                        password: effective_password.as_deref(),
+                        total_bytes,
+                        group: config.groups.first().map(String::as_str),
+                        server: Some(config.host.as_str()),
+                        par2_redundancy: par2_pct,
+                        duration_secs: upload_start.elapsed().as_secs_f64(),
+                        nzb_path: Some(&out.display().to_string()),
+                        subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                    });
+                }
+
                 Some(xml)
             }
         } else {
@@ -896,6 +940,7 @@ async fn main() -> Result<()> {
         nzb_default: nzb_default.map(|s| s.to_string()),
         json_mode,
         out: cli.out.clone(),
+        write_history: config.history,
     });
 
     // ── --watch mode ──────────────────────────────────────────────────────────

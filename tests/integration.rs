@@ -113,6 +113,7 @@ async fn posts_every_segment_to_a_mock_server() {
         indexer_api_key: None,
         indexer_category: None,
         no_upload: false,
+        history: true,
         nzb_dir: None,
         date: None,
         no_archive: false,

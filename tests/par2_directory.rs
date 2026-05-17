@@ -72,6 +72,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         indexer_api_key: None,
         indexer_category: None,
         no_upload: false,
+        history: true,
         nzb_dir: None,
         date: None,
         no_archive: false,

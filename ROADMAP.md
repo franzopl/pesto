@@ -403,20 +403,29 @@ and PAR2 recovery writing were silent (or a single `eprintln!`).
       `blocknews.net`); `generate_message_id()` now generates a random
       8–15 character domain + random TLD per article, independent of `from`
 
-### 16c — JSON output mode
+### 16c — JSON output mode ✅
 
-- [ ] `--output-format json` flag
-- [ ] Progress events emitted as newline-delimited JSON to stdout; final
-      result summary as a single JSON object
-- [ ] Designed for scripting and `upapasta` integration
+- [x] `--output-format json` flag (already wired; `spawn_json_emitter` in
+      `progress.rs` translates every `ProgressEvent` to a JSON line on stdout)
+- [x] Events: `started`, `segment_done`, `queue_extended`, `status`, `failed`,
+      `interrupted`, `finished`, `nzb_written`, `compress_*`, `par2_write_*`
+- [x] `--no-nfo` accepted as a no-op for backward compatibility with `upapasta`
+      invocations that still pass the flag
 
-### 16d — Upload history log
+### 16d — Upload history log ✅
 
-- [ ] Store a record of each completed upload in
-      `~/.local/share/pesto/history.db` (SQLite via `rusqlite`)
-- [ ] Schema: upload ID, timestamp, files, total bytes, NZB path, groups,
-      subject base
-- [ ] `pesto history` subcommand: list, search, and show individual entries
+- [x] After each successful upload, append a JSON record to
+      `~/.config/upapasta/history.jsonl` — the **same file and format** used
+      by upapasta's `catalog.py`, so both tools share a single history visible
+      from the upapasta TUI
+- [x] Fields written: `data_upload`, `nome_original`, `categoria` (auto-
+      detected: Anime / TV / Movie / Generic), `nome_ofuscado`, `senha_rar`,
+      `tamanho_bytes`, `grupo_usenet`, `servidor_nntp`, `redundancia_par2`,
+      `duracao_upload_s`, `caminho_nzb`, `subject`
+- [x] NZB archived to `~/.config/upapasta/nzb/<stamp>_<name>.nzb` (hard-link,
+      fallback copy), matching upapasta behaviour
+- [x] `--history` / `--no-history` flag (default: enabled); config key
+      `output.history`; disabled automatically for `--par2-only` and `--dry-run`
 
 ### 16e — Completion notifications
 

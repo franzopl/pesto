@@ -39,6 +39,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         indexer_api_key: None,
         indexer_category: None,
         no_upload: false,
+        history: true,
         nzb_dir: None,
         date: None,
         no_archive: false,

@@ -201,6 +201,9 @@ pub struct PostingSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSection {
+    /// Write a record to `~/.config/upapasta/history.jsonl` after each upload.
+    /// Default: true.
+    pub history: Option<bool>,
     /// Default path for the generated `.nzb`. Overridden by `--out`.
     pub nzb: Option<String>,
     /// Directory where `.nzb` files are written by default. The filename is
@@ -287,6 +290,8 @@ pub struct Overrides {
     pub nzb_dir: Option<String>,
     /// When true, skip the indexer NZB upload for this run.
     pub no_upload: bool,
+    /// Override history writing: `Some(false)` = `--no-history`.
+    pub history: Option<bool>,
     /// `Date:` header mode: `"now"`, `"random"`, or a fixed RFC 2822 string.
     pub date: Option<String>,
     /// Add `X-No-Archive: yes` to every posted article.
@@ -359,6 +364,8 @@ pub struct Config {
     pub nzb_dir: Option<String>,
     /// Skip the indexer upload for this run.
     pub no_upload: bool,
+    /// Append a record to the shared history catalog after each upload.
+    pub history: bool,
 }
 
 impl Config {
@@ -527,6 +534,7 @@ impl Config {
             indexer_api_key: file.output.indexer.api_key,
             indexer_category: file.output.indexer.category,
             no_upload: cli.no_upload,
+            history: cli.history.unwrap_or_else(|| file.output.history.unwrap_or(true)),
             date: cli.date.or(file.posting.date),
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
