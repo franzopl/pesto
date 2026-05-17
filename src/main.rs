@@ -1354,6 +1354,11 @@ fn is_executable(path: &std::path::Path) -> bool {
 ///
 /// The 0-byte placeholder is left for `tokio::fs::write` to overwrite.
 async fn versioned_nzb_path(base: &Path) -> PathBuf {
+    // Always work from the bare stem (no extension) to avoid double extensions.
+    let bare = base.with_extension("");
+    let dir = bare.parent().unwrap_or(Path::new("."));
+    let stem = bare.file_name().unwrap_or_default().to_string_lossy();
+
     let try_create = |path: PathBuf| async move {
         tokio::fs::OpenOptions::new()
             .write(true)
@@ -1363,20 +1368,16 @@ async fn versioned_nzb_path(base: &Path) -> PathBuf {
             .map(|_| path)
     };
 
-    if let Ok(p) = try_create(base.with_extension("nzb")).await {
+    if let Ok(p) = try_create(dir.join(format!("{stem}.nzb"))).await {
         return p;
     }
     let mut v = 2u32;
     loop {
-        let stem = base.file_name().unwrap_or_default().to_string_lossy();
-        let candidate = base
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(format!("{stem}.v{v}.nzb"));
+        let candidate = dir.join(format!("{stem}.v{v}.nzb"));
         match try_create(candidate.clone()).await {
             Ok(p) => return p,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => v += 1,
-            Err(_) => return candidate, // dir missing etc — let the write fail
+            Err(_) => return candidate,
         }
     }
 }
