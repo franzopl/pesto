@@ -58,6 +58,10 @@ struct Cli {
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1, default_missing_value = "full")]
     obfuscate: Option<ObfuscateMode>,
 
+    /// Skip network posting and just measure generation speed.
+    #[arg(long)]
+    dry_run: bool,
+
     /// Files to post.
     #[arg(required = true, value_name = "FILE")]
     files: Vec<PathBuf>,
@@ -82,6 +86,7 @@ impl Cli {
             },
             article_size: None,
             obfuscate: self.obfuscate,
+            dry_run: if self.dry_run { Some(true) } else { None },
         }
     }
 }

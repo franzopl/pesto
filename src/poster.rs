@@ -154,14 +154,23 @@ pub async fn post_files(config: &Config, files: &[PathBuf]) -> Result<PostOutcom
         .max(1)
         .min(total_segments.max(1) as usize);
 
-    eprintln!(
-        "posting {} file(s) as {} segment(s) over {} connection(s) to {}:{}",
-        metas.len(),
-        total_segments,
-        worker_count,
-        config.host,
-        config.port,
-    );
+    if config.dry_run {
+        eprintln!(
+            "DRY RUN: processing {} file(s) as {} segment(s) over {} thread(s) (no network)",
+            metas.len(),
+            total_segments,
+            worker_count,
+        );
+    } else {
+        eprintln!(
+            "posting {} file(s) as {} segment(s) over {} connection(s) to {}:{}",
+            metas.len(),
+            total_segments,
+            worker_count,
+            config.host,
+            config.port,
+        );
+    }
 
     let shared = Arc::new(Shared {
         config: config.clone(),
@@ -290,31 +299,36 @@ async fn worker(shared: Arc<Shared>) {
 
         let mut posted = false;
         let mut last_err = String::from("unknown error");
-        for attempt in 1..=MAX_POST_ATTEMPTS {
-            if conn.is_none() {
-                match connect_and_auth(&shared.config).await {
-                    Ok(c) => conn = Some(c),
+
+        if shared.config.dry_run {
+            posted = true;
+        } else {
+            for attempt in 1..=MAX_POST_ATTEMPTS {
+                if conn.is_none() {
+                    match connect_and_auth(&shared.config).await {
+                        Ok(c) => conn = Some(c),
+                        Err(e) => {
+                            last_err = format!("connect: {e:#}");
+                            if attempt < MAX_POST_ATTEMPTS {
+                                tokio::time::sleep(RETRY_BACKOFF).await;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                let connection = conn.as_mut().expect("connection established above");
+                match connection.post(&payload).await {
+                    Ok(()) => {
+                        posted = true;
+                        break;
+                    }
                     Err(e) => {
-                        last_err = format!("connect: {e:#}");
+                        last_err = format!("{e:#}");
+                        // Drop the connection so the next attempt reconnects.
+                        conn = None;
                         if attempt < MAX_POST_ATTEMPTS {
                             tokio::time::sleep(RETRY_BACKOFF).await;
                         }
-                        continue;
-                    }
-                }
-            }
-            let connection = conn.as_mut().expect("connection established above");
-            match connection.post(&payload).await {
-                Ok(()) => {
-                    posted = true;
-                    break;
-                }
-                Err(e) => {
-                    last_err = format!("{e:#}");
-                    // Drop the connection so the next attempt reconnects.
-                    conn = None;
-                    if attempt < MAX_POST_ATTEMPTS {
-                        tokio::time::sleep(RETRY_BACKOFF).await;
                     }
                 }
             }

@@ -67,23 +67,23 @@ so one read block is one article and one input slice.
 
 ### 7a — GF(2^16) field and Reed-Solomon matrix
 
-- [ ] GF(2^16) arithmetic (generator `0x1100B`), log/antilog tables
-- [ ] PAR2 input-constant and recovery-exponent generation, bit-exact with
+- [x] GF(2^16) arithmetic (generator `0x1100B`), log/antilog tables
+- [x] PAR2 input-constant and recovery-exponent generation, bit-exact with
       `par2cmdline`
-- [ ] Tests cross-checked against known `par2cmdline` constants
+- [x] Tests cross-checked against known `par2cmdline` constants
 
 ### 7b — PAR2 packet format
 
-- [ ] Packet framing, MD5 packet hashes, recovery set ID
-- [ ] Main, File Description, Input File Slice Checksum, Recovery Slice and
+- [x] Packet framing, MD5 packet hashes, recovery set ID
+- [x] Main, File Description, Input File Slice Checksum, Recovery Slice and
       Creator packets
-- [ ] Volume-split layout (index + `volNNN+MMM` files, exponential counts)
+- [x] Volume-split layout (index + `volNNN+MMM` files, exponential counts)
 
 ### 7c — Streaming Reed-Solomon encoder
 
-- [ ] Accumulate input slices one at a time into N recovery buffers
-- [ ] Per-slice MD5 + CRC32 and per-file MD5 computed while streaming
-- [ ] Validate generated PAR2 with `par2cmdline` (verify + repair)
+- [x] Accumulate input slices one at a time into N recovery buffers
+- [x] Per-slice MD5 + CRC32 and per-file MD5 computed while streaming
+- [x] Validate generated PAR2 with `par2cmdline` (verify + repair)
 
 ### 7d — Pipeline integration
 

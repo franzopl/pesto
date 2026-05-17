@@ -9,7 +9,9 @@
 //! - [`gf16`] — the GF(2^16) field and Reed-Solomon matrix (phase 7a)
 //! - [`packet`] — PAR2 packet serialization (phase 7b)
 //! - [`layout`] — volume-split file layout (phase 7b)
+//! - [`encoder`] — streaming Reed-Solomon encoder (phase 7c)
 
+pub mod encoder;
 pub mod gf16;
 pub mod layout;
 pub mod packet;

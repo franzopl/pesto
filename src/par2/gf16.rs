@@ -18,7 +18,7 @@
 const POLYNOMIAL: u32 = 0x1_100B;
 
 /// Order of the multiplicative group: `2^16 - 1`.
-const ORDER: u32 = 65_535;
+pub const ORDER: u32 = 65_535;
 
 /// Maximum number of input blocks: the count of integers coprime with 65535,
 /// i.e. `φ(65535) = φ(3)·φ(5)·φ(17)·φ(257) = 2·4·16·256`.
@@ -102,6 +102,22 @@ impl Gf16 {
         }
         let log = self.log[base as usize] as u64;
         self.antilog[((log * exponent as u64) % ORDER as u64) as usize]
+    }
+
+    /// `2^exponent` in the field, with the exponent reduced modulo the group
+    /// order. Note `discrete_log(exp(e)) == e % ORDER`.
+    pub fn exp(&self, exponent: u32) -> u16 {
+        self.antilog[(exponent % ORDER) as usize]
+    }
+
+    /// Discrete logarithm: the exponent `e` such that `exp(e) == value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` is zero.
+    pub fn discrete_log(&self, value: u16) -> u16 {
+        assert!(value != 0, "zero has no discrete logarithm");
+        self.log[value as usize]
     }
 
     /// The base constants assigned to the first `count` input blocks.

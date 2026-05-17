@@ -94,6 +94,7 @@ pub struct Overrides {
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
     pub obfuscate: Option<ObfuscateMode>,
+    pub dry_run: Option<bool>,
 }
 
 /// Fully resolved, validated configuration.
@@ -110,6 +111,8 @@ pub struct Config {
     pub article_size: usize,
     /// How much of each post to obfuscate.
     pub obfuscate: ObfuscateMode,
+    /// If true, skip the network and just simulate posting.
+    pub dry_run: bool,
 }
 
 impl Config {
@@ -118,10 +121,17 @@ impl Config {
     /// Precedence, highest first: CLI override, file value, built-in default.
     /// Returns an error if a required field (host, from, groups) is missing.
     pub fn resolve(file: FileConfig, cli: Overrides) -> Result<Self> {
-        let host = cli
-            .host
-            .or(file.server.host)
-            .context("no `host` set: provide [server].host or --host")?;
+        let dry_run = cli.dry_run.unwrap_or(false);
+
+        let host = if dry_run {
+            cli.host
+                .or(file.server.host)
+                .unwrap_or_else(|| "localhost".into())
+        } else {
+            cli.host
+                .or(file.server.host)
+                .context("no `host` set: provide [server].host or --host")?
+        };
 
         let from = cli
             .from
@@ -151,6 +161,7 @@ impl Config {
                 .or(file.posting.article_size)
                 .unwrap_or(DEFAULT_ARTICLE_SIZE),
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
+            dry_run,
         })
     }
 }
