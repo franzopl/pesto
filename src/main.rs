@@ -499,7 +499,10 @@ async fn run_single_upload(
     // Derive NZB path: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
     // Always use the original entry_paths for the stem so obfuscation/compression
     // does not leak the randomised archive name into the output filenames.
-    let nzb_out_path: Option<PathBuf> = params
+    //
+    // The resume state file is keyed to the BASE stem (no version suffix) so
+    // that a re-post always finds the previous state regardless of versioning.
+    let nzb_base_path: Option<PathBuf> = params
         .out
         .clone()
         .or_else(|| params.nzb_default.as_deref().map(PathBuf::from))
@@ -523,11 +526,17 @@ async fn run_single_upload(
             } else {
                 PathBuf::from(&stem)
             };
-            Some(next_free_versioned_path(&base, "nzb"))
+            Some(base.with_extension("nzb"))
         });
-    let resume_path: Option<PathBuf> = nzb_out_path
+    // Resume state uses the base path so it is stable across re-posts.
+    let resume_path: Option<PathBuf> = nzb_base_path
         .as_ref()
         .map(|p| p.with_extension("pesto-state"));
+    // Output NZB path gets a version suffix when the base already exists.
+    let nzb_out_path: Option<PathBuf> = nzb_base_path.as_ref().map(|p| {
+        let base = p.with_extension("");
+        next_free_versioned_path(&base, "nzb")
+    });
 
     let outcome = pesto::poster::post_files_with_progress(
         config,
