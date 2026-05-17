@@ -283,6 +283,60 @@ mod tests {
     }
 
     #[test]
+    fn escape_apostrophe() {
+        let segments = vec![seg("it's.bin", 1, 1, "<id@x>")];
+        let xml = generate("p <p@x>", &["alt.test".into()], &segments, &no_meta());
+        assert!(xml.contains("it&apos;s.bin"), "apostrophe must be escaped");
+        assert!(!xml.contains("it's.bin"));
+    }
+
+    #[test]
+    fn file_name_with_slash_is_not_escaped() {
+        // A relative path like "Season01/ep01.mkv" — forward slash is not an
+        // XML entity and must appear verbatim in the output.
+        let mut s = seg("Season01/ep01.mkv", 1, 1, "<id@x>");
+        s.file_name = "Season01/ep01.mkv".into();
+        s.subject_name = "Season01/ep01.mkv".into();
+        let xml = generate("p <p@x>", &["alt.test".into()], &[s], &no_meta());
+        assert!(xml.contains("name=\"Season01/ep01.mkv\""));
+    }
+
+    #[test]
+    fn subject_always_shows_part_one_of_total() {
+        // write_file always emits "(1/N)" regardless of which parts are present.
+        // This is intentional — the subject describes the file, not a segment.
+        let segments = vec![
+            seg("big.bin", 2, 5, "<a2@x>"),
+            seg("big.bin", 3, 5, "<a3@x>"),
+        ];
+        let xml = generate("p <p@x>", &["alt.test".into()], &segments, &no_meta());
+        assert!(xml.contains("subject=\"big.bin (1/5)\""));
+        assert!(!xml.contains("(2/5)"));
+    }
+
+    #[test]
+    fn segment_bytes_attribute_is_exact() {
+        let mut s = seg("f.bin", 1, 1, "<id@x>");
+        s.bytes = 123_456;
+        let xml = generate("p <p@x>", &["alt.test".into()], &[s], &no_meta());
+        assert!(xml.contains("bytes=\"123456\""));
+    }
+
+    #[test]
+    fn date_attribute_is_a_nonzero_number() {
+        let xml = generate("p <p@x>", &["alt.test".into()], &[seg("f.bin", 1, 1, "<id@x>")], &no_meta());
+        // Extract the date="..." value from the <file> element.
+        let date_str = xml
+            .lines()
+            .find(|l| l.contains("<file "))
+            .and_then(|l| l.split("date=\"").nth(1))
+            .and_then(|l| l.split('"').next())
+            .unwrap();
+        let date: u64 = date_str.parse().expect("date should be a number");
+        assert!(date > 0, "date timestamp should be non-zero");
+    }
+
+    #[test]
     fn only_password_meta_emits_head_without_name_or_category() {
         let meta = NzbMeta {
             name: None,

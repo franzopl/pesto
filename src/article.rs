@@ -361,4 +361,82 @@ mod tests {
     fn default_subject_last_part() {
         assert_eq!(default_subject("f.bin", 10, 10), "f.bin (10/10)");
     }
+
+    // ── format_rfc2822 additional edge cases ──────────────────────────────────
+
+    #[test]
+    fn format_rfc2822_year_end() {
+        // 2023-12-31 23:59:59 UTC — verified: 1704067199
+        let t = UNIX_EPOCH + Duration::from_secs(1704067199);
+        let s = format_rfc2822(t);
+        assert_eq!(s, "Sun, 31 Dec 2023 23:59:59 +0000");
+    }
+
+    #[test]
+    fn format_rfc2822_non_leap_year_feb28() {
+        // 2023-02-28 00:00:00 UTC — verified: 1677542400
+        let t = UNIX_EPOCH + Duration::from_secs(1677542400);
+        let s = format_rfc2822(t);
+        assert_eq!(s, "Tue, 28 Feb 2023 00:00:00 +0000");
+    }
+
+    #[test]
+    fn format_rfc2822_midnight_fields_are_zero_padded() {
+        // Any midnight timestamp — hours, minutes, seconds must be "00".
+        let t = UNIX_EPOCH + Duration::from_secs(86400); // 1970-01-02 00:00:00
+        let s = format_rfc2822(t);
+        assert!(s.ends_with("00:00:00 +0000"), "got: {s}");
+    }
+
+    // ── serialize edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn serialize_preserves_binary_body_verbatim() {
+        let article = Article {
+            message_id: "<id@x>".into(),
+            from: "p <p@x.com>".into(),
+            newsgroups: vec!["alt.test".into()],
+            subject: "f".into(),
+            date: None,
+            no_archive: false,
+        };
+        let body: Vec<u8> = (0u8..=255).collect();
+        let out = article.serialize(&body);
+        // The headers end with \r\n\r\n; everything after is the raw body.
+        let sep = b"\r\n\r\n";
+        let body_start = out.windows(sep.len()).position(|w| w == sep).unwrap() + sep.len();
+        assert_eq!(&out[body_start..], body.as_slice());
+    }
+
+    #[test]
+    fn serialize_single_newsgroup_has_no_comma() {
+        let article = Article {
+            message_id: "<id@x>".into(),
+            from: "p <p@x.com>".into(),
+            newsgroups: vec!["alt.binaries.test".into()],
+            subject: "f".into(),
+            date: None,
+            no_archive: false,
+        };
+        let out = String::from_utf8(article.serialize(b"")).unwrap();
+        let ng_line = out.lines().find(|l| l.starts_with("Newsgroups:")).unwrap();
+        assert!(!ng_line.contains(','));
+        assert!(ng_line.contains("alt.binaries.test"));
+    }
+
+    #[test]
+    fn serialize_zero_length_body_header_ends_with_double_crlf() {
+        // Zero-length file: the body after encoding is empty. The serialized
+        // article must still end with \r\n\r\n (blank line after headers).
+        let article = Article {
+            message_id: "<id@x>".into(),
+            from: "p <p@x.com>".into(),
+            newsgroups: vec!["alt.test".into()],
+            subject: "empty.bin".into(),
+            date: None,
+            no_archive: false,
+        };
+        let out = article.serialize(b"");
+        assert!(out.ends_with(b"\r\n\r\n"));
+    }
 }
