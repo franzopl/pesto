@@ -63,7 +63,10 @@ fn detect_category(name: &str) -> &'static str {
 
     // TV: S01E01, 1x01, Season N, Complete Series, MINISERIES
     let tv = contains_pattern(stem, &["x0", "x1", "x2"])
-        || contains_ci(stem, &["s01e", "s02e", "s03e", "season", "miniseries", "complete"])
+        || contains_ci(
+            stem,
+            &["s01e", "s02e", "s03e", "season", "miniseries", "complete"],
+        )
         || (stem.len() > 3 && {
             let b = stem.as_bytes();
             b.iter().any(|&c| c == b'S' || c == b's')
@@ -201,7 +204,13 @@ fn archive_nzb(src: &Path, stamp: &str, name: &str) -> Option<PathBuf> {
     let dir = catalog_dir()?.join("nzb");
     let safe: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' || c == ' ' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(80)
         .collect();
     let dest = dir.join(format!("{stamp}_{safe}.nzb"));

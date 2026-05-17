@@ -330,12 +330,19 @@ impl Cli {
             // None → no password; Some("") → bare --password → random;
             // Some(s) → explicit password.
             compress_password: self.archive_password.as_deref().map(|pw| {
-                if pw.is_empty() { random_password() } else { pw.to_string() }
+                if pw.is_empty() {
+                    random_password()
+                } else {
+                    pw.to_string()
+                }
             }),
             nzb_name: self.nzb_name.clone(),
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
-            nzb_dir: self.nzb_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            nzb_dir: self
+                .nzb_dir
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
             no_upload: self.no_upload,
             history: if self.no_history { Some(false) } else { None },
             notify: if self.no_notify {
@@ -393,24 +400,20 @@ async fn run_single_upload(
     };
 
     // ── Compression ──────────────────────────────────────────────────────────
-    let compress_format_str: Option<String> = config
-        .compress_format
-        .clone()
-        .or_else(|| {
-            if config.compress_password.is_some() {
-                Some("7z".to_string())
-            } else {
-                None
-            }
-        });
+    let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
+        if config.compress_password.is_some() {
+            Some("7z".to_string())
+        } else {
+            None
+        }
+    });
     let effective_password: Option<String> = config.compress_password.clone();
 
     let compress_temp_dir: Option<PathBuf>;
     if let Some(fmt_str) = &compress_format_str {
-        let format = ArchiveFormat::parse(fmt_str)
-            .ok_or_else(|| anyhow::anyhow!(
-                "unknown compression format `{fmt_str}`; supported: 7z, zip, rar"
-            ))?;
+        let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
+            anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
+        })?;
 
         if format == ArchiveFormat::Rar && effective_password.is_some() {
             eprintln!("note: rar password protection requires the `rar` binary in PATH");
@@ -434,8 +437,11 @@ async fn run_single_upload(
             archive_stem
         };
 
-        let tmp_dir = std::env::temp_dir()
-            .join(format!("pesto_compress_{}_{}", std::process::id(), entry_label));
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "pesto_compress_{}_{}",
+            std::process::id(),
+            entry_label
+        ));
         compress_temp_dir = Some(tmp_dir.clone());
 
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
@@ -445,7 +451,8 @@ async fn run_single_upload(
             total_bytes: compress_input_bytes,
         });
 
-        let archive_path_for_poll = tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
+        let archive_path_for_poll =
+            tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
         let poll_tx = progress_tx.clone();
         let poll_path = archive_path_for_poll.clone();
         let poll_handle = tokio::spawn(async move {
@@ -480,7 +487,8 @@ async fn run_single_upload(
         poll_handle.abort();
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
 
-        let archive_name = result.path
+        let archive_name = result
+            .path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
@@ -563,7 +571,11 @@ async fn run_single_upload(
         let files_word = if file_count == 1 { "file" } else { "files" };
         let size = pesto::progress::format_size(total_bytes);
         if folder_count > 0 {
-            let folders_word = if folder_count == 1 { "subfolder" } else { "subfolders" };
+            let folders_word = if folder_count == 1 {
+                "subfolder"
+            } else {
+                "subfolders"
+            };
             println!("upload: {file_count} {files_word} · {folder_count} {folders_word} · {size}");
         } else {
             println!("upload: {file_count} {files_word} · {size}");
@@ -614,7 +626,11 @@ async fn run_single_upload(
                     .await
                     .with_context(|| format!("writing nzb file `{}`", out.display()))?;
                 if params.json_mode {
-                    let path_esc = out.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+                    let path_esc = out
+                        .display()
+                        .to_string()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
                     println!(r#"{{"type":"nzb_written","path":"{path_esc}"}}"#);
                 } else {
                     println!("wrote nzb: {}", out.display());
@@ -702,15 +718,12 @@ async fn run_single_upload(
     if upload_ok && !config.par2_only && !config.dry_run {
         // Derive the .nfo path next to the .nzb (or next to the source).
         let nfo_path: Option<PathBuf> = if config.nfo {
-            let base = out
-                .as_ref()
-                .map(|p| p.with_extension("nfo"))
-                .or_else(|| {
-                    entry_paths
-                        .first()
-                        .and_then(|p| p.parent())
-                        .map(|d| d.join(format!("{entry_label}.nfo")))
-                });
+            let base = out.as_ref().map(|p| p.with_extension("nfo")).or_else(|| {
+                entry_paths
+                    .first()
+                    .and_then(|p| p.parent())
+                    .map(|d| d.join(format!("{entry_label}.nfo")))
+            });
             if let Some(ref nfo_out) = base {
                 match pesto::nfo::generate(entry_paths) {
                     Some(content) => match pesto::nfo::write(nfo_out, &content) {
@@ -789,8 +802,7 @@ async fn run_batch(
     // Collect all entries from every directory argument.
     let mut entries: Vec<PathBuf> = Vec::new();
     for dir in dirs {
-        let md = std::fs::metadata(dir)
-            .with_context(|| format!("reading `{}`", dir.display()))?;
+        let md = std::fs::metadata(dir).with_context(|| format!("reading `{}`", dir.display()))?;
         if md.is_dir() {
             entries.extend(top_level_entries(dir)?);
         } else {
@@ -840,8 +852,12 @@ async fn run_batch(
         match handle.await {
             Ok(Ok(result)) => {
                 all_segments.extend(result.segments);
-                if result.cancelled { any_cancelled = true; }
-                if result.had_failures { any_failures = true; }
+                if result.cancelled {
+                    any_cancelled = true;
+                }
+                if result.had_failures {
+                    any_failures = true;
+                }
             }
             Ok(Err(e)) => {
                 eprintln!("upload error: {e:#}");
@@ -863,20 +879,18 @@ async fn run_batch(
                 password: config.nzb_password.clone(),
                 category: config.nzb_category.clone(),
             };
-            let xml = pesto::nzb::generate(
-                &config.from,
-                &config.groups,
-                &all_segments,
-                &nzb_meta,
-            );
+            let xml = pesto::nzb::generate(&config.from, &config.groups, &all_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
             if !params.json_mode {
                 println!("\nwrote season nzb: {}", season_path.display());
             } else {
-                let path_esc = season_path.display().to_string()
-                    .replace('\\', "\\\\").replace('"', "\\\"");
+                let path_esc = season_path
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
                 println!(r#"{{"type":"nzb_written","path":"{path_esc}","season":true}}"#);
             }
 
@@ -917,14 +931,20 @@ async fn run_watch(
 ) -> Result<()> {
     use tokio::signal;
 
-    eprintln!("watching {} (poll every {}s)", watch_dir.display(), poll_interval);
+    eprintln!(
+        "watching {} (poll every {}s)",
+        watch_dir.display(),
+        poll_interval
+    );
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_clone = Arc::clone(&shutdown);
 
     // Listen for Ctrl-C / SIGTERM on a background task.
     tokio::spawn(async move {
-        let ctrl_c = async { signal::ctrl_c().await.ok(); };
+        let ctrl_c = async {
+            signal::ctrl_c().await.ok();
+        };
         #[cfg(unix)]
         let sigterm = async {
             signal::unix::signal(signal::unix::SignalKind::terminate())
@@ -952,7 +972,9 @@ async fn run_watch(
     }
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(if jobs == 0 {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
     } else {
         jobs
     }));
@@ -997,8 +1019,11 @@ async fn run_watch(
                         if let Some(done_dir) = &watch_done {
                             let dest = done_dir.join(entry.file_name().unwrap_or_default());
                             if let Err(e) = std::fs::rename(&entry, &dest) {
-                                eprintln!("watch: could not move `{}` to `{}`: {e}",
-                                    entry.display(), dest.display());
+                                eprintln!(
+                                    "watch: could not move `{}` to `{}`: {e}",
+                                    entry.display(),
+                                    dest.display()
+                                );
                             }
                         } else {
                             // Delete completed entry.
@@ -1021,7 +1046,9 @@ async fn run_watch(
 
     // Wait for all in-progress uploads (drain the semaphore).
     let effective_jobs = if jobs == 0 {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
     } else {
         jobs
     };

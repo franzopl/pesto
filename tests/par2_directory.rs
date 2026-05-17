@@ -14,8 +14,7 @@ use pesto::walk::expand_inputs;
 fn content(seed: u8) -> Vec<u8> {
     (0..200_000u64)
         .map(|i| {
-            let mut z = i
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            let mut z = i.wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 ^ (seed as u64).wrapping_mul(0xD1B5_4A32_D192_ED03);
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -80,7 +79,6 @@ async fn par2_only_directory_repair_recreates_tree() {
         date: None,
         no_archive: false,
         message_id_domain: None,
-
     };
 
     let inputs = expand_inputs(std::slice::from_ref(&show)).unwrap();

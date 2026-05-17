@@ -69,11 +69,10 @@ fn find_media_file(paths: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut children: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     children.sort();
     for child in children {
         if child.is_dir() {
@@ -85,9 +84,7 @@ fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn run_mediainfo(path: &Path) -> std::io::Result<String> {
-    let output = std::process::Command::new("mediainfo")
-        .arg(path)
-        .output()?;
+    let output = std::process::Command::new("mediainfo").arg(path).output()?;
     if !output.status.success() {
         return Err(std::io::Error::other("mediainfo exited non-zero"));
     }
@@ -111,12 +108,11 @@ fn build_listing(paths: &[PathBuf]) -> String {
 }
 
 fn append_dir_listing(dir: &Path, buf: &mut String, depth: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let indent = "  ".repeat(depth);
-    let mut children: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
+    let mut children: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     children.sort();
     for child in children {
         let name = child.file_name().unwrap_or(child.as_os_str());

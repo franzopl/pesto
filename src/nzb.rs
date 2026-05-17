@@ -60,11 +60,7 @@ pub fn generate(
     if !metas.is_empty() {
         out.push_str("  <head>\n");
         for (k, v) in &metas {
-            out.push_str(&format!(
-                "    <meta type=\"{}\">{}</meta>\n",
-                k,
-                escape(v)
-            ));
+            out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
         }
         out.push_str("  </head>\n");
     }

@@ -47,13 +47,14 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         date: None,
         no_archive: false,
         message_id_domain: None,
-
     }
 }
 
 /// `true` when `s` is a 32-character lowercase-hex obfuscated name.
 fn is_obfuscated_name(s: &str) -> bool {
-    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == 32
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// Build a two-root directory tree under a fresh temp directory and return
@@ -86,7 +87,11 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     let config = dry_run_config(ObfuscateMode::Full);
     let inputs = expand_inputs(&args).unwrap();
     let outcome = post_files(&config, &inputs).await.unwrap();
-    assert!(outcome.failures.is_empty(), "failures: {:?}", outcome.failures);
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
 
     // Every expected relative path must appear as a posted segment's real
     // file name, and its subject must be a fresh obfuscated name — never the
@@ -116,9 +121,17 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
 
     // The `.nzb` keeps the real relative paths in `name`, and never leaks one
     // into a `subject`.
-    let nzb = pesto::nzb::generate(&config.from, &config.groups, &outcome.segments, &pesto::nzb::NzbMeta::default());
+    let nzb = pesto::nzb::generate(
+        &config.from,
+        &config.groups,
+        &outcome.segments,
+        &pesto::nzb::NzbMeta::default(),
+    );
     for rel in &expected {
-        assert!(nzb.contains(&format!("name=\"{rel}\"")), "nzb missing `{rel}`");
+        assert!(
+            nzb.contains(&format!("name=\"{rel}\"")),
+            "nzb missing `{rel}`"
+        );
     }
     assert!(
         !nzb.contains("subject=\"Show"),
@@ -137,7 +150,11 @@ async fn subject_obfuscation_keeps_relative_path_as_yenc_name() {
     let config = dry_run_config(ObfuscateMode::Subject);
     let inputs = expand_inputs(&args).unwrap();
     let outcome = post_files(&config, &inputs).await.unwrap();
-    assert!(outcome.failures.is_empty(), "failures: {:?}", outcome.failures);
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
 
     for rel in &expected {
         let seg = outcome

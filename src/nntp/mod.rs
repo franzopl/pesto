@@ -139,9 +139,7 @@ impl Connection {
     /// Returns `true` when the server responds 223 (article exists), `false`
     /// on 430 (not found). Any other response code is returned as an error.
     pub async fn stat(&mut self, message_id: &str) -> Result<bool> {
-        let resp = self
-            .command(&format!("STAT <{message_id}>"))
-            .await?;
+        let resp = self.command(&format!("STAT <{message_id}>")).await?;
         match resp.code {
             223 => Ok(true),
             430 => Ok(false),

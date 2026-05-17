@@ -183,7 +183,11 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                             r#"{{"type":"segment_done","file":"{file_esc}","bytes":{bytes},"ok":{ok},"done_segments":{done_segments},"total_segments":{total_segments},"done_bytes":{done_bytes},"total_bytes":{total_bytes},"progress_pct":{pct:.1}}}"#
                         );
                     }
-                    ProgressEvent::QueueExtended { file, segments, bytes } => {
+                    ProgressEvent::QueueExtended {
+                        file,
+                        segments,
+                        bytes,
+                    } => {
                         total_segments += segments;
                         total_bytes += bytes;
                         let file_esc = file.replace('"', "\\\"");
@@ -204,10 +208,8 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ = writeln!(out, r#"{{"type":"interrupted"}}"#);
                     }
                     ProgressEvent::CompressStarted { total_bytes: tb } => {
-                        let _ = writeln!(
-                            out,
-                            r#"{{"type":"compress_started","total_bytes":{tb}}}"#
-                        );
+                        let _ =
+                            writeln!(out, r#"{{"type":"compress_started","total_bytes":{tb}}}"#);
                     }
                     ProgressEvent::CompressProgress { bytes_written } => {
                         let _ = writeln!(
@@ -219,10 +221,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ = writeln!(out, r#"{{"type":"compress_done"}}"#);
                     }
                     ProgressEvent::Par2WriteStarted { total } => {
-                        let _ = writeln!(
-                            out,
-                            r#"{{"type":"par2_write_started","total":{total}}}"#
-                        );
+                        let _ = writeln!(out, r#"{{"type":"par2_write_started","total":{total}}}"#);
                     }
                     ProgressEvent::Par2SliceWritten => {
                         let _ = writeln!(out, r#"{{"type":"par2_slice_written"}}"#);
@@ -499,7 +498,8 @@ impl RenderState {
         }
 
         // --- compression box (shown while compressing) -------------------
-        if self.compress_active || (final_draw && self.compress_total > 0 && self.files.is_empty()) {
+        if self.compress_active || (final_draw && self.compress_total > 0 && self.files.is_empty())
+        {
             let elapsed = self.compress_start.elapsed().as_secs_f64().max(0.001);
             let frac = if self.compress_total > 0 {
                 (self.compress_written as f64 / self.compress_total as f64).clamp(0.0, 1.0)

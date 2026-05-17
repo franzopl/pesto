@@ -44,14 +44,8 @@ pub async fn send_all(cfg: &NotifyConfig<'_>) {
 /// Telegram, and generic webhooks — same logic as upapasta `_webhook.py`.
 async fn send_webhook(url: &str, cfg: &NotifyConfig<'_>) -> Result<()> {
     let gb = cfg.total_bytes as f64 / (1024.0_f64.powi(3));
-    let group_str = cfg
-        .group
-        .map(|g| format!(" → {g}"))
-        .unwrap_or_default();
-    let cat_str = cfg
-        .category
-        .map(|c| format!(" [{c}]"))
-        .unwrap_or_default();
+    let group_str = cfg.group.map(|g| format!(" → {g}")).unwrap_or_default();
+    let cat_str = cfg.category.map(|c| format!(" [{c}]")).unwrap_or_default();
     let status = if cfg.ok { "✅" } else { "❌" };
     let msg = format!(
         "{status} Upload {}: {name}{cat_str} ({gb:.2} GB){group_str}",
@@ -97,7 +91,11 @@ async fn send_ntfy(topic: &str, cfg: &NotifyConfig<'_>) -> Result<()> {
     let status = if cfg.ok { "✅" } else { "❌" };
     let title = format!(
         "{status} pesto: {}",
-        if cfg.ok { "upload concluído" } else { "upload com falhas" }
+        if cfg.ok {
+            "upload concluído"
+        } else {
+            "upload com falhas"
+        }
     );
     let body = format!(
         "{name} ({gb:.2} GB){group}",
@@ -182,8 +180,8 @@ async fn http_post_with_headers(
 
     if tls {
         use std::sync::Arc;
-        use tokio_rustls::rustls::{ClientConfig, RootCertStore};
         use tokio_rustls::rustls::pki_types::ServerName;
+        use tokio_rustls::rustls::{ClientConfig, RootCertStore};
         use tokio_rustls::TlsConnector;
 
         let mut roots = RootCertStore::empty();

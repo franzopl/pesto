@@ -16,7 +16,9 @@ use anyhow::{bail, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::article::{default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article};
+use crate::article::{
+    default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article,
+};
 use crate::config::{Config, ObfuscateMode, ServerEntry};
 use crate::nntp::Connection;
 use crate::par2::encoder::{slice_checksum, FileHasher, RecoveryEncoder};
@@ -204,32 +206,26 @@ pub async fn post_files_with_progress(
     let worker_count = if config.par2_only {
         0
     } else {
-        total_conns
-            .max(1)
-            .min(initial_segments.max(1) as usize)
+        total_conns.max(1).min(initial_segments.max(1) as usize)
     };
 
     // Load resume state when enabled and a state path is provided.
-    let (resume_arc, resume_path_owned) =
-        if config.resume && !config.dry_run && !config.par2_only {
-            if let Some(rp) = resume_state_path {
-                let state = ResumeState::load(rp)?;
-                if !state.is_empty() {
-                    eprintln!(
-                        "resuming: {} segment(s) already posted, skipping",
-                        state.len()
-                    );
-                }
-                (
-                    Some(Arc::new(Mutex::new(state))),
-                    Some(rp.to_path_buf()),
-                )
-            } else {
-                (None, None)
+    let (resume_arc, resume_path_owned) = if config.resume && !config.dry_run && !config.par2_only {
+        if let Some(rp) = resume_state_path {
+            let state = ResumeState::load(rp)?;
+            if !state.is_empty() {
+                eprintln!(
+                    "resuming: {} segment(s) already posted, skipping",
+                    state.len()
+                );
             }
+            (Some(Arc::new(Mutex::new(state))), Some(rp.to_path_buf()))
         } else {
             (None, None)
-        };
+        }
+    } else {
+        (None, None)
+    };
 
     // Pre-seed the buffer pool with enough buffers to keep all workers and the
     // double-buffer reader supplied without allocating during the hot path.
@@ -493,7 +489,10 @@ async fn producer(
         let mut count = total_slices;
         while count > 32768 {
             articles += 1;
-            count = per_file_articles.iter().map(|&n| n.div_ceil(articles)).sum();
+            count = per_file_articles
+                .iter()
+                .map(|&n| n.div_ceil(articles))
+                .sum();
         }
         (articles * article_size, count)
     } else {
@@ -553,8 +552,7 @@ async fn producer(
             // disk into a bounded channel of capacity 2. This lets the OS
             // begin fetching article N+1 while the producer is processing
             // article N (PAR2 accumulation, channel send, or block_in_place).
-            let (read_tx, mut read_rx) =
-                tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
+            let (read_tx, mut read_rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
 
             let reader_path = meta.path.clone();
             let reader_shared = shared.clone();
@@ -868,8 +866,7 @@ impl RateLimiter {
         }
         let now = Instant::now();
         let elapsed = now.duration_since(self.last).as_secs_f64();
-        self.tokens =
-            (self.tokens + elapsed * self.rate as f64).min(self.rate as f64);
+        self.tokens = (self.tokens + elapsed * self.rate as f64).min(self.rate as f64);
         self.last = now;
 
         let bytes_f = bytes as f64;
@@ -1039,8 +1036,7 @@ async fn worker(
                         server_idx = (server_idx + 1) % server_count;
                     }
                 }
-                let backoff =
-                    Duration::from_secs(shared.servers[server_idx].retry_delay);
+                let backoff = Duration::from_secs(shared.servers[server_idx].retry_delay);
                 if attempt < max_attempts {
                     tokio::time::sleep(backoff).await;
                 }
@@ -1088,8 +1084,7 @@ async fn worker(
 }
 
 async fn connect_and_auth_server(server: &ServerEntry) -> Result<Connection> {
-    let mut conn =
-        Connection::connect(&server.host, server.port, server.ssl).await?;
+    let mut conn = Connection::connect(&server.host, server.port, server.ssl).await?;
     if let Some(username) = &server.username {
         let password = server.password.as_deref().unwrap_or("");
         conn.authenticate(username, password).await?;

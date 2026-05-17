@@ -90,9 +90,8 @@ pub fn config_dir() -> Option<PathBuf> {
 pub fn default_config_path() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::var_os("APPDATA").map(|appdata| {
-            PathBuf::from(appdata).join("pesto").join("config.toml")
-        })
+        std::env::var_os("APPDATA")
+            .map(|appdata| PathBuf::from(appdata).join("pesto").join("config.toml"))
     }
     #[cfg(not(windows))]
     {
@@ -482,7 +481,14 @@ impl Config {
                     })
                     .collect::<Result<_>>()?;
                 (
-                    host, port, ssl, connections, username, password, retry_delay, extras,
+                    host,
+                    port,
+                    ssl,
+                    connections,
+                    username,
+                    password,
+                    retry_delay,
+                    extras,
                 )
             } else {
                 let host = if dry_run || par2_only {
@@ -553,11 +559,10 @@ impl Config {
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
             par2_only,
-            verify: cli
-                .verify
-                .or(file.posting.verify)
-                .unwrap_or(false),
-            resume: cli.resume.unwrap_or_else(|| file.output.resume.unwrap_or(false)),
+            verify: cli.verify.or(file.posting.verify).unwrap_or(false),
+            resume: cli
+                .resume
+                .unwrap_or_else(|| file.output.resume.unwrap_or(false)),
             upload_rate: {
                 // CLI `--rate` wins; fall back to config file string.
                 if let Some(rate) = cli.upload_rate {
@@ -578,7 +583,9 @@ impl Config {
             indexer_api_key: file.output.indexer.api_key,
             indexer_category: file.output.indexer.category,
             no_upload: cli.no_upload,
-            history: cli.history.unwrap_or_else(|| file.output.history.unwrap_or(true)),
+            history: cli
+                .history
+                .unwrap_or_else(|| file.output.history.unwrap_or(true)),
             notify_webhook: file.notify.webhook_url,
             notify_ntfy: file.notify.ntfy_topic,
             notify: cli.notify,

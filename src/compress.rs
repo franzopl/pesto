@@ -116,8 +116,8 @@ fn compress_with_7z(
     cmd.arg("a")
         .arg(type_flag)
         .arg("-mx=0") // store mode: no compression
-        .arg("-bd")   // no progress bar
-        .arg("-y");   // assume yes
+        .arg("-bd") // no progress bar
+        .arg("-y"); // assume yes
 
     if let Some(pass) = password {
         cmd.arg(format!("-p{pass}"));
@@ -175,9 +175,7 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 }
 
 fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
-    let output = cmd
-        .output()
-        .with_context(|| format!("running `{tool}`"))?;
+    let output = cmd.output().with_context(|| format!("running `{tool}`"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -200,8 +198,7 @@ pub fn random_password() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
 
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut out = String::with_capacity(24);
     let (mut bits, mut left) = (0u64, 0u32);
     for _ in 0..24 {
@@ -228,7 +225,10 @@ mod tests {
     fn random_password_is_24_alphanumeric_chars() {
         let p = random_password();
         assert_eq!(p.len(), 24);
-        assert!(p.chars().all(|c| c.is_ascii_alphanumeric()), "non-alphanumeric: {p}");
+        assert!(
+            p.chars().all(|c| c.is_ascii_alphanumeric()),
+            "non-alphanumeric: {p}"
+        );
     }
 
     #[test]
@@ -241,7 +241,11 @@ mod tests {
 
     #[test]
     fn format_round_trips() {
-        for (s, expected) in &[("7z", ArchiveFormat::SevenZip), ("zip", ArchiveFormat::Zip), ("rar", ArchiveFormat::Rar)] {
+        for (s, expected) in &[
+            ("7z", ArchiveFormat::SevenZip),
+            ("zip", ArchiveFormat::Zip),
+            ("rar", ArchiveFormat::Rar),
+        ] {
             assert_eq!(ArchiveFormat::parse(s), Some(*expected));
             assert_eq!(expected.extension(), *s);
         }

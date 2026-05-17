@@ -51,8 +51,7 @@ pub fn expand_inputs(paths: &[PathBuf]) -> Result<Vec<InputFile>> {
 
     let mut out = Vec::new();
     for path in paths {
-        let md = fs::metadata(path)
-            .with_context(|| format!("reading `{}`", path.display()))?;
+        let md = fs::metadata(path).with_context(|| format!("reading `{}`", path.display()))?;
         if md.is_file() {
             out.push(InputFile {
                 path: path.clone(),
@@ -93,14 +92,17 @@ pub fn expand_inputs(paths: &[PathBuf]) -> Result<Vec<InputFile>> {
 /// Recursively collect the files under `dir`, prefixing each relative name
 /// with `prefix` (the path built so far, starting at the root folder name).
 fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<InputFile>) -> Result<()> {
-    let entries = fs::read_dir(dir)
-        .with_context(|| format!("reading directory `{}`", dir.display()))?;
+    let entries =
+        fs::read_dir(dir).with_context(|| format!("reading directory `{}`", dir.display()))?;
 
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("warning: skipping unreadable entry in `{}`: {e}", dir.display());
+                eprintln!(
+                    "warning: skipping unreadable entry in `{}`: {e}",
+                    dir.display()
+                );
                 continue;
             }
         };
@@ -109,10 +111,7 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<InputFile>) -> Result<()> {
         let name = match raw_name.to_str() {
             Some(s) => s,
             None => {
-                eprintln!(
-                    "warning: skipping non-UTF-8 name in `{}`",
-                    dir.display()
-                );
+                eprintln!("warning: skipping non-UTF-8 name in `{}`", dir.display());
                 continue;
             }
         };
@@ -159,10 +158,7 @@ mod tests {
     fn temp_dir() -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "pesto_walk_{}_{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("pesto_walk_{}_{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -203,7 +199,11 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            ["Season 01/ep01.mkv", "Season 01/ep02.mkv", "Season 01/extras/behind.mkv"]
+            [
+                "Season 01/ep01.mkv",
+                "Season 01/ep02.mkv",
+                "Season 01/extras/behind.mkv"
+            ]
         );
 
         fs::remove_dir_all(&dir).unwrap();
