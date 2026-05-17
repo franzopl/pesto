@@ -426,20 +426,22 @@ async fn run_single_upload(
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // Derive NZB path.
+    // Derive NZB path: --out > --nzb-default > <stem-of-first-input>.nzb
     let nzb_out_path: Option<PathBuf> = params
         .out
         .clone()
         .or_else(|| params.nzb_default.as_deref().map(PathBuf::from))
         .or_else(|| {
-            inputs.first().and_then(|f| {
-                let top = f.name.split('/').next()?;
-                if top != f.name {
-                    Some(PathBuf::from(format!("{top}.nzb")))
-                } else {
-                    None
-                }
-            })
+            let stem = upload_root(&inputs).or_else(|| {
+                inputs.first().map(|f| {
+                    PathBuf::from(f.name.split('/').next().unwrap_or(&f.name))
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })?;
+            Some(PathBuf::from(format!("{stem}.nzb")))
         });
     let resume_path: Option<PathBuf> = nzb_out_path
         .as_ref()
@@ -482,11 +484,7 @@ async fn run_single_upload(
     }
 
     // Write NZB.
-    let out = params
-        .out
-        .clone()
-        .or_else(|| params.nzb_default.clone().map(PathBuf::from))
-        .or_else(|| upload_root(&inputs).map(|root| PathBuf::from(format!("{root}.nzb"))));
+    let out = nzb_out_path.clone();
 
     let nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
