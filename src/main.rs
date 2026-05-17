@@ -147,8 +147,14 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
-    /// Disable upload resume: ignore any existing state file and start fresh.
+    /// Resume an interrupted upload from where it left off. Without this flag
+    /// pesto always starts fresh, even if a state file exists
+    /// [config: output.resume = true].
     #[arg(long)]
+    resume: bool,
+
+    /// Accepted for backward compatibility; no-op (resume is off by default).
+    #[arg(long, hide = true)]
     no_resume: bool,
 
     /// After posting each article, confirm it is present on the server with
@@ -312,7 +318,7 @@ impl Cli {
             dry_run: if self.dry_run { Some(true) } else { None },
             par2: self.par2,
             par2_only: if self.par2_only { Some(true) } else { None },
-            resume: if self.no_resume { Some(false) } else { None },
+            resume: if self.resume { Some(true) } else { Some(false) },
             verify: if self.verify { Some(true) } else { None },
             upload_rate: self
                 .rate
@@ -1342,11 +1348,13 @@ fn is_executable(path: &std::path::Path) -> bool {
 
 /// Return `base.ext` if it does not exist, otherwise `base.v2.ext`,
 /// `base.v3.ext`, … until a free slot is found.
-/// Uses async I/O so it never blocks the tokio executor.
+///
+/// Uses async I/O with a 2-second timeout per check. On timeout the file is
+/// assumed to exist (safe: we just pick a higher version rather than risk
+/// overwriting).
 async fn next_free_versioned_path(base: &Path, ext: &str) -> PathBuf {
-    let candidate = base.with_extension(ext);
-    if !tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
-        return candidate;
+    if !file_exists_with_timeout(base.with_extension(ext)).await {
+        return base.with_extension(ext);
     }
     let mut v = 2u32;
     loop {
@@ -1356,11 +1364,22 @@ async fn next_free_versioned_path(base: &Path, ext: &str) -> PathBuf {
             .unwrap_or(Path::new("."))
             .join(format!("{stem}.v{v}"))
             .with_extension(ext);
-        if !tokio::fs::try_exists(&versioned).await.unwrap_or(false) {
+        if !file_exists_with_timeout(versioned.clone()).await {
             return versioned;
         }
         v += 1;
     }
+}
+
+async fn file_exists_with_timeout(path: PathBuf) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::fs::try_exists(&path),
+    )
+    .await
+    // timeout → assume exists so we never overwrite
+    .unwrap_or(Ok(true))
+    .unwrap_or(true)
 }
 
 /// Expand a leading `~` to the user's home directory.

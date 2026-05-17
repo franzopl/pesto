@@ -233,6 +233,8 @@ pub struct OutputSection {
     /// Generate a `.nfo` file alongside the `.nzb` after posting.
     /// Default: false.
     pub nfo: Option<bool>,
+    /// Resume interrupted uploads from a saved state file. Default: false.
+    pub resume: Option<bool>,
 }
 
 /// Newznab API configuration for automatic NZB upload after posting.
@@ -555,7 +557,7 @@ impl Config {
                 .verify
                 .or(file.posting.verify)
                 .unwrap_or(false),
-            resume: cli.resume.unwrap_or(true),
+            resume: cli.resume.unwrap_or_else(|| file.output.resume.unwrap_or(false)),
             upload_rate: {
                 // CLI `--rate` wins; fall back to config file string.
                 if let Some(rate) = cli.upload_rate {
