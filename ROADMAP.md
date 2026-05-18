@@ -749,28 +749,29 @@ Implemented flags missing from the reference table:
 - [x] Create `CHANGELOG.md` covering v0.1.0 → v0.2.4 with highlights per version
 - [x] Follow Keep a Changelog format
 
-### 22g — Document all JSON event types ⬜
+### 22g — Document all JSON event types ✅
 
 The JSON output mode section in README shows only 5 sample events; the full
 set is needed for reliable integration by `upapasta` and other consumers.
 
-- [ ] Document all `ProgressEvent` types emitted by `--output-format json`
+- [x] Document all `ProgressEvent` types emitted by `--output-format json`
       (started, segment_done, queue_extended, status, failed, interrupted,
       finished, nzb_written, compress_*, par2_write_*)
-- [ ] Include field names and types for each event
+- [x] Include field names and types for each event
 
-### 22h — CONTRIBUTING.md ⬜
+### 22h — CONTRIBUTING.md ✅
 
-- [ ] How to set up the dev environment and run tests
-- [ ] How to use the mock NNTP harness
-- [ ] Commit message and PR conventions
-- [ ] Pointer to ROADMAP.md for picking up work
+- [x] How to set up the dev environment and run tests
+- [x] How to use the mock NNTP harness
+- [x] Commit message and PR conventions
+- [x] Pointer to ROADMAP.md for picking up work
 
-### 22i — Audit ROADMAP checkboxes ⬜
+### 22i — Audit ROADMAP checkboxes ✅
 
-- [ ] Review all `[ ]` items; mark completed ones as `[x]`
-- [ ] Move Phase 21c's unchecked item (< 60-column terminal fallback) to the
-      correct state based on the current implementation
+- [x] Review all `[ ]` items; mark completed ones as `[x]`
+- [x] Remaining open items: Phase 21c (< 60-column sparkline fallback) and
+      Phase 21j (ratatui TUI) — both genuinely not yet implemented; Phase 22e
+      (`cargo install`) pending crates.io publication
 
 ---
 

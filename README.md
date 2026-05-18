@@ -597,17 +597,157 @@ with tools like `upapasta`.
 pesto --output-format json movie.mkv
 ```
 
-Sample event stream:
+All diagnostic messages go to stderr; stdout carries only the event stream, so
+it is safe to pipe or redirect without filtering.
+
+### Event reference
+
+Every event is a JSON object on a single line. The `type` field identifies it.
+
+#### `started`
+
+Emitted once at the beginning of the run.
 
 ```json
-{"type":"started","files":1,"total_bytes":4294967296}
-{"type":"progress","posted_bytes":134217728,"total_bytes":4294967296,"rate_bps":52428800}
-{"type":"progress","posted_bytes":268435456,"total_bytes":4294967296,"rate_bps":53477376}
-{"type":"done","segments":5590,"failures":0}
-{"type":"nzb_written","path":"movie.nzb"}
+{"type":"started","total_files":2,"total_bytes":4294967296,"total_segments":5590,"connections":10,"target":"news.example.com:563"}
 ```
 
-All diagnostic messages continue to go to stderr so stdout is clean for parsing.
+| Field | Type | Description |
+|-------|------|-------------|
+| `total_files` | integer | Number of input files (including PAR2 estimate) |
+| `total_bytes` | integer | Sum of raw input bytes |
+| `total_segments` | integer | Total number of yEnc segments to post |
+| `connections` | integer | Number of NNTP worker connections |
+| `target` | string \| null | `host:port` of the NNTP server; `null` for `--par2-only` |
+
+#### `segment_done`
+
+Emitted after each segment is posted (or skipped via resume).
+
+```json
+{"type":"segment_done","file":"movie.mkv","bytes":768000,"ok":true,"done_segments":1,"total_segments":5590,"done_bytes":768000,"total_bytes":4294967296,"progress_pct":0.0}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `file` | string | Relative path of the file this segment belongs to |
+| `bytes` | integer | Raw payload size of this segment in bytes |
+| `ok` | boolean | `false` if the segment failed every retry |
+| `done_segments` | integer | Running total of completed segments |
+| `total_segments` | integer | Total segments in the run |
+| `done_bytes` | integer | Running total of completed bytes |
+| `total_bytes` | integer | Total bytes in the run |
+| `progress_pct` | float | Overall completion percentage (0–100) |
+
+#### `queue_extended`
+
+Emitted when PAR2 files are appended to the work queue (after the data pass
+computes parity). Updates `total_segments` and `total_bytes` upwards.
+
+```json
+{"type":"queue_extended","file":"movie.mkv.vol0+1.par2","segments":12,"bytes":9216000,"total_segments":5602,"total_bytes":4303183296}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `file` | string | PAR2 file being added |
+| `segments` | integer | Segments added for this file |
+| `bytes` | integer | Bytes added for this file |
+| `total_segments` | integer | Updated total segments |
+| `total_bytes` | integer | Updated total bytes |
+
+#### `status`
+
+A short human-readable note from the poster (e.g. "computing PAR2"). An empty
+string clears the current status.
+
+```json
+{"type":"status","text":"computing PAR2 recovery data"}
+```
+
+#### `failed`
+
+A segment failed permanently after exhausting all retries.
+
+```json
+{"type":"failed","description":"segment 42 of movie.mkv: 441 Posting not allowed"}
+```
+
+#### `interrupted`
+
+Emitted when Ctrl-C is received. The run is winding down; a `finished` event
+follows once in-flight segments complete.
+
+```json
+{"type":"interrupted"}
+```
+
+#### `compress_started`
+
+Archive creation has begun.
+
+```json
+{"type":"compress_started","total_bytes":4294967296}
+```
+
+#### `compress_progress`
+
+Archive file on disk has grown (polled approximately every 200 ms).
+
+```json
+{"type":"compress_progress","bytes_written":134217728}
+```
+
+#### `compress_done`
+
+Archive is complete and ready for posting.
+
+```json
+{"type":"compress_done"}
+```
+
+#### `par2_write_started`
+
+PAR2 recovery volume writing has started.
+
+```json
+{"type":"par2_write_started","total":64}
+```
+
+`total` is the number of PAR2 recovery slices that will be written.
+
+#### `par2_slice_written`
+
+One PAR2 recovery slice has been written to disk. Emitted `total` times after
+`par2_write_started`.
+
+```json
+{"type":"par2_slice_written"}
+```
+
+#### `finished`
+
+Always the last event. The run is complete.
+
+```json
+{"type":"finished","segments":5590,"failures":0,"progress_pct":100.0,"ok":true}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `segments` | integer | Total segments processed |
+| `failures` | integer | Segments that failed permanently |
+| `progress_pct` | float | Final completion percentage |
+| `ok` | boolean | `true` if all segments succeeded |
+
+#### `nzb_written`
+
+Printed by `pesto` after `finished`, once the `.nzb` file has been written to
+disk. Not part of the internal event stream — always the very last line.
+
+```json
+{"type":"nzb_written","path":"/home/user/nzbs/movie.nzb"}
+```
 
 ---
 
