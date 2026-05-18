@@ -542,7 +542,11 @@ async fn run_single_upload(
             } else {
                 PathBuf::from(&stem)
             };
-            Some(base.with_extension("nzb"))
+            Some({
+                let mut s = base.into_os_string();
+                s.push(".nzb");
+                PathBuf::from(s)
+            })
         });
     // Resume state uses the base path so it is stable across re-posts.
     let resume_path: Option<PathBuf> = nzb_base_path
