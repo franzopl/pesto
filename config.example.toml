@@ -115,3 +115,11 @@ groups = ["alt.binaries.test"]
 # nzb — fixed path for the generated .nzb file. Overrides nzb_dir.
 # Overridden by --out.
 # nzb = "upload.nzb"
+
+# history — write a record to history.jsonl after each upload. Default: true.
+# history = true
+
+# history_dir — directory where history.jsonl and nzb/ are stored.
+# Default: ~/.config/pesto  (or $XDG_CONFIG_HOME/pesto).
+# Set to ~/.config/upapasta to share the catalog with upapasta.
+# history_dir = "~/.config/upapasta"

@@ -43,6 +43,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         notify_ntfy: None,
         notify: None,
         history: true,
+        history_dir: None,
         nzb_dir: None,
         date: None,
         no_archive: false,

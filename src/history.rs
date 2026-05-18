@@ -1,11 +1,12 @@
-//! Upload history log, compatible with the upapasta catalog.
+//! Upload history log.
 //!
-//! Records are appended to `~/.config/upapasta/history.jsonl` in the same
-//! JSON format used by upapasta's `catalog.py`, so the two tools share a
-//! single upload history visible from the upapasta TUI.
+//! Records are appended to `<history_dir>/history.jsonl` (default:
+//! `~/.config/pesto/history.jsonl`). The JSON format is compatible with
+//! upapasta's `catalog.py`; set `output.history_dir = "~/.config/upapasta"`
+//! in `config.toml` to share the catalog with upapasta.
 //!
 //! After a successful upload the NZB file is also hard-linked (or copied) into
-//! `~/.config/upapasta/nzb/<stamp>_<name>.nzb`, matching upapasta behaviour.
+//! `<history_dir>/nzb/<stamp>_<name>.nzb`.
 
 use std::fs;
 use std::io::Write;
@@ -36,10 +37,19 @@ pub struct UploadRecord<'a> {
     pub subject: Option<&'a str>,
 }
 
-/// Returns `~/.config/upapasta`, creating it (and `nzb/`) if necessary.
-fn catalog_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let dir = PathBuf::from(home).join(".config").join("upapasta");
+/// Returns the history catalog directory, creating it (and `nzb/`) if necessary.
+///
+/// Uses `override_dir` when provided; otherwise falls back to
+/// `$XDG_CONFIG_HOME/pesto` or `~/.config/pesto`.
+fn catalog_dir(override_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = if let Some(d) = override_dir {
+        d.to_path_buf()
+    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        PathBuf::from(xdg).join("pesto")
+    } else {
+        let home = std::env::var_os("HOME")?;
+        PathBuf::from(home).join(".config").join("pesto")
+    };
     fs::create_dir_all(dir.join("nzb")).ok()?;
     Some(dir)
 }
@@ -198,10 +208,10 @@ fn stamp_now() -> String {
     format!("{year:04}{month:02}{day:02}T{h:02}{m:02}{s:02}Z")
 }
 
-/// Archive the NZB file to `~/.config/upapasta/nzb/<stamp>_<name>.nzb`.
+/// Archive the NZB file to `<catalog_dir>/nzb/<stamp>_<name>.nzb`.
 /// Returns the archived path on success.
-fn archive_nzb(src: &Path, stamp: &str, name: &str) -> Option<PathBuf> {
-    let dir = catalog_dir()?.join("nzb");
+fn archive_nzb(src: &Path, stamp: &str, name: &str, override_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = catalog_dir(override_dir)?.join("nzb");
     let safe: String = name
         .chars()
         .map(|c| {
@@ -236,12 +246,13 @@ fn json_opt(v: Option<&str>) -> String {
     }
 }
 
-/// Append one record to `~/.config/upapasta/history.jsonl`.
+/// Append one record to `<history_dir>/history.jsonl`.
 ///
-/// Errors are silently ignored so a catalog write failure never aborts an
-/// otherwise-successful upload.
-pub fn record_upload(rec: &UploadRecord<'_>) {
-    let Some(dir) = catalog_dir() else { return };
+/// `history_dir` overrides the default (`~/.config/pesto`). Pass `None` to
+/// use the default. Errors are silently ignored so a catalog write failure
+/// never aborts an otherwise-successful upload.
+pub fn record_upload(rec: &UploadRecord<'_>, history_dir: Option<&Path>) {
+    let Some(dir) = catalog_dir(history_dir) else { return };
     let history = dir.join("history.jsonl");
 
     let stamp = stamp_now();
@@ -251,7 +262,7 @@ pub fn record_upload(rec: &UploadRecord<'_>) {
     // Archive the NZB if present.
     let archived_nzb = rec
         .nzb_path
-        .and_then(|p| archive_nzb(Path::new(p), &stamp, rec.name));
+        .and_then(|p| archive_nzb(Path::new(p), &stamp, rec.name, history_dir));
     let nzb_val = json_opt(
         archived_nzb
             .as_deref()

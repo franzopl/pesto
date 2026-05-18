@@ -208,9 +208,12 @@ pub struct PostingSection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputSection {
-    /// Write a record to `~/.config/upapasta/history.jsonl` after each upload.
-    /// Default: true.
+    /// Append a record to `history.jsonl` after each upload. Default: true.
     pub history: Option<bool>,
+    /// Directory where `history.jsonl` (and `nzb/`) are written.
+    /// Defaults to `~/.config/pesto`. Set to `~/.config/upapasta` to share
+    /// the catalog with upapasta.
+    pub history_dir: Option<String>,
     /// Default path for the generated `.nzb`. Overridden by `--out`.
     pub nzb: Option<String>,
     /// Directory where `.nzb` files are written by default. The filename is
@@ -399,8 +402,11 @@ pub struct Config {
     pub nzb_dir: Option<String>,
     /// Skip the indexer upload for this run.
     pub no_upload: bool,
-    /// Append a record to the shared history catalog after each upload.
+    /// Append a record to the history catalog after each upload.
     pub history: bool,
+    /// Directory where `history.jsonl` and `nzb/` are stored.
+    /// `None` means use the pesto default (`~/.config/pesto`).
+    pub history_dir: Option<PathBuf>,
     /// Webhook URL for completion notifications.
     pub notify_webhook: Option<String>,
     /// ntfy.sh topic name or URL for completion notifications.
@@ -594,6 +600,15 @@ impl Config {
             history: cli
                 .history
                 .unwrap_or_else(|| file.output.history.unwrap_or(true)),
+            history_dir: file.output.history_dir.map(|s| PathBuf::from(
+                if s.starts_with("~/") {
+                    std::env::var_os("HOME")
+                        .map(|h| PathBuf::from(h).join(&s[2..]))
+                        .unwrap_or_else(|| PathBuf::from(&s))
+                } else {
+                    PathBuf::from(&s)
+                }
+            )),
             notify_webhook: file.notify.webhook_url,
             notify_ntfy: file.notify.ntfy_topic,
             notify: cli.notify,

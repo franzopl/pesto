@@ -239,8 +239,7 @@ struct Cli {
     #[arg(long, value_name = "CMD")]
     post_hook: Option<String>,
 
-    /// Skip writing to the shared upload history
-    /// (~/.config/upapasta/history.jsonl) for this run
+    /// Skip writing to the upload history catalog for this run
     /// [config: output.history = false].
     #[arg(long)]
     no_history: bool,
@@ -681,7 +680,7 @@ async fn run_single_upload(
                         duration_secs: upload_start.elapsed().as_secs_f64(),
                         nzb_path: Some(&out.display().to_string()),
                         subject: config.nzb_name.as_deref().or(Some(entry_label)),
-                    });
+                    }, config.history_dir.as_deref());
                 }
 
                 Some(xml)

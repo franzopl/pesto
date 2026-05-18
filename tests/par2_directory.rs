@@ -75,6 +75,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         notify_ntfy: None,
         notify: None,
         history: true,
+        history_dir: None,
         nzb_dir: None,
         date: None,
         no_archive: false,
