@@ -260,7 +260,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
 }
 
 /// Width, in characters, of the panel box interior.
-const BODY_W: usize = 44;
+const BODY_W: usize = 56;
 /// Above this connection count the per-connection grid is replaced by a
 /// one-line summary, so the panel never grows unbounded.
 const GRID_LIMIT: usize = 12;
@@ -367,6 +367,12 @@ struct RenderState {
     /// Buffer pool snapshot.
     buf_total: usize,
     buf_free: usize,
+    // Process resource stats (polled from /proc/self on Linux)
+    proc_rss_bytes: u64,
+    proc_cpu_pct: f64,
+    /// Previous (utime+stime) ticks for CPU delta.
+    proc_prev_ticks: u64,
+    proc_prev_tick_time: Instant,
     // Compression phase
     compress_active: bool,
     compress_total: u64,
@@ -407,6 +413,10 @@ impl RenderState {
             par2_write_total: 0,
             par2_write_done: 0,
             par2_write_start: Instant::now(),
+            proc_rss_bytes: 0,
+            proc_cpu_pct: 0.0,
+            proc_prev_ticks: 0,
+            proc_prev_tick_time: Instant::now(),
             speed_history: [0.0; 10],
             speed_history_pos: 0,
             speed_history_len: 0,
@@ -655,6 +665,48 @@ impl RenderState {
 
     // ---- TTY panel rendering --------------------------------------------
 
+    /// Read RSS and CPU usage from /proc/self (Linux only; no-op on other OS).
+    fn poll_proc_stats(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            // RSS from /proc/self/status  →  VmRSS: N kB
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("VmRSS:") {
+                        if let Some(kb_str) = rest.split_whitespace().next() {
+                            if let Ok(kb) = kb_str.parse::<u64>() {
+                                self.proc_rss_bytes = kb * 1024;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            // CPU from /proc/self/stat  →  field 14 (utime) + field 15 (stime)
+            if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+                // Skip past the comm field which may contain spaces inside parens.
+                let after_comm = stat.rfind(')').map(|i| &stat[i + 2..]).unwrap_or("");
+                let fields: Vec<&str> = after_comm.split_whitespace().collect();
+                // Fields are 0-indexed from after comm; utime is index 11, stime 12.
+                if fields.len() > 12 {
+                    let utime: u64 = fields[11].parse().unwrap_or(0);
+                    let stime: u64 = fields[12].parse().unwrap_or(0);
+                    let ticks = utime + stime;
+                    let now = Instant::now();
+                    let elapsed = now
+                        .duration_since(self.proc_prev_tick_time)
+                        .as_secs_f64()
+                        .max(0.001);
+                    let clk_tck: f64 = 100.0; // sysconf(_SC_CLK_TCK) is 100 on Linux
+                    let delta_ticks = ticks.saturating_sub(self.proc_prev_ticks) as f64;
+                    self.proc_cpu_pct = (delta_ticks / clk_tck / elapsed * 100.0).min(9999.0);
+                    self.proc_prev_ticks = ticks;
+                    self.proc_prev_tick_time = now;
+                }
+            }
+        }
+    }
+
     fn draw_panel(&mut self, final_draw: bool) {
         if !self.started {
             return;
@@ -665,6 +717,9 @@ impl RenderState {
         self.prev_done_bytes = self.done_bytes;
         if !final_draw && self.done_bytes > 0 {
             self.push_speed_sample(current_bps);
+        }
+        if !final_draw {
+            self.poll_proc_stats();
         }
         let lines = self.panel_lines(final_draw);
 
@@ -747,14 +802,31 @@ impl RenderState {
                 0.0
             };
             let pct = (frac * 100.0).round() as u64;
-            let bar = render_bar(frac, 18);
+            let bar = render_bar(frac, 26);
+            // Line 1: bar + percentage + segment count
             let line1 = format!(
                 "[{bar}] {pct:>3}%  {}/{} seg",
                 self.done_segments, self.total_segments
             );
             let rate = self.rate();
-            // ETA with confidence range (phase 21d).
-            let eta = if final_draw {
+            // Line 2: bytes transferred + speed + sparkline (phase 21c)
+            let spark = {
+                let samples = self.speed_samples();
+                if samples.len() >= 2 {
+                    format!(" {}", render_sparkline(&samples))
+                } else {
+                    String::new()
+                }
+            };
+            let line2 = format!(
+                "{}/{} · {}/s{}",
+                format_size(self.done_bytes),
+                format_size(self.total_bytes),
+                format_size(rate as u64),
+                spark,
+            );
+            // Line 3: ETA with confidence range (phase 21d)
+            let line3 = if final_draw {
                 format!("elapsed {}", format_duration(self.elapsed_secs()))
             } else if let Some((lo, hi, unstable)) = self.eta_range() {
                 let mark = if unstable { "~" } else { "" };
@@ -769,24 +841,10 @@ impl RenderState {
             } else {
                 "ETA —".to_string()
             };
-            // Sparkline appended to the speed value (phase 21c).
-            let spark = {
-                let samples = self.speed_samples();
-                if samples.len() >= 2 {
-                    format!(" {}", render_sparkline(&samples))
-                } else {
-                    String::new()
-                }
-            };
-            let line2 = format!(
-                "{}/{} · {}/s{spark} · {eta}",
-                format_size(self.done_bytes),
-                format_size(self.total_bytes),
-                format_size(rate as u64),
-            );
             lines.push(format!("┌─ overall {}┐", "─".repeat(BODY_W + 2 - 10)));
             lines.push(box_line(&line1));
             lines.push(box_line(&line2));
+            lines.push(box_line(&line3));
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
 
             // --- per-connection activity with colour codes (phase 21b) ----
@@ -864,6 +922,15 @@ impl RenderState {
                 "▸ PAR2 [{bar}] {}/{} slices{eta_str}",
                 self.par2_write_done, self.par2_write_total
             ));
+        }
+
+        // --- process resource stats (Linux /proc/self) -------------------
+        #[cfg(target_os = "linux")]
+        if self.proc_rss_bytes > 0 {
+            let rss = format_size(self.proc_rss_bytes);
+            let cpu = format!("{:.1}%", self.proc_cpu_pct);
+            let res_line = format!("process  ram {}  cpu {}", rss, cpu);
+            lines.push(ansi(&res_line, "2")); // dim — informational, not critical
         }
 
         // --- optional status / interrupt note ----------------------------
