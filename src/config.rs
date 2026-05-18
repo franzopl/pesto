@@ -234,6 +234,10 @@ pub struct OutputSection {
     pub nfo: Option<bool>,
     /// Resume interrupted uploads from a saved state file. Default: false.
     pub resume: Option<bool>,
+    /// Show only a single spinner line instead of the full panel. Default: false.
+    pub quiet: Option<bool>,
+    /// Ring the terminal bell on completion. Default: false.
+    pub bell: Option<bool>,
 }
 
 /// Newznab API configuration for automatic NZB upload after posting.
@@ -409,6 +413,10 @@ pub struct Config {
     pub post_hook: Option<String>,
     /// Generate a `.nfo` file next to the `.nzb` after posting.
     pub nfo: bool,
+    /// Show only a single spinner line (quiet mode).
+    pub quiet: bool,
+    /// Ring the terminal bell on completion.
+    pub bell: bool,
 }
 
 impl Config {
@@ -594,6 +602,8 @@ impl Config {
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
             post_hook: cli.post_hook.or(file.output.post_hook),
             nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),
+            quiet: file.output.quiet.unwrap_or(false),
+            bell: file.output.bell.unwrap_or(false),
         })
     }
 }

@@ -49,6 +49,8 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         message_id_domain: None,
         post_hook: None,
         nfo: false,
+        quiet: false,
+        bell: false,
     }
 }
 

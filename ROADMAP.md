@@ -572,3 +572,189 @@ Priority order (easiest → most complex):
 > counting, NZB assembly) should live in `#[cfg(test)]` modules inside each
 > source file. The `poster.rs` tests that touch the network must be gated with
 > `#[ignore]` so `cargo test` passes in CI without a live server.
+
+## Phase 21 — Visual Feedback & Terminal UX
+
+Deliver an impressive, information-dense terminal experience without depending
+on external TUI crates for the incremental items. Work ordered by impact vs.
+effort ratio — each sub-phase must leave the panel better than before.
+
+### 21a — Smooth progress bars ✅ (priority 1)
+
+Replace the plain `████░░░░` bar with sub-character block rendering so the
+bar moves continuously instead of jumping full-cell steps.
+
+- [x] `render_bar` uses the eight-level block sequence
+      `▏▎▍▌▋▊▉█` for the fractional leading character
+- [x] The filled portion uses `█`; the unfilled portion uses `░` (unchanged)
+- [x] No new dependencies; pure Unicode
+
+### 21b — Color-coded connection status matrix ✅ (priority 2)
+
+Paint each connection cell with ANSI colours to communicate state at a glance:
+
+- [x] 🟢 Active/uploading → green cell label
+- [x] 🟡 Authenticating / reconnecting → yellow
+- [x] 🔴 Retrying / failed → red
+- [x] ⚪ Idle → dim/grey
+- [x] New `ProgressEvent` variants `ConnectionRetrying { conn }` and
+      `ConnectionAuth { conn }` emitted by the NNTP pool
+- [x] Colors suppressed when `NO_COLOR` env var is set or stderr is not a TTY
+
+### 21c — Sparkline throughput history ✅ (priority 3)
+
+Show a 10-sample rolling graph of upload speed directly in the panel so
+fluctuations are visible without any external tool.
+
+- [x] `RenderState` keeps a ring-buffer of the last 10 per-tick byte deltas
+- [x] `render_sparkline(samples) -> String` maps each sample to one of
+      ` ▁▂▃▄▅▆▇█` proportional to the max in the window
+- [x] Displayed on the right side of the speed line: `12.3 MiB/s ▁▃▅▇█▆▄▂▃█`
+- [ ] Degrades gracefully to nothing when terminal is < 60 columns
+
+### 21d — Confidence-based ETA ✅ (priority 4)
+
+Display ETA as a range when throughput is unstable rather than a single
+potentially misleading value.
+
+- [x] Track a rolling coefficient of variation (σ/μ) over the last 10 speed
+      samples
+- [x] When CV < 0.1: show single ETA as today (`ETA 2:34`)
+- [x] When CV ≥ 0.1: show range (`ETA 2:10–3:05`) based on ±1σ projection
+- [x] When CV ≥ 0.3: append a `~` instability marker (`ETA ~2:30–4:00`)
+- [x] No new dependencies; pure arithmetic on existing ring-buffer
+
+### 21e — Directory tree preview ✅ (priority 5)
+
+Print a clean `tree`-style breakdown of the payload in the pre-flight summary
+before any encoding/uploading starts.
+
+- [x] `print_tree(files: &[InputFile])` in `progress.rs` renders the file
+      list as a hierarchical tree by splitting names on `/`
+- [x] Shows per-file size on the right column, total at the bottom
+- [x] Only emitted when stderr is a TTY; suppressed in JSON / quiet mode
+- [x] Called from `main.rs` after the file list is resolved, before
+      `spawn_terminal_renderer`
+
+### 21f — Quiet / minimal mode ✅ (priority 6)
+
+Single-line mode for tmux/screen users who want minimal terminal noise.
+
+- [x] `--quiet` / `-q` flag and `output.quiet = true` config key
+- [x] In quiet mode: single line re-drawn in place showing a spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`)
+      followed by percentage and ETA, e.g. `⠹  47% · ETA 1:23`
+- [x] On completion: replaces the spinner line with a single summary line
+- [x] No box-drawing characters; zero ANSI colour (so it degrades cleanly in
+      logging pipelines even if accidentally used there)
+- [x] `--quiet` suppresses the directory tree preview (21e) and sparklines (21c)
+
+### 21g — Audible bell on completion ✅ (priority 7)
+
+- [x] `--bell` flag and `output.bell = true` config key
+- [x] Writes `\a` (ASCII BEL) to stderr on successful completion
+- [x] Also fires on failure so the user is notified either way
+- [x] Off by default; never emitted in JSON mode
+
+### 21h — Buffer pool visualizer ✅ (priority 8)
+
+Show real-time buffer pool health in the panel so resource pressure is visible.
+
+- [x] New `ProgressEvent::BufferPoolStats { total: usize, free: usize }` emitted
+      by `Shared` every N segments (not every segment — keep it cheap)
+- [x] `RenderState` renders a compact mini-bar: `buf [████████░░] 8/10`
+- [x] Added as a single line below the connection grid when pool is under
+      pressure (free < 25% of total); hidden otherwise to reduce clutter
+
+### 21i — Adaptive refresh rate ✅ (priority 9)
+
+Lower the panel redraw frequency when the CPU is loaded so rendering does not
+compete with the encoding/uploading hot path.
+
+- [x] Replace the fixed 200 ms ticker in `render_loop` with a dynamic interval
+- [x] Start at 200 ms; back off to 500 ms when the last draw took > 5 ms
+      (measured with `Instant` around the `draw_panel` call)
+- [x] Return to 200 ms when the previous draw was fast again
+- [x] Measurement uses monotonic clock; no system calls beyond what tokio
+      already uses
+
+### 21j — Interactive TUI mode with ratatui (priority 10)
+
+Full-screen dashboard replacing the scrolling panel. Most complex item;
+delivered last so the simpler improvements ship first.
+
+- [ ] Add `ratatui` and `crossterm` to `[dependencies]` behind a
+      `tui` Cargo feature (off by default, so the default binary stays small)
+- [ ] `--tui` flag activates the dashboard; requires a TTY, otherwise falls
+      back to the standard panel with a warning
+- [ ] Layout: three panes — (1) real-time speed graph (last 60 s), (2)
+      connection grid, (3) file list with per-file progress bars
+- [ ] Speed graph uses `ratatui::widgets::Sparkline` or `Chart`; connection
+      grid is a `Table`; file list is a `List`
+- [ ] Keyboard: `q` quits (after confirming), `p` pauses rate display, `h`
+      toggles help overlay
+- [ ] All state driven by the same `ProgressEvent` channel so the TUI is a
+      drop-in renderer alongside the existing panel
+
+## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
+
+*A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
+
+### A. Extreme Environments & Resource Management
+1. **Auto-Detect RAM limits:** Automatically cap buffer pools based on total system RAM to prevent OOM errors on low-memory machines.
+2. **Dynamic Connection Scaling:** Reduce the number of active NNTP connections on-the-fly if memory pressure is high or TCP buffers fill up.
+3. **CPU Topology Awareness:** Adjust the `rayon` thread pool dynamically based on available physical cores versus total logical CPUs.
+4. **Disk Space Pre-flight:** Check if the temp directory has enough free space *before* starting heavy compression or PAR2 generation.
+5. **In-Memory Mode:** For files smaller than available RAM, avoid writing temporary archives to disk completely (bypassing I/O bottlenecks).
+6. **Direct I/O (`O_DIRECT`):** On Linux, bypass the OS page cache for huge files to prevent thrashing system memory.
+7. **Memory Mapping (`mmap`):** Alternative fast-path for reading massive files using `madvise(MADV_SEQUENTIAL)`.
+8. **Adaptive Buffering:** Grow or shrink `Shared::acquire_buffer` pools based on the delta between network upload speed and disk read speed.
+9. **Disk Read Throttling:** Intentionally stall disk reads if the NNTP upload queue becomes saturated, saving memory.
+10. **Single-Core Fallback:** Auto-detect environments like Raspberry Pi 1/Zero and switch to a fully sequential, low-overhead pipeline.
+
+### B. Pipelined Processing & Archiving (Streaming)
+11. **Pipelined Volume Streaming (The "RAR Volumes" Idea):** Stream archive volumes (`.part01.rar`) from the compressor directly into the NNTP upload queue as soon as each volume is flushed to disk, instead of waiting for the entire archive to finish.
+12. **Native Streaming Compression:** Use pure Rust crates (`zip` or `sevenz-rust`) to compress on-the-fly directly in memory, feeding the NNTP workers without temporary files.
+13. **On-the-fly TAR Bundling:** Bundle directories into a tar stream dynamically during the read pass, eliminating the need for a temporary archive step.
+14. **Stdin Pipelining:** Allow `pesto` to read directly from `stdin` (yEnc-encoding on the fly), enabling chaining from other shell tools (e.g., `tar cf - . | pesto -`).
+15. **Eager PAR2 Processing in Watch Mode:** In `--watch` mode, start hashing and computing PAR2 blocks as soon as a file is detected, before the upload queue is ready.
+16. **Async Backpressure:** Ensure that the compression/PAR2 stages block properly if the network layer stalls, preventing buffer bloat.
+17. **Chunked/Live Uploading:** Support infinite data streams (like live video), producing a continuous sequence of NZBs or a dynamically updating NZB.
+18. **Progressive NZB Flushing:** Write the `.nzb` XML progressively to disk to save memory when uploading sets with millions of articles.
+19. **Incremental State Saving:** Flush `.pesto-state` periodically during long uploads so that a crash loses absolutely minimal progress.
+20. **Zero-Copy yEnc:** Optimize buffer handling to zero-copy levels using advanced scatter-gather I/O.
+
+### C. Visual Feedback & Terminal UX
+21. **Interactive TUI Mode:** A `ratatui`-based dashboard showing real-time graphs of upload speed, memory usage, and thread activity.
+22. **Sparkline Metrics:** Add mini Unicode sparklines (e.g., ` ▂▃▅▆▇`) to the CLI output to show network throughput over the last 10 seconds.
+23. **Buffer Pool Visualizer:** Display a small visual indicator of free vs. in-use memory buffers to show the health of the internal pipeline.
+24. **Adaptive Refresh Rate:** Lower the terminal redraw rate dynamically when the CPU is bogged down, keeping resources focused on the upload.
+25. **Color-Coded Status Matrix:** Show a grid representing NNTP worker states (🟢 Uploading, 🟡 Authenticating, 🔴 Retrying, ⚪ Idle).
+26. **Confidence-Based ETA:** Display ETA as a range (e.g., `12-15 min`) or add a stability indicator if throughput is fluctuating heavily.
+27. **Directory Tree Preview:** Print a clean `tree`-style breakdown of the payload during the pre-flight summary before uploading.
+28. **Quiet / Minimal Mode:** A mode showing *only* a single spinning character and ETA, minimizing terminal pollution for tmux/screen users.
+29. **Audible / ANSI Bell Notifications:** Optionally trigger a terminal bell (`\a`) on completion for users without desktop notification integrations.
+30. **Smooth Progress Transitions:** Use sub-character block rendering (e.g., `▏▎▍▌▋▊▉█`) for ultra-smooth progress bars.
+
+### D. Performance & Concurrency
+31. **SIMD yEnc Acceleration:** Implement AVX2/NEON intrinsics for the yEnc encoding loop, pushing encoding speeds to memory-bandwidth limits.
+32. **TCP `SO_RCVBUF`/`SO_SNDBUF` Tuning:** Auto-tune socket buffers for Long Fat Networks (LFNs) to maximize throughput over high-latency connections.
+33. **Hardware-Accelerated CRC32:** Use `CRC32c` or ARM CRC instructions if supported by the CPU, falling back to software.
+34. **GPU-Accelerated PAR2:** Experimental CUDA/Vulkan backend for computing PAR2 recovery data on massive files almost instantly.
+35. **Connection Reuse Across Jobs:** In `--each` mode, keep the NNTP connection pool alive between files to skip TLS handshake overhead.
+36. **NNTP Command Pipelining:** Send multiple `POST` commands back-to-back without waiting for the server's response, if the server supports it.
+37. **Dynamic Worker Scaling:** Automatically spawn more NNTP connections mid-flight if throughput is under the network cap.
+38. **Multi-Path TCP (MPTCP):** Bond multiple network interfaces (e.g., Wi-Fi + Ethernet) to aggregate upload bandwidth.
+39. **NUMA-Aware Threading:** Pin Rayon threads to specific CPU cores on high-end servers to avoid cross-socket memory latency.
+40. **TLS Session Resumption:** Utilize TLS session tickets across multiple connections to speed up the initial swarm connection phase.
+
+### E. Resilience, Error Handling & Open-Source Best Practices
+41. **Auto-Relocate Temp Storage:** If `/tmp` gets full, dynamically switch to `$HOME` or the output directory without failing the upload.
+42. **Intelligent Network Backoff:** Implement fully jittered exponential backoff for NNTP server drops to avoid thundering-herd reconnects.
+43. **Auto-Ban Failing Servers:** Temporarily ban an NNTP server from the pool during the run if it drops connections more than 5 times.
+44. **Pre-flight NZB Validation:** Hash-check the generated NZB file against original files right before finishing to guarantee data integrity.
+45. **Corrupt State Recovery:** Detect corrupted `.pesto-state` JSON files and automatically repair or fallback gracefully.
+46. **OOM Graceful Exit:** Catch allocation failures (where supported) and write a clean crash-log instead of a hard abort.
+47. **C-Compatible FFI:** Export a C-API so `pesto` can be linked directly into Python/Go/C++ applications without subprocess overhead.
+48. **WebAssembly (WASM) Core:** Compile the yEnc/PAR2/NZB generation logic to WASM, allowing browser-based offline NZB generation.
+49. **Pluggable Storage Backends:** Abstract `std::fs` to allow reading directly from AWS S3, MinIO, or HTTP streams.
+50. **gRPC / Webhook Interceptor:** A granular hook system allowing external tools to modify metadata (like renaming the subject) *during* the run via RPC.
