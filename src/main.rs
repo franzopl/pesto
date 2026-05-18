@@ -881,7 +881,10 @@ async fn run_batch(
             let config = &params.config;
             let nzb_meta = NzbMeta {
                 name: config.nzb_name.clone(),
-                password: config.nzb_password.clone(),
+                password: config
+                    .nzb_password
+                    .clone()
+                    .or_else(|| config.compress_password.clone()),
                 category: config.nzb_category.clone(),
             };
             let xml = pesto::nzb::generate(
