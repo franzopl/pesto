@@ -261,6 +261,16 @@ pub async fn post_files_with_progress(
         )
     };
     let _ = &target; // used below
+    let total_source_bytes: u64 = metas.iter().map(|m| m.size).sum();
+    // Rough PAR2 size estimate: recovery data ≈ par2% of source bytes, plus
+    // a small fixed overhead per file for PAR2 packet headers (~1 KiB/file).
+    let par2_bytes_hint = if config.par2 > 0 && !config.par2_only && !config.dry_run {
+        let data_est = total_source_bytes * config.par2 as u64 / 100;
+        let header_est = metas.len() as u64 * 1024;
+        data_est + header_est
+    } else {
+        0
+    };
     let file_entries = metas
         .iter()
         .map(|m| FileEntry {
@@ -274,6 +284,7 @@ pub async fn post_files_with_progress(
         files: file_entries,
         connections: worker_count,
         target,
+        par2_bytes_hint,
     });
 
     let cancel_handle = {
