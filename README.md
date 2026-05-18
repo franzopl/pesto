@@ -41,6 +41,23 @@ The binary is written to `target/release/pesto`. Copy it anywhere on your `PATH`
 
 ---
 
+## Prerequisites
+
+`pesto` itself has no mandatory runtime dependencies — the Rust binary is
+self-contained. Some features require external tools:
+
+| Feature | Tool required | Install |
+|---------|--------------|---------|
+| `--compress` (7z / zip) | `p7zip` | `apt install p7zip-full` · `brew install p7zip` · [7-zip.org](https://www.7-zip.org) |
+| `--compress=rar` | `rar` | [rarlab.com/download.htm](https://www.rarlab.com/download.htm) (not redistributable) |
+| `--nfo` (video metadata) | `mediainfo` | `apt install mediainfo` · `brew install media-info` · [mediaarea.net](https://mediaarea.net/en/MediaInfo) |
+
+`pesto` will print a clear error if a required tool is missing. `mediainfo` is
+optional and its absence degrades gracefully — `--nfo` falls back to a
+directory listing instead.
+
+---
+
 ## Quick start
 
 ```bash
@@ -480,6 +497,7 @@ chmod +x ~/.config/pesto/hooks/curupira.sh
 | Flag | Config key | Default | Description |
 |------|-----------|---------|-------------|
 | `-c`, `--config [PATH]` | — | auto | Load a TOML config; with no value, run the setup wizard |
+| **Connection** | | | |
 | `--host <HOST>` | `server.host` | — | NNTP server hostname |
 | `--port <PORT>` | `server.port` | `563` | NNTP server port |
 | `--no-ssl` | `server.ssl` | TLS on | Disable TLS (plaintext) |
@@ -487,33 +505,47 @@ chmod +x ~/.config/pesto/hooks/curupira.sh
 | `--retry-delay <SECS>` | `server.retry_delay` | `1` | Seconds between retries |
 | `--username <USER>` | `auth.username` | — | NNTP username |
 | `--auth-password <PASS>` | `auth.password` | — | NNTP password |
+| **Posting** | | | |
 | `--from <ADDRESS>` | `posting.from` | random | `From` header (omit = random per run) |
 | `--groups <G,...>` | `posting.groups` | — | Newsgroups, comma-separated |
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
 | `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `subject`, or `full`; bare flag = `full` |
+| `--date <VALUE>` | `posting.date` | server-supplied | `now`, `random`, or an RFC 2822 timestamp |
+| `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
+| `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
+| **Reliability** | | | |
 | `--par2 <PERCENT>` | `posting.par2` | `10` | PAR2 recovery percentage (0 = off) |
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
 | `--dry-run` | — | off | Encode only; never touch the network |
 | `--no-resume` | — | off | Ignore existing state; start fresh |
 | `--verify` | `posting.verify` | off | Confirm each article with STAT |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
+| **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
+| **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |
 | `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="name">` in the `.nzb` |
 | `--nzb-password <PASS>` | `output.nzb_password` | — | `<meta type="password">` in the `.nzb` |
 | `--nzb-category <CAT>` | `output.nzb_category` | — | `<meta type="category">` in the `.nzb` |
+| `--nfo` / `--no-nfo` | `output.nfo` | off | Generate a `.nfo` file alongside the `.nzb` |
+| `--post-hook <CMD>` | `output.post_hook` | — | Shell command run after each successful upload |
+| `--history` / `--no-history` | `output.history` | on | Write a record to the upload history log |
 | `--no-upload` | — | off | Skip automatic indexer upload this run |
+| `--notify` / `--no-notify` | — | on | Send completion notification (webhook / ntfy) |
+| `-q`, `--quiet` | `output.quiet` | off | Single-line minimal output (no panel) |
+| `--bell` | `output.bell` | off | Write ASCII BEL to stderr on completion |
+| `--output-format <FORMAT>` | — | `terminal` | `terminal` or `json` |
+| **Batch / watch** | | | |
 | `--each` | — | off | Post each top-level entry as its own release |
 | `--season` | — | off | Like `--each`, plus a consolidated season `.nzb` |
 | `--jobs <N>` | — | `1` | Parallel uploads for `--each`/`--season` (0 = CPU count) |
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
 | `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |
 | `--watch-interval <SECS>` | `watch.poll_interval` | `30` | Poll interval for `--watch` |
-| `--output-format <FORMAT>` | — | `terminal` | `terminal` or `json` |
 
 ---
 

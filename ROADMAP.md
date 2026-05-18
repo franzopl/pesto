@@ -695,6 +695,85 @@ delivered last so the simpler improvements ship first.
 - [ ] All state driven by the same `ProgressEvent` channel so the TUI is a
       drop-in renderer alongside the existing panel
 
+## Phase 22 — Public Release Preparation
+
+Getting `pesto` ready for public consumption. Items ordered by impact: critical
+correctness first, then polish, then open-source completeness.
+
+### 22a — Complete `config.example.toml` ✅
+
+Several implemented sections are entirely absent from the example file:
+
+- [x] `[notify]` section — `webhook_url`, `ntfy_topic` (Phase 16e)
+- [x] `[output.indexer]` section — `url`, `api_key`, `category` (Phase 15b)
+- [x] `output.nzb_name`, `output.nzb_password`, `output.nzb_category` (Phase 15a)
+- [x] `output.nfo`, `output.post_hook`, `output.bell`, `output.quiet` (Phases 18, 21f, 21g)
+- [x] `posting.date`, `posting.no_archive`, `posting.message_id_domain` (Phase 14b–e)
+
+### 22b — Complete "All flags" table in README ✅
+
+Implemented flags missing from the reference table:
+
+- [x] `--nfo` / `--no-nfo`
+- [x] `--quiet` / `-q`
+- [x] `--bell`
+- [x] `--history` / `--no-history`
+- [x] `--notify` / `--no-notify`
+- [x] `--post-hook`
+- [x] `--date`
+- [x] `--no-archive`
+- [x] `--message-id-domain`
+
+### 22c — Document external dependencies in README ✅
+
+- [x] Add "Prerequisites" section listing `p7zip` (for `--compress`) and `rar`
+      binary (for `--compress=rar`), with install commands for common platforms
+- [x] Note that `mediainfo` is optional but recommended for `--nfo`
+- [x] Note that `par2cmdline` is not required at runtime (pesto has its own
+      implementation)
+
+### 22d — Badges and minimum Rust version ⬜
+
+- [ ] Add CI status, crates.io version, and license badges to the top of README
+- [ ] Set `rust-version` in `Cargo.toml` to the minimum supported version
+- [ ] Mention the minimum Rust version in the README Build section
+
+### 22e — Installing section (binaries + crates.io) ⬜
+
+- [ ] Add `cargo install pesto` once published to crates.io
+- [ ] Document downloading a pre-built binary from GitHub Releases
+- [ ] Note how to add the binary to `PATH` on Linux, macOS, and Windows
+
+### 22f — CHANGELOG.md ⬜
+
+- [ ] Create `CHANGELOG.md` covering v0.1.0 → v0.2.4 with highlights per version
+- [ ] Follow Keep a Changelog format
+
+### 22g — Document all JSON event types ⬜
+
+The JSON output mode section in README shows only 5 sample events; the full
+set is needed for reliable integration by `upapasta` and other consumers.
+
+- [ ] Document all `ProgressEvent` types emitted by `--output-format json`
+      (started, segment_done, queue_extended, status, failed, interrupted,
+      finished, nzb_written, compress_*, par2_write_*)
+- [ ] Include field names and types for each event
+
+### 22h — CONTRIBUTING.md ⬜
+
+- [ ] How to set up the dev environment and run tests
+- [ ] How to use the mock NNTP harness
+- [ ] Commit message and PR conventions
+- [ ] Pointer to ROADMAP.md for picking up work
+
+### 22i — Audit ROADMAP checkboxes ⬜
+
+- [ ] Review all `[ ]` items; mark completed ones as `[x]`
+- [ ] Move Phase 21c's unchecked item (< 60-column terminal fallback) to the
+      correct state based on the current implementation
+
+---
+
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*

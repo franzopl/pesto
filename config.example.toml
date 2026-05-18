@@ -92,6 +92,21 @@ groups = ["alt.binaries.test"]
 # 0 or omitted means unlimited. Also settable with --rate.
 # upload_rate = "0"
 
+# date — value for the `Date:` header on each article. Options:
+#   "now"    current UTC time at the moment of posting (default)
+#   "random" a random time within the last 30 days
+#   A fixed RFC 2822 timestamp: "Mon, 01 Jan 2024 12:00:00 +0000"
+# When omitted, pesto does not set the Date header and lets the server supply it.
+# date = "random"
+
+# no_archive — add `X-No-Archive: yes` to every posted article. Default: false.
+# no_archive = false
+
+# message_id_domain — fixed domain used in the Message-ID of every article.
+# When omitted (default), a fresh random domain is generated per article, which
+# is better for privacy. Set this only if your provider requires a stable domain.
+# message_id_domain = "example.com"
+
 [compression]
 # Bundle files into an archive before posting. Default: disabled.
 #
@@ -101,7 +116,7 @@ groups = ["alt.binaries.test"]
 #   "rar" via rar binary (not distributed; must be in PATH)
 #
 # Use --compress [FORMAT] on the CLI to enable for a single run.
-# Use --password [PASSWORD] to add a password (implies --compress).
+# Use --password [PASSWORD] to add a password (implies --compress 7z).
 # Omitting FORMAT or leaving format unset defaults to "7z".
 #
 # format = "7z"
@@ -116,6 +131,29 @@ groups = ["alt.binaries.test"]
 # Overridden by --out.
 # nzb = "upload.nzb"
 
+# nzb_name — value for the <meta type="name"> element in the .nzb.
+# Shown as the release title in NZBGet and SABnzbd. Defaults to the upload name.
+# nzb_name = "My Release (2024)"
+
+# nzb_category — value for the <meta type="category"> element in the .nzb.
+# nzb_category = "TV > HD"
+
+# nzb_password — value for the <meta type="password"> element in the .nzb.
+# When --password is used, the archive password is stored here automatically.
+# Use this only to set a static password independently of --compress.
+# nzb_password = "archive_pass"
+
+# nfo — generate a .nfo text file alongside the .nzb. Default: false.
+# Runs `mediainfo` on the first video file found; falls back to a directory
+# listing when no video file is present or mediainfo is not installed.
+# nfo = false
+
+# post_hook — shell command executed after each successful upload.
+# Runs via `sh -c` on Unix or `cmd /c` on Windows. The following environment
+# variables are available: PESTO_NZB, PESTO_NFO, PESTO_NAME, PESTO_BYTES,
+# PESTO_GROUP, PESTO_PASSWORD, PESTO_SERVER.
+# post_hook = "notify-send 'pesto' 'Upload done: $PESTO_NAME'"
+
 # history — write a record to history.jsonl after each upload. Default: true.
 # history = true
 
@@ -123,3 +161,37 @@ groups = ["alt.binaries.test"]
 # Default: ~/.config/pesto  (or $XDG_CONFIG_HOME/pesto).
 # Set to ~/.config/upapasta to share the catalog with upapasta.
 # history_dir = "~/.config/upapasta"
+
+# quiet — single-line minimal output instead of the full terminal panel.
+# Designed for tmux/screen users who want minimal terminal noise. Default: false.
+# quiet = false
+
+# bell — write an ASCII BEL (\a) to stderr on completion (success or failure).
+# Useful for desktop notification integrations. Default: false.
+# bell = false
+
+# ── Indexer upload ───────────────────────────────────────────────────────────
+#
+# Automatically POST the generated .nzb to a Newznab-compatible indexer after
+# each successful upload. Skip for a single run with --no-upload.
+#
+# [output.indexer]
+# url     = "https://my.indexer.com"
+# api_key = "abc123"
+# category = "5000"   # optional Newznab category ID
+
+# ── Completion notifications ─────────────────────────────────────────────────
+#
+# Send a notification after each upload (success or failure).
+# Both fields are optional; omit the whole section to disable notifications.
+#
+# [notify]
+# webhook_url — HTTP POST target (Discord, Slack, Telegram, or generic JSON).
+#   Discord:  https://discord.com/api/webhooks/<id>/<token>
+#   Slack:    https://hooks.slack.com/services/...
+#   Telegram: https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>
+#   Generic:  any URL; receives a rich JSON object with upload details
+# webhook_url = "https://discord.com/api/webhooks/..."
+#
+# ntfy_topic — ntfy.sh topic name or full URL (e.g. "https://ntfy.sh/mytopic").
+# ntfy_topic = "pesto-uploads"
