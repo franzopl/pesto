@@ -55,6 +55,10 @@ pub enum ProgressEvent {
         connections: usize,
         /// `host:port` of the NNTP server, or `None` when not posting.
         target: Option<String>,
+        /// Best-effort estimate of PAR2 bytes that will be added to the queue
+        /// later via `QueueExtended`. Pre-seeded into `total_bytes` so the bar
+        /// never goes backwards when PAR2 files arrive.
+        par2_bytes_hint: u64,
     },
     /// Worker connection `conn` started posting a segment of `file`.
     ConnectionBusy { conn: usize, file: String },
@@ -367,6 +371,10 @@ struct RenderState {
     /// Buffer pool snapshot.
     buf_total: usize,
     buf_free: usize,
+    /// PAR2 bytes hint included in total_bytes upfront; reduced as QueueExtended arrives.
+    par2_hint_remaining: u64,
+    /// Whether any QueueExtended event was received (PAR2 files being posted).
+    posting_par2: bool,
     // Process resource stats (polled from /proc/self on Linux)
     proc_rss_bytes: u64,
     proc_cpu_pct: f64,
@@ -425,6 +433,8 @@ impl RenderState {
             conn_state: Vec::new(),
             buf_total: 0,
             buf_free: 0,
+            par2_hint_remaining: 0,
+            posting_par2: false,
         }
     }
 
@@ -435,6 +445,7 @@ impl RenderState {
                 files,
                 connections,
                 target,
+                par2_bytes_hint,
             } => {
                 self.started = true;
                 self.mode = mode;
@@ -447,6 +458,10 @@ impl RenderState {
                     self.total_bytes += f.bytes;
                     self.files.insert(f.name, (0, f.segments));
                 }
+                // Pre-seed total with the PAR2 estimate so the bar never
+                // goes backwards when QueueExtended arrives.
+                self.total_bytes += par2_bytes_hint;
+                self.par2_hint_remaining = par2_bytes_hint;
             }
             ProgressEvent::ConnectionBusy { conn, file } => {
                 if let Some(slot) = self.conn_files.get_mut(conn) {
@@ -493,8 +508,19 @@ impl RenderState {
                 segments,
                 bytes,
             } => {
+                self.posting_par2 = true;
                 self.total_segments += segments;
-                self.total_bytes += bytes;
+                // Absorb the real bytes against the pre-seeded hint so the bar
+                // does not jump backwards. If real PAR2 is larger than the hint,
+                // we expand total_bytes by the excess only.
+                if bytes <= self.par2_hint_remaining {
+                    self.par2_hint_remaining -= bytes;
+                    // total_bytes already includes this; no change needed.
+                } else {
+                    let excess = bytes - self.par2_hint_remaining;
+                    self.par2_hint_remaining = 0;
+                    self.total_bytes += excess;
+                }
                 self.files.entry(file).or_insert((0, 0)).1 += segments;
             }
             ProgressEvent::Status { text } => {
@@ -744,22 +770,37 @@ impl RenderState {
     fn panel_lines(&self, final_draw: bool) -> Vec<String> {
         let mut lines = Vec::new();
 
-        // --- header ------------------------------------------------------
-        if self.compress_active && self.files.is_empty() {
-            lines.push("pesto · compressing".to_string());
+        // --- header with phase indicator and elapsed time ----------------
+        let elapsed_hdr = if self.started {
+            format!(" · {}", format_duration(self.elapsed_secs()))
         } else {
-            let verb = match self.mode {
-                RunMode::Post => "posting",
-                RunMode::DryRun => "dry run",
-                RunMode::Par2Only => "par2",
-            };
-            let file_count = self.files.len();
-            let mut header = format!("pesto · {verb} {file_count} file(s)");
-            if let Some(t) = &self.target {
-                header.push_str(&format!(" → {t}"));
-            }
-            lines.push(header);
-        }
+            String::new()
+        };
+        let phase = if self.compress_active && self.files.is_empty() {
+            ansi("compressing", "33") // yellow
+        } else if self.par2_write_active {
+            ansi("writing PAR2", "36") // cyan
+        } else if self.posting_par2 && !self.files.is_empty() {
+            ansi("posting PAR2", "35") // magenta
+        } else if !self.files.is_empty() {
+            ansi("posting data", "32") // green
+        } else {
+            "starting".to_string()
+        };
+        let verb_suffix = match self.mode {
+            RunMode::Post => String::new(),
+            RunMode::DryRun => format!(" · {}", ansi("dry run", "33")),
+            RunMode::Par2Only => format!(" · {}", ansi("par2 only", "36")),
+        };
+        let file_count = self.files.len();
+        let target_str = self
+            .target
+            .as_deref()
+            .map(|t| format!(" → {t}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "pesto  {phase}  {file_count} file(s){target_str}{verb_suffix}{elapsed_hdr}"
+        ));
 
         // --- compression box (shown while compressing) -------------------
         if self.compress_active || (final_draw && self.compress_total > 0 && self.files.is_empty())
@@ -880,12 +921,23 @@ impl RenderState {
 
             // --- file tally + failures -----------------------------------
             let (done, in_flight) = self.file_tally();
+            let total_files = self.files.len();
+            let pending = total_files.saturating_sub(done + in_flight);
+            // Show the name of the file currently being uploaded (first busy conn).
+            let active_file = self
+                .conn_files
+                .iter()
+                .find_map(|f| f.as_deref())
+                .map(|name| format!("  ▸ {}", truncate(name, 28)))
+                .unwrap_or_default();
             let failures_str = if self.failures > 0 {
-                ansi(&format!("failures {}", self.failures), "31")
+                format!("  {}", ansi(&format!("{} failed", self.failures), "31"))
             } else {
-                format!("failures {}", self.failures)
+                String::new()
             };
-            lines.push(format!("files ✓{done} ⤵{in_flight} · {failures_str}"));
+            lines.push(format!(
+                "files  done {done}/{total_files}  uploading {in_flight}  waiting {pending}{failures_str}{active_file}"
+            ));
 
             // --- buffer pool visualizer (phase 21h, shown under pressure) -
             if self.buf_total > 0 && self.buf_free * 4 < self.buf_total {
@@ -1235,6 +1287,7 @@ mod tests {
             }],
             connections: 1,
             target: None,
+            par2_bytes_hint: 0,
         });
         st.apply(ProgressEvent::SegmentDone {
             file: "a".into(),
@@ -1250,5 +1303,70 @@ mod tests {
         assert_eq!(st.done_bytes, 100);
         assert_eq!(st.failures, 1);
         assert_eq!(st.file_tally(), (1, 0));
+    }
+
+    #[test]
+    fn queue_extended_does_not_reduce_progress_fraction() {
+        let mut st = RenderState::new();
+        // 1000 byte file; PAR2 hint = 100 bytes (10%)
+        st.apply(ProgressEvent::Started {
+            mode: RunMode::Post,
+            files: vec![FileEntry {
+                name: "data.bin".into(),
+                segments: 10,
+                bytes: 1000,
+            }],
+            connections: 1,
+            target: None,
+            par2_bytes_hint: 100,
+        });
+        assert_eq!(st.total_bytes, 1100); // includes hint
+
+        // Simulate 90% of data uploaded
+        st.done_bytes = 900;
+        let frac_before = st.done_bytes as f64 / st.total_bytes as f64;
+
+        // PAR2 arrives — real size matches hint exactly
+        st.apply(ProgressEvent::QueueExtended {
+            file: "data.par2".into(),
+            segments: 1,
+            bytes: 100,
+        });
+        let frac_after = st.done_bytes as f64 / st.total_bytes as f64;
+
+        // total_bytes must not have grown (hint absorbed the real bytes)
+        assert_eq!(st.total_bytes, 1100);
+        // fraction must not have dropped
+        assert!(
+            frac_after >= frac_before,
+            "progress went backwards: {frac_before:.3} → {frac_after:.3}"
+        );
+    }
+
+    #[test]
+    fn queue_extended_expands_total_only_for_excess_over_hint() {
+        let mut st = RenderState::new();
+        st.apply(ProgressEvent::Started {
+            mode: RunMode::Post,
+            files: vec![FileEntry {
+                name: "data.bin".into(),
+                segments: 10,
+                bytes: 1000,
+            }],
+            connections: 1,
+            target: None,
+            par2_bytes_hint: 50, // underestimated
+        });
+        assert_eq!(st.total_bytes, 1050);
+
+        // PAR2 is actually 80 bytes (30 more than hint)
+        st.apply(ProgressEvent::QueueExtended {
+            file: "data.par2".into(),
+            segments: 1,
+            bytes: 80,
+        });
+        // Should grow by excess only: 1050 + (80 - 50) = 1080
+        assert_eq!(st.total_bytes, 1080);
+        assert_eq!(st.par2_hint_remaining, 0);
     }
 }
