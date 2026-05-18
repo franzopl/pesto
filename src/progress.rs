@@ -89,6 +89,21 @@ pub enum ProgressEvent {
     Par2WriteStarted { total: u32 },
     /// One PAR2 recovery slice has been appended to its volume file on disk.
     Par2SliceWritten,
+    /// Worker connection `conn` is authenticating (shown in yellow).
+    ConnectionAuth { conn: usize },
+    /// Worker connection `conn` is retrying a failed segment (shown in red).
+    ConnectionRetrying { conn: usize },
+    /// Snapshot of the buffer pool: `total` pre-allocated buffers, `free` available.
+    BufferPoolStats { total: usize, free: usize },
+}
+
+/// Options controlling the built-in terminal renderer.
+#[derive(Debug, Clone, Default)]
+pub struct RendererOptions {
+    /// Show only a single spinning line instead of the full panel.
+    pub quiet: bool,
+    /// Ring the terminal bell (`\a`) when the run finishes.
+    pub bell: bool,
 }
 
 /// Spawn the built-in terminal renderer used by the `pesto` binary.
@@ -98,8 +113,13 @@ pub enum ProgressEvent {
 /// real TTY it draws an in-place multi-line panel; otherwise it prints plain,
 /// scroll-friendly status lines suitable for logs and CI.
 pub fn spawn_terminal_renderer() -> (ProgressSender, JoinHandle<()>) {
+    spawn_terminal_renderer_with(RendererOptions::default())
+}
+
+/// Like [`spawn_terminal_renderer`] but with explicit display options.
+pub fn spawn_terminal_renderer_with(opts: RendererOptions) -> (ProgressSender, JoinHandle<()>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let handle = tokio::spawn(render_loop(rx));
+    let handle = tokio::spawn(render_loop(rx, opts));
     (tx, handle)
 }
 
@@ -226,9 +246,12 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::Par2SliceWritten => {
                         let _ = writeln!(out, r#"{{"type":"par2_slice_written"}}"#);
                     }
-                    // Connection events are noisy and not useful to consumers.
+                    // Connection and pool events are noisy and not useful to consumers.
                     ProgressEvent::ConnectionBusy { .. }
                     | ProgressEvent::ConnectionIdle { .. }
+                    | ProgressEvent::ConnectionAuth { .. }
+                    | ProgressEvent::ConnectionRetrying { .. }
+                    | ProgressEvent::BufferPoolStats { .. }
                     | ProgressEvent::Finished => {}
                 }
             }
@@ -242,10 +265,12 @@ const BODY_W: usize = 44;
 /// one-line summary, so the panel never grows unbounded.
 const GRID_LIMIT: usize = 12;
 
-async fn render_loop(mut rx: ProgressReceiver) {
+async fn render_loop(mut rx: ProgressReceiver, opts: RendererOptions) {
     let tty = std::io::stderr().is_terminal();
     let mut state = RenderState::new();
-    let mut ticker = tokio::time::interval(Duration::from_millis(200));
+    // Base interval; may be extended by adaptive logic when draws are slow.
+    let mut interval_ms: u64 = 200;
+    let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -254,9 +279,18 @@ async fn render_loop(mut rx: ProgressReceiver) {
                 None | Some(ProgressEvent::Finished) => {
                     state.finished = true;
                     if tty {
-                        state.draw_panel(true);
+                        if opts.quiet {
+                            state.draw_quiet(true);
+                        } else {
+                            state.draw_panel(true);
+                        }
                     } else {
                         state.draw_plain(true);
+                    }
+                    if opts.bell {
+                        let mut err = std::io::stderr().lock();
+                        let _ = err.write_all(b"\x07");
+                        let _ = err.flush();
                     }
                     break;
                 }
@@ -264,13 +298,36 @@ async fn render_loop(mut rx: ProgressReceiver) {
             },
             _ = ticker.tick() => {
                 if tty {
-                    state.draw_panel(false);
+                    let draw_start = Instant::now();
+                    if opts.quiet {
+                        state.draw_quiet(false);
+                    } else {
+                        state.draw_panel(false);
+                    }
+                    // Adaptive refresh: back off to 500 ms when drawing is slow.
+                    let draw_ms = draw_start.elapsed().as_millis() as u64;
+                    let new_interval = if draw_ms > 5 { 500 } else { 200 };
+                    if new_interval != interval_ms {
+                        interval_ms = new_interval;
+                        ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+                        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    }
                 } else {
                     state.draw_plain(false);
                 }
             }
         }
     }
+}
+
+/// Visual state of a single NNTP connection worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ConnState {
+    #[default]
+    Idle,
+    Busy,
+    Auth,
+    Retrying,
 }
 
 /// Mutable view the renderer builds up from the event stream.
@@ -297,6 +354,19 @@ struct RenderState {
     lines_drawn: usize,
     /// Tick counter that paces the non-TTY plain output.
     plain_ticks: u32,
+    /// Rolling window of bytes-per-second samples (up to 10 entries).
+    speed_history: [f64; 10],
+    speed_history_pos: usize,
+    speed_history_len: usize,
+    /// Bytes done at the last tick, for computing per-tick delta.
+    prev_done_bytes: u64,
+    /// Spinner frame index for quiet mode.
+    spinner_frame: usize,
+    /// Connection state overrides: None=normal, Some(ConnState).
+    conn_state: Vec<ConnState>,
+    /// Buffer pool snapshot.
+    buf_total: usize,
+    buf_free: usize,
     // Compression phase
     compress_active: bool,
     compress_total: u64,
@@ -337,6 +407,14 @@ impl RenderState {
             par2_write_total: 0,
             par2_write_done: 0,
             par2_write_start: Instant::now(),
+            speed_history: [0.0; 10],
+            speed_history_pos: 0,
+            speed_history_len: 0,
+            prev_done_bytes: 0,
+            spinner_frame: 0,
+            conn_state: Vec::new(),
+            buf_total: 0,
+            buf_free: 0,
         }
     }
 
@@ -353,6 +431,7 @@ impl RenderState {
                 self.target = target;
                 self.start = Instant::now();
                 self.conn_files = vec![None; connections];
+                self.conn_state = vec![ConnState::Idle; connections];
                 for f in files {
                     self.total_segments += f.segments;
                     self.total_bytes += f.bytes;
@@ -363,11 +442,31 @@ impl RenderState {
                 if let Some(slot) = self.conn_files.get_mut(conn) {
                     *slot = Some(file);
                 }
+                if let Some(s) = self.conn_state.get_mut(conn) {
+                    *s = ConnState::Busy;
+                }
             }
             ProgressEvent::ConnectionIdle { conn } => {
                 if let Some(slot) = self.conn_files.get_mut(conn) {
                     *slot = None;
                 }
+                if let Some(s) = self.conn_state.get_mut(conn) {
+                    *s = ConnState::Idle;
+                }
+            }
+            ProgressEvent::ConnectionAuth { conn } => {
+                if let Some(s) = self.conn_state.get_mut(conn) {
+                    *s = ConnState::Auth;
+                }
+            }
+            ProgressEvent::ConnectionRetrying { conn } => {
+                if let Some(s) = self.conn_state.get_mut(conn) {
+                    *s = ConnState::Retrying;
+                }
+            }
+            ProgressEvent::BufferPoolStats { total, free } => {
+                self.buf_total = total;
+                self.buf_free = free;
             }
             ProgressEvent::SegmentDone { file, bytes, ok } => {
                 self.done_segments += 1;
@@ -451,11 +550,121 @@ impl RenderState {
         self.done_bytes as f64 / self.elapsed_secs()
     }
 
+    /// Record a per-tick speed sample in the ring buffer (phase 21c/21d).
+    fn push_speed_sample(&mut self, bps: f64) {
+        self.speed_history[self.speed_history_pos] = bps;
+        self.speed_history_pos = (self.speed_history_pos + 1) % 10;
+        if self.speed_history_len < 10 {
+            self.speed_history_len += 1;
+        }
+    }
+
+    /// Return the active speed history slice in chronological order.
+    fn speed_samples(&self) -> Vec<f64> {
+        let n = self.speed_history_len;
+        if n == 0 {
+            return Vec::new();
+        }
+        let start = if n < 10 {
+            0
+        } else {
+            self.speed_history_pos // oldest slot when buffer is full
+        };
+        (0..n)
+            .map(|i| self.speed_history[(start + i) % 10])
+            .collect()
+    }
+
+    /// Compute ETA as a range based on throughput confidence (phase 21d).
+    ///
+    /// Returns `(low_secs, high_secs, unstable)`.
+    fn eta_range(&self) -> Option<(f64, f64, bool)> {
+        let remaining = self.total_bytes.saturating_sub(self.done_bytes) as f64;
+        if remaining <= 0.0 {
+            return None;
+        }
+        let samples = self.speed_samples();
+        if samples.is_empty() {
+            return None;
+        }
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        if mean < 1.0 {
+            return None;
+        }
+        let variance = samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
+            / samples.len() as f64;
+        let sigma = variance.sqrt();
+        let cv = sigma / mean;
+
+        let mid = remaining / mean;
+        if cv < 0.1 {
+            return Some((mid, mid, false));
+        }
+        let low = remaining / (mean + sigma).max(1.0);
+        let high = remaining / (mean - sigma).max(1.0);
+        Some((low, high, cv >= 0.3))
+    }
+
+    /// Draw quiet single-line mode (phase 21f).
+    fn draw_quiet(&mut self, final_draw: bool) {
+        if !self.started {
+            return;
+        }
+        const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let spinner = if final_draw {
+            '✓'
+        } else {
+            let ch = SPINNER[self.spinner_frame % SPINNER.len()];
+            self.spinner_frame += 1;
+            ch
+        };
+
+        let pct = if self.total_bytes > 0 {
+            (self.done_bytes as f64 / self.total_bytes as f64 * 100.0).clamp(0.0, 100.0) as u64
+        } else {
+            0
+        };
+
+        let eta_str = if final_draw {
+            format!("done {}", format_duration(self.elapsed_secs()))
+        } else if let Some((lo, hi, unstable)) = self.eta_range() {
+            let mark = if unstable { "~" } else { "" };
+            if (hi - lo).abs() < 1.0 {
+                format!("ETA {mark}{}", format_duration(lo))
+            } else {
+                format!("ETA {mark}{}–{}", format_duration(lo), format_duration(hi))
+            }
+        } else {
+            "ETA —".to_string()
+        };
+
+        let line = format!("{spinner}  {pct:>3}% · {eta_str}");
+
+        let mut out = String::new();
+        if self.lines_drawn > 0 {
+            out.push_str("\x1b[1F\x1b[2K");
+        }
+        out.push_str(&line);
+        out.push('\n');
+        self.lines_drawn = 1;
+
+        let mut err = std::io::stderr().lock();
+        let _ = err.write_all(out.as_bytes());
+        let _ = err.flush();
+    }
+
     // ---- TTY panel rendering --------------------------------------------
 
     fn draw_panel(&mut self, final_draw: bool) {
         if !self.started {
             return;
+        }
+        // Record a speed sample for sparkline + ETA confidence (phase 21c/21d).
+        let current_bps = self.done_bytes.saturating_sub(self.prev_done_bytes) as f64
+            * (1000.0 / 200.0); // per-tick delta → bytes/s (200 ms tick)
+        self.prev_done_bytes = self.done_bytes;
+        if !final_draw && self.done_bytes > 0 {
+            self.push_speed_sample(current_bps);
         }
         let lines = self.panel_lines(final_draw);
 
@@ -544,16 +753,33 @@ impl RenderState {
                 self.done_segments, self.total_segments
             );
             let rate = self.rate();
+            // ETA with confidence range (phase 21d).
             let eta = if final_draw {
                 format!("elapsed {}", format_duration(self.elapsed_secs()))
+            } else if let Some((lo, hi, unstable)) = self.eta_range() {
+                let mark = if unstable { "~" } else { "" };
+                if (hi - lo).abs() < 1.0 {
+                    format!("ETA {mark}{}", format_duration(lo))
+                } else {
+                    format!("ETA {mark}{}–{}", format_duration(lo), format_duration(hi))
+                }
             } else if rate > 1.0 && self.total_bytes > self.done_bytes {
                 let remaining = (self.total_bytes - self.done_bytes) as f64 / rate;
                 format!("ETA {}", format_duration(remaining))
             } else {
                 "ETA —".to_string()
             };
+            // Sparkline appended to the speed value (phase 21c).
+            let spark = {
+                let samples = self.speed_samples();
+                if samples.len() >= 2 {
+                    format!(" {}", render_sparkline(&samples))
+                } else {
+                    String::new()
+                }
+            };
             let line2 = format!(
-                "{}/{} · {}/s · {eta}",
+                "{}/{} · {}/s{spark} · {eta}",
                 format_size(self.done_bytes),
                 format_size(self.total_bytes),
                 format_size(rate as u64),
@@ -563,14 +789,16 @@ impl RenderState {
             lines.push(box_line(&line2));
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
 
-            // --- per-connection activity ----------------------------------
+            // --- per-connection activity with colour codes (phase 21b) ----
             let conns = self.conn_files.len();
             if conns > 0 && conns <= GRID_LIMIT {
                 let mut idx = 0;
                 while idx < conns {
-                    let left = conn_cell(idx, &self.conn_files[idx]);
+                    let st_l = self.conn_state.get(idx).copied().unwrap_or_default();
+                    let left = conn_cell(idx, &self.conn_files[idx], st_l);
                     let line = if idx + 1 < conns {
-                        format!("{left}{}", conn_cell(idx + 1, &self.conn_files[idx + 1]))
+                        let st_r = self.conn_state.get(idx + 1).copied().unwrap_or_default();
+                        format!("{left}{}", conn_cell(idx + 1, &self.conn_files[idx + 1], st_r))
                     } else {
                         left
                     };
@@ -579,15 +807,39 @@ impl RenderState {
                 }
             } else if conns > GRID_LIMIT {
                 let active = self.conn_files.iter().filter(|c| c.is_some()).count();
-                lines.push(format!("{conns} connections · {active} active"));
+                let retrying = self
+                    .conn_state
+                    .iter()
+                    .filter(|&&s| s == ConnState::Retrying)
+                    .count();
+                let retry_str = if retrying > 0 {
+                    format!(" · {} retrying", ansi(&retrying.to_string(), "31"))
+                } else {
+                    String::new()
+                };
+                lines.push(format!("{conns} connections · {active} active{retry_str}"));
             }
 
             // --- file tally + failures -----------------------------------
             let (done, in_flight) = self.file_tally();
-            lines.push(format!(
-                "files ✓{done} ⤵{in_flight} · failures {}",
-                self.failures
-            ));
+            let failures_str = if self.failures > 0 {
+                ansi(&format!("failures {}", self.failures), "31")
+            } else {
+                format!("failures {}", self.failures)
+            };
+            lines.push(format!("files ✓{done} ⤵{in_flight} · {failures_str}"));
+
+            // --- buffer pool visualizer (phase 21h, shown under pressure) -
+            if self.buf_total > 0 && self.buf_free * 4 < self.buf_total {
+                let frac_free = self.buf_free as f64 / self.buf_total as f64;
+                let bar = render_bar(1.0 - frac_free, 10);
+                let buf_line = format!(
+                    "buf [{bar}] {}/{} used",
+                    self.buf_total - self.buf_free,
+                    self.buf_total,
+                );
+                lines.push(ansi(&buf_line, "33")); // yellow when under pressure
+            }
         }
 
         // --- PAR2 recovery slice writing progress ------------------------
@@ -695,14 +947,27 @@ impl RenderState {
     }
 }
 
-/// One cell of the connection grid, padded to a fixed column width.
-fn conn_cell(idx: usize, file: &Option<String>) -> String {
+/// One cell of the connection grid with colour-coded state (phase 21b).
+fn conn_cell(idx: usize, file: &Option<String>, state: ConnState) -> String {
     let label = match file {
         Some(name) => truncate(name, 14),
         None => "idle".to_string(),
     };
-    let cell = format!("conn {:<2} ▸ {label}", idx + 1);
-    pad(&cell, 26)
+    let raw = format!("conn {:<2} ▸ {label}", idx + 1);
+    let coloured = match state {
+        ConnState::Busy => ansi(&raw, "32"),      // green
+        ConnState::Auth => ansi(&raw, "33"),      // yellow
+        ConnState::Retrying => ansi(&raw, "31"),  // red
+        ConnState::Idle => ansi(&raw, "2"),       // dim
+    };
+    // pad by visual width (raw chars, not ANSI-escaped)
+    let visual_len = raw.chars().count();
+    let padding = if visual_len < 26 {
+        " ".repeat(26 - visual_len)
+    } else {
+        String::new()
+    };
+    format!("{coloured}{padding}")
 }
 
 /// Format a `│ … │` box content line, padding/truncating to the interior.
@@ -710,18 +975,74 @@ fn box_line(body: &str) -> String {
     format!("│ {} │", pad(body, BODY_W))
 }
 
-/// Draw a `████░░░░` proportional bar of the given character width.
+// Eight sub-character blocks from narrowest to fullest (phase 21a).
+const SUBCHAR: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+
+/// Draw a smooth proportional bar using sub-character block rendering.
+///
+/// The fractional leading cell uses one of `▏▎▍▌▋▊▉█` so the bar moves
+/// continuously instead of jumping whole-cell steps.
 fn render_bar(frac: f64, width: usize) -> String {
-    let filled = (frac * width as f64).round() as usize;
-    let filled = filled.min(width);
-    let mut s = String::with_capacity(width);
-    for _ in 0..filled {
+    if width == 0 {
+        return String::new();
+    }
+    let total_eighths = (frac.clamp(0.0, 1.0) * width as f64 * 8.0).round() as usize;
+    let full_blocks = (total_eighths / 8).min(width);
+    let remainder = total_eighths % 8;
+
+    let mut s = String::with_capacity(width * 3); // UTF-8 multi-byte
+    for _ in 0..full_blocks {
         s.push('█');
     }
-    for _ in 0..width - filled {
-        s.push('░');
+    if full_blocks < width {
+        if remainder > 0 {
+            s.push(SUBCHAR[remainder - 1]);
+            for _ in 0..width - full_blocks - 1 {
+                s.push('░');
+            }
+        } else {
+            for _ in 0..width - full_blocks {
+                s.push('░');
+            }
+        }
     }
     s
+}
+
+// Nine-level sparkline characters (phase 21c).
+const SPARK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Render a sparkline string from a slice of f64 speed samples.
+fn render_sparkline(samples: &[f64]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    let max = samples.iter().cloned().fold(0.0_f64, f64::max);
+    if max < 1.0 {
+        return SPARK[0].to_string().repeat(samples.len());
+    }
+    samples
+        .iter()
+        .map(|&v| {
+            let idx = ((v / max) * 8.0).round() as usize;
+            SPARK[idx.min(8)]
+        })
+        .collect()
+}
+
+/// Returns true when ANSI colour should be used (TTY + NO_COLOR not set).
+fn use_color() -> bool {
+    std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err()
+}
+
+/// Wrap `s` in the given ANSI SGR codes, or return `s` unchanged when colours
+/// are disabled.
+fn ansi(s: &str, code: &str) -> String {
+    if use_color() {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Pad `s` with spaces (or truncate it) to exactly `width` characters.
@@ -795,7 +1116,22 @@ mod tests {
     fn render_bar_is_proportional() {
         assert_eq!(render_bar(0.0, 4), "░░░░");
         assert_eq!(render_bar(1.0, 4), "████");
+        // 0.5 of 4 cells = 2 full blocks exactly (no fractional remainder)
         assert_eq!(render_bar(0.5, 4), "██░░");
+        // Sub-character: 0.125 of 8 cells = 1 eighth → ▏ then 7 empty
+        assert_eq!(render_bar(0.125 / 8.0, 8), "▏░░░░░░░");
+        // Ensure visual width equals `width` (each char is one column)
+        assert_eq!(render_bar(0.3, 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn render_sparkline_maps_to_nine_levels() {
+        let samples = vec![0.0, 50.0, 100.0];
+        let spark = render_sparkline(&samples);
+        let chars: Vec<char> = spark.chars().collect();
+        assert_eq!(chars.len(), 3);
+        assert_eq!(chars[0], ' '); // min → space
+        assert_eq!(chars[2], '█'); // max → full block
     }
 
     #[test]

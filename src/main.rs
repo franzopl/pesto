@@ -255,6 +255,15 @@ struct Cli {
     #[arg(long)]
     no_notify: bool,
 
+    /// Show only a single spinning line instead of the full progress panel.
+    /// Ideal for tmux / screen sessions [config: output.quiet].
+    #[arg(short, long)]
+    quiet: bool,
+
+    /// Ring the terminal bell on completion [config: output.bell].
+    #[arg(long)]
+    bell: bool,
+
     /// Treat each top-level entry in a directory argument as an independent
     /// upload with its own NZB. PAR2 and NZB naming follow the entry name.
     /// Combine with --jobs for parallel uploads.
@@ -371,6 +380,7 @@ struct UploadParams {
     out: Option<PathBuf>,
     /// Write a history record to history.jsonl after each successful upload.
     write_history: bool,
+    renderer_opts: pesto::progress::RendererOptions,
 }
 
 /// The result of a single upload (one entry in `--each` / `--season`).
@@ -396,7 +406,7 @@ async fn run_single_upload(
     let (progress_tx, renderer) = if params.json_mode {
         pesto::progress::spawn_json_emitter()
     } else {
-        pesto::progress::spawn_terminal_renderer()
+        pesto::progress::spawn_terminal_renderer_with(params.renderer_opts.clone())
     };
 
     // ── Compression ──────────────────────────────────────────────────────────
@@ -1113,6 +1123,10 @@ async fn main() -> Result<()> {
         json_mode,
         out: cli.out.clone(),
         write_history: config.history,
+        renderer_opts: pesto::progress::RendererOptions {
+            quiet: cli.quiet || config.quiet,
+            bell: cli.bell || config.bell,
+        },
     });
 
     // ── --watch mode ──────────────────────────────────────────────────────────

@@ -123,6 +123,8 @@ async fn posts_every_segment_to_a_mock_server() {
         message_id_domain: None,
         post_hook: None,
         nfo: false,
+        quiet: false,
+        bell: false,
     };
 
     let inputs = vec![pesto::walk::InputFile {
@@ -264,6 +266,8 @@ fn make_config(port: u16) -> Config {
         message_id_domain: None,
         post_hook: None,
         nfo: false,
+        quiet: false,
+        bell: false,
     }
 }
 
