@@ -613,6 +613,13 @@ async fn producer(
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         let mut encoder = if rec_count > 0 {
             let enc = RecoveryEncoder::new(par2_slice_size, total_slices, exp_start, rec_count);
+            // On passes with many recovery blocks, increasing the queue size
+            // (cache blocking) amortizes the flush cost over more input data.
+            // We use 1/4 of the available memory limit for the queue, capped
+            // between 256MB and 2GB.
+            let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+            let enc = enc.with_flush_limit(queue_limit);
+
             // Melhoria 1: on pass 0 enable parallel checksum computation inside
             // the encoder so rayon::join overlaps MD5+CRC32 with RS work.
             let enc = if pass_idx == 0 {

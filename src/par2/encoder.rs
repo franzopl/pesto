@@ -45,6 +45,8 @@ pub struct RecoveryEncoder {
     next_index: usize,
     /// Queue of input slices waiting to be processed (cache blocking).
     queued_slices: Vec<Vec<u8>>,
+    /// Maximum bytes to queue before flushing.
+    flush_limit_bytes: usize,
     /// When true each flush also computes per-slice MD5+CRC32 checksums in
     /// parallel with the Reed-Solomon work and accumulates them here.
     compute_checksums: bool,
@@ -77,9 +79,16 @@ impl RecoveryEncoder {
             buffers: vec![vec![0u16; slice_size / 2]; recovery_count],
             next_index: 0,
             queued_slices: Vec::with_capacity(64),
+            flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
         }
+    }
+
+    /// Set the maximum bytes to queue before flushing.
+    pub fn with_flush_limit(mut self, bytes: usize) -> Self {
+        self.flush_limit_bytes = bytes;
+        self
     }
 
     /// Enable parallel per-slice MD5+CRC32 checksum computation.
@@ -116,12 +125,10 @@ impl RecoveryEncoder {
         // (to keep the footprint lean). 256 MB is enough to amortize the flush
         // cost even for very few slices.
         let queued_bytes = self.queued_slices.len() * self.slice_words * 2;
-        if self.queued_slices.len() >= 64 || queued_bytes >= 256 * 1024 * 1024 {
+        if self.queued_slices.len() >= 128 || queued_bytes >= self.flush_limit_bytes {
             self.flush();
         }
     }
-
-    /// Process queued slices into the recovery buffers.
     fn flush(&mut self) {
         if self.queued_slices.is_empty() {
             return;
