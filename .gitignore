@@ -6,3 +6,7 @@ config.toml
 test_results/
 screenshot-*.png
 Terapia atraves da Escrita*/
+file10G.bin
+file1G.bin
+file5G.bin
+*.par2
