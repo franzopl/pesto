@@ -1013,7 +1013,7 @@ mod tests {
         let recovery_count = 4;
 
         // Build a deterministic non-trivial input.
-        let mut slices: Vec<Vec<u8>> = (0..total_slices)
+        let slices: Vec<Vec<u8>> = (0..total_slices)
             .map(|s| {
                 (0..slice_size)
                     .map(|i| ((s * 37 + i * 13 + 7) & 0xFF) as u8)

@@ -51,7 +51,7 @@ fn bench(label: &str, input_mib: usize, redundancy_pct: usize) {
     for slice in slices {
         enc.add_slice(slice);
     }
-    let recovery = enc.finish();
+    let (recovery, _) = enc.finish();
     let elapsed = start.elapsed().as_secs_f64();
 
     assert_eq!(recovery.len(), recovery_count);

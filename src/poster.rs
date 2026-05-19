@@ -610,7 +610,7 @@ async fn producer(
             None
         };
 
-        for (_file_idx, meta) in metas.iter().enumerate() {
+        for meta in metas.iter() {
             let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
             let total_parts = segments.len() as u32;
 
