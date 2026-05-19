@@ -84,6 +84,9 @@ async fn par2_only_directory_repair_recreates_tree() {
         nfo: false,
         quiet: false,
         bell: false,
+        check: false,
+        check_delay_secs: 30,
+        check_retries: 2,
     };
 
     let inputs = expand_inputs(std::slice::from_ref(&show)).unwrap();

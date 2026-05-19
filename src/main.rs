@@ -295,8 +295,31 @@ struct Cli {
     #[arg(long, value_name = "SECS", default_value = "30")]
     watch_interval: u64,
 
+    /// After all articles are posted, verify each one is present on the server
+    /// via STAT. Waits --check-delay seconds before checking. Articles not
+    /// found after --check-retries attempts are reported as missing
+    /// [config: posting.check, default false].
+    #[arg(long)]
+    check: bool,
+
+    /// Seconds to wait after the last article is posted before running the
+    /// STAT verification pass [config: posting.check_delay, default 30].
+    #[arg(long, value_name = "SECS")]
+    check_delay: Option<u64>,
+
+    /// Number of STAT attempts per article during post-check before marking
+    /// it as missing [config: posting.check_retries, default 2].
+    #[arg(long, value_name = "N")]
+    check_retries: Option<u32>,
+
+    /// Name to use when reading from stdin (`-`). Required when a `-` path is
+    /// given; determines the filename in the NZB and PAR2 metadata.
+    #[arg(long, value_name = "NAME")]
+    stdin_name: Option<String>,
+
     /// Files or directories to post. A directory is walked recursively and
     /// every file inside it is posted, keeping the folder structure.
+    /// Use `-` to read from stdin (requires --stdin-name).
     #[arg(value_name = "PATH")]
     files: Vec<PathBuf>,
 }
@@ -365,6 +388,9 @@ impl Cli {
             message_id_domain: self.message_id_domain.clone(),
             post_hook: self.post_hook.clone(),
             nfo: if self.nfo { Some(true) } else { None },
+            check: if self.check { Some(true) } else { None },
+            check_delay_secs: self.check_delay,
+            check_retries: self.check_retries,
         }
     }
 }
@@ -579,6 +605,31 @@ async fn run_single_upload(
     .await?;
     let _ = renderer.await;
 
+    // ── Post-check STAT pass ──────────────────────────────────────────────────
+    let check_missing: Vec<String> = if config.check
+        && !config.dry_run
+        && !config.par2_only
+        && !outcome.cancelled
+        && !outcome.segments.is_empty()
+    {
+        let (check_tx, check_renderer) = if params.json_mode {
+            pesto::progress::spawn_json_emitter()
+        } else {
+            pesto::progress::spawn_terminal_renderer_with(params.renderer_opts.clone())
+        };
+        let missing = pesto::poster::check_articles(config, &outcome.segments, Some(&check_tx))
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("check: error during STAT pass: {e:#}");
+                Vec::new()
+            });
+        drop(check_tx);
+        let _ = check_renderer.await;
+        missing
+    } else {
+        Vec::new()
+    };
+
     if !params.json_mode {
         if config.par2_only {
             if outcome.cancelled {
@@ -616,6 +667,17 @@ async fn run_single_upload(
         for failure in &outcome.failures {
             eprintln!("  - {failure}");
         }
+    }
+    if !check_missing.is_empty() {
+        eprintln!(
+            "check: {} article(s) not found on server:",
+            check_missing.len()
+        );
+        for id in &check_missing {
+            eprintln!("  - {id}");
+        }
+    } else if config.check && !config.dry_run && !config.par2_only && !outcome.cancelled {
+        eprintln!("check: all {} article(s) verified", outcome.segments.len());
     }
 
     // Write NZB.
@@ -804,7 +866,7 @@ async fn run_single_upload(
     Ok(UploadResult {
         segments: outcome.segments,
         cancelled: outcome.cancelled,
-        had_failures: !outcome.failures.is_empty(),
+        had_failures: !outcome.failures.is_empty() || !check_missing.is_empty(),
     })
 }
 
@@ -1098,11 +1160,80 @@ async fn run_watch(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     // `pesto --config` with no value: launch the interactive setup wizard.
     if matches!(cli.config, Some(None)) {
         return run_wizard();
+    }
+
+    // Handle `-` (stdin) in the file list.
+    // Read all of stdin into a temp file and replace the `-` path with it.
+    // Only one `-` is allowed per invocation; combining with --each/--season
+    // is not supported (PAR2 and compression require a real file on disk).
+    let _stdin_tempfile: Option<tempfile::NamedTempFile>;
+    if cli.files.iter().any(|p| p.as_os_str() == "-") {
+        if cli.files.iter().filter(|p| p.as_os_str() == "-").count() > 1 {
+            anyhow::bail!("stdin (`-`) may only appear once in the file list");
+        }
+        if cli.each || cli.season {
+            anyhow::bail!("stdin (`-`) cannot be combined with --each or --season");
+        }
+        let stdin_name = cli
+            .stdin_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("--stdin-name is required when reading from stdin (`-`)")
+            })?;
+
+        use std::io::Read;
+        if std::io::stdin().is_terminal() {
+            anyhow::bail!("stdin is a terminal; pipe data into pesto or use a file instead of `-`");
+        }
+
+        // Read stdin into a named temp file so poster.rs can seek and stat it.
+        let mut tmp = tempfile::Builder::new()
+            .prefix("pesto_stdin_")
+            .tempfile()
+            .context("creating stdin temp file")?;
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .context("reading from stdin")?;
+        std::io::Write::write_all(&mut tmp, &buf).context("writing stdin to temp file")?;
+        let tmp_path = tmp.path().to_path_buf();
+        // Keep the temp file alive until the upload is done.
+        _stdin_tempfile = Some(tmp);
+
+        // Replace `-` with the temp path and set the published name via a
+        // special sentinel that run_single_upload will recognise.
+        for p in &mut cli.files {
+            if p.as_os_str() == "-" {
+                *p = tmp_path.clone();
+            }
+        }
+        // Store the desired name in cli.stdin_name; run_single_upload will
+        // use it when building InputFile from the temp path.
+        // We rename the file itself so expand_inputs picks up the right base name.
+        // Easiest: just rename the temp file to have the desired name as its last component.
+        let named_tmp_dir = tmp_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+        let named_path = named_tmp_dir.join(stdin_name);
+        // Only rename if the paths differ (avoid overwriting if name matches).
+        if named_path != tmp_path {
+            std::fs::hard_link(&tmp_path, &named_path)
+                .or_else(|_| std::fs::copy(&tmp_path, &named_path).map(|_| ()))
+                .context("naming stdin temp file")?;
+            for p in &mut cli.files {
+                if *p == tmp_path {
+                    *p = named_path.clone();
+                }
+            }
+        }
+    } else {
+        _stdin_tempfile = None;
     }
 
     // `pesto` with nothing to post and no --watch: show the orientation screen.

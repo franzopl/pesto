@@ -776,6 +776,59 @@ set is needed for reliable integration by `upapasta` and other consumers.
 
 ---
 
+## Phase 23 — Stdin Pipelining & Post-Check ✅
+
+### 23a — Stdin pipelining ✅
+
+Allow `pesto` to receive data from another process via a Unix pipe without
+writing an intermediate file to disk manually.
+
+- [x] `-` accepted as a `FILE` argument (one occurrence per invocation)
+- [x] `--stdin-name NAME` flag — sets the filename published in the NZB and
+      PAR2 metadata (required when `-` is used)
+- [x] stdin is read into a named temp file (`tempfile::Builder`) so the poster
+      can seek, stat, and pass the data to the existing pipeline unchanged
+- [x] The temp file is named after `--stdin-name` so `expand_inputs` picks up
+      the right base name without changes to `walk.rs` or `poster.rs`
+- [x] Error if stdin is a terminal, if `--stdin-name` is missing, or if `-`
+      appears more than once
+- [x] Incompatible with `--each` and `--season` (documented)
+- [x] PAR2 and compression work normally on the temp file
+
+**Typical usage:**
+
+```bash
+tar cf - ./Season01/ | pesto - --stdin-name season01.tar --out season01.nzb
+zstd -c bigfile.mkv  | pesto - --stdin-name bigfile.mkv.zst --groups alt.binaries.x
+```
+
+### 23b — Deferred post-check ✅
+
+Verify that every posted article is retrievable on the server after uploading
+completes, without blocking the upload throughput.
+
+- [x] `--check` flag enables the check phase (config: `posting.check`)
+- [x] `--check-delay SECS` — seconds to wait before issuing STAT commands;
+      default 30 (config: `posting.check_delay`)
+- [x] `--check-retries N` — STAT attempts per article before marking it
+      missing; default 2 (config: `posting.check_retries`)
+- [x] Check phase runs **after** all articles are posted and the progress
+      renderer finishes — upload throughput is never impacted
+- [x] Uses a single NNTP connection (STAT is lightweight); reuses primary server
+- [x] `ProgressEvent::CheckStarted / CheckProgress / CheckDone` for the
+      terminal panel, plain log, and JSON emitter
+- [x] Terminal panel shows `▸ check [████░░░░] N/M · X missing` in red when
+      articles are missing
+- [x] Missing Message-IDs printed to stderr; exit code 1 when any are missing
+- [x] `check: "all N article(s) verified"` printed on success
+- [x] Skipped automatically on `--dry-run`, `--par2-only`, cancelled runs
+
+**Difference from `--verify`:** `--verify` re-posts immediately during upload
+if STAT fails; `--check` runs after all articles are posted, does not re-post,
+and is designed for confirming propagation to the server with a delay.
+
+---
+
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
@@ -796,7 +849,7 @@ set is needed for reliable integration by `upapasta` and other consumers.
 11. **Pipelined Volume Streaming (The "RAR Volumes" Idea):** Stream archive volumes (`.part01.rar`) from the compressor directly into the NNTP upload queue as soon as each volume is flushed to disk, instead of waiting for the entire archive to finish.
 12. **Native Streaming Compression:** Use pure Rust crates (`zip` or `sevenz-rust`) to compress on-the-fly directly in memory, feeding the NNTP workers without temporary files.
 13. **On-the-fly TAR Bundling:** Bundle directories into a tar stream dynamically during the read pass, eliminating the need for a temporary archive step.
-14. **Stdin Pipelining:** Allow `pesto` to read directly from `stdin` (yEnc-encoding on the fly), enabling chaining from other shell tools (e.g., `tar cf - . | pesto -`).
+14. **Stdin Pipelining:** ✅ Implemented in Phase 23a. `-` is accepted as a file argument; data is buffered to a named temp file.
 15. **Eager PAR2 Processing in Watch Mode:** In `--watch` mode, start hashing and computing PAR2 blocks as soon as a file is detected, before the upload queue is ready.
 16. **Async Backpressure:** Ensure that the compression/PAR2 stages block properly if the network layer stalls, preventing buffer bloat.
 17. **Chunked/Live Uploading:** Support infinite data streams (like live video), producing a continuous sequence of NZBs or a dynamically updating NZB.

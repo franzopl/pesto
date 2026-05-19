@@ -126,6 +126,9 @@ async fn posts_every_segment_to_a_mock_server() {
         nfo: false,
         quiet: false,
         bell: false,
+        check: false,
+        check_delay_secs: 30,
+        check_retries: 2,
     };
 
     let inputs = vec![pesto::walk::InputFile {
@@ -270,6 +273,9 @@ fn make_config(port: u16) -> Config {
         nfo: false,
         quiet: false,
         bell: false,
+        check: false,
+        check_delay_secs: 30,
+        check_retries: 2,
     }
 }
 

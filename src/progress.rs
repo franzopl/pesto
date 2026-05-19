@@ -99,6 +99,12 @@ pub enum ProgressEvent {
     ConnectionRetrying { conn: usize },
     /// Snapshot of the buffer pool: `total` pre-allocated buffers, `free` available.
     BufferPoolStats { total: usize, free: usize },
+    /// Post-check phase has started; `total` is the number of articles to verify.
+    CheckStarted { total: u64 },
+    /// One article has been checked; `ok` is false if it was not found.
+    CheckProgress { checked: u64, ok: bool },
+    /// Post-check phase is complete; `failed` is the number of missing articles.
+    CheckDone { failed: u64 },
 }
 
 /// Options controlling the built-in terminal renderer.
@@ -250,6 +256,19 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::Par2SliceWritten => {
                         let _ = writeln!(out, r#"{{"type":"par2_slice_written"}}"#);
                     }
+                    ProgressEvent::CheckStarted { total } => {
+                        let _ = writeln!(out, r#"{{"type":"check_started","total":{total}}}"#);
+                    }
+                    ProgressEvent::CheckProgress { checked, ok } => {
+                        let ok_str = if ok { "true" } else { "false" };
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_progress","checked":{checked},"ok":{ok_str}}}"#
+                        );
+                    }
+                    ProgressEvent::CheckDone { failed } => {
+                        let _ = writeln!(out, r#"{{"type":"check_done","failed":{failed}}}"#);
+                    }
                     // Connection and pool events are noisy and not useful to consumers.
                     ProgressEvent::ConnectionBusy { .. }
                     | ProgressEvent::ConnectionIdle { .. }
@@ -391,6 +410,12 @@ struct RenderState {
     par2_write_total: u32,
     par2_write_done: u32,
     par2_write_start: Instant,
+    // Post-check phase
+    check_active: bool,
+    check_total: u64,
+    check_checked: u64,
+    check_failed: u64,
+    check_start: Instant,
 }
 
 impl RenderState {
@@ -421,6 +446,11 @@ impl RenderState {
             par2_write_total: 0,
             par2_write_done: 0,
             par2_write_start: Instant::now(),
+            check_active: false,
+            check_total: 0,
+            check_checked: 0,
+            check_failed: 0,
+            check_start: Instant::now(),
             proc_rss_bytes: 0,
             proc_cpu_pct: 0.0,
             proc_prev_ticks: 0,
@@ -559,6 +589,23 @@ impl RenderState {
                 if self.par2_write_done >= self.par2_write_total {
                     self.par2_write_active = false;
                 }
+            }
+            ProgressEvent::CheckStarted { total } => {
+                self.check_active = true;
+                self.check_total = total;
+                self.check_checked = 0;
+                self.check_failed = 0;
+                self.check_start = Instant::now();
+            }
+            ProgressEvent::CheckProgress { checked, ok } => {
+                self.check_checked = checked;
+                if !ok {
+                    self.check_failed += 1;
+                }
+            }
+            ProgressEvent::CheckDone { failed } => {
+                self.check_active = false;
+                self.check_failed = failed;
             }
         }
     }
@@ -988,6 +1035,36 @@ impl RenderState {
             lines.push(ansi(&res_line, "2")); // dim — informational, not critical
         }
 
+        // --- post-check STAT phase ---------------------------------------
+        if self.check_active || (final_draw && self.check_total > 0) {
+            let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
+            let frac = if self.check_total > 0 {
+                (self.check_checked as f64 / self.check_total as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let bar = render_bar(frac, 10);
+            let failed_str = if self.check_failed > 0 {
+                format!(" · {} missing", self.check_failed)
+            } else {
+                String::new()
+            };
+            let elapsed_str = if !self.check_active {
+                format!(" · elapsed {}", format_duration(elapsed))
+            } else {
+                String::new()
+            };
+            let line = format!(
+                "▸ check [{bar}] {}/{}{failed_str}{elapsed_str}",
+                self.check_checked, self.check_total
+            );
+            if self.check_failed > 0 {
+                lines.push(ansi(&line, "31")); // red when articles are missing
+            } else {
+                lines.push(line);
+            }
+        }
+
         // --- optional status / interrupt note ----------------------------
         if self.interrupted {
             lines.push("⚠ interrupt received — finishing in-flight segments".to_string());
@@ -1035,6 +1112,16 @@ impl RenderState {
                 err,
                 "par2: {}/{} slices",
                 self.par2_write_done, self.par2_write_total,
+            );
+            let _ = err.flush();
+            return;
+        }
+
+        if self.check_active {
+            let _ = writeln!(
+                err,
+                "check: {}/{} articles · {} missing",
+                self.check_checked, self.check_total, self.check_failed,
             );
             let _ = err.flush();
             return;
