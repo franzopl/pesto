@@ -989,9 +989,10 @@ or 64-byte (GFNI) chunk of input data. Amortize that load over 2 or 4 recovery
 buffers simultaneously: different coefficients, same input vector, 2–4 store
 instructions — halves or quarters the load/store ratio.
 
-- [ ] Implement a 2× unrolled variant of `flush_avx2_work`: one `_mm256_loadu`
-      feeds two separate multiply-accumulate chains targeting two recovery buffers
-- [ ] Benchmark 2× vs 4× unrolling (diminishing returns expected beyond 2×)
+- [x] Implement a 2× unrolled variant via `par_chunks_mut(2)`: each rayon task
+      handles a pair of recovery blocks sharing one input load + nibble decomposition
+- [x] Measured: 1G −1.8%, 5G −2.9%; modest gain due to register pressure (16 table
+      vectors against 16 available YMM registers); gap vs parpar now 1.27×
 - [ ] Apply to `flush_ssse3_work`; skip GFNI (already 2× wider than AVX2)
 
 ---
