@@ -135,6 +135,17 @@ impl RecoveryEncoder {
         }
 
         #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("gfni")
+        {
+            unsafe {
+                self.flush_avx512_gfni();
+            }
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2") {
             unsafe {
                 self.flush_avx2();
@@ -367,6 +378,232 @@ impl RecoveryEncoder {
                         let mut p_in = slice_chunk[blocks_32 * 32..].as_ptr();
                         let tail_end = p_in.add(remainder);
 
+                        while p_in < tail_end {
+                            let lo = *p_in as usize;
+                            let hi = *p_in.add(1) as usize;
+                            *ptr_word ^= table_low[lo] ^ table_high[hi];
+                            ptr_word = ptr_word.add(1);
+                            p_in = p_in.add(2);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// GF(2^16) multiply-by-coefficient using AVX-512BW + GFNI instructions.
+    ///
+    /// The `vgf2p8affineqb` instruction applies an 8×8 GF(2) matrix to each input
+    /// byte in a single cycle. Any GF(2^16) multiply-by-constant is a GF(2)-linear
+    /// map on 16 bits, which decomposes into four 8×8 matrices (one per pair of
+    /// input/output byte halves). Processing 512-bit vectors yields 32 GF(2^16)
+    /// words per loop iteration — roughly twice the AVX2 throughput.
+    ///
+    /// Inner-loop layout (per 512-bit iteration):
+    ///   1. De-interleave bytes within each 128-bit lane so lo bytes occupy the
+    ///      low qword and hi bytes the high qword.
+    ///   2. Apply two GFNI affine transforms (mat_lo, mat_hi) — each call covers
+    ///      both the M_ll/M_lh or M_hl/M_hh matrices simultaneously by placing
+    ///      different matrices in the two qwords of each lane.
+    ///   3. Fold the two qword results within each lane (bsrli + xor) to produce
+    ///      the combined lo and hi result bytes.
+    ///   4. Re-interleave with `vunpcklbw` and XOR into the recovery buffer.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_gfni(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            let buffers = &mut self.buffers;
+            let logbases = &self.logbases;
+            let exponent_start = self.exponent_start;
+            let gf = &self.gf;
+            let ((), cs) = rayon::join(
+                || unsafe {
+                    Self::flush_avx512_gfni_work(
+                        buffers,
+                        &queued,
+                        start_index,
+                        logbases,
+                        exponent_start,
+                        gf,
+                    )
+                },
+                || queued.par_iter().map(|s| slice_checksum(s)).collect(),
+            );
+            cs
+        } else {
+            unsafe {
+                Self::flush_avx512_gfni_work(
+                    &mut self.buffers,
+                    &queued,
+                    start_index,
+                    &self.logbases,
+                    self.exponent_start,
+                    &self.gf,
+                );
+            }
+            Vec::new()
+        };
+
+        self.pending_checksums.extend(new_cs);
+        self.queued_slices = queued;
+        self.queued_slices.clear();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_gfni_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        use std::arch::x86_64::*;
+
+        // Broadcast the de-interleave shuffle to all four 128-bit lanes:
+        // within each lane, move lo bytes (even positions 0,2,…,14) to the low
+        // qword (positions 0..7) and hi bytes (odd positions 1,3,…,15) to the
+        // high qword (positions 8..15). This lets us apply different GFNI
+        // matrices to lo vs hi bytes in a single vgf2p8affineqb call.
+        let deint_mask = _mm512_broadcast_i32x4(_mm_setr_epi8(
+            0, 2, 4, 6, 8, 10, 12, 14, // lo bytes of 8 words → positions 0..7
+            1, 3, 5, 7, 9, 11, 13, 15, // hi bytes of 8 words → positions 8..15
+        ));
+
+        buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
+            let exponent = exponent_start + i as u32;
+
+            let mut tables = Vec::with_capacity(queued.len());
+            for (q_idx, _) in queued.iter().enumerate() {
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+
+                // Decompose GF(2^16) multiply-by-coeff into four 8×8 GF(2) matrices.
+                // For each 16-bit word w = (lo_byte, hi_byte):
+                //   result_lo = M_ll * lo  ^  M_lh * hi
+                //   result_hi = M_hl * lo  ^  M_hh * hi
+                //
+                // GFNI matrix encoding: row i lives at bits [i*8 + 7 : i*8]
+                // (row 0 in the LSB byte, row 7 in the MSB byte).
+                // M[i][j] = 1 iff input bit j affects output bit i.
+                let mut m_ll = 0u64; // lo input byte → lo output byte
+                let mut m_lh = 0u64; // hi input byte → lo output byte
+                let mut m_hl = 0u64; // lo input byte → hi output byte
+                let mut m_hh = 0u64; // hi input byte → hi output byte
+                for i in 0..8usize {
+                    let mut row_ll = 0u8;
+                    let mut row_lh = 0u8;
+                    let mut row_hl = 0u8;
+                    let mut row_hh = 0u8;
+                    for j in 0..8usize {
+                        // Low-byte basis vector 2^j contributes to lo and hi outputs.
+                        let r_lo = gf.mul(1u16 << j, coeff);
+                        if (r_lo >> i) & 1 == 1 {
+                            row_ll |= 1 << j;
+                        }
+                        if (r_lo >> (i + 8)) & 1 == 1 {
+                            row_hl |= 1 << j;
+                        }
+                        // High-byte basis vector 2^(j+8) contributes to lo and hi outputs.
+                        let r_hi = gf.mul(1u16 << (j + 8), coeff);
+                        if (r_hi >> i) & 1 == 1 {
+                            row_lh |= 1 << j;
+                        }
+                        if (r_hi >> (i + 8)) & 1 == 1 {
+                            row_hh |= 1 << j;
+                        }
+                    }
+                    m_ll |= (row_ll as u64) << (i * 8);
+                    m_lh |= (row_lh as u64) << (i * 8);
+                    m_hl |= (row_hl as u64) << (i * 8);
+                    m_hh |= (row_hh as u64) << (i * 8);
+                }
+
+                // Each 128-bit lane has two qwords: the low qword handles lo bytes
+                // (positions 0..7 after de-interleave) and the high qword handles hi
+                // bytes (positions 8..15). Alternating the two matrices in adjacent
+                // qwords lets one vgf2p8affineqb cover both contributions at once.
+                // _mm512_set_epi64 takes arguments from high (e7) to low (e0).
+                let mat_lo = _mm512_set_epi64(
+                    m_lh as i64, m_ll as i64, // lane 3: hi→lo, lo→lo
+                    m_lh as i64, m_ll as i64, // lane 2
+                    m_lh as i64, m_ll as i64, // lane 1
+                    m_lh as i64, m_ll as i64, // lane 0
+                );
+                let mat_hi = _mm512_set_epi64(
+                    m_hh as i64, m_hl as i64, // lane 3: hi→hi, lo→hi
+                    m_hh as i64, m_hl as i64, // lane 2
+                    m_hh as i64, m_hl as i64, // lane 1
+                    m_hh as i64, m_hl as i64, // lane 0
+                );
+
+                // Scalar fallback table for bytes that don't fill a full 64-byte block.
+                let mut table_low = [0u16; 256];
+                let mut table_high = [0u16; 256];
+                for b in 0..=255usize {
+                    table_low[b] = gf.mul(b as u16, coeff);
+                    table_high[b] = gf.mul((b as u16) << 8, coeff);
+                }
+
+                tables.push((mat_lo, mat_hi, table_low, table_high));
+            }
+
+            // 16384 words = 32 KiB: same L1 cache-blocking strategy as AVX2/SSSE3.
+            let chunk_size = 16384;
+            for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
+                let byte_offset = chunk_idx * chunk_size * 2;
+                let byte_len = buffer_chunk.len() * 2;
+                // 512-bit (64-byte) iterations; remainder handled by scalar path.
+                let blocks_64 = byte_len / 64;
+                let remainder = byte_len % 64;
+
+                for (q_idx, slice) in queued.iter().enumerate() {
+                    let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
+                    let (mat_lo, mat_hi, ref table_low, ref table_high) = tables[q_idx];
+
+                    let mut ptr_buf = buffer_chunk.as_mut_ptr() as *mut __m512i;
+                    let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
+                    let end = ptr_in.add(blocks_64);
+
+                    while ptr_in < end {
+                        // Step 1: separate lo/hi bytes within each 128-bit lane.
+                        let input = _mm512_loadu_si512(ptr_in.cast());
+                        let separated = _mm512_shuffle_epi8(input, deint_mask);
+
+                        // Step 2a: GFNI affine — low qword gets M_ll*lo, high gets M_lh*hi.
+                        let v_lo = _mm512_gf2p8affine_epi64_epi8(separated, mat_lo, 0);
+                        // Fold: shift the high-qword result down by 8 bytes within each
+                        // 128-bit lane, then XOR → result_lo = M_ll*lo ^ M_lh*hi in bytes 0..7.
+                        let new_lo =
+                            _mm512_xor_si512(v_lo, _mm512_bsrli_epi128::<8>(v_lo));
+
+                        // Step 2b: same for the hi half.
+                        let v_hi = _mm512_gf2p8affine_epi64_epi8(separated, mat_hi, 0);
+                        let new_hi =
+                            _mm512_xor_si512(v_hi, _mm512_bsrli_epi128::<8>(v_hi));
+
+                        // Step 3: re-interleave lo/hi results and XOR into the buffer.
+                        // unpacklo_epi8 interleaves the low 8 bytes of each 128-bit lane:
+                        //   [lo0,hi0, lo1,hi1, ..., lo7,hi7] per lane.
+                        let out = _mm512_unpacklo_epi8(new_lo, new_hi);
+                        let prev = _mm512_loadu_si512(ptr_buf.cast());
+                        _mm512_storeu_si512(ptr_buf.cast(), _mm512_xor_si512(prev, out));
+
+                        ptr_in = ptr_in.add(1);
+                        ptr_buf = ptr_buf.add(1);
+                    }
+
+                    if remainder > 0 {
+                        let offset_words = blocks_64 * 32;
+                        let mut ptr_word = buffer_chunk[offset_words..].as_mut_ptr();
+                        let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
+                        let tail_end = p_in.add(remainder);
                         while p_in < tail_end {
                             let lo = *p_in as usize;
                             let hi = *p_in.add(1) as usize;
