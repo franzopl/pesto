@@ -670,6 +670,8 @@ async fn producer(
             None
         };
 
+        let mut par2_slices_fed: usize = 0;
+
         for meta in metas.iter() {
             let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
             let total_parts = segments.len() as u32;
@@ -705,7 +707,6 @@ async fn producer(
             } else {
                 Vec::new()
             };
-            let mut par2_slices_fed: usize = 0;
 
             let mut i: u32 = 0;
             while let Some((offset, buf)) = read_rx.recv().await {
