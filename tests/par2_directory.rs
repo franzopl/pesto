@@ -57,7 +57,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 100,
-        par2_memory_limit: 1_000_000_000,
+        par2_memory_limit: Some(1_000_000_000),
         par2_only: true,
         extra_servers: vec![],
         verify: false,

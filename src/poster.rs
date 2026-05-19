@@ -530,7 +530,22 @@ async fn producer(
         optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2);
 
     let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
-    let slices_per_pass = (shared.config.par2_memory_limit / par2_slice_size).max(1);
+    
+    // Auto-detect safe RAM limit if not specified (70% of available RAM)
+    let memory_limit = match shared.config.par2_memory_limit {
+        Some(limit) => limit,
+        None => {
+            let mut sys = sysinfo::System::new_all();
+            sys.refresh_memory();
+            let available_ram = sys.available_memory();
+            let safe_limit = (available_ram as f64 * 0.70) as usize;
+            
+            // At least 256MB as a bare minimum fallback
+            safe_limit.max(256 * 1024 * 1024)
+        }
+    };
+
+    let slices_per_pass = (memory_limit / par2_slice_size).max(1);
 
     let mut passes = Vec::new();
     if recovery_count > 0 {
@@ -549,7 +564,7 @@ async fn producer(
             text: format!(
                 "PAR2 recovery data split into {} passes (memory limit: {} MiB)",
                 passes.len(),
-                shared.config.par2_memory_limit / (1024 * 1024),
+                memory_limit / (1024 * 1024),
             ),
         });
     }

@@ -392,7 +392,8 @@ pub struct Config {
     pub par2: u8,
     /// Maximum RAM for PAR2 recovery buffers in bytes. Multi-pass kicks in
     /// when `recovery_count × slice_size` would exceed this limit.
-    pub par2_memory_limit: usize,
+    /// If `None`, dynamically scales up to 70% of currently available system memory.
+    pub par2_memory_limit: Option<usize>,
     /// Only generate PAR2 files without uploading them.
     pub par2_only: bool,
     /// Confirm each posted article with `STAT` and repost on failure.
@@ -599,9 +600,9 @@ impl Config {
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
             par2_memory_limit: if let Some(s) = file.posting.par2_memory_limit {
-                parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")? as usize
+                Some(parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")? as usize)
             } else {
-                1_000_000_000 // 1 GiB default
+                None
             },
             par2_only,
             verify: cli.verify.or(file.posting.verify).unwrap_or(false),

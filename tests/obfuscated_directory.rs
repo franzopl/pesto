@@ -25,7 +25,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         obfuscate,
         dry_run: true,
         par2: 0,
-        par2_memory_limit: 1_000_000_000,
+        par2_memory_limit: Some(1_000_000_000),
         par2_only: false,
         extra_servers: vec![],
         verify: false,
