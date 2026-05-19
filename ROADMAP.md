@@ -846,20 +846,23 @@ CPU made since ~2007.
 - [x] Runtime dispatch chain: AVX2 → SSSE3 → scalar
 - [ ] Benchmark on a pre-AVX2 machine and document the speedup
 
-### 24b — AVX-512 + GFNI path
+### 24b — AVX-512 + GFNI path ✅
 
 Intel Ice Lake (2019+) and later server CPUs expose `AVX-512BW` and GFNI
 (`gf2p8affine_epi64_epi8`). GFNI performs GF(2^8) affine transforms in a
 single instruction; with a two-step decomposition GF(2^16) multiplication
-becomes two `vgf2p8affineinvqb` on 512-bit vectors — roughly 4× the AVX2
-shuffle throughput.
+becomes two `vgf2p8affineqb` on 512-bit vectors — roughly 2× the AVX2
+shuffle throughput (32 words per iteration vs 16).
 
-- [ ] Precompute the pair of 8×8 affine matrices that maps each coefficient
-      to a GF(2^8) affine operation (one matrix per coefficient, computed once
-      per flush batch)
-- [ ] Implement `flush_avx512_gfni()` using `_mm512_gf2p8affine_epi64_epi8`
-- [ ] Runtime dispatch: GFNI+AVX512BW → AVX2 → SSSE3 → scalar (via
-      `std::is_x86_feature_detected!("avx512bw")` + `"gfni"`)
+- [x] Decompose GF(2^16) multiply-by-coeff into four 8×8 GF(2) matrices
+      (M_ll, M_lh, M_hl, M_hh), computed once per flush batch
+- [x] Implement `flush_avx512_gfni()` using `_mm512_gf2p8affine_epi64_epi8`:
+      de-interleave lo/hi bytes with `vpshufb`, apply paired matrices with two
+      GFNI calls, fold with `vpbsrldq`+`vpxor`, re-interleave with `vpunpcklbw`
+- [x] Runtime dispatch: GFNI+AVX512F+AVX512BW → AVX2 → SSSE3 → NEON → scalar
+- [x] Requires Rust ≥ 1.89 (AVX-512 GFNI intrinsics stabilised in 1.89);
+      MSRV bumped accordingly
+- [ ] Benchmark on an Ice Lake or Sapphire Rapids machine and document speedup
 
 ### 24c — ARM NEON path ✅
 

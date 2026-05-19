@@ -2,7 +2,7 @@
 name = "pesto-poster"
 version = "0.2.7"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.89"
 description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation"
 license = "MIT"
 repository = "https://github.com/franzopl/pesto"
