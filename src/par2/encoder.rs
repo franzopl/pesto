@@ -45,6 +45,10 @@ pub struct RecoveryEncoder {
     next_index: usize,
     /// Queue of input slices waiting to be processed (cache blocking).
     queued_slices: Vec<Vec<u8>>,
+    /// When true each flush also computes per-slice MD5+CRC32 checksums in
+    /// parallel with the Reed-Solomon work and accumulates them here.
+    compute_checksums: bool,
+    pending_checksums: Vec<SliceChecksum>,
 }
 
 impl RecoveryEncoder {
@@ -73,7 +77,22 @@ impl RecoveryEncoder {
             buffers: vec![vec![0u16; slice_size / 2]; recovery_count],
             next_index: 0,
             queued_slices: Vec::with_capacity(64),
+            compute_checksums: false,
+            pending_checksums: Vec::new(),
         }
+    }
+
+    /// Enable parallel per-slice MD5+CRC32 checksum computation.
+    /// Each flush will compute checksums alongside RS recovery using `rayon::join`.
+    /// Call [`drain_checksums`] after [`finish`] to retrieve them in slice order.
+    pub fn with_checksums(mut self) -> Self {
+        self.compute_checksums = true;
+        self
+    }
+
+    /// Return and clear all checksums accumulated so far (in input-slice order).
+    pub fn drain_checksums(&mut self) -> Vec<SliceChecksum> {
+        std::mem::take(&mut self.pending_checksums)
     }
 
     /// Feed one input slice, already zero-padded to the slice size.
@@ -143,21 +162,63 @@ impl RecoveryEncoder {
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
 
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            // Split borrows so both rayon::join arms are Send without capturing &mut self.
+            let buffers = &mut self.buffers;
+            let logbases = &self.logbases;
+            let exponent_start = self.exponent_start;
+            let gf = &self.gf;
+            let ((), cs) = rayon::join(
+                || unsafe {
+                    Self::flush_avx2_work(buffers, &queued, start_index, logbases, exponent_start, gf)
+                },
+                || queued.par_iter().map(|s| slice_checksum(s)).collect(),
+            );
+            cs
+        } else {
+            unsafe {
+                Self::flush_avx2_work(
+                    &mut self.buffers,
+                    &queued,
+                    start_index,
+                    &self.logbases,
+                    self.exponent_start,
+                    &self.gf,
+                );
+            }
+            Vec::new()
+        };
+
+        self.pending_checksums.extend(new_cs);
+        self.queued_slices = queued;
+        self.queued_slices.clear();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn flush_avx2_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
         let mask_f = _mm256_set1_epi8(0x0F);
         let mask_even = _mm256_set1_epi16(0x00FF);
 
-        self.buffers
+        buffers
             .par_iter_mut()
             .enumerate()
             .for_each(|(i, buffer)| {
-                let exponent = self.exponent_start + i as u32;
+                let exponent = exponent_start + i as u32;
 
                 // Precompute AVX2 shuffle tables + scalar tables for tail
                 let mut tables = Vec::with_capacity(queued.len());
                 for (q_idx, _) in queued.iter().enumerate() {
-                    let logbase = self.logbases[start_index + q_idx] as u64;
+                    let logbase = logbases[start_index + q_idx] as u64;
                     let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-                    let coeff = self.gf.exp(log_coeff);
+                    let coeff = gf.exp(log_coeff);
 
                     let mut tl_l = [0u8; 16];
                     let mut tl_h = [0u8; 16];
@@ -169,19 +230,19 @@ impl RecoveryEncoder {
                     let mut hh_h = [0u8; 16];
 
                     for val in 0..16 {
-                        let r0 = self.gf.mul(val as u16, coeff);
+                        let r0 = gf.mul(val as u16, coeff);
                         tl_l[val as usize] = (r0 & 0xFF) as u8;
                         th_l[val as usize] = (r0 >> 8) as u8;
 
-                        let r1 = self.gf.mul((val as u16) << 4, coeff);
+                        let r1 = gf.mul((val as u16) << 4, coeff);
                         tl_h[val as usize] = (r1 & 0xFF) as u8;
                         th_h[val as usize] = (r1 >> 8) as u8;
 
-                        let r2 = self.gf.mul((val as u16) << 8, coeff);
+                        let r2 = gf.mul((val as u16) << 8, coeff);
                         hl_l[val as usize] = (r2 & 0xFF) as u8;
                         hh_l[val as usize] = (r2 >> 8) as u8;
 
-                        let r3 = self.gf.mul((val as u16) << 12, coeff);
+                        let r3 = gf.mul((val as u16) << 12, coeff);
                         hl_h[val as usize] = (r3 & 0xFF) as u8;
                         hh_h[val as usize] = (r3 >> 8) as u8;
                     }
@@ -214,8 +275,8 @@ impl RecoveryEncoder {
                     let mut table_low = [0u16; 256];
                     let mut table_high = [0u16; 256];
                     for b in 0..=255 {
-                        table_low[b as usize] = self.gf.mul(b as u16, coeff);
-                        table_high[b as usize] = self.gf.mul((b as u16) << 8, coeff);
+                        table_low[b as usize] = gf.mul(b as u16, coeff);
+                        table_high[b as usize] = gf.mul((b as u16) << 8, coeff);
                     }
 
                     tables.push((
@@ -311,9 +372,6 @@ impl RecoveryEncoder {
                     }
                 }
             });
-
-        self.queued_slices = queued;
-        self.queued_slices.clear();
     }
 
     /// Same 4-nibble shuffle algorithm as `flush_avx2` but operating on 128-bit
@@ -326,20 +384,61 @@ impl RecoveryEncoder {
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
 
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            let buffers = &mut self.buffers;
+            let logbases = &self.logbases;
+            let exponent_start = self.exponent_start;
+            let gf = &self.gf;
+            let ((), cs) = rayon::join(
+                || unsafe {
+                    Self::flush_ssse3_work(buffers, &queued, start_index, logbases, exponent_start, gf)
+                },
+                || queued.par_iter().map(|s| slice_checksum(s)).collect(),
+            );
+            cs
+        } else {
+            unsafe {
+                Self::flush_ssse3_work(
+                    &mut self.buffers,
+                    &queued,
+                    start_index,
+                    &self.logbases,
+                    self.exponent_start,
+                    &self.gf,
+                );
+            }
+            Vec::new()
+        };
+
+        self.pending_checksums.extend(new_cs);
+        self.queued_slices = queued;
+        self.queued_slices.clear();
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "ssse3")]
+    unsafe fn flush_ssse3_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
         let mask_f = _mm_set1_epi8(0x0F_u8 as i8);
         let mask_even = _mm_set1_epi16(0x00FF_u16 as i16);
 
-        self.buffers
+        buffers
             .par_iter_mut()
             .enumerate()
             .for_each(|(i, buffer)| {
-                let exponent = self.exponent_start + i as u32;
+                let exponent = exponent_start + i as u32;
 
                 let mut tables = Vec::with_capacity(queued.len());
                 for (q_idx, _) in queued.iter().enumerate() {
-                    let logbase = self.logbases[start_index + q_idx] as u64;
+                    let logbase = logbases[start_index + q_idx] as u64;
                     let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-                    let coeff = self.gf.exp(log_coeff);
+                    let coeff = gf.exp(log_coeff);
 
                     let mut tl_l = [0u8; 16];
                     let mut tl_h = [0u8; 16];
@@ -351,19 +450,19 @@ impl RecoveryEncoder {
                     let mut hh_h = [0u8; 16];
 
                     for val in 0..16usize {
-                        let r0 = self.gf.mul(val as u16, coeff);
+                        let r0 = gf.mul(val as u16, coeff);
                         tl_l[val] = (r0 & 0xFF) as u8;
                         th_l[val] = (r0 >> 8) as u8;
 
-                        let r1 = self.gf.mul((val as u16) << 4, coeff);
+                        let r1 = gf.mul((val as u16) << 4, coeff);
                         tl_h[val] = (r1 & 0xFF) as u8;
                         th_h[val] = (r1 >> 8) as u8;
 
-                        let r2 = self.gf.mul((val as u16) << 8, coeff);
+                        let r2 = gf.mul((val as u16) << 8, coeff);
                         hl_l[val] = (r2 & 0xFF) as u8;
                         hh_l[val] = (r2 >> 8) as u8;
 
-                        let r3 = self.gf.mul((val as u16) << 12, coeff);
+                        let r3 = gf.mul((val as u16) << 12, coeff);
                         hl_h[val] = (r3 & 0xFF) as u8;
                         hh_h[val] = (r3 >> 8) as u8;
                     }
@@ -380,8 +479,8 @@ impl RecoveryEncoder {
                     let mut table_low = [0u16; 256];
                     let mut table_high = [0u16; 256];
                     for b in 0..=255usize {
-                        table_low[b] = self.gf.mul(b as u16, coeff);
-                        table_high[b] = self.gf.mul((b as u16) << 8, coeff);
+                        table_low[b] = gf.mul(b as u16, coeff);
+                        table_high[b] = gf.mul((b as u16) << 8, coeff);
                     }
 
                     tables.push((
@@ -477,9 +576,6 @@ impl RecoveryEncoder {
                     }
                 }
             });
-
-        self.queued_slices = queued;
-        self.queued_slices.clear();
     }
 
     /// Same 4-nibble shuffle algorithm as `flush_ssse3` for AArch64 targets.
@@ -488,27 +584,68 @@ impl RecoveryEncoder {
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
     unsafe fn flush_neon(&mut self) {
-        use std::arch::aarch64::*;
-
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
+
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            let buffers = &mut self.buffers;
+            let logbases = &self.logbases;
+            let exponent_start = self.exponent_start;
+            let gf = &self.gf;
+            let ((), cs) = rayon::join(
+                || unsafe {
+                    Self::flush_neon_work(buffers, &queued, start_index, logbases, exponent_start, gf)
+                },
+                || queued.par_iter().map(|s| slice_checksum(s)).collect(),
+            );
+            cs
+        } else {
+            unsafe {
+                Self::flush_neon_work(
+                    &mut self.buffers,
+                    &queued,
+                    start_index,
+                    &self.logbases,
+                    self.exponent_start,
+                    &self.gf,
+                );
+            }
+            Vec::new()
+        };
+
+        self.pending_checksums.extend(new_cs);
+        self.queued_slices = queued;
+        self.queued_slices.clear();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn flush_neon_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        use std::arch::aarch64::*;
 
         let mask_f = vdupq_n_u8(0x0F);
         // 0x00FF per 16-bit lane: bytes [0xFF, 0x00, 0xFF, 0x00, ...].
         let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
 
-        self.buffers
+        buffers
             .par_iter_mut()
             .enumerate()
             .for_each(|(i, buffer)| {
-                let exponent = self.exponent_start + i as u32;
+                let exponent = exponent_start + i as u32;
 
                 let mut tables = Vec::with_capacity(queued.len());
                 for (q_idx, _) in queued.iter().enumerate() {
-                    let logbase = self.logbases[start_index + q_idx] as u64;
+                    let logbase = logbases[start_index + q_idx] as u64;
                     let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-                    let coeff = self.gf.exp(log_coeff);
+                    let coeff = gf.exp(log_coeff);
 
                     let mut tl_l = [0u8; 16];
                     let mut tl_h = [0u8; 16];
@@ -520,19 +657,19 @@ impl RecoveryEncoder {
                     let mut hh_h = [0u8; 16];
 
                     for val in 0..16usize {
-                        let r0 = self.gf.mul(val as u16, coeff);
+                        let r0 = gf.mul(val as u16, coeff);
                         tl_l[val] = (r0 & 0xFF) as u8;
                         th_l[val] = (r0 >> 8) as u8;
 
-                        let r1 = self.gf.mul((val as u16) << 4, coeff);
+                        let r1 = gf.mul((val as u16) << 4, coeff);
                         tl_h[val] = (r1 & 0xFF) as u8;
                         th_h[val] = (r1 >> 8) as u8;
 
-                        let r2 = self.gf.mul((val as u16) << 8, coeff);
+                        let r2 = gf.mul((val as u16) << 8, coeff);
                         hl_l[val] = (r2 & 0xFF) as u8;
                         hh_l[val] = (r2 >> 8) as u8;
 
-                        let r3 = self.gf.mul((val as u16) << 12, coeff);
+                        let r3 = gf.mul((val as u16) << 12, coeff);
                         hl_h[val] = (r3 & 0xFF) as u8;
                         hh_h[val] = (r3 >> 8) as u8;
                     }
@@ -549,8 +686,8 @@ impl RecoveryEncoder {
                     let mut table_low = [0u16; 256];
                     let mut table_high = [0u16; 256];
                     for b in 0..=255usize {
-                        table_low[b] = self.gf.mul(b as u16, coeff);
-                        table_high[b] = self.gf.mul((b as u16) << 8, coeff);
+                        table_low[b] = gf.mul(b as u16, coeff);
+                        table_high[b] = gf.mul((b as u16) << 8, coeff);
                     }
 
                     tables.push((
@@ -657,9 +794,6 @@ impl RecoveryEncoder {
                     }
                 }
             });
-
-        self.queued_slices = queued;
-        self.queued_slices.clear();
     }
 
     fn flush_scalar(&mut self) {
@@ -667,23 +801,58 @@ impl RecoveryEncoder {
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
 
-        self.buffers
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            let buffers = &mut self.buffers;
+            let logbases = &self.logbases;
+            let exponent_start = self.exponent_start;
+            let gf = &self.gf;
+            let ((), cs) = rayon::join(
+                || Self::flush_scalar_work(buffers, &queued, start_index, logbases, exponent_start, gf),
+                || queued.par_iter().map(|s| slice_checksum(s)).collect(),
+            );
+            cs
+        } else {
+            Self::flush_scalar_work(
+                &mut self.buffers,
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+            Vec::new()
+        };
+
+        self.pending_checksums.extend(new_cs);
+        self.queued_slices = queued;
+        self.queued_slices.clear();
+    }
+
+    fn flush_scalar_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        buffers
             .par_iter_mut()
             .enumerate()
             .for_each(|(i, buffer)| {
-                let exponent = self.exponent_start + i as u32;
+                let exponent = exponent_start + i as u32;
 
                 let mut tables = Vec::with_capacity(queued.len());
                 for (q_idx, _) in queued.iter().enumerate() {
-                    let logbase = self.logbases[start_index + q_idx] as u64;
+                    let logbase = logbases[start_index + q_idx] as u64;
                     let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-                    let coeff = self.gf.exp(log_coeff);
+                    let coeff = gf.exp(log_coeff);
 
                     let mut table_low = [0u16; 256];
                     let mut table_high = [0u16; 256];
                     for b in 0..=255 {
-                        table_low[b as usize] = self.gf.mul(b as u16, coeff);
-                        table_high[b as usize] = self.gf.mul((b as u16) << 8, coeff);
+                        table_low[b as usize] = gf.mul(b as u16, coeff);
+                        table_high[b as usize] = gf.mul((b as u16) << 8, coeff);
                     }
                     tables.push((table_low, table_high));
                 }
@@ -705,16 +874,16 @@ impl RecoveryEncoder {
                     }
                 }
             });
-
-        self.queued_slices = queued;
-        self.queued_slices.clear();
     }
 
-    /// Consume the encoder and return the finished recovery slices.
-    pub fn finish(mut self) -> Vec<RecoverySlice> {
+    /// Consume the encoder and return the finished recovery slices together
+    /// with all accumulated per-slice checksums (empty when checksums were
+    /// not enabled via [`with_checksums`]).
+    pub fn finish(mut self) -> (Vec<RecoverySlice>, Vec<SliceChecksum>) {
         self.flush();
+        let checksums = self.pending_checksums;
         let exponent_start = self.exponent_start;
-        self.buffers
+        let slices = self.buffers
             .into_iter()
             .enumerate()
             .map(|(i, buffer)| {
@@ -727,7 +896,8 @@ impl RecoveryEncoder {
                     data,
                 }
             })
-            .collect()
+            .collect();
+        (slices, checksums)
     }
 }
 
@@ -809,7 +979,7 @@ mod tests {
         let mut encoder = RecoveryEncoder::new(4, 2, 0, 1);
         encoder.add_slice(a.to_vec());
         encoder.add_slice(b.to_vec());
-        let recovery = encoder.finish();
+        let (recovery, _) = encoder.finish();
 
         let expected: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
         assert_eq!(recovery[0].exponent, 0);
@@ -822,7 +992,7 @@ mod tests {
         let slice = [0x34u8, 0x12, 0x78, 0x56]; // words 0x1234, 0x5678
         let mut encoder = RecoveryEncoder::new(4, 1, 0, 2);
         encoder.add_slice(slice.to_vec());
-        let recovery = encoder.finish();
+        let (recovery, _) = encoder.finish();
 
         // base of input block 0 is 2; exponent 1 -> each word multiplied by 2.
         let w0 = gf.mul(0x1234, 2);

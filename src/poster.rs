@@ -21,7 +21,7 @@ use crate::article::{
 };
 use crate::config::{Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
-use crate::par2::encoder::{slice_checksum, FileHasher, RecoveryEncoder};
+use crate::par2::encoder::{FileHasher, RecoveryEncoder};
 use crate::par2::layout;
 use crate::par2::packet::{self, SliceChecksum};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
@@ -459,20 +459,13 @@ fn physical_core_count() -> usize {
         .unwrap_or(1)
 }
 
-/// Pad the accumulated real bytes to the full PAR2 slice size, hand the slice
-/// to the recovery encoder and, when `checksums` is `Some` (first pass only),
-/// record its IFSC checksum. Leaves `accum` empty for the next slice.
-fn feed_par2_slice(
-    accum: &mut Vec<u8>,
-    par2_slice_size: usize,
-    enc: &mut RecoveryEncoder,
-    checksums: Option<&mut Vec<SliceChecksum>>,
-) {
+/// Pad the accumulated real bytes to the full PAR2 slice size and hand the
+/// slice to the recovery encoder. Checksum computation is handled inside the
+/// encoder (via `rayon::join`) when it was built with `.with_checksums()`.
+/// Leaves `accum` empty for the next slice.
+fn feed_par2_slice(accum: &mut Vec<u8>, par2_slice_size: usize, enc: &mut RecoveryEncoder) {
     let mut padded = std::mem::replace(accum, Vec::with_capacity(par2_slice_size));
     padded.resize(par2_slice_size, 0);
-    if let Some(checksums) = checksums {
-        checksums.push(slice_checksum(&padded));
-    }
     tokio::task::block_in_place(|| enc.add_slice(padded));
 }
 
@@ -561,11 +554,34 @@ async fn producer(
         });
     }
 
-    let mut par2_files = Vec::new();
     let mut all_checksums: Vec<Vec<SliceChecksum>> = vec![Vec::new(); metas.len()];
-    for _ in &metas {
-        par2_files.push(FileHasher::new());
-    }
+
+    // Melhoria 2: hash each source file on its own Tokio task, running
+    // concurrently with the PAR2 encode pass so the ~13s MD5 cost overlaps
+    // with Reed-Solomon computation instead of being sequential.
+    let mut file_hash_tasks: Vec<_> = if recovery_count > 0 {
+        metas
+            .iter()
+            .map(|meta| {
+                let path = meta.path.clone();
+                tokio::spawn(async move {
+                    let mut hasher = FileHasher::new();
+                    let mut file = File::open(&path).await?;
+                    let mut buf = vec![0u8; 512 * 1024];
+                    loop {
+                        let n = file.read(&mut buf).await?;
+                        if n == 0 {
+                            break;
+                        }
+                        hasher.update(&buf[..n]);
+                    }
+                    Ok::<_, anyhow::Error>(hasher.finish())
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Announce how many recovery slices will be written across all passes, so
     // the renderer can show a progress bar for the PAR2 write phase.
@@ -581,17 +597,16 @@ async fn producer(
 
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         let mut encoder = if rec_count > 0 {
-            Some(RecoveryEncoder::new(
-                par2_slice_size,
-                total_slices,
-                exp_start,
-                rec_count,
-            ))
+            let enc = RecoveryEncoder::new(par2_slice_size, total_slices, exp_start, rec_count);
+            // Melhoria 1: on pass 0 enable parallel checksum computation inside
+            // the encoder so rayon::join overlaps MD5+CRC32 with RS work.
+            let enc = if pass_idx == 0 { enc.with_checksums() } else { enc };
+            Some(enc)
         } else {
             None
         };
 
-        for (file_idx, meta) in metas.iter().enumerate() {
+        for (_file_idx, meta) in metas.iter().enumerate() {
             let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
             let total_parts = segments.len() as u32;
 
@@ -638,9 +653,6 @@ async fn producer(
                 // The encoder is `Some` exactly when PAR2 is enabled, so all
                 // PAR2 work — hashing, checksums, recovery — is gated on it.
                 if let Some(enc) = &mut encoder {
-                    if pass_idx == 0 {
-                        par2_files[file_idx].update(&buf);
-                    }
                     // Append the article to the current PAR2 slice. Every
                     // article but a file's last is exactly `article_size`, so
                     // the accumulator reaches `par2_slice_size` precisely on
@@ -648,8 +660,7 @@ async fn producer(
                     // the partial-slice flush after the loop.
                     par2_accum.extend_from_slice(&buf);
                     if par2_accum.len() >= par2_slice_size {
-                        let checksums = (pass_idx == 0).then_some(&mut all_checksums[file_idx]);
-                        feed_par2_slice(&mut par2_accum, par2_slice_size, enc, checksums);
+                        feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
                     }
                 }
 
@@ -695,8 +706,7 @@ async fn producer(
             // Flush the file's final, partial PAR2 slice (zero-padded).
             if let Some(enc) = &mut encoder {
                 if !par2_accum.is_empty() {
-                    let checksums = (pass_idx == 0).then_some(&mut all_checksums[file_idx]);
-                    feed_par2_slice(&mut par2_accum, par2_slice_size, enc, checksums);
+                    feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
                 }
             }
         }
@@ -705,17 +715,27 @@ async fn producer(
             shared.emit(ProgressEvent::Status {
                 text: "computing PAR2 recovery data".to_string(),
             });
-            let recovery_slices = enc.finish();
+            let (recovery_slices, slice_checksums) = enc.finish();
             shared.emit(ProgressEvent::Status {
                 text: String::new(),
             });
 
             if pass_idx == 0 {
+                // Distribute per-slice checksums back to per-file buckets.
+                let articles_per_slice = par2_slice_size / article_size;
+                let mut cs_iter = slice_checksums.into_iter();
+                for (file_idx, &articles) in per_file_articles.iter().enumerate() {
+                    let file_slices = articles.div_ceil(articles_per_slice);
+                    all_checksums[file_idx] = cs_iter.by_ref().take(file_slices).collect();
+                }
+
+                // Melhoria 2: await the parallel file-hash tasks that have
+                // been running concurrently with the encode pass.
                 let mut file_ids = Vec::new();
                 let mut hashes = Vec::new();
 
-                for (idx, hasher) in par2_files.drain(..).enumerate() {
-                    let fh = hasher.finish();
+                for (idx, task) in file_hash_tasks.drain(..).enumerate() {
+                    let fh = task.await??;
                     let fid =
                         packet::compute_file_id(&fh.md5_16k, fh.length, &metas[idx].real_name);
                     file_ids.push(fid);
