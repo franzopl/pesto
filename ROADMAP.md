@@ -933,6 +933,67 @@ The tradeoff is extra I/O reads in exchange for bounded memory.
 - [x] Emit a `ProgressEvent::Status` when multi-pass is triggered so the user
       understands the extra I/O passes
 
+### 24g — RS encoder throughput: close the gap with parpar
+
+Profiling against parpar (AVX2, i5-10400, 12 threads) shows pesto running at
+~229 MB/s vs parpar's ~400 MB/s on a 5 GiB file. All four improvements below
+attack different root causes of the ~1.75× gap.
+
+#### 24g-1 — Parallelize `finish()` buffer conversion
+
+`finish()` converts `Vec<Vec<u16>>` → `Vec<u8>` for each recovery buffer
+sequentially. For 200 recovery blocks of ~2.6 MiB each (5 GiB file at 10%)
+this is ~500 MiB of serial work after the RS compute has already finished.
+
+- [ ] Replace the sequential iterator in `finish()` with `par_iter()` using
+      rayon to convert all buffers in parallel
+- [x] Measure wall-clock improvement on the 5 GiB benchmark (expected ~5–10%)
+      — measured: negligible (<0.5%); conversion was never the bottleneck
+
+#### 24g-2 — Pre-compute coefficient tables outside rayon closure
+
+In `flush_avx2_work` (and SSSE3/GFNI equivalents), each of the 200 rayon tasks
+independently builds a full `tables` vec of per-(recovery, input-slice)
+coefficients, including 64 `gf.mul()` calls per entry to derive the 8 shuffle
+vectors. This causes 200 × 128 × 64 = 1.6 M redundant GF multiplications per
+flush (16 flushes for a 5 GiB file), with all threads contending on the same
+128 KB log/antilog arrays.
+
+- [x] Pre-compute a flat `all_tables` array `[recovery_count × queued_len]` of
+      full SIMD table structs in a parallel pre-pass before the chunk loop
+- [x] Apply the same refactor to `flush_avx512_gfni_work` (pending)
+- [ ] Apply to `flush_ssse3_work`
+
+#### 24g-3 — Input-major flush: read each slice once
+
+Current loop order: outer = recovery buffer (rayon), middle = 32 KiB chunk,
+inner = input slice. Each input slice is read `recovery_count` times from L3/RAM
+because different rayon threads need different slices at different times.
+
+Parpar's `Input pass(es): 1` confirms it reads the input exactly once. The fix
+is to invert the outer two loops inside each rayon task so the input slice is
+the outer dimension and the recovery block chunk is inner — or, better, to
+restructure the flush so threads partition over input-slice batches and each
+thread iterates over all its recovery blocks for that batch.
+
+- [x] Move the chunk loop outside `par_iter_mut` so all threads rendezvous at
+      each chunk boundary; input window (128 slices × 32 KiB = 4 MiB) stays L3-resident
+- [x] Measured: 1G 3.6s → 2.9s (−20%), 5G 22.3s → 16.6s (−25%); gap vs parpar
+      reduced from 1.75× to 1.31×
+- [ ] Apply to `flush_ssse3_work` and `flush_avx512_gfni_work`
+
+#### 24g-4 — Unroll 2–4 recovery buffers per inner loop iteration
+
+Once input-major order is in place, each inner iteration loads one 32-byte (AVX2)
+or 64-byte (GFNI) chunk of input data. Amortize that load over 2 or 4 recovery
+buffers simultaneously: different coefficients, same input vector, 2–4 store
+instructions — halves or quarters the load/store ratio.
+
+- [ ] Implement a 2× unrolled variant of `flush_avx2_work`: one `_mm256_loadu`
+      feeds two separate multiply-accumulate chains targeting two recovery buffers
+- [ ] Benchmark 2× vs 4× unrolling (diminishing returns expected beyond 2×)
+- [ ] Apply to `flush_ssse3_work`; skip GFNI (already 2× wider than AVX2)
+
 ---
 
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
