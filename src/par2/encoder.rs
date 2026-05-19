@@ -21,6 +21,11 @@ use crate::yenc::crc32;
 /// Bytes covered by the per-file 16k hash.
 const HEAD_LEN: usize = 16 * 1024;
 
+/// Pre-computed AVX-512/GFNI coefficient table for one (recovery_block, input_slice) pair.
+/// Two 512-bit matrix registers (mat_lo, mat_hi) plus 256-entry scalar lookup tables.
+#[cfg(target_arch = "x86_64")]
+type Avx512GfniTable = (__m512i, __m512i, [u16; 256], [u16; 256]);
+
 /// Pre-computed SSSE3 coefficient table for one (recovery_block, input_slice) pair.
 /// Eight 128-bit shuffle vectors plus 256-entry scalar lookup tables.
 #[cfg(target_arch = "x86_64")]
@@ -716,11 +721,17 @@ impl RecoveryEncoder {
             1, 3, 5, 7, 9, 11, 13, 15, // hi bytes of 8 words → positions 8..15
         ));
 
-        buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
-            let exponent = exponent_start + i as u32;
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
 
-            let mut tables = Vec::with_capacity(queued.len());
-            for (q_idx, _) in queued.iter().enumerate() {
+        // Pre-build all coefficient tables in a single parallel pass.
+        // Layout: all_tables[rec * n_queued + q_idx].
+        let all_tables: Vec<Avx512GfniTable> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
                 let coeff = gf.exp(log_coeff);
@@ -737,33 +748,31 @@ impl RecoveryEncoder {
                 let mut m_lh = 0u64; // hi input byte → lo output byte
                 let mut m_hl = 0u64; // lo input byte → hi output byte
                 let mut m_hh = 0u64; // hi input byte → hi output byte
-                for i in 0..8usize {
+                for row in 0..8usize {
                     let mut row_ll = 0u8;
                     let mut row_lh = 0u8;
                     let mut row_hl = 0u8;
                     let mut row_hh = 0u8;
                     for j in 0..8usize {
-                        // Low-byte basis vector 2^j contributes to lo and hi outputs.
                         let r_lo = gf.mul(1u16 << j, coeff);
-                        if (r_lo >> i) & 1 == 1 {
+                        if (r_lo >> row) & 1 == 1 {
                             row_ll |= 1 << j;
                         }
-                        if (r_lo >> (i + 8)) & 1 == 1 {
+                        if (r_lo >> (row + 8)) & 1 == 1 {
                             row_hl |= 1 << j;
                         }
-                        // High-byte basis vector 2^(j+8) contributes to lo and hi outputs.
                         let r_hi = gf.mul(1u16 << (j + 8), coeff);
-                        if (r_hi >> i) & 1 == 1 {
+                        if (r_hi >> row) & 1 == 1 {
                             row_lh |= 1 << j;
                         }
-                        if (r_hi >> (i + 8)) & 1 == 1 {
+                        if (r_hi >> (row + 8)) & 1 == 1 {
                             row_hh |= 1 << j;
                         }
                     }
-                    m_ll |= (row_ll as u64) << (i * 8);
-                    m_lh |= (row_lh as u64) << (i * 8);
-                    m_hl |= (row_hl as u64) << (i * 8);
-                    m_hh |= (row_hh as u64) << (i * 8);
+                    m_ll |= (row_ll as u64) << (row * 8);
+                    m_lh |= (row_lh as u64) << (row * 8);
+                    m_hl |= (row_hl as u64) << (row * 8);
+                    m_hh |= (row_hh as u64) << (row * 8);
                 }
 
                 // Each 128-bit lane has two qwords: the low qword handles lo bytes
@@ -792,7 +801,6 @@ impl RecoveryEncoder {
                     m_hl as i64, // lane 0
                 );
 
-                // Scalar fallback table for bytes that don't fill a full 64-byte block.
                 let mut table_low = [0u16; 256];
                 let mut table_high = [0u16; 256];
                 for b in 0..=255usize {
@@ -800,68 +808,163 @@ impl RecoveryEncoder {
                     table_high[b] = gf.mul((b as u16) << 8, coeff);
                 }
 
-                tables.push((mat_lo, mat_hi, table_low, table_high));
-            }
+                (mat_lo, mat_hi, table_low, table_high)
+            })
+            .collect();
 
-            // 16384 words = 32 KiB: same L1 cache-blocking strategy as AVX2/SSSE3.
-            let chunk_size = 16384;
-            for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
-                let byte_offset = chunk_idx * chunk_size * 2;
-                let byte_len = buffer_chunk.len() * 2;
-                // 512-bit (64-byte) iterations; remainder handled by scalar path.
-                let blocks_64 = byte_len / 64;
-                let remainder = byte_len % 64;
+        // Chunk-outer loop: all rayon tasks rendezvous at each chunk boundary so
+        // all threads read the same 4 MiB input window → L3 hits.
+        let slice_words = queued[0].len() / 2;
+        let chunk_size = 16384usize; // 32 KiB recovery buffer chunk stays in L1
+        let n_chunks = slice_words.div_ceil(chunk_size);
 
-                for (q_idx, slice) in queued.iter().enumerate() {
-                    let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
-                    let (mat_lo, mat_hi, ref table_low, ref table_high) = tables[q_idx];
+        for chunk_idx in 0..n_chunks {
+            let word_start = chunk_idx * chunk_size;
+            let word_end = (word_start + chunk_size).min(slice_words);
+            let byte_offset = word_start * 2;
+            let byte_len = (word_end - word_start) * 2;
+            // 512-bit (64-byte) iterations; remainder handled by scalar path.
+            let blocks_64 = byte_len / 64;
+            let remainder = byte_len % 64;
 
-                    let mut ptr_buf = buffer_chunk.as_mut_ptr() as *mut __m512i;
-                    let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
-                    let end = ptr_in.add(blocks_64);
+            buffers
+                .par_chunks_mut(2)
+                .enumerate()
+                .for_each(|(pair_idx, buf_pair)| unsafe {
+                    let i = pair_idx * 2;
+                    match buf_pair {
+                        [buf_a, buf_b] => {
+                            let base_a = i * n_queued;
+                            let base_b = (i + 1) * n_queued;
+                            let chunk_a = &mut buf_a[word_start..word_end];
+                            let chunk_b = &mut buf_b[word_start..word_end];
 
-                    while ptr_in < end {
-                        // Step 1: separate lo/hi bytes within each 128-bit lane.
-                        let input = _mm512_loadu_si512(ptr_in.cast());
-                        let separated = _mm512_shuffle_epi8(input, deint_mask);
+                            for q_idx in 0..n_queued {
+                                let (mat_lo_a, mat_hi_a, ref tlow_a, ref thigh_a) =
+                                    all_tables[base_a + q_idx];
+                                let (mat_lo_b, mat_hi_b, ref tlow_b, ref thigh_b) =
+                                    all_tables[base_b + q_idx];
+                                let slice_chunk =
+                                    &queued[q_idx][byte_offset..byte_offset + byte_len];
 
-                        // Step 2a: GFNI affine — low qword gets M_ll*lo, high gets M_lh*hi.
-                        let v_lo = _mm512_gf2p8affine_epi64_epi8(separated, mat_lo, 0);
-                        // Fold: shift the high-qword result down by 8 bytes within each
-                        // 128-bit lane, then XOR → result_lo = M_ll*lo ^ M_lh*hi in bytes 0..7.
-                        let new_lo = _mm512_xor_si512(v_lo, _mm512_bsrli_epi128::<8>(v_lo));
+                                let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
+                                let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m512i;
+                                let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m512i;
+                                let end = ptr_in.add(blocks_64);
 
-                        // Step 2b: same for the hi half.
-                        let v_hi = _mm512_gf2p8affine_epi64_epi8(separated, mat_hi, 0);
-                        let new_hi = _mm512_xor_si512(v_hi, _mm512_bsrli_epi128::<8>(v_hi));
+                                while ptr_in < end {
+                                    let input = _mm512_loadu_si512(ptr_in.cast());
+                                    let separated = _mm512_shuffle_epi8(input, deint_mask);
 
-                        // Step 3: re-interleave lo/hi results and XOR into the buffer.
-                        // unpacklo_epi8 interleaves the low 8 bytes of each 128-bit lane:
-                        //   [lo0,hi0, lo1,hi1, ..., lo7,hi7] per lane.
-                        let out = _mm512_unpacklo_epi8(new_lo, new_hi);
-                        let prev = _mm512_loadu_si512(ptr_buf.cast());
-                        _mm512_storeu_si512(ptr_buf.cast(), _mm512_xor_si512(prev, out));
+                                    // Block A
+                                    let vlo_a =
+                                        _mm512_gf2p8affine_epi64_epi8(separated, mat_lo_a, 0);
+                                    let new_lo_a =
+                                        _mm512_xor_si512(vlo_a, _mm512_bsrli_epi128::<8>(vlo_a));
+                                    let vhi_a =
+                                        _mm512_gf2p8affine_epi64_epi8(separated, mat_hi_a, 0);
+                                    let new_hi_a =
+                                        _mm512_xor_si512(vhi_a, _mm512_bsrli_epi128::<8>(vhi_a));
+                                    let out_a = _mm512_unpacklo_epi8(new_lo_a, new_hi_a);
+                                    let prev_a = _mm512_loadu_si512(ptr_a.cast());
+                                    _mm512_storeu_si512(
+                                        ptr_a.cast(),
+                                        _mm512_xor_si512(prev_a, out_a),
+                                    );
 
-                        ptr_in = ptr_in.add(1);
-                        ptr_buf = ptr_buf.add(1);
-                    }
+                                    // Block B — reuses `separated`
+                                    let vlo_b =
+                                        _mm512_gf2p8affine_epi64_epi8(separated, mat_lo_b, 0);
+                                    let new_lo_b =
+                                        _mm512_xor_si512(vlo_b, _mm512_bsrli_epi128::<8>(vlo_b));
+                                    let vhi_b =
+                                        _mm512_gf2p8affine_epi64_epi8(separated, mat_hi_b, 0);
+                                    let new_hi_b =
+                                        _mm512_xor_si512(vhi_b, _mm512_bsrli_epi128::<8>(vhi_b));
+                                    let out_b = _mm512_unpacklo_epi8(new_lo_b, new_hi_b);
+                                    let prev_b = _mm512_loadu_si512(ptr_b.cast());
+                                    _mm512_storeu_si512(
+                                        ptr_b.cast(),
+                                        _mm512_xor_si512(prev_b, out_b),
+                                    );
 
-                    if remainder > 0 {
-                        let offset_words = blocks_64 * 32;
-                        let mut ptr_word = buffer_chunk[offset_words..].as_mut_ptr();
-                        let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
-                        let tail_end = p_in.add(remainder);
-                        while p_in < tail_end {
-                            let lo = *p_in as usize;
-                            let hi = *p_in.add(1) as usize;
-                            *ptr_word ^= table_low[lo] ^ table_high[hi];
-                            ptr_word = ptr_word.add(1);
-                            p_in = p_in.add(2);
+                                    ptr_in = ptr_in.add(1);
+                                    ptr_a = ptr_a.add(1);
+                                    ptr_b = ptr_b.add(1);
+                                }
+
+                                if remainder > 0 {
+                                    let ow = blocks_64 * 32;
+                                    let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                    let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                    let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
+                                    let tail_end = p_in.add(remainder);
+                                    while p_in < tail_end {
+                                        let lo = *p_in as usize;
+                                        let hi = *p_in.add(1) as usize;
+                                        *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                        *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                        pw_a = pw_a.add(1);
+                                        pw_b = pw_b.add(1);
+                                        p_in = p_in.add(2);
+                                    }
+                                }
+                            }
                         }
+                        [buf_a] => {
+                            let base = i * n_queued;
+                            let chunk_a = &mut buf_a[word_start..word_end];
+
+                            for q_idx in 0..n_queued {
+                                let (mat_lo, mat_hi, ref table_low, ref table_high) =
+                                    all_tables[base + q_idx];
+                                let slice_chunk =
+                                    &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                let mut ptr_buf = chunk_a.as_mut_ptr() as *mut __m512i;
+                                let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
+                                let end = ptr_in.add(blocks_64);
+
+                                while ptr_in < end {
+                                    let input = _mm512_loadu_si512(ptr_in.cast());
+                                    let separated = _mm512_shuffle_epi8(input, deint_mask);
+
+                                    let v_lo = _mm512_gf2p8affine_epi64_epi8(separated, mat_lo, 0);
+                                    let new_lo =
+                                        _mm512_xor_si512(v_lo, _mm512_bsrli_epi128::<8>(v_lo));
+                                    let v_hi = _mm512_gf2p8affine_epi64_epi8(separated, mat_hi, 0);
+                                    let new_hi =
+                                        _mm512_xor_si512(v_hi, _mm512_bsrli_epi128::<8>(v_hi));
+                                    let out = _mm512_unpacklo_epi8(new_lo, new_hi);
+                                    let prev = _mm512_loadu_si512(ptr_buf.cast());
+                                    _mm512_storeu_si512(
+                                        ptr_buf.cast(),
+                                        _mm512_xor_si512(prev, out),
+                                    );
+
+                                    ptr_in = ptr_in.add(1);
+                                    ptr_buf = ptr_buf.add(1);
+                                }
+
+                                if remainder > 0 {
+                                    let ow = blocks_64 * 32;
+                                    let mut pw = chunk_a[ow..].as_mut_ptr();
+                                    let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
+                                    let tail_end = p_in.add(remainder);
+                                    while p_in < tail_end {
+                                        let lo = *p_in as usize;
+                                        let hi = *p_in.add(1) as usize;
+                                        *pw ^= table_low[lo] ^ table_high[hi];
+                                        pw = pw.add(1);
+                                        p_in = p_in.add(2);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                }
-            }
-        });
+                });
+        }
     }
 
     /// Same 4-nibble shuffle algorithm as `flush_avx2` but operating on 128-bit
