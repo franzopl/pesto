@@ -3,6 +3,7 @@
 **Fast, lean Usenet poster written in Rust.**
 
 [![CI](https://github.com/franzopl/pesto/actions/workflows/ci.yml/badge.svg)](https://github.com/franzopl/pesto/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/pesto-poster.svg)](https://crates.io/crates/pesto-poster)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
@@ -49,6 +50,14 @@ Download the latest binary for your platform from the
 
 Extract the archive and copy the binary to a directory on your `PATH`
 (e.g. `/usr/local/bin` on Linux/macOS, `C:\Windows\System32` on Windows).
+
+### Via cargo
+
+```bash
+cargo install pesto-poster
+```
+
+The installed binary is named `pesto`.
 
 ### Build from source
 
