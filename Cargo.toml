@@ -37,12 +37,18 @@ sha2 = "0.10"
 tempfile = "3"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
 
+[features]
+# Exposes internal per-path flush functions for micro-benchmarking individual SIMD paths.
+# Never enable this in production builds.
+bench-internals = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
 
 [[bench]]
 name = "par2_encoder"
 harness = false
+required-features = ["bench-internals"]
 
 [profile.release]
 lto = true

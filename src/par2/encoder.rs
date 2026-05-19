@@ -51,6 +51,24 @@ pub struct RecoveryEncoder {
     /// parallel with the Reed-Solomon work and accumulates them here.
     compute_checksums: bool,
     pending_checksums: Vec<SliceChecksum>,
+    /// Force a specific SIMD path instead of auto-detecting; only available
+    /// when built with the `bench-internals` Cargo feature.
+    #[cfg(feature = "bench-internals")]
+    forced_path: Option<BenchPath>,
+}
+
+/// Selects which SIMD flush path to use when `bench-internals` is enabled.
+/// Lets benchmarks bypass runtime dispatch and compare paths directly.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BenchPath {
+    Scalar,
+    #[cfg(target_arch = "x86_64")]
+    Ssse3,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "x86_64")]
+    Avx512Gfni,
 }
 
 impl RecoveryEncoder {
@@ -82,12 +100,22 @@ impl RecoveryEncoder {
             flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
+            #[cfg(feature = "bench-internals")]
+            forced_path: None,
         }
     }
 
     /// Set the maximum bytes to queue before flushing.
     pub fn with_flush_limit(mut self, bytes: usize) -> Self {
         self.flush_limit_bytes = bytes;
+        self
+    }
+
+    /// Force a specific SIMD flush path, bypassing runtime auto-detection.
+    /// Only available with the `bench-internals` Cargo feature.
+    #[cfg(feature = "bench-internals")]
+    pub fn with_forced_path(mut self, path: BenchPath) -> Self {
+        self.forced_path = Some(path);
         self
     }
 
@@ -132,6 +160,32 @@ impl RecoveryEncoder {
     fn flush(&mut self) {
         if self.queued_slices.is_empty() {
             return;
+        }
+
+        // When bench-internals is active a forced path overrides auto-detection.
+        #[cfg(feature = "bench-internals")]
+        if let Some(path) = self.forced_path {
+            match path {
+                BenchPath::Scalar => {
+                    self.flush_scalar();
+                    return;
+                }
+                #[cfg(target_arch = "x86_64")]
+                BenchPath::Ssse3 => unsafe {
+                    self.flush_ssse3();
+                    return;
+                },
+                #[cfg(target_arch = "x86_64")]
+                BenchPath::Avx2 => unsafe {
+                    self.flush_avx2();
+                    return;
+                },
+                #[cfg(target_arch = "x86_64")]
+                BenchPath::Avx512Gfni => unsafe {
+                    self.flush_avx512_gfni();
+                    return;
+                },
+            }
         }
 
         #[cfg(target_arch = "x86_64")]

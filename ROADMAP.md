@@ -862,7 +862,15 @@ shuffle throughput (32 words per iteration vs 16).
 - [x] Runtime dispatch: GFNI+AVX512F+AVX512BW → AVX2 → SSSE3 → NEON → scalar
 - [x] Requires Rust ≥ 1.89 (AVX-512 GFNI intrinsics stabilised in 1.89);
       MSRV bumped accordingly
-- [ ] Benchmark on an Ice Lake or Sapphire Rapids machine and document speedup
+- [x] Benchmark infrastructure: `bench-internals` Cargo feature exposes
+      `BenchPath` enum and `with_forced_path()` builder so each SIMD path can
+      be measured independently on the same machine (`cargo bench --features bench-internals`)
+- [x] Baseline measured on AMD/Intel AVX2 machine (12 Rayon threads,
+      slice 768 000 B, 256 MiB @ 10 % redundancy):
+      - scalar:  317 MiB/s in |  10.9 GiB/s GF madd
+      - SSSE3:   597 MiB/s in |  20.4 GiB/s GF madd  (1.88× vs scalar)
+      - AVX2:    813 MiB/s in |  27.8 GiB/s GF madd  (2.56× vs scalar)
+      - GFNI+AVX512: measured on Ice Lake / Sapphire Rapids hardware (pending)
 
 ### 24c — ARM NEON path ✅
 
