@@ -89,6 +89,29 @@ pub enum ProgressEvent {
     CompressProgress { bytes_written: u64 },
     /// Compression finished; the archive file is complete.
     CompressDone,
+    /// PAR2 encode is about to start; carries configuration for the info block.
+    Par2EncodeStarted {
+        /// Total source data size in bytes.
+        input_bytes: u64,
+        /// Number of input slices.
+        input_slices: usize,
+        /// Number of source files.
+        input_files: usize,
+        /// Number of recovery blocks.
+        recovery_slices: usize,
+        /// Bytes per slice.
+        slice_size: usize,
+        /// How many encode passes (determined by memory limit).
+        passes: usize,
+        /// Chunk size in bytes used inside the encoder inner loop.
+        chunk_size: usize,
+        /// Human-readable SIMD method name (e.g. "AVX-512/GFNI", "AVX2").
+        simd_method: String,
+        /// Number of rayon threads active for this encode.
+        threads: usize,
+        /// Memory limit in bytes.
+        memory_limit: usize,
+    },
     /// PAR2 recovery slice writing has started; `total` slices will be written.
     Par2WriteStarted { total: u32 },
     /// One PAR2 recovery slice has been appended to its volume file on disk.
@@ -250,6 +273,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::CompressDone => {
                         let _ = writeln!(out, r#"{{"type":"compress_done"}}"#);
                     }
+                    ProgressEvent::Par2EncodeStarted { .. } => {}
                     ProgressEvent::Par2WriteStarted { total } => {
                         let _ = writeln!(out, r#"{{"type":"par2_write_started","total":{total}}}"#);
                     }
@@ -416,6 +440,22 @@ struct RenderState {
     check_checked: u64,
     check_failed: u64,
     check_start: Instant,
+    // PAR2 encode info block (shown while encoding, inspired by parpar)
+    par2_info: Option<Par2Info>,
+}
+
+#[derive(Debug, Clone)]
+struct Par2Info {
+    input_bytes: u64,
+    input_slices: usize,
+    input_files: usize,
+    recovery_slices: usize,
+    slice_size: usize,
+    passes: usize,
+    chunk_size: usize,
+    simd_method: String,
+    threads: usize,
+    memory_limit: usize,
 }
 
 impl RenderState {
@@ -451,6 +491,7 @@ impl RenderState {
             check_checked: 0,
             check_failed: 0,
             check_start: Instant::now(),
+            par2_info: None,
             proc_rss_bytes: 0,
             proc_cpu_pct: 0.0,
             proc_prev_ticks: 0,
@@ -577,6 +618,31 @@ impl RenderState {
             ProgressEvent::CompressDone => {
                 self.compress_written = self.compress_total;
                 self.compress_active = false;
+            }
+            ProgressEvent::Par2EncodeStarted {
+                input_bytes,
+                input_slices,
+                input_files,
+                recovery_slices,
+                slice_size,
+                passes,
+                chunk_size,
+                simd_method,
+                threads,
+                memory_limit,
+            } => {
+                self.par2_info = Some(Par2Info {
+                    input_bytes,
+                    input_slices,
+                    input_files,
+                    recovery_slices,
+                    slice_size,
+                    passes,
+                    chunk_size,
+                    simd_method,
+                    threads,
+                    memory_limit,
+                });
             }
             ProgressEvent::Par2WriteStarted { total } => {
                 self.par2_write_active = true;
@@ -1024,6 +1090,41 @@ impl RenderState {
                 "▸ PAR2 [{bar}] {}/{} slices{eta_str}",
                 self.par2_write_done, self.par2_write_total
             ));
+        }
+
+        // --- PAR2 encode info block (parpar-style) -----------------------
+        if let Some(ref info) = self.par2_info {
+            let input_str = format!(
+                "{} ({} slice{} from {} file{})",
+                format_size(info.input_bytes),
+                info.input_slices,
+                if info.input_slices == 1 { "" } else { "s" },
+                info.input_files,
+                if info.input_files == 1 { "" } else { "s" },
+            );
+            let recovery_total = info.recovery_slices as u64 * info.slice_size as u64;
+            let recovery_str = format!(
+                "{} ({} × {} slices)",
+                format_size(recovery_total),
+                info.recovery_slices,
+                format_size(info.slice_size as u64),
+            );
+            let passes_str = format!(
+                "{}, processing {} × {} chunks per pass",
+                info.passes,
+                info.recovery_slices,
+                format_size(info.chunk_size as u64),
+            );
+            let mem_str = format_size(info.memory_limit as u64);
+            lines.push(ansi("PAR2 encoder", "36"));
+            lines.push(format!("  Input data      : {input_str}"));
+            lines.push(format!("  Recovery data   : {recovery_str}"));
+            lines.push(format!("  Input pass(es)  : {passes_str}"));
+            lines.push(format!(
+                "  Multiply method : {} · {} threads",
+                info.simd_method, info.threads
+            ));
+            lines.push(format!("  Memory usage    : {mem_str}"));
         }
 
         // --- persistent status line (e.g. PAR2 details) ------------------

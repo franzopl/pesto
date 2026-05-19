@@ -432,6 +432,30 @@ fn configure_rayon() {
     });
 }
 
+/// Returns the name of the SIMD path that the PAR2 encoder will use at runtime.
+fn detect_par2_simd() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512bw")
+        && std::is_x86_feature_detected!("gfni")
+    {
+        return "AVX-512/GFNI";
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        return "AVX2";
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("ssse3") {
+        return "SSSE3";
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        return "NEON";
+    }
+    "scalar"
+}
+
 /// Number of physical CPU cores, derived from `/proc/cpuinfo` by counting
 /// distinct `(physical id, core id)` pairs. Falls back to the logical CPU
 /// count when that information is unavailable.
@@ -602,14 +626,18 @@ async fn producer(
     };
 
     if recovery_count > 0 {
-        shared.emit(crate::progress::ProgressEvent::Status {
-            text: format!(
-                "PAR2: {} slices · {}% redundancy · slice size {} · memory limit {} MiB",
-                recovery_count,
-                shared.config.par2,
-                crate::progress::format_size(par2_slice_size as u64),
-                memory_limit / (1024 * 1024),
-            ),
+        let chunk_size_bytes = 16384usize * 2; // 16384 u16 words × 2 bytes = 32 KiB
+        shared.emit(crate::progress::ProgressEvent::Par2EncodeStarted {
+            input_bytes: metas.iter().map(|m| m.size).sum(),
+            input_slices: total_slices,
+            input_files: metas.len(),
+            recovery_slices: recovery_count,
+            slice_size: par2_slice_size,
+            passes: passes.len(),
+            chunk_size: chunk_size_bytes,
+            simd_method: detect_par2_simd().to_string(),
+            threads: physical_core_count(),
+            memory_limit,
         });
         shared.emit(crate::progress::ProgressEvent::Par2WriteStarted {
             total: recovery_count as u32,
