@@ -581,7 +581,11 @@ async fn run_single_upload(
 
     if !params.json_mode {
         if config.par2_only {
-            println!("PAR2 generation complete.");
+            if outcome.cancelled {
+                println!("PAR2 generation interrupted.");
+            } else {
+                println!("PAR2 generation complete.");
+            }
         } else {
             println!("posted {} segment(s)", outcome.segments.len());
         }
@@ -601,7 +605,11 @@ async fn run_single_upload(
     }
 
     if outcome.cancelled {
-        eprintln!("interrupted — stopped before posting every requested segment");
+        if config.par2_only {
+            eprintln!("interrupted — stopped before finishing PAR2 generation");
+        } else {
+            eprintln!("interrupted — stopped before posting every requested segment");
+        }
     }
     if !outcome.failures.is_empty() {
         eprintln!("{} segment(s) failed:", outcome.failures.len());
