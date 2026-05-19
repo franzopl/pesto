@@ -5,6 +5,13 @@ edition = "2021"
 rust-version = "1.75"
 description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation"
 license = "MIT"
+repository = "https://github.com/franzopl/pesto"
+homepage = "https://github.com/franzopl/pesto"
+documentation = "https://github.com/franzopl/pesto#readme"
+readme = "README.md"
+keywords = ["usenet", "nntp", "yenc", "nzb", "par2"]
+categories = ["command-line-utilities", "network-programming"]
+exclude = ["test_results/", "screenshot-*.png", "Terapia atraves da Escrita*/"]
 
 [[bin]]
 name = "pesto"

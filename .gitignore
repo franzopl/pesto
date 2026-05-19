@@ -3,3 +3,6 @@ Cargo.lock
 config.toml
 *.nzb
 *.mkv
+test_results/
+screenshot-*.png
+Terapia atraves da Escrita*/
