@@ -21,6 +21,22 @@ use crate::yenc::crc32;
 /// Bytes covered by the per-file 16k hash.
 const HEAD_LEN: usize = 16 * 1024;
 
+/// Pre-computed SSSE3 coefficient table for one (recovery_block, input_slice) pair.
+/// Eight 128-bit shuffle vectors plus 256-entry scalar lookup tables.
+#[cfg(target_arch = "x86_64")]
+type Ssse3Table = (
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    __m128i,
+    [u16; 256],
+    [u16; 256],
+);
+
 /// Pre-computed AVX2 coefficient table for one (recovery_block, input_slice) pair.
 /// Eight 256-bit shuffle vectors covering the four nibble × two byte-half combinations,
 /// plus full 256-entry lookup tables for the scalar tail handler.
@@ -909,11 +925,17 @@ impl RecoveryEncoder {
         let mask_f = _mm_set1_epi8(0x0F_u8 as i8);
         let mask_even = _mm_set1_epi16(0x00FF_u16 as i16);
 
-        buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
-            let exponent = exponent_start + i as u32;
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
 
-            let mut tables = Vec::with_capacity(queued.len());
-            for (q_idx, _) in queued.iter().enumerate() {
+        // Pre-build all SIMD coefficient tables in a single parallel pass — one Vec
+        // entry per (recovery_block × input_slice) pair, laid out as [rec * n_queued + q].
+        let all_tables: Vec<Ssse3Table> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| unsafe {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
                 let coeff = gf.exp(log_coeff);
@@ -931,15 +953,12 @@ impl RecoveryEncoder {
                     let r0 = gf.mul(val as u16, coeff);
                     tl_l[val] = (r0 & 0xFF) as u8;
                     th_l[val] = (r0 >> 8) as u8;
-
                     let r1 = gf.mul((val as u16) << 4, coeff);
                     tl_h[val] = (r1 & 0xFF) as u8;
                     th_h[val] = (r1 >> 8) as u8;
-
                     let r2 = gf.mul((val as u16) << 8, coeff);
                     hl_l[val] = (r2 & 0xFF) as u8;
                     hh_l[val] = (r2 >> 8) as u8;
-
                     let r3 = gf.mul((val as u16) << 12, coeff);
                     hl_h[val] = (r3 & 0xFF) as u8;
                     hh_h[val] = (r3 >> 8) as u8;
@@ -961,97 +980,229 @@ impl RecoveryEncoder {
                     table_high[b] = gf.mul((b as u16) << 8, coeff);
                 }
 
-                tables.push((
+                (
                     v_tl_l, v_tl_h, v_th_l, v_th_h, v_hl_l, v_hl_h, v_hh_l, v_hh_h, table_low,
                     table_high,
-                ));
-            }
+                )
+            })
+            .collect();
 
-            // 16384 words == 32 KiB: keeps the recovery chunk L1-resident
-            // across all queued input slices (same blocking strategy as AVX2).
-            let chunk_size = 16384;
-            for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
-                let byte_offset = chunk_idx * chunk_size * 2;
-                let byte_len = buffer_chunk.len() * 2;
-                // SSSE3 processes 16 bytes per iteration.
-                let blocks_16 = byte_len / 16;
-                let remainder = byte_len % 16;
+        // Chunk-outer loop: all rayon tasks rendezvous at each chunk boundary so
+        // all threads read the same 4 MiB input window → L3 hits (same strategy as AVX2).
+        let slice_words = queued[0].len() / 2;
+        let chunk_size = 16384usize; // 32 KiB recovery buffer chunk stays in L1
+        let n_chunks = slice_words.div_ceil(chunk_size);
 
-                for (q_idx, slice) in queued.iter().enumerate() {
-                    let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
-                    let (
-                        v_tl_l,
-                        v_tl_h,
-                        v_th_l,
-                        v_th_h,
-                        v_hl_l,
-                        v_hl_h,
-                        v_hh_l,
-                        v_hh_h,
-                        ref table_low,
-                        ref table_high,
-                    ) = tables[q_idx];
+        for chunk_idx in 0..n_chunks {
+            let word_start = chunk_idx * chunk_size;
+            let word_end = (word_start + chunk_size).min(slice_words);
+            let byte_offset = word_start * 2;
+            let byte_len = (word_end - word_start) * 2;
+            let blocks_16 = byte_len / 16;
+            let remainder = byte_len % 16;
 
-                    let mut ptr_buf = buffer_chunk.as_mut_ptr() as *mut __m128i;
-                    let mut ptr_in = slice_chunk.as_ptr() as *const __m128i;
-                    let end = ptr_in.add(blocks_16);
+            buffers
+                .par_chunks_mut(2)
+                .enumerate()
+                .for_each(|(pair_idx, buf_pair)| unsafe {
+                    let i = pair_idx * 2;
+                    match buf_pair {
+                        [buf_a, buf_b] => {
+                            let base_a = i * n_queued;
+                            let base_b = (i + 1) * n_queued;
+                            let chunk_a = &mut buf_a[word_start..word_end];
+                            let chunk_b = &mut buf_b[word_start..word_end];
 
-                    while ptr_in < end {
-                        let input = _mm_loadu_si128(ptr_in);
+                            for q_idx in 0..n_queued {
+                                let (
+                                    v_tl_l_a,
+                                    v_tl_h_a,
+                                    v_th_l_a,
+                                    v_th_h_a,
+                                    v_hl_l_a,
+                                    v_hl_h_a,
+                                    v_hh_l_a,
+                                    v_hh_h_a,
+                                    ref tlow_a,
+                                    ref thigh_a,
+                                ) = all_tables[base_a + q_idx];
+                                let (
+                                    v_tl_l_b,
+                                    v_tl_h_b,
+                                    v_th_l_b,
+                                    v_th_h_b,
+                                    v_hl_l_b,
+                                    v_hl_h_b,
+                                    v_hh_l_b,
+                                    v_hh_h_b,
+                                    ref tlow_b,
+                                    ref thigh_b,
+                                ) = all_tables[base_b + q_idx];
+                                let slice_chunk =
+                                    &queued[q_idx][byte_offset..byte_offset + byte_len];
 
-                        let n0_2 = _mm_and_si128(input, mask_f);
-                        let n1_3 = _mm_and_si128(_mm_srli_epi16(input, 4), mask_f);
+                                let mut ptr_in = slice_chunk.as_ptr() as *const __m128i;
+                                let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m128i;
+                                let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m128i;
+                                let end = ptr_in.add(blocks_16);
 
-                        let res_lo_even = _mm_xor_si128(
-                            _mm_shuffle_epi8(v_tl_l, n0_2),
-                            _mm_shuffle_epi8(v_tl_h, n1_3),
-                        );
-                        let res_hi_even = _mm_xor_si128(
-                            _mm_shuffle_epi8(v_th_l, n0_2),
-                            _mm_shuffle_epi8(v_th_h, n1_3),
-                        );
-                        let res_lo_odd = _mm_xor_si128(
-                            _mm_shuffle_epi8(v_hl_l, n0_2),
-                            _mm_shuffle_epi8(v_hl_h, n1_3),
-                        );
-                        let res_hi_odd = _mm_xor_si128(
-                            _mm_shuffle_epi8(v_hh_l, n0_2),
-                            _mm_shuffle_epi8(v_hh_h, n1_3),
-                        );
+                                while ptr_in < end {
+                                    let input = _mm_loadu_si128(ptr_in);
+                                    let n0_2 = _mm_and_si128(input, mask_f);
+                                    let n1_3 = _mm_and_si128(_mm_srli_epi16(input, 4), mask_f);
 
-                        let sum_lo_even = _mm_xor_si128(res_lo_even, _mm_srli_epi16(res_lo_odd, 8));
-                        let sum_hi_even = _mm_xor_si128(res_hi_even, _mm_srli_epi16(res_hi_odd, 8));
+                                    // Block A
+                                    let rle_a = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_tl_l_a, n0_2),
+                                        _mm_shuffle_epi8(v_tl_h_a, n1_3),
+                                    );
+                                    let rhe_a = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_th_l_a, n0_2),
+                                        _mm_shuffle_epi8(v_th_h_a, n1_3),
+                                    );
+                                    let rlo_a = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_hl_l_a, n0_2),
+                                        _mm_shuffle_epi8(v_hl_h_a, n1_3),
+                                    );
+                                    let rho_a = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_hh_l_a, n0_2),
+                                        _mm_shuffle_epi8(v_hh_h_a, n1_3),
+                                    );
+                                    let sle_a = _mm_xor_si128(rle_a, _mm_srli_epi16(rlo_a, 8));
+                                    let she_a = _mm_xor_si128(rhe_a, _mm_srli_epi16(rho_a, 8));
+                                    let out_a = _mm_or_si128(
+                                        _mm_and_si128(sle_a, mask_even),
+                                        _mm_slli_epi16(she_a, 8),
+                                    );
+                                    let prev_a = _mm_loadu_si128(ptr_a);
+                                    _mm_storeu_si128(ptr_a, _mm_xor_si128(prev_a, out_a));
 
-                        let r_l_masked = _mm_and_si128(sum_lo_even, mask_even);
-                        let r_h_shifted = _mm_slli_epi16(sum_hi_even, 8);
+                                    // Block B — reuses n0_2 and n1_3
+                                    let rle_b = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_tl_l_b, n0_2),
+                                        _mm_shuffle_epi8(v_tl_h_b, n1_3),
+                                    );
+                                    let rhe_b = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_th_l_b, n0_2),
+                                        _mm_shuffle_epi8(v_th_h_b, n1_3),
+                                    );
+                                    let rlo_b = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_hl_l_b, n0_2),
+                                        _mm_shuffle_epi8(v_hl_h_b, n1_3),
+                                    );
+                                    let rho_b = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_hh_l_b, n0_2),
+                                        _mm_shuffle_epi8(v_hh_h_b, n1_3),
+                                    );
+                                    let sle_b = _mm_xor_si128(rle_b, _mm_srli_epi16(rlo_b, 8));
+                                    let she_b = _mm_xor_si128(rhe_b, _mm_srli_epi16(rho_b, 8));
+                                    let out_b = _mm_or_si128(
+                                        _mm_and_si128(sle_b, mask_even),
+                                        _mm_slli_epi16(she_b, 8),
+                                    );
+                                    let prev_b = _mm_loadu_si128(ptr_b);
+                                    _mm_storeu_si128(ptr_b, _mm_xor_si128(prev_b, out_b));
 
-                        let out = _mm_or_si128(r_l_masked, r_h_shifted);
+                                    ptr_in = ptr_in.add(1);
+                                    ptr_a = ptr_a.add(1);
+                                    ptr_b = ptr_b.add(1);
+                                }
 
-                        let prev = _mm_loadu_si128(ptr_buf);
-                        _mm_storeu_si128(ptr_buf, _mm_xor_si128(prev, out));
-
-                        ptr_in = ptr_in.add(1);
-                        ptr_buf = ptr_buf.add(1);
-                    }
-
-                    if remainder > 0 {
-                        // 8 words per 16-byte block.
-                        let offset_words = blocks_16 * 8;
-                        let mut ptr_word = buffer_chunk[offset_words..].as_mut_ptr();
-                        let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
-                        let tail_end = p_in.add(remainder);
-
-                        while p_in < tail_end {
-                            let lo = *p_in as usize;
-                            let hi = *p_in.add(1) as usize;
-                            *ptr_word ^= table_low[lo] ^ table_high[hi];
-                            ptr_word = ptr_word.add(1);
-                            p_in = p_in.add(2);
+                                if remainder > 0 {
+                                    let ow = blocks_16 * 8;
+                                    let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                    let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                    let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
+                                    let tail_end = p_in.add(remainder);
+                                    while p_in < tail_end {
+                                        let lo = *p_in as usize;
+                                        let hi = *p_in.add(1) as usize;
+                                        *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                        *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                        pw_a = pw_a.add(1);
+                                        pw_b = pw_b.add(1);
+                                        p_in = p_in.add(2);
+                                    }
+                                }
+                            }
                         }
+                        [buf_a] => {
+                            let base = i * n_queued;
+                            let chunk_a = &mut buf_a[word_start..word_end];
+
+                            for q_idx in 0..n_queued {
+                                let (
+                                    v_tl_l,
+                                    v_tl_h,
+                                    v_th_l,
+                                    v_th_h,
+                                    v_hl_l,
+                                    v_hl_h,
+                                    v_hh_l,
+                                    v_hh_h,
+                                    ref table_low,
+                                    ref table_high,
+                                ) = all_tables[base + q_idx];
+                                let slice_chunk =
+                                    &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                let mut ptr_buf = chunk_a.as_mut_ptr() as *mut __m128i;
+                                let mut ptr_in = slice_chunk.as_ptr() as *const __m128i;
+                                let end = ptr_in.add(blocks_16);
+
+                                while ptr_in < end {
+                                    let input = _mm_loadu_si128(ptr_in);
+                                    let n0_2 = _mm_and_si128(input, mask_f);
+                                    let n1_3 = _mm_and_si128(_mm_srli_epi16(input, 4), mask_f);
+                                    let res_lo_even = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_tl_l, n0_2),
+                                        _mm_shuffle_epi8(v_tl_h, n1_3),
+                                    );
+                                    let res_hi_even = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_th_l, n0_2),
+                                        _mm_shuffle_epi8(v_th_h, n1_3),
+                                    );
+                                    let res_lo_odd = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_hl_l, n0_2),
+                                        _mm_shuffle_epi8(v_hl_h, n1_3),
+                                    );
+                                    let res_hi_odd = _mm_xor_si128(
+                                        _mm_shuffle_epi8(v_hh_l, n0_2),
+                                        _mm_shuffle_epi8(v_hh_h, n1_3),
+                                    );
+                                    let sum_lo =
+                                        _mm_xor_si128(res_lo_even, _mm_srli_epi16(res_lo_odd, 8));
+                                    let sum_hi =
+                                        _mm_xor_si128(res_hi_even, _mm_srli_epi16(res_hi_odd, 8));
+                                    let out = _mm_or_si128(
+                                        _mm_and_si128(sum_lo, mask_even),
+                                        _mm_slli_epi16(sum_hi, 8),
+                                    );
+                                    let prev = _mm_loadu_si128(ptr_buf);
+                                    _mm_storeu_si128(ptr_buf, _mm_xor_si128(prev, out));
+                                    ptr_in = ptr_in.add(1);
+                                    ptr_buf = ptr_buf.add(1);
+                                }
+
+                                if remainder > 0 {
+                                    let ow = blocks_16 * 8;
+                                    let mut pw = chunk_a[ow..].as_mut_ptr();
+                                    let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
+                                    let tail_end = p_in.add(remainder);
+                                    while p_in < tail_end {
+                                        let lo = *p_in as usize;
+                                        let hi = *p_in.add(1) as usize;
+                                        *pw ^= table_low[lo] ^ table_high[hi];
+                                        pw = pw.add(1);
+                                        p_in = p_in.add(2);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                }
-            }
-        });
+                });
+        }
     }
 
     /// Same 4-nibble shuffle algorithm as `flush_ssse3` for AArch64 targets.
