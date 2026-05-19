@@ -968,8 +968,11 @@ impl RenderState {
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
         }
 
-        // --- PAR2 encode progress bar (shown while computing RS, before upload) ---
-        if self.par2_encode_total > 0 && self.par2_encode_done < self.par2_encode_total {
+        // --- PAR2 encode progress bar (secondary; only while active, hidden on final draw) ---
+        if !final_draw
+            && self.par2_encode_total > 0
+            && self.par2_encode_done < self.par2_encode_total
+        {
             let elapsed = self.par2_encode_start.elapsed().as_secs_f64().max(0.001);
             let frac =
                 (self.par2_encode_done as f64 / self.par2_encode_total as f64).clamp(0.0, 1.0);
@@ -982,9 +985,12 @@ impl RenderState {
             } else {
                 String::new()
             };
-            lines.push(format!(
-                "▸ PAR2 encode [{bar}] {pct:>3}%  {}/{} slices{eta_str}",
-                self.par2_encode_done, self.par2_encode_total,
+            lines.push(ansi(
+                &format!(
+                    "  par2 encode  [{bar}] {pct:>3}%  {}/{} slices{eta_str}",
+                    self.par2_encode_done, self.par2_encode_total,
+                ),
+                "2",
             ));
         }
 
@@ -1035,7 +1041,7 @@ impl RenderState {
             } else {
                 "ETA —".to_string()
             };
-            lines.push(format!("┌─ overall {}┐", "─".repeat(BODY_W + 2 - 10)));
+            lines.push(format!("┌─ upload {}┐", "─".repeat(BODY_W + 2 - 9)));
             lines.push(box_line(&line1));
             lines.push(box_line(&line2));
             lines.push(box_line(&line3));
@@ -1108,8 +1114,8 @@ impl RenderState {
             }
         }
 
-        // --- PAR2 recovery slice writing progress ------------------------
-        if self.par2_write_active || (final_draw && self.par2_write_total > 0) {
+        // --- PAR2 recovery slice writing progress (secondary; hidden on final draw) ---
+        if !final_draw && self.par2_write_active {
             let elapsed = self.par2_write_start.elapsed().as_secs_f64().max(0.001);
             let frac = if self.par2_write_total > 0 {
                 (self.par2_write_done as f64 / self.par2_write_total as f64).clamp(0.0, 1.0)
@@ -1118,53 +1124,56 @@ impl RenderState {
             };
             let bar = render_bar(frac, 10);
             let rate = self.par2_write_done as f64 / elapsed;
-            let eta_str = if final_draw {
-                format!(" · elapsed {}", format_duration(elapsed))
-            } else if rate > 0.1 && self.par2_write_total > self.par2_write_done {
+            let eta_str = if rate > 0.1 && self.par2_write_total > self.par2_write_done {
                 let remaining = (self.par2_write_total - self.par2_write_done) as f64 / rate;
                 format!(" · ETA {}", format_duration(remaining))
             } else {
                 String::new()
             };
-            lines.push(format!(
-                "▸ PAR2 [{bar}] {}/{} slices{eta_str}",
-                self.par2_write_done, self.par2_write_total
+            lines.push(ansi(
+                &format!(
+                    "  par2 write   [{bar}] {}/{} slices{eta_str}",
+                    self.par2_write_done, self.par2_write_total
+                ),
+                "2",
             ));
         }
 
-        // --- PAR2 encode info block (parpar-style) -----------------------
-        if let Some(ref info) = self.par2_info {
-            let input_str = format!(
-                "{} ({} slice{} from {} file{})",
-                format_size(info.input_bytes),
-                info.input_slices,
-                if info.input_slices == 1 { "" } else { "s" },
-                info.input_files,
-                if info.input_files == 1 { "" } else { "s" },
-            );
-            let recovery_total = info.recovery_slices as u64 * info.slice_size as u64;
-            let recovery_str = format!(
-                "{} ({} × {} slices)",
-                format_size(recovery_total),
-                info.recovery_slices,
-                format_size(info.slice_size as u64),
-            );
-            let passes_str = format!(
-                "{}, processing {} × {} chunks per pass",
-                info.passes,
-                info.recovery_slices,
-                format_size(info.chunk_size as u64),
-            );
-            let mem_str = format_size(info.memory_limit as u64);
-            lines.push(ansi("PAR2 encoder", "36"));
-            lines.push(format!("  Input data      : {input_str}"));
-            lines.push(format!("  Recovery data   : {recovery_str}"));
-            lines.push(format!("  Input pass(es)  : {passes_str}"));
-            lines.push(format!(
-                "  Multiply method : {} · {} threads",
-                info.simd_method, info.threads
-            ));
-            lines.push(format!("  Memory usage    : {mem_str}"));
+        // --- PAR2 encode info block (shown only while actively encoding) ---
+        if !final_draw && self.par2_encode_done < self.par2_encode_total {
+            if let Some(ref info) = self.par2_info {
+                let input_str = format!(
+                    "{} ({} slice{} from {} file{})",
+                    format_size(info.input_bytes),
+                    info.input_slices,
+                    if info.input_slices == 1 { "" } else { "s" },
+                    info.input_files,
+                    if info.input_files == 1 { "" } else { "s" },
+                );
+                let recovery_total = info.recovery_slices as u64 * info.slice_size as u64;
+                let recovery_str = format!(
+                    "{} ({} × {} slices)",
+                    format_size(recovery_total),
+                    info.recovery_slices,
+                    format_size(info.slice_size as u64),
+                );
+                let passes_str = format!(
+                    "{}, processing {} × {} chunks per pass",
+                    info.passes,
+                    info.recovery_slices,
+                    format_size(info.chunk_size as u64),
+                );
+                let mem_str = format_size(info.memory_limit as u64);
+                lines.push(ansi("PAR2 encoder", "36"));
+                lines.push(format!("  Input data      : {input_str}"));
+                lines.push(format!("  Recovery data   : {recovery_str}"));
+                lines.push(format!("  Input pass(es)  : {passes_str}"));
+                lines.push(format!(
+                    "  Multiply method : {} · {} threads",
+                    info.simd_method, info.threads
+                ));
+                lines.push(format!("  Memory usage    : {mem_str}"));
+            }
         }
 
         // --- persistent status line (e.g. PAR2 details) ------------------
