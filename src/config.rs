@@ -203,6 +203,12 @@ pub struct PostingSection {
     /// Fixed domain for `Message-ID` generation. When absent a random domain
     /// is generated per article.
     pub message_id_domain: Option<String>,
+    /// Run a deferred STAT check on every posted article after upload finishes.
+    pub check: Option<bool>,
+    /// Seconds to wait before running the post-check STAT pass. Default: 30.
+    pub check_delay: Option<u64>,
+    /// Number of STAT attempts per article during post-check. Default: 2.
+    pub check_retries: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -336,6 +342,12 @@ pub struct Overrides {
     pub post_hook: Option<String>,
     /// Generate a `.nfo` file next to the `.nzb` after posting.
     pub nfo: Option<bool>,
+    /// Run a deferred STAT check on every posted article after upload finishes.
+    pub check: Option<bool>,
+    /// Seconds to wait before running the post-check STAT pass.
+    pub check_delay_secs: Option<u64>,
+    /// Number of STAT attempts per article during post-check.
+    pub check_retries: Option<u32>,
 }
 
 /// Fully resolved, validated configuration.
@@ -423,6 +435,12 @@ pub struct Config {
     pub quiet: bool,
     /// Ring the terminal bell on completion.
     pub bell: bool,
+    /// Run a deferred STAT check on every posted article after upload finishes.
+    pub check: bool,
+    /// Seconds to wait before running the post-check STAT pass.
+    pub check_delay_secs: u64,
+    /// Number of STAT attempts per article during post-check.
+    pub check_retries: u32,
 }
 
 impl Config {
@@ -619,6 +637,15 @@ impl Config {
             nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),
             quiet: file.output.quiet.unwrap_or(false),
             bell: file.output.bell.unwrap_or(false),
+            check: cli
+                .check
+                .unwrap_or_else(|| file.posting.check.unwrap_or(false)),
+            check_delay_secs: cli
+                .check_delay_secs
+                .unwrap_or_else(|| file.posting.check_delay.unwrap_or(30)),
+            check_retries: cli
+                .check_retries
+                .unwrap_or_else(|| file.posting.check_retries.unwrap_or(2)),
         })
     }
 }

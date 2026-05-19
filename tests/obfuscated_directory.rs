@@ -52,6 +52,9 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         nfo: false,
         quiet: false,
         bell: false,
+        check: false,
+        check_delay_secs: 30,
+        check_retries: 2,
     }
 }
 

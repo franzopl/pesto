@@ -1079,6 +1079,95 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
     shared.failures.lock().unwrap().push(description);
 }
 
+/// Check that every article in `segments` is retrievable via `STAT`.
+///
+/// Opens a single NNTP connection (using the primary server from `config`),
+/// waits `config.check_delay_secs`, then queries each article. Each article
+/// is retried up to `config.check_retries` times before being recorded as
+/// missing. Returns the list of `Message-ID`s that could not be confirmed.
+///
+/// Progress events (`CheckStarted`, `CheckProgress`, `CheckDone`) are emitted
+/// on `events` when provided.
+pub async fn check_articles(
+    config: &Config,
+    segments: &[PostedSegment],
+    events: Option<&ProgressSender>,
+) -> Result<Vec<String>> {
+    if segments.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let total = segments.len() as u64;
+    if let Some(tx) = events {
+        let _ = tx.send(ProgressEvent::CheckStarted { total });
+    }
+
+    // Wait for server propagation before checking.
+    if config.check_delay_secs > 0 {
+        tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
+    }
+
+    // Open a single connection for the check pass — STAT is lightweight.
+    let server = config
+        .all_servers()
+        .next()
+        .expect("at least one server is configured");
+    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
+
+    let mut missing = Vec::new();
+    let max_attempts = config.check_retries.max(1) as usize;
+
+    for (idx, seg) in segments.iter().enumerate() {
+        // Strip angle brackets for the STAT command.
+        let id = seg.message_id.trim_start_matches('<').trim_end_matches('>');
+
+        let mut found = false;
+        for attempt in 1..=max_attempts {
+            match slot.ensure_connected().await {
+                Ok(conn) => match conn.stat(id).await {
+                    Ok(true) => {
+                        found = true;
+                        break;
+                    }
+                    Ok(false) => {
+                        // Not found yet — wait a bit and retry.
+                        if attempt < max_attempts {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
+                    Err(_) => {
+                        slot.invalidate();
+                        if attempt < max_attempts {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
+                },
+                Err(_) => {
+                    if attempt < max_attempts {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            }
+        }
+
+        if !found {
+            missing.push(seg.message_id.clone());
+        }
+
+        let checked = idx as u64 + 1;
+        if let Some(tx) = events {
+            let _ = tx.send(ProgressEvent::CheckProgress { checked, ok: found });
+        }
+    }
+
+    let failed = missing.len() as u64;
+    if let Some(tx) = events {
+        let _ = tx.send(ProgressEvent::CheckDone { failed });
+    }
+
+    Ok(missing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
