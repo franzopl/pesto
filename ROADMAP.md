@@ -1123,6 +1123,72 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 
 ---
 
+## Phase 26 — Simultaneous Compression and Upload (Streaming Volumes)
+
+Compress and post in parallel: start uploading the first volume the moment the
+compressor finishes it, without waiting for the entire archive.
+
+### Design
+
+The 7z stdout pipe introduced in Phase 13 / `refactor(compress)` already gives
+pesto a byte stream from the compressor. The streaming-volumes phase splits that
+stream into fixed-size volumes internally — no dependency on `7z -v` or
+filesystem events — and dispatches each completed volume to the posting pipeline
+immediately.
+
+```
+7z stdout ──► [accumulate N bytes] ──► vol.001 ready ──► PAR2(vol.001) + post vol.001
+                                   ──► vol.002 ready ──► PAR2(vol.002) + post vol.002
+                                   ──► ...
+```
+
+PAR2 is generated **per volume** (one independent recovery set per volume).
+This is the only option compatible with streaming: a single PAR2 set over all
+volumes would require all volumes to be complete before any parity can be
+generated, defeating the purpose. The overhead is negligible — a few extra
+header packets per volume; total parity bytes are identical to a single-set
+approach.
+
+### Obfuscation compatibility
+
+Fully compatible. Each volume and its PAR2 files receive randomised names in
+yEnc/NZB exactly as single-file uploads do today. The PAR2 File Description
+packets store the real volume names internally; the NZB `<file name>` attribute
+carries the real name. No changes to the obfuscation logic are needed.
+
+### Implementation sketch
+
+- `--volume-size SIZE` flag and `compression.volume_size` config key (e.g.
+  `"500 MiB"`); when absent, compression writes one volume (current behaviour)
+- `compress_streaming` in `compress.rs` gains a `volume_size: Option<u64>`
+  parameter; when set, it yields completed `NamedTempFile` volumes one at a
+  time via a callback or channel instead of returning a single file
+- The caller (`run_single_upload` in `main.rs`) spawns the compressor in a
+  background task and feeds completed volumes into the existing posting pipeline
+  via the bounded channel already used for articles
+- PAR2 encoder is instantiated once per volume; `finish()` is called and the
+  PAR2 files are posted before the next volume begins accumulating parity
+- Progress events: `CompressVolumeReady { volume: usize, bytes: u64 }` emitted
+  when each volume is sealed, so the terminal panel can show how many volumes
+  have been queued for upload
+- The NZB collects segments from all volumes; a single `.nzb` covers the entire
+  release as today
+
+### Sub-phases
+
+- [ ] `--volume-size` flag and config key; validate + parse alongside
+      `compression.format`
+- [ ] Streaming volume splitter in `compress.rs`: read from 7z stdout,
+      accumulate into `NamedTempFile`, yield when `volume_size` bytes reached
+      or EOF; last chunk is always a partial volume
+- [ ] Per-volume PAR2: instantiate a fresh `RecoveryEncoder` per volume, feed
+      the volume bytes, call `finish()`, post PAR2 articles before moving on
+- [ ] `CompressVolumeReady` progress event + terminal panel update
+- [ ] End-to-end test: compress a multi-volume upload, verify every volume and
+      its PAR2 set passes `par2 verify`, confirm the NZB is complete
+
+---
+
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
