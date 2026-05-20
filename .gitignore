@@ -10,3 +10,6 @@ file10G.bin
 file1G.bin
 file5G.bin
 *.par2
+/bench_par2_out/
+/bench_pesto_vs_parpar.sh
+/file10M.bin

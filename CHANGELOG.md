@@ -7,6 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.16] — 2026-05-20
+
+### Added
+- **High-Performance PAR2 Encoder**:
+  - Implemented AVX-512 + GFNI, AVX2, and SSSE3 optimized paths for Reed-Solomon encoding.
+  - 2D parallelization (chunks × recovery blocks) with hybrid CPU detection.
+  - Hardware-accelerated CRC32 and memory prefetching.
+- **Terminal UI Restructure**:
+  - New multi-panel layout with dedicated PAR2 encoding progress bars.
+  - Grouped status matrix and sparkline throughput history.
+  - Detailed final upload summaries (average speed, total elapsed time).
+
+### Fixed
+- Corrected recovery data generation in AVX2/GFNI paths.
+- Fixed progress counter resets between files.
+- Improved ETA stability by clamping high-bound ranges.
+
 ## [0.2.5] — 2026-05-19
 
 ### Fixed
