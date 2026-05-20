@@ -983,42 +983,59 @@ impl RenderState {
                 self.done_segments, self.total_segments
             );
             let rate = self.rate();
-            // Line 2: bytes transferred + speed + sparkline (phase 21c)
-            let spark = {
-                let samples = self.speed_samples();
-                if samples.len() >= 2 {
-                    format!(" {}", render_sparkline(&samples))
+            let (line2, line3) = if final_draw {
+                // On final draw: show total size, average speed, and elapsed time.
+                // Average speed is more meaningful than the last-tick instantaneous rate.
+                let avg_speed = if self.elapsed_secs() > 0.001 {
+                    self.done_bytes as f64 / self.elapsed_secs()
                 } else {
-                    String::new()
-                }
-            };
-            let line2 = format!(
-                "{}/{} · {}/s{}",
-                format_size(self.done_bytes),
-                format_size(self.total_bytes),
-                format_size(rate as u64),
-                spark,
-            );
-            // Line 3: ETA with confidence range (phase 21d)
-            let line3 = if final_draw {
-                format!("elapsed {}", format_duration(self.elapsed_secs()))
-            } else if let Some((lo, hi, unstable)) = self.eta_range() {
-                let mark = if unstable { "~" } else { "" };
-                if (hi - lo).abs() < 1.0 {
-                    format!("ETA {mark}{}", format_duration(lo))
-                } else {
-                    format!("ETA {mark}{}–{}", format_duration(lo), format_duration(hi))
-                }
-            } else if rate > 1.0 && self.total_bytes > self.done_bytes {
-                let remaining = (self.total_bytes - self.done_bytes) as f64 / rate;
-                format!("ETA {}", format_duration(remaining))
+                    0.0
+                };
+                let summary = format!(
+                    "{} · avg {}/s · elapsed {}",
+                    format_size(self.done_bytes),
+                    format_size(avg_speed as u64),
+                    format_duration(self.elapsed_secs()),
+                );
+                (summary, None)
             } else {
-                "ETA —".to_string()
+                // While uploading: bytes/total · instantaneous speed · sparkline
+                let spark = {
+                    let samples = self.speed_samples();
+                    if samples.len() >= 2 {
+                        format!(" {}", render_sparkline(&samples))
+                    } else {
+                        String::new()
+                    }
+                };
+                let l2 = format!(
+                    "{}/{} · {}/s{}",
+                    format_size(self.done_bytes),
+                    format_size(self.total_bytes),
+                    format_size(rate as u64),
+                    spark,
+                );
+                let l3 = if let Some((lo, hi, unstable)) = self.eta_range() {
+                    let mark = if unstable { "~" } else { "" };
+                    if (hi - lo).abs() < 1.0 {
+                        format!("ETA {mark}{}", format_duration(lo))
+                    } else {
+                        format!("ETA {mark}{}–{}", format_duration(lo), format_duration(hi))
+                    }
+                } else if rate > 1.0 && self.total_bytes > self.done_bytes {
+                    let remaining = (self.total_bytes - self.done_bytes) as f64 / rate;
+                    format!("ETA {}", format_duration(remaining))
+                } else {
+                    "ETA —".to_string()
+                };
+                (l2, Some(l3))
             };
             lines.push(format!("┌─ upload {}┐", "─".repeat(BODY_W + 2 - 9)));
             lines.push(box_line(&line1));
             lines.push(box_line(&line2));
-            lines.push(box_line(&line3));
+            if let Some(l3) = line3 {
+                lines.push(box_line(&l3));
+            }
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
 
             // --- per-connection activity with colour codes (phase 21b) ----

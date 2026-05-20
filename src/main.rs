@@ -427,7 +427,7 @@ async fn run_single_upload(
     let upload_start = std::time::Instant::now();
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
-    let (file_count, folder_count, total_bytes) = upload_summary(&inputs);
+    let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
 
     if !params.json_mode && !params.renderer_opts.quiet && std::io::stderr().is_terminal() {
         pesto::progress::print_tree(&inputs);
@@ -630,28 +630,11 @@ async fn run_single_upload(
         Vec::new()
     };
 
-    if !params.json_mode {
-        if config.par2_only {
-            if outcome.cancelled {
-                println!("PAR2 generation interrupted.");
-            } else {
-                println!("PAR2 generation complete.");
-            }
+    if !params.json_mode && config.par2_only {
+        if outcome.cancelled {
+            println!("PAR2 generation interrupted.");
         } else {
-            println!("posted {} segment(s)", outcome.segments.len());
-        }
-
-        let files_word = if file_count == 1 { "file" } else { "files" };
-        let size = pesto::progress::format_size(total_bytes);
-        if folder_count > 0 {
-            let folders_word = if folder_count == 1 {
-                "subfolder"
-            } else {
-                "subfolders"
-            };
-            println!("upload: {file_count} {files_word} · {folder_count} {folders_word} · {size}");
-        } else {
-            println!("upload: {file_count} {files_word} · {size}");
+            println!("PAR2 generation complete.");
         }
     }
 
