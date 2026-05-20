@@ -97,11 +97,17 @@ pub fn compress(
     }
 }
 
-/// Split a 7z-format archive into volumes of at most `volume_size` bytes.
+/// Split a 7z-format archive into volumes of at most `volume_size` bytes,
+/// calling `on_volume` for each volume **as soon as it is sealed** — before
+/// the remaining volumes are compressed.
 ///
-/// Uses 7z's native `-v` flag so the tool handles all seeking requirements
-/// internally. The volume files are written to a shared temp directory and
-/// passed to `on_volume` in order once compression completes.
+/// Uses 7z's native `-v` flag. A volume is considered sealed the moment 7z
+/// begins writing the *next* volume: when `archive.7z.00N+1` appears in the
+/// temp dir, `archive.7z.00N` is complete and ready for upload. The last
+/// volume is dispatched after 7z exits.
+///
+/// This allows PAR2 generation and upload of volume N to run concurrently
+/// with 7z still compressing volume N+1.
 ///
 /// Only supported for [`ArchiveFormat::SevenZip`]. Returns an error for
 /// other formats.
@@ -146,40 +152,106 @@ pub fn compress_volumes(
     for input in inputs {
         cmd.arg(input);
     }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
 
-    // Poll total size of all volume files in the temp dir while 7z runs.
-    run_with_progress_dir(cmd, "7z", temp_dir.path(), &on_progress)?;
+    let mut child = cmd.spawn().context("spawning 7z")?;
 
-    // Collect volume files in sorted order (archive.7z.001, .002, …).
-    let mut volumes: Vec<PathBuf> = std::fs::read_dir(temp_dir.path())
-        .context("reading temp dir")?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("archive.7z"))
-                .unwrap_or(false)
-        })
-        .collect();
-    volumes.sort();
+    // sorted_volumes lists archive.7z.001, .002, … present in the temp dir.
+    let sorted_volumes = |dir: &std::path::Path| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.starts_with("archive.7z."))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
 
-    if volumes.is_empty() {
-        anyhow::bail!(
-            "7z produced no output files in {}",
-            temp_dir.path().display()
-        );
+    // Number of volumes already dispatched via on_volume.
+    let mut dispatched: usize = 0;
+
+    // Seal volumes whose completeness is proven: a volume at index i is sealed
+    // when a volume at index i+1 exists (7z has moved on to the next file).
+    let seal_ready = |all: &[PathBuf],
+                      dispatched: &mut usize,
+                      up_to: usize,
+                      temp_dir: &std::sync::Arc<tempfile::TempDir>,
+                      on_volume: &mut dyn FnMut(CompressResult) -> Result<()>|
+     -> Result<()> {
+        while *dispatched < up_to && *dispatched < all.len() {
+            let path = all[*dispatched].clone();
+            let dir = std::sync::Arc::clone(temp_dir);
+            on_volume(CompressResult {
+                path,
+                format,
+                _cleanup: TempCleanup::SharedDir(dir),
+            })?;
+            *dispatched += 1;
+        }
+        Ok(())
+    };
+
+    loop {
+        on_progress(dir_total_size(temp_dir.path()));
+
+        let vols = sorted_volumes(temp_dir.path());
+        // All volumes except the last are sealed (7z has moved on).
+        let sealable = vols.len().saturating_sub(1);
+        seal_ready(&vols, &mut dispatched, sealable, &temp_dir, &mut on_volume)?;
+
+        match child.try_wait().context("waiting for 7z")? {
+            Some(status) => {
+                on_progress(dir_total_size(temp_dir.path()));
+                if !status.success() {
+                    let detail = child
+                        .stderr
+                        .as_mut()
+                        .and_then(|s| {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            s.read_to_string(&mut buf).ok()?;
+                            Some(buf)
+                        })
+                        .unwrap_or_default();
+                    bail!(
+                        "`7z` exited with {status}{}",
+                        if detail.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", detail.trim())
+                        }
+                    );
+                }
+                // 7z exited successfully — seal all remaining volumes.
+                let vols = sorted_volumes(temp_dir.path());
+                if vols.is_empty() {
+                    anyhow::bail!(
+                        "7z produced no output files in {}",
+                        temp_dir.path().display()
+                    );
+                }
+                seal_ready(
+                    &vols,
+                    &mut dispatched,
+                    vols.len(),
+                    &temp_dir,
+                    &mut on_volume,
+                )?;
+                return Ok(());
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
     }
-
-    for path in volumes {
-        let dir = std::sync::Arc::clone(&temp_dir);
-        on_volume(CompressResult {
-            path,
-            format,
-            _cleanup: TempCleanup::SharedDir(dir),
-        })?;
-    }
-
-    Ok(())
 }
 
 /// 7z in SevenZip format: write to a `NamedTempFile` inside a `TempDir`.
@@ -308,55 +380,6 @@ fn dir_total_size(dir: &std::path::Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
-}
-
-/// Spawn `cmd`, poll the total size of all files in `output_dir` every 200 ms,
-/// and call `on_progress` so the UI stays live during multi-volume compression.
-fn run_with_progress_dir(
-    mut cmd: Command,
-    tool: &str,
-    output_dir: &std::path::Path,
-    on_progress: &dyn Fn(u64),
-) -> Result<()> {
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().with_context(|| format!("spawning `{tool}`"))?;
-
-    loop {
-        match child
-            .try_wait()
-            .with_context(|| format!("waiting for `{tool}`"))?
-        {
-            Some(status) => {
-                on_progress(dir_total_size(output_dir));
-                if !status.success() {
-                    let detail = child
-                        .stderr
-                        .as_mut()
-                        .and_then(|s| {
-                            use std::io::Read;
-                            let mut buf = String::new();
-                            s.read_to_string(&mut buf).ok()?;
-                            Some(buf)
-                        })
-                        .unwrap_or_default();
-                    bail!(
-                        "`{tool}` exited with {status}{}",
-                        if detail.trim().is_empty() {
-                            String::new()
-                        } else {
-                            format!(": {}", detail.trim())
-                        }
-                    );
-                }
-                return Ok(());
-            }
-            None => {
-                on_progress(dir_total_size(output_dir));
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-        }
-    }
 }
 
 /// Spawn `cmd`, poll `output_path` file size every 200 ms until the process
