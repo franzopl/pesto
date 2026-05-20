@@ -96,19 +96,17 @@ pub fn compress(
     }
 }
 
-/// Split a 7z-format archive stream into volumes of at most `volume_size` bytes.
+/// Split a 7z-format archive into volumes of at most `volume_size` bytes.
 ///
-/// The 7z stdout pipe is split purely in software: bytes from the compressor
-/// are written into a [`NamedTempFile`] until it reaches `volume_size`, at
-/// which point the file is sealed and `on_volume` is called. A new temp file is
-/// opened for the next volume. The final volume may be smaller than `volume_size`.
+/// A named pipe (FIFO) is used as the 7z output path so the archive stream
+/// can be split into [`NamedTempFile`] volumes purely in software as bytes
+/// arrive, without waiting for the full archive to be written first.
 ///
-/// Only supported for [`ArchiveFormat::SevenZip`] on Unix (relies on the
-/// `/dev/stdout` pipe introduced in Phase 13). Returns an error on other
-/// platforms or formats.
+/// Only supported for [`ArchiveFormat::SevenZip`] on Unix. Returns an error
+/// on other platforms or formats.
 ///
-/// `on_progress` is called after each write with the number of bytes written
-/// to the *current* volume so far.
+/// `on_progress` is called after each write with bytes written to the current
+/// volume so far.
 pub fn compress_volumes(
     inputs: &[PathBuf],
     format: ArchiveFormat,
@@ -123,7 +121,7 @@ pub fn compress_volumes(
     #[cfg(not(unix))]
     {
         anyhow::bail!(
-            "--volume-size requires Unix (stdout piping is not available on this platform)"
+            "--volume-size requires Unix (named pipes are not available on this platform)"
         );
     }
     #[cfg(unix)]
@@ -135,23 +133,44 @@ pub fn compress_volumes(
             "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
         )?;
 
+        // Create a named pipe that 7z writes into. We read from the other end
+        // and split the stream into fixed-size volumes.
+        let pipe_dir = tempfile::TempDir::new().context("creating temp dir for FIFO")?;
+        let fifo_path = pipe_dir.path().join("archive.7z");
+        let status = Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .context("running mkfifo")?;
+        if !status.success() {
+            anyhow::bail!("mkfifo failed with {status}");
+        }
+
         let mut cmd = Command::new(&bin);
-        cmd.arg("a").arg("-t7z").arg("-mx=0").arg("-bd").arg("-y");
+        cmd.arg("a")
+            .arg("-t7z")
+            .arg("-mx=0") // store mode: no compression
+            .arg("-bd") // no progress bar
+            .arg("-y"); // assume yes
 
         if let Some(pass) = password {
             cmd.arg(format!("-p{pass}"));
             cmd.arg("-mhe=on");
         }
 
-        cmd.arg("-so").arg("archive.7z");
+        cmd.arg(&fifo_path);
         for input in inputs {
             cmd.arg(input);
         }
-        cmd.stdout(Stdio::piped());
+        // 7z writes to the FIFO; we don't need to capture its stdout.
+        cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::inherit());
 
+        // Spawn 7z before opening the FIFO for reading — a FIFO open blocks
+        // until both ends are open, so the writer must be alive first.
         let mut child = cmd.spawn().context("spawning 7z")?;
-        let mut stdout = child.stdout.take().expect("stdout was piped");
+
+        // Opening the FIFO for reading unblocks the 7z writer.
+        let mut fifo = std::fs::File::open(&fifo_path).context("opening FIFO for reading")?;
 
         let mut buf = vec![0u8; 64 * 1024];
         let mut current =
@@ -159,7 +178,7 @@ pub fn compress_volumes(
         let mut current_bytes: u64 = 0;
 
         loop {
-            let n = stdout.read(&mut buf).context("reading 7z output")?;
+            let n = fifo.read(&mut buf).context("reading from FIFO")?;
             if n == 0 {
                 break;
             }
@@ -186,14 +205,14 @@ pub fn compress_volumes(
                 let write_len = (space as usize).min(chunk.len());
                 current
                     .write_all(&chunk[..write_len])
-                    .context("writing archive data")?;
+                    .context("writing volume data")?;
                 current_bytes += write_len as u64;
                 chunk = &chunk[write_len..];
                 on_progress(current_bytes);
             }
         }
 
-        drop(stdout);
+        drop(fifo);
         let status = child.wait().context("waiting for 7z")?;
         if !status.success() {
             anyhow::bail!("`7z` exited with {status}");
@@ -213,83 +232,17 @@ pub fn compress_volumes(
     }
 }
 
-/// 7z in SevenZip format: pipe stdout directly into a `NamedTempFile` on Unix.
-/// This avoids the need for a pre-known output path and replaces size-polling
-/// with exact byte counting as data flows through.
+/// 7z in SevenZip format: write to a `NamedTempFile` inside a `TempDir`.
 ///
-/// On non-Unix platforms the function falls back to the file-based path used
-/// by Zip and RAR.
+/// Progress is reported after the archive is written by reading its size.
+/// The streamed-stdout approach was unreliable across p7zip versions, so
+/// we use the same temp-file strategy as Zip and RAR.
 fn compress_7z_streamed(
     inputs: &[PathBuf],
     format: ArchiveFormat,
     password: Option<&str>,
     on_progress: &dyn Fn(u64),
 ) -> Result<CompressResult> {
-    #[cfg(unix)]
-    {
-        use std::io::{Read, Write};
-        use std::process::Stdio;
-
-        let bin = find_binary("7z").context(
-            "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
-        )?;
-
-        let mut cmd = Command::new(&bin);
-        cmd.arg("a")
-            .arg("-t7z")
-            .arg("-mx=0") // store mode: no compression
-            .arg("-bd") // no progress bar
-            .arg("-y"); // assume yes
-
-        if let Some(pass) = password {
-            cmd.arg(format!("-p{pass}"));
-            // -mhe=on encrypts archive headers, hiding internal file names.
-            cmd.arg("-mhe=on");
-        }
-
-        // -so tells 7z to write the archive to stdout; the dummy name is used
-        // only for internal 7z metadata, no file is created on disk.
-        cmd.arg("-so").arg("archive.7z");
-        for input in inputs {
-            cmd.arg(input);
-        }
-        cmd.stdout(Stdio::piped());
-        // Inherit stderr so 7z error messages are visible to the user.
-        cmd.stderr(Stdio::inherit());
-
-        let mut child = cmd.spawn().context("spawning 7z")?;
-        let mut stdout = child.stdout.take().expect("stdout was piped");
-
-        let mut temp = tempfile::NamedTempFile::new().context("creating temp file for archive")?;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut total: u64 = 0;
-        loop {
-            let n = stdout.read(&mut buf).context("reading 7z output")?;
-            if n == 0 {
-                break;
-            }
-            temp.write_all(&buf[..n]).context("writing archive data")?;
-            total += n as u64;
-            on_progress(total);
-        }
-        // Drop the pipe before wait() so 7z is not blocked on a full buffer.
-        drop(stdout);
-
-        let status = child.wait().context("waiting for 7z")?;
-        if !status.success() {
-            bail!("`7z` exited with {status}");
-        }
-
-        let path = temp.path().to_path_buf();
-        Ok(CompressResult {
-            path,
-            format,
-            _cleanup: TempCleanup::File(temp),
-        })
-    }
-
-    // Non-Unix fallback: write to a temp directory the same way Zip does.
-    #[cfg(not(unix))]
     compress_7z_file(inputs, "archive", format, password, on_progress)
 }
 
