@@ -2573,6 +2573,63 @@ mod tests {
         }
     }
 
+    // Validates that flush_avx512_gfni produces bit-identical output to the
+    // scalar reference.  Requires the `bench-internals` feature to force the
+    // path; skips cleanly on CPUs without AVX-512/GFNI.
+    //
+    // Run with:
+    //   cargo test --features bench-internals -- gfni_recovery_matches_scalar
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn gfni_recovery_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx512f")
+            || !std::is_x86_feature_detected!("avx512bw")
+            || !std::is_x86_feature_detected!("gfni")
+        {
+            eprintln!("gfni_recovery_matches_scalar: skipped (no GFNI on this CPU)");
+            return;
+        }
+
+        // Use a slice size that exercises both the 64-byte SIMD blocks and the
+        // scalar remainder path (not a multiple of 64).
+        let slice_size = 96; // 64 + 32 — one full block + a remainder
+        let total_slices = 5;
+        let recovery_count = 6;
+
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 53 + i * 17 + 3) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+
+        // GFNI path via forced dispatch.
+        let mut enc = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count)
+            .with_forced_path(BenchPath::Avx512Gfni);
+        for s in &slices {
+            enc.add_slice(s.clone());
+        }
+        let (gfni_recovery, _) = enc.finish();
+
+        // Scalar reference.
+        let gf = Gf16::new();
+        let logbases = input_logbases(total_slices);
+        let mut scalar_buffers = vec![vec![0u16; slice_size / 2]; recovery_count];
+        RecoveryEncoder::flush_scalar_work(&mut scalar_buffers, &slices, 0, &logbases, 0, &gf);
+        let scalar_recovery: Vec<Vec<u8>> = scalar_buffers
+            .into_iter()
+            .map(|buf| buf.into_iter().flat_map(|w| w.to_le_bytes()).collect())
+            .collect();
+
+        for (i, (gfni, scalar)) in gfni_recovery.iter().zip(&scalar_recovery).enumerate() {
+            assert_eq!(
+                gfni.data, *scalar,
+                "GFNI and scalar disagree on recovery block {i}"
+            );
+        }
+    }
+
     #[test]
     fn file_hasher_16k_equals_full_for_small_files() {
         let mut hasher = FileHasher::new();
