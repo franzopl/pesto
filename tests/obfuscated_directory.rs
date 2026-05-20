@@ -48,6 +48,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        volume_size: None,
         message_id_domain: None,
         post_hook: None,
         nfo: false,

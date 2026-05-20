@@ -96,6 +96,123 @@ pub fn compress(
     }
 }
 
+/// Split a 7z-format archive stream into volumes of at most `volume_size` bytes.
+///
+/// The 7z stdout pipe is split purely in software: bytes from the compressor
+/// are written into a [`NamedTempFile`] until it reaches `volume_size`, at
+/// which point the file is sealed and `on_volume` is called. A new temp file is
+/// opened for the next volume. The final volume may be smaller than `volume_size`.
+///
+/// Only supported for [`ArchiveFormat::SevenZip`] on Unix (relies on the
+/// `/dev/stdout` pipe introduced in Phase 13). Returns an error on other
+/// platforms or formats.
+///
+/// `on_progress` is called after each write with the number of bytes written
+/// to the *current* volume so far.
+pub fn compress_volumes(
+    inputs: &[PathBuf],
+    format: ArchiveFormat,
+    password: Option<&str>,
+    volume_size: u64,
+    mut on_volume: impl FnMut(CompressResult) -> Result<()>,
+    on_progress: impl Fn(u64),
+) -> Result<()> {
+    if format != ArchiveFormat::SevenZip {
+        anyhow::bail!("--volume-size is only supported with the 7z format (got `{format}`)");
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!(
+            "--volume-size requires Unix (stdout piping is not available on this platform)"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Write};
+        use std::process::Stdio;
+
+        let bin = find_binary("7z").context(
+            "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
+        )?;
+
+        let mut cmd = Command::new(&bin);
+        cmd.arg("a").arg("-t7z").arg("-mx=0").arg("-bd").arg("-y");
+
+        if let Some(pass) = password {
+            cmd.arg(format!("-p{pass}"));
+            cmd.arg("-mhe=on");
+        }
+
+        cmd.arg("/dev/stdout");
+        for input in inputs {
+            cmd.arg(input);
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::inherit());
+
+        let mut child = cmd.spawn().context("spawning 7z")?;
+        let mut stdout = child.stdout.take().expect("stdout was piped");
+
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut current =
+            tempfile::NamedTempFile::new().context("creating temp file for volume")?;
+        let mut current_bytes: u64 = 0;
+
+        loop {
+            let n = stdout.read(&mut buf).context("reading 7z output")?;
+            if n == 0 {
+                break;
+            }
+            let mut chunk = &buf[..n];
+
+            // Split the chunk across volume boundaries as needed.
+            while !chunk.is_empty() {
+                let space = volume_size.saturating_sub(current_bytes);
+                if space == 0 {
+                    // Current volume is full — seal it and open a new one.
+                    let next =
+                        tempfile::NamedTempFile::new().context("creating temp file for volume")?;
+                    let sealed = std::mem::replace(&mut current, next);
+                    let path = sealed.path().to_path_buf();
+                    on_volume(CompressResult {
+                        path,
+                        format,
+                        _cleanup: TempCleanup::File(sealed),
+                    })?;
+                    current_bytes = 0;
+                    continue; // re-check space with new volume
+                }
+
+                let write_len = (space as usize).min(chunk.len());
+                current
+                    .write_all(&chunk[..write_len])
+                    .context("writing archive data")?;
+                current_bytes += write_len as u64;
+                chunk = &chunk[write_len..];
+                on_progress(current_bytes);
+            }
+        }
+
+        drop(stdout);
+        let status = child.wait().context("waiting for 7z")?;
+        if !status.success() {
+            anyhow::bail!("`7z` exited with {status}");
+        }
+
+        // Seal the final (possibly partial) volume.
+        if current_bytes > 0 {
+            let path = current.path().to_path_buf();
+            on_volume(CompressResult {
+                path,
+                format,
+                _cleanup: TempCleanup::File(current),
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
 /// 7z in SevenZip format: pipe stdout directly into a `NamedTempFile` on Unix.
 /// This avoids the need for a pre-known output path and replaces size-polling
 /// with exact byte counting as data flows through.

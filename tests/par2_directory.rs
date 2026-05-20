@@ -80,6 +80,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        volume_size: None,
         message_id_domain: None,
         post_hook: None,
         nfo: false,

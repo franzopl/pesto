@@ -89,6 +89,9 @@ pub enum ProgressEvent {
     CompressProgress { bytes_written: u64 },
     /// Compression finished; the archive file is complete.
     CompressDone,
+    /// One archive volume has been sealed and is ready for upload.
+    /// `volume` is 1-based. Emitted only when `--volume-size` is active.
+    CompressVolumeReady { volume: usize, bytes: u64 },
     /// PAR2 encode is about to start; carries configuration for the info block.
     Par2EncodeStarted {
         /// Total source data size in bytes.
@@ -274,6 +277,12 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     }
                     ProgressEvent::CompressDone => {
                         let _ = writeln!(out, r#"{{"type":"compress_done"}}"#);
+                    }
+                    ProgressEvent::CompressVolumeReady { volume, bytes } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"compress_volume_ready","volume":{volume},"bytes":{bytes}}}"#
+                        );
                     }
                     ProgressEvent::Par2EncodeStarted { .. } => {}
                     ProgressEvent::Par2InputProgress { .. } => {}
@@ -628,6 +637,11 @@ impl RenderState {
             ProgressEvent::CompressDone => {
                 self.compress_written = self.compress_total;
                 self.compress_active = false;
+            }
+            ProgressEvent::CompressVolumeReady { volume, bytes } => {
+                let mib = bytes / (1024 * 1024);
+                self.status = format!("volume {volume} ready ({mib} MiB) — queuing for upload");
+                self.status_since = Some(Instant::now());
             }
             ProgressEvent::Par2EncodeStarted {
                 input_bytes,
