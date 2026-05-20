@@ -181,6 +181,15 @@ struct Cli {
           num_args = 0..=1, default_missing_value = "")]
     archive_password: Option<String>,
 
+    /// Split the 7z archive into volumes of SIZE and begin uploading each one
+    /// as soon as it is sealed. Compression and upload run in parallel.
+    /// Each volume gets its own PAR2 set; a single NZB covers all volumes.
+    /// Only supported with `--compress 7z` (the default) on Unix.
+    /// Examples: `--volume-size 500MiB`, `--volume-size 1GiB`
+    /// [config: compression.volume_size].
+    #[arg(long, value_name = "SIZE")]
+    volume_size: Option<String>,
+
     /// Friendly display name emitted as `<meta type="name">` in the `.nzb`
     /// (shown by NZBGet / SABnzbd) [config: output.nzb_name].
     #[arg(long, value_name = "NAME")]
@@ -391,6 +400,12 @@ impl Cli {
             check: if self.check { Some(true) } else { None },
             check_delay_secs: self.check_delay,
             check_retries: self.check_retries,
+            volume_size: self
+                .volume_size
+                .as_deref()
+                .map(parse_upload_rate)
+                .transpose()
+                .unwrap_or(None),
         }
     }
 }
@@ -441,7 +456,7 @@ async fn run_single_upload(
 
     // ── Compression ──────────────────────────────────────────────────────────
     let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
-        if config.compress_password.is_some() {
+        if config.compress_password.is_some() || config.volume_size.is_some() {
             Some("7z".to_string())
         } else {
             None
@@ -449,6 +464,209 @@ async fn run_single_upload(
     });
     let effective_password: Option<String> = config.compress_password.clone();
 
+    // When --volume-size is set, stream volumes directly to the poster while
+    // compression runs, then build the NZB from all accumulated segments.
+    if let (Some(fmt_str), Some(volume_size)) = (&compress_format_str, config.volume_size) {
+        let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
+            anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
+        })?;
+
+        let archive_stem = upload_root(&inputs)
+            .or_else(|| {
+                inputs.first().map(|f| {
+                    PathBuf::from(&f.name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+            .unwrap_or_else(|| "archive".to_string());
+        let archive_stem = if config.obfuscate == ObfuscateMode::Full {
+            pesto::article::obfuscated_name()
+        } else {
+            archive_stem
+        };
+
+        let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
+        let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
+
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
+            total_bytes: compress_input_bytes,
+        });
+
+        if let Some(pw) = &effective_password {
+            if params.archive_password_raw.as_deref() == Some("") {
+                println!("archive password: {pw}");
+            }
+        }
+
+        // Channel with capacity 2: compressor can seal one volume ahead of the
+        // poster so neither side spins idle at a volume boundary.
+        let (vol_tx, mut vol_rx) = tokio::sync::mpsc::channel::<pesto::compress::CompressResult>(2);
+
+        let compress_pass = effective_password.clone();
+        let tx_prog = progress_tx.clone();
+        let compressor = tokio::task::spawn_blocking(move || {
+            pesto::compress::compress_volumes(
+                &fs_paths,
+                format,
+                compress_pass.as_deref(),
+                volume_size,
+                |vol| {
+                    vol_tx
+                        .blocking_send(vol)
+                        .map_err(|_| anyhow::anyhow!("volume channel closed"))
+                },
+                |bytes| {
+                    let _ = tx_prog.send(pesto::progress::ProgressEvent::CompressProgress {
+                        bytes_written: bytes,
+                    });
+                },
+            )
+        });
+
+        let mut all_segments: Vec<PostedSegment> = Vec::new();
+        let mut vol_index: usize = 0;
+        let mut any_cancelled = false;
+        let mut any_failures = false;
+
+        while let Some(vol) = vol_rx.recv().await {
+            vol_index += 1;
+            let vol_bytes = vol.path.metadata().map(|m| m.len()).unwrap_or(0);
+            let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressVolumeReady {
+                volume: vol_index,
+                bytes: vol_bytes,
+            });
+
+            let vol_name = if config.obfuscate == ObfuscateMode::Full {
+                format!(
+                    "{}.{}",
+                    pesto::article::obfuscated_name(),
+                    format.extension()
+                )
+            } else {
+                format!(
+                    "{}.part{:04}.{}",
+                    archive_stem,
+                    vol_index,
+                    format.extension()
+                )
+            };
+            let vol_inputs = vec![pesto::walk::InputFile {
+                path: vol.path.clone(),
+                name: vol_name,
+            }];
+
+            let (vol_tx_prog, vol_renderer) = if params.json_mode {
+                pesto::progress::spawn_json_emitter()
+            } else {
+                pesto::progress::spawn_terminal_renderer_with(params.renderer_opts.clone())
+            };
+
+            let vol_outcome = pesto::poster::post_files_with_progress(
+                config,
+                &vol_inputs,
+                Some(vol_tx_prog),
+                None, // no resume per-volume
+            )
+            .await?;
+            let _ = vol_renderer.await;
+
+            if vol_outcome.cancelled {
+                any_cancelled = true;
+            }
+            if !vol_outcome.failures.is_empty() {
+                any_failures = true;
+            }
+            all_segments.extend(vol_outcome.segments);
+            // vol is dropped here, cleaning up its temp file.
+        }
+
+        compressor
+            .await
+            .context("compressor task panicked")?
+            .context("compression failed")?;
+
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
+        let _ = renderer.await;
+
+        // Build NZB path.
+        let nzb_base_path: Option<PathBuf> = params
+            .out
+            .clone()
+            .or_else(|| params.nzb_default.as_deref().map(PathBuf::from))
+            .or_else(|| {
+                let stem = entry_paths
+                    .first()
+                    .and_then(|p| p.file_name())
+                    .map(|s| {
+                        let p = std::path::Path::new(s);
+                        p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+                    })
+                    .or_else(|| upload_root(&inputs))
+                    .or_else(|| {
+                        inputs.first().map(|f| {
+                            PathBuf::from(f.name.split('/').next().unwrap_or(&f.name))
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                    })?;
+                let base = if let Some(dir) = &config.nzb_dir {
+                    expand_tilde(dir).join(&stem)
+                } else {
+                    PathBuf::from(&stem)
+                };
+                Some({
+                    let mut s = base.into_os_string();
+                    s.push(".nzb");
+                    PathBuf::from(s)
+                })
+            });
+
+        let out: Option<PathBuf> = if let Some(base) = nzb_base_path {
+            Some(versioned_nzb_path(&base).await)
+        } else {
+            None
+        };
+
+        if let Some(out) = &out {
+            if !all_segments.is_empty() {
+                let nzb_meta = NzbMeta {
+                    name: config
+                        .nzb_name
+                        .clone()
+                        .or_else(|| Some(archive_stem.clone())),
+                    password: config
+                        .nzb_password
+                        .clone()
+                        .or_else(|| effective_password.clone()),
+                    category: config.nzb_category.clone(),
+                };
+                let xml = pesto::nzb::generate(
+                    &config.from,
+                    &config.groups,
+                    &all_segments,
+                    &nzb_meta,
+                    config.obfuscate == ObfuscateMode::Full,
+                );
+                match tokio::fs::write(out, &xml).await {
+                    Ok(()) => eprintln!("nzb: {}", out.display()),
+                    Err(e) => eprintln!("nzb: failed to write {}: {e:#}", out.display()),
+                }
+            }
+        }
+
+        return Ok(UploadResult {
+            segments: all_segments,
+            cancelled: any_cancelled,
+            had_failures: any_failures,
+        });
+    }
+
+    // ── Single-archive (no volume splitting) path ─────────────────────────────
     // Holds the CompressResult so its temp storage stays alive until posting ends.
     let _compress_temp: Option<pesto::compress::CompressResult>;
     if let Some(fmt_str) = &compress_format_str {

@@ -271,6 +271,10 @@ pub struct IndexerSection {
 pub struct CompressionSection {
     /// Archive format: `"7z"` (default), `"zip"`, or `"rar"`.
     pub format: Option<String>,
+    /// Split the archive into volumes of this size (e.g. `"500 MiB"`).
+    /// Only supported for the `7z` format. When set, each volume is uploaded
+    /// immediately after it is sealed, overlapping with compression of the next.
+    pub volume_size: Option<String>,
 }
 
 /// `[notify]` config section for completion notifications.
@@ -323,6 +327,8 @@ pub struct Overrides {
     pub compress_format: Option<String>,
     /// Password for the archive, already resolved (random generation done by caller).
     pub compress_password: Option<String>,
+    /// Split into volumes of this size (bytes); `None` = no splitting.
+    pub volume_size: Option<u64>,
     /// Friendly name for the `.nzb` `<meta type="name">` element.
     pub nzb_name: Option<String>,
     /// Explicit `.nzb` password meta. Falls back to `compress_password`.
@@ -407,6 +413,9 @@ pub struct Config {
     /// Password for the archive. `None` = no password.
     /// Set by `--password`; stored in the `.nzb` `<meta type="password">`.
     pub compress_password: Option<String>,
+    /// Split the archive into volumes of this many bytes (`0` = no splitting).
+    /// Only effective when `compress_format` is `7z` on Unix.
+    pub volume_size: Option<u64>,
     /// Friendly name for `<meta type="name">` in the `.nzb`.
     pub nzb_name: Option<String>,
     /// Explicit password for `<meta type="password">` in the `.nzb`.
@@ -621,6 +630,13 @@ impl Config {
             },
             compress_format: cli.compress_format.or(file.compression.format),
             compress_password: cli.compress_password,
+            volume_size: if let Some(v) = cli.volume_size {
+                Some(v)
+            } else if let Some(s) = file.compression.volume_size {
+                Some(parse_upload_rate(&s).context("parsing compression.volume_size")?)
+            } else {
+                None
+            },
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: cli.nzb_category.or(file.output.nzb_category),
