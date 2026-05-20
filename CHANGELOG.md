@@ -7,10 +7,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed
-- Improved graceful degradation messages for external tools (`mediainfo` and `rar`).
-- Expanded abbreviated older entries in CHANGELOG for better readability and consistency.
-
 ## [0.2.5] — 2026-05-19
 
 ### Fixed
