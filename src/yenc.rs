@@ -12,52 +12,28 @@ pub const DEFAULT_LINE_LENGTH: usize = 128;
 
 // --- CRC-32 (IEEE polynomial, reflected — the variant used by yEnc) ---
 
-const fn build_crc32_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut crc = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            crc = if crc & 1 != 0 {
-                0xEDB8_8320 ^ (crc >> 1)
-            } else {
-                crc >> 1
-            };
-            j += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-}
-
-static CRC32_TABLE: [u32; 256] = build_crc32_table();
-
 /// Incremental CRC-32 calculator (IEEE polynomial, as used by yEnc).
 #[derive(Debug, Clone)]
 pub struct Crc32 {
-    state: u32,
+    hasher: crc32fast::Hasher,
 }
 
 impl Crc32 {
     /// Start a fresh CRC-32 computation.
     pub fn new() -> Self {
-        Self { state: 0xFFFF_FFFF }
+        Self {
+            hasher: crc32fast::Hasher::new(),
+        }
     }
 
     /// Feed more bytes into the running checksum.
     pub fn update(&mut self, data: &[u8]) {
-        let mut state = self.state;
-        for &b in data {
-            state = CRC32_TABLE[((state ^ b as u32) & 0xFF) as usize] ^ (state >> 8);
-        }
-        self.state = state;
+        self.hasher.update(data);
     }
 
     /// Produce the final CRC-32 value.
     pub fn finalize(&self) -> u32 {
-        !self.state
+        self.hasher.clone().finalize()
     }
 }
 
@@ -69,9 +45,7 @@ impl Default for Crc32 {
 
 /// CRC-32 of a complete byte slice.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = Crc32::new();
-    crc.update(data);
-    crc.finalize()
+    crc32fast::hash(data)
 }
 
 // --- Segmentation ---

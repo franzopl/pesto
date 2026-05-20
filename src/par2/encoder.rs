@@ -273,38 +273,21 @@ impl RecoveryEncoder {
         self.next_index += queued.len();
 
         let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
-            // Split borrows so both rayon::join arms are Send without capturing &mut self.
-            let buffers = &mut self.buffers;
-            let logbases = &self.logbases;
-            let exponent_start = self.exponent_start;
-            let gf = &self.gf;
-            let ((), cs) = rayon::join(
-                || unsafe {
-                    Self::flush_avx2_work(
-                        buffers,
-                        &queued,
-                        start_index,
-                        logbases,
-                        exponent_start,
-                        gf,
-                    )
-                },
-                || queued.par_iter().map(|s| slice_checksum(s)).collect(),
-            );
-            cs
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
         } else {
-            unsafe {
-                Self::flush_avx2_work(
-                    &mut self.buffers,
-                    &queued,
-                    start_index,
-                    &self.logbases,
-                    self.exponent_start,
-                    &self.gf,
-                );
-            }
             Vec::new()
         };
+
+        unsafe {
+            Self::flush_avx2_work(
+                &mut self.buffers,
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
 
         self.pending_checksums.extend(new_cs);
         self.queued_slices = queued;
@@ -406,19 +389,116 @@ impl RecoveryEncoder {
         // for a 30 MiB slice). Total rayon tasks = 91 × 960 = ~87 K, saturating all
         // available cores instead of the previous 91-task ceiling.
         //
-        // Each rayon task handles a PAIR of consecutive recovery blocks (2× unrolling
+        // Each rayon task handles a group of consecutive recovery blocks (4× unrolling
         // over the recovery dimension). One input load + one nibble decomposition serves
-        // both blocks, halving the load and AND/SRL overhead per byte processed.
+        // all blocks in the group, halving the load and AND/SRL overhead per byte processed.
         let chunk_size = 16384usize; // 32 KiB recovery buffer chunk stays in L1
 
         buffers
-            .par_chunks_mut(2)
+            .par_chunks_mut(4)
             .enumerate()
-            .for_each(|(pair_idx, buf_pair)| {
-                let i = pair_idx * 2;
-                match buf_pair {
+            .for_each(|(group_idx, buf_group)| {
+                let i = group_idx * 4;
+                match buf_group {
+                    [buf_a, buf_b, buf_c, buf_d] => {
+                        // 4× unrolled: four recovery blocks share one input load.
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        let base_c = (i + 2) * n_queued;
+                        let base_d = (i + 3) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size)
+                            .zip(buf_b.par_chunks_mut(chunk_size))
+                            .zip(buf_c.par_chunks_mut(chunk_size))
+                            .zip(buf_d.par_chunks_mut(chunk_size))
+                            .enumerate()
+                            .for_each(|(chunk_idx, (((chunk_a, chunk_b), chunk_c), chunk_d))| unsafe {
+                                let byte_offset = chunk_idx * chunk_size * 2;
+                                let byte_len = chunk_a.len() * 2;
+                                let blocks_32 = byte_len / 32;
+                                let remainder = byte_len % 32;
+
+                                for q_idx in 0..n_queued {
+                                    let (v_tl_l_a, v_tl_h_a, v_th_l_a, v_th_h_a, v_hl_l_a, v_hl_h_a, v_hh_l_a, v_hh_h_a, ref tlow_a, ref thigh_a) = all_tables[base_a + q_idx];
+                                    let (v_tl_l_b, v_tl_h_b, v_th_l_b, v_th_h_b, v_hl_l_b, v_hl_h_b, v_hh_l_b, v_hh_h_b, ref tlow_b, ref thigh_b) = all_tables[base_b + q_idx];
+                                    let (v_tl_l_c, v_tl_h_c, v_th_l_c, v_th_h_c, v_hl_l_c, v_hl_h_c, v_hh_l_c, v_hh_h_c, ref tlow_c, ref thigh_c) = all_tables[base_c + q_idx];
+                                    let (v_tl_l_d, v_tl_h_d, v_th_l_d, v_th_h_d, v_hl_l_d, v_hl_h_d, v_hh_l_d, v_hh_h_d, ref tlow_d, ref thigh_d) = all_tables[base_d + q_idx];
+                                    
+                                    let slice_chunk = &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                    let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
+                                    let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
+                                    let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
+                                    let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m256i;
+                                    let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m256i;
+                                    let end = ptr_in.add(blocks_32);
+
+                                    while ptr_in < end {
+                                        _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
+                                        let input = _mm256_loadu_si256(ptr_in);
+                                        let n0_2 = _mm256_and_si256(input, mask_f);
+                                        let n1_3 = _mm256_and_si256(_mm256_srli_epi16(input, 4), mask_f);
+
+                                        // Block A
+                                        let rle_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l_a, n0_2), _mm256_shuffle_epi8(v_tl_h_a, n1_3));
+                                        let rhe_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l_a, n0_2), _mm256_shuffle_epi8(v_th_h_a, n1_3));
+                                        let rlo_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l_a, n0_2), _mm256_shuffle_epi8(v_hl_h_a, n1_3));
+                                        let rho_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l_a, n0_2), _mm256_shuffle_epi8(v_hh_h_a, n1_3));
+                                        let out_a = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(rle_a, _mm256_srli_epi16(rlo_a, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(rhe_a, _mm256_srli_epi16(rho_a, 8)), 8));
+                                        _mm256_storeu_si256(ptr_a, _mm256_xor_si256(_mm256_loadu_si256(ptr_a), out_a));
+
+                                        // Block B
+                                        let rle_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l_b, n0_2), _mm256_shuffle_epi8(v_tl_h_b, n1_3));
+                                        let rhe_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l_b, n0_2), _mm256_shuffle_epi8(v_th_h_b, n1_3));
+                                        let rlo_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l_b, n0_2), _mm256_shuffle_epi8(v_hl_h_b, n1_3));
+                                        let rho_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l_b, n0_2), _mm256_shuffle_epi8(v_hh_h_b, n1_3));
+                                        let out_b = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(rle_b, _mm256_srli_epi16(rlo_b, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(rhe_b, _mm256_srli_epi16(rho_b, 8)), 8));
+                                        _mm256_storeu_si256(ptr_b, _mm256_xor_si256(_mm256_loadu_si256(ptr_b), out_b));
+
+                                        // Block C
+                                        let rle_c = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l_c, n0_2), _mm256_shuffle_epi8(v_tl_h_c, n1_3));
+                                        let rhe_c = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l_c, n0_2), _mm256_shuffle_epi8(v_th_h_c, n1_3));
+                                        let rlo_c = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l_c, n0_2), _mm256_shuffle_epi8(v_hl_h_c, n1_3));
+                                        let rho_c = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l_c, n0_2), _mm256_shuffle_epi8(v_hh_h_c, n1_3));
+                                        let out_c = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(rle_c, _mm256_srli_epi16(rlo_c, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(rhe_c, _mm256_srli_epi16(rho_c, 8)), 8));
+                                        _mm256_storeu_si256(ptr_c, _mm256_xor_si256(_mm256_loadu_si256(ptr_c), out_c));
+
+                                        // Block D
+                                        let rle_d = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l_d, n0_2), _mm256_shuffle_epi8(v_tl_h_d, n1_3));
+                                        let rhe_d = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l_d, n0_2), _mm256_shuffle_epi8(v_th_h_d, n1_3));
+                                        let rlo_d = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l_d, n0_2), _mm256_shuffle_epi8(v_hl_h_d, n1_3));
+                                        let rho_d = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l_d, n0_2), _mm256_shuffle_epi8(v_hh_h_d, n1_3));
+                                        let out_d = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(rle_d, _mm256_srli_epi16(rlo_d, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(rhe_d, _mm256_srli_epi16(rho_d, 8)), 8));
+                                        _mm256_storeu_si256(ptr_d, _mm256_xor_si256(_mm256_loadu_si256(ptr_d), out_d));
+
+                                        ptr_in = ptr_in.add(1);
+                                        ptr_a = ptr_a.add(1); ptr_b = ptr_b.add(1); ptr_c = ptr_c.add(1); ptr_d = ptr_d.add(1);
+                                    }
+
+                                    if remainder > 0 {
+                                        let ow = blocks_32 * 16;
+                                        let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                        let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                        let mut pw_c = chunk_c[ow..].as_mut_ptr();
+                                        let mut pw_d = chunk_d[ow..].as_mut_ptr();
+                                        let mut p_in = slice_chunk[blocks_32 * 32..].as_ptr();
+                                        let tail_end = p_in.add(remainder);
+                                        while p_in < tail_end {
+                                            let lo = *p_in as usize;
+                                            let hi = *p_in.add(1) as usize;
+                                            *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                            *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                            *pw_c ^= tlow_c[lo] ^ thigh_c[hi];
+                                            *pw_d ^= tlow_d[lo] ^ thigh_d[hi];
+                                            pw_a = pw_a.add(1); pw_b = pw_b.add(1); pw_c = pw_c.add(1); pw_d = pw_d.add(1);
+                                            p_in = p_in.add(2);
+                                        }
+                                    }
+                                }
+                            });
+                    }
                     [buf_a, buf_b] => {
-                        // 2× unrolled: two recovery blocks share one input load.
+                        // Fallback for 2 blocks (remains 2× unrolled).
                         let base_a = i * n_queued;
                         let base_b = (i + 1) * n_queued;
                         buf_a
@@ -432,32 +512,9 @@ impl RecoveryEncoder {
                                 let remainder = byte_len % 32;
 
                                 for q_idx in 0..n_queued {
-                                    let (
-                                        v_tl_l_a,
-                                        v_tl_h_a,
-                                        v_th_l_a,
-                                        v_th_h_a,
-                                        v_hl_l_a,
-                                        v_hl_h_a,
-                                        v_hh_l_a,
-                                        v_hh_h_a,
-                                        ref tlow_a,
-                                        ref thigh_a,
-                                    ) = all_tables[base_a + q_idx];
-                                    let (
-                                        v_tl_l_b,
-                                        v_tl_h_b,
-                                        v_th_l_b,
-                                        v_th_h_b,
-                                        v_hl_l_b,
-                                        v_hl_h_b,
-                                        v_hh_l_b,
-                                        v_hh_h_b,
-                                        ref tlow_b,
-                                        ref thigh_b,
-                                    ) = all_tables[base_b + q_idx];
-                                    let slice_chunk =
-                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                    let (v_tl_l_a, v_tl_h_a, v_th_l_a, v_th_h_a, v_hl_l_a, v_hl_h_a, v_hh_l_a, v_hh_h_a, ref tlow_a, ref thigh_a) = all_tables[base_a + q_idx];
+                                    let (v_tl_l_b, v_tl_h_b, v_th_l_b, v_th_h_b, v_hl_l_b, v_hl_h_b, v_hh_l_b, v_hh_h_b, ref tlow_b, ref thigh_b) = all_tables[base_b + q_idx];
+                                    let slice_chunk = &queued[q_idx][byte_offset..byte_offset + byte_len];
 
                                     let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
                                     let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
@@ -465,71 +522,27 @@ impl RecoveryEncoder {
                                     let end = ptr_in.add(blocks_32);
 
                                     while ptr_in < end {
-                                        // One load; nibble decomposition amortised over both blocks.
+                                        _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
                                         let input = _mm256_loadu_si256(ptr_in);
                                         let n0_2 = _mm256_and_si256(input, mask_f);
-                                        let n1_3 =
-                                            _mm256_and_si256(_mm256_srli_epi16(input, 4), mask_f);
+                                        let n1_3 = _mm256_and_si256(_mm256_srli_epi16(input, 4), mask_f);
 
-                                        // Block A
-                                        let rle_a = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_tl_l_a, n0_2),
-                                            _mm256_shuffle_epi8(v_tl_h_a, n1_3),
-                                        );
-                                        let rhe_a = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_th_l_a, n0_2),
-                                            _mm256_shuffle_epi8(v_th_h_a, n1_3),
-                                        );
-                                        let rlo_a = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_hl_l_a, n0_2),
-                                            _mm256_shuffle_epi8(v_hl_h_a, n1_3),
-                                        );
-                                        let rho_a = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_hh_l_a, n0_2),
-                                            _mm256_shuffle_epi8(v_hh_h_a, n1_3),
-                                        );
-                                        let sle_a =
-                                            _mm256_xor_si256(rle_a, _mm256_srli_epi16(rlo_a, 8));
-                                        let she_a =
-                                            _mm256_xor_si256(rhe_a, _mm256_srli_epi16(rho_a, 8));
-                                        let out_a = _mm256_or_si256(
-                                            _mm256_and_si256(sle_a, mask_even),
-                                            _mm256_slli_epi16(she_a, 8),
-                                        );
-                                        let prev_a = _mm256_loadu_si256(ptr_a);
-                                        _mm256_storeu_si256(ptr_a, _mm256_xor_si256(prev_a, out_a));
+                                        let rle_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l_a, n0_2), _mm256_shuffle_epi8(v_tl_h_a, n1_3));
+                                        let rhe_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l_a, n0_2), _mm256_shuffle_epi8(v_th_h_a, n1_3));
+                                        let rlo_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l_a, n0_2), _mm256_shuffle_epi8(v_hl_h_a, n1_3));
+                                        let rho_a = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l_a, n0_2), _mm256_shuffle_epi8(v_hh_h_a, n1_3));
+                                        let out_a = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(rle_a, _mm256_srli_epi16(rlo_a, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(rhe_a, _mm256_srli_epi16(rho_a, 8)), 8));
+                                        _mm256_storeu_si256(ptr_a, _mm256_xor_si256(_mm256_loadu_si256(ptr_a), out_a));
 
-                                        // Block B — reuses n0_2 and n1_3
-                                        let rle_b = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_tl_l_b, n0_2),
-                                            _mm256_shuffle_epi8(v_tl_h_b, n1_3),
-                                        );
-                                        let rhe_b = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_th_l_b, n0_2),
-                                            _mm256_shuffle_epi8(v_th_h_b, n1_3),
-                                        );
-                                        let rlo_b = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_hl_l_b, n0_2),
-                                            _mm256_shuffle_epi8(v_hl_h_b, n1_3),
-                                        );
-                                        let rho_b = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_hh_l_b, n0_2),
-                                            _mm256_shuffle_epi8(v_hh_h_b, n1_3),
-                                        );
-                                        let sle_b =
-                                            _mm256_xor_si256(rle_b, _mm256_srli_epi16(rlo_b, 8));
-                                        let she_b =
-                                            _mm256_xor_si256(rhe_b, _mm256_srli_epi16(rho_b, 8));
-                                        let out_b = _mm256_or_si256(
-                                            _mm256_and_si256(sle_b, mask_even),
-                                            _mm256_slli_epi16(she_b, 8),
-                                        );
-                                        let prev_b = _mm256_loadu_si256(ptr_b);
-                                        _mm256_storeu_si256(ptr_b, _mm256_xor_si256(prev_b, out_b));
+                                        let rle_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l_b, n0_2), _mm256_shuffle_epi8(v_tl_h_b, n1_3));
+                                        let rhe_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l_b, n0_2), _mm256_shuffle_epi8(v_th_h_b, n1_3));
+                                        let rlo_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l_b, n0_2), _mm256_shuffle_epi8(v_hl_h_b, n1_3));
+                                        let rho_b = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l_b, n0_2), _mm256_shuffle_epi8(v_hh_h_b, n1_3));
+                                        let out_b = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(rle_b, _mm256_srli_epi16(rlo_b, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(rhe_b, _mm256_srli_epi16(rho_b, 8)), 8));
+                                        _mm256_storeu_si256(ptr_b, _mm256_xor_si256(_mm256_loadu_si256(ptr_b), out_b));
 
                                         ptr_in = ptr_in.add(1);
-                                        ptr_a = ptr_a.add(1);
-                                        ptr_b = ptr_b.add(1);
+                                        ptr_a = ptr_a.add(1); ptr_b = ptr_b.add(1);
                                     }
 
                                     if remainder > 0 {
@@ -543,86 +556,49 @@ impl RecoveryEncoder {
                                             let hi = *p_in.add(1) as usize;
                                             *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
                                             *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
-                                            pw_a = pw_a.add(1);
-                                            pw_b = pw_b.add(1);
+                                            pw_a = pw_a.add(1); pw_b = pw_b.add(1);
                                             p_in = p_in.add(2);
                                         }
                                     }
                                 }
                             });
                     }
-                    [buf_a] => {
-                        // Scalar-fallback for the last odd recovery block.
-                        let base = i * n_queued;
-                        buf_a.par_chunks_mut(chunk_size).enumerate().for_each(
-                            |(chunk_idx, chunk_a)| unsafe {
+                    rest => {
+                        // Fallback for remaining 1 or 3 blocks (scalar for SIMD simplicity here).
+                        for (j, buf) in rest.iter_mut().enumerate() {
+                            let base = (i + j) * n_queued;
+                            buf.par_chunks_mut(chunk_size).enumerate().for_each(|(chunk_idx, chunk)| unsafe {
                                 let byte_offset = chunk_idx * chunk_size * 2;
-                                let byte_len = chunk_a.len() * 2;
+                                let byte_len = chunk.len() * 2;
                                 let blocks_32 = byte_len / 32;
                                 let remainder = byte_len % 32;
 
                                 for q_idx in 0..n_queued {
-                                    let (
-                                        v_tl_l,
-                                        v_tl_h,
-                                        v_th_l,
-                                        v_th_h,
-                                        v_hl_l,
-                                        v_hl_h,
-                                        v_hh_l,
-                                        v_hh_h,
-                                        ref table_low,
-                                        ref table_high,
-                                    ) = all_tables[base + q_idx];
-                                    let slice_chunk =
-                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                    let (v_tl_l, v_tl_h, v_th_l, v_th_h, v_hl_l, v_hl_h, v_hh_l, v_hh_h, ref table_low, ref table_high) = all_tables[base + q_idx];
+                                    let slice_chunk = &queued[q_idx][byte_offset..byte_offset + byte_len];
 
-                                    let mut ptr_buf = chunk_a.as_mut_ptr() as *mut __m256i;
+                                    let mut ptr_buf = chunk.as_mut_ptr() as *mut __m256i;
                                     let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
                                     let end = ptr_in.add(blocks_32);
 
                                     while ptr_in < end {
+                                        _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
                                         let input = _mm256_loadu_si256(ptr_in);
                                         let n0_2 = _mm256_and_si256(input, mask_f);
-                                        let n1_3 =
-                                            _mm256_and_si256(_mm256_srli_epi16(input, 4), mask_f);
-                                        let res_lo_even = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_tl_l, n0_2),
-                                            _mm256_shuffle_epi8(v_tl_h, n1_3),
-                                        );
-                                        let res_hi_even = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_th_l, n0_2),
-                                            _mm256_shuffle_epi8(v_th_h, n1_3),
-                                        );
-                                        let res_lo_odd = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_hl_l, n0_2),
-                                            _mm256_shuffle_epi8(v_hl_h, n1_3),
-                                        );
-                                        let res_hi_odd = _mm256_xor_si256(
-                                            _mm256_shuffle_epi8(v_hh_l, n0_2),
-                                            _mm256_shuffle_epi8(v_hh_h, n1_3),
-                                        );
-                                        let sum_lo = _mm256_xor_si256(
-                                            res_lo_even,
-                                            _mm256_srli_epi16(res_lo_odd, 8),
-                                        );
-                                        let sum_hi = _mm256_xor_si256(
-                                            res_hi_even,
-                                            _mm256_srli_epi16(res_hi_odd, 8),
-                                        );
-                                        let out = _mm256_or_si256(
-                                            _mm256_and_si256(sum_lo, mask_even),
-                                            _mm256_slli_epi16(sum_hi, 8),
-                                        );
-                                        let prev = _mm256_loadu_si256(ptr_buf);
-                                        _mm256_storeu_si256(ptr_buf, _mm256_xor_si256(prev, out));
+                                        let n1_3 = _mm256_and_si256(_mm256_srli_epi16(input, 4), mask_f);
+                                        let res_lo_even = _mm256_xor_si256(_mm256_shuffle_epi8(v_tl_l, n0_2), _mm256_shuffle_epi8(v_tl_h, n1_3));
+                                        let res_hi_even = _mm256_xor_si256(_mm256_shuffle_epi8(v_th_l, n0_2), _mm256_shuffle_epi8(v_th_h, n1_3));
+                                        let res_lo_odd = _mm256_xor_si256(_mm256_shuffle_epi8(v_hl_l, n0_2), _mm256_shuffle_epi8(v_hl_h, n1_3));
+                                        let res_hi_odd = _mm256_xor_si256(_mm256_shuffle_epi8(v_hh_l, n0_2), _mm256_shuffle_epi8(v_hh_h, n1_3));
+                                        let out = _mm256_or_si256(_mm256_and_si256(_mm256_xor_si256(res_lo_even, _mm256_srli_epi16(res_lo_odd, 8)), mask_even), _mm256_slli_epi16(_mm256_xor_si256(res_hi_even, _mm256_srli_epi16(res_hi_odd, 8)), 8));
+                                        _mm256_storeu_si256(ptr_buf, _mm256_xor_si256(_mm256_loadu_si256(ptr_buf), out));
                                         ptr_in = ptr_in.add(1);
                                         ptr_buf = ptr_buf.add(1);
                                     }
 
                                     if remainder > 0 {
                                         let ow = blocks_32 * 16;
-                                        let mut pw = chunk_a[ow..].as_mut_ptr();
+                                        let mut pw = chunk[ow..].as_mut_ptr();
                                         let mut p_in = slice_chunk[blocks_32 * 32..].as_ptr();
                                         let tail_end = p_in.add(remainder);
                                         while p_in < tail_end {
@@ -634,10 +610,9 @@ impl RecoveryEncoder {
                                         }
                                     }
                                 }
-                            },
-                        );
+                            });
+                        }
                     }
-                    _ => {}
                 }
             });
     }
