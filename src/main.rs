@@ -589,6 +589,11 @@ async fn run_single_upload(
             .context("compression failed")?;
 
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
+        // Drop progress_tx before awaiting the renderer so the channel closes
+        // and the renderer task can exit. In the normal (non-volume) path,
+        // progress_tx is moved into post_files_with_progress and dropped there;
+        // here we must do it explicitly.
+        drop(progress_tx);
         let _ = renderer.await;
 
         // Build NZB path.

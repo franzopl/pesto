@@ -640,7 +640,7 @@ impl RenderState {
             }
             ProgressEvent::CompressVolumeReady { volume, bytes } => {
                 let mib = bytes / (1024 * 1024);
-                self.status = format!("volume {volume} ready ({mib} MiB) — queuing for upload");
+                self.status = format!("volume {volume} ready ({mib} MiB) — starting upload");
                 self.status_since = Some(Instant::now());
             }
             ProgressEvent::Par2EncodeStarted {
