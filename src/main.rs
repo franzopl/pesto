@@ -15,6 +15,7 @@ use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, 
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
+use tracing::info;
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -431,6 +432,14 @@ struct UploadResult {
     had_failures: bool,
 }
 
+/// Per-phase wall-clock timing accumulated during a single upload (26g).
+#[derive(Default)]
+struct PhaseTimings {
+    compress_ms: Option<u128>,
+    post_ms: Option<u128>,
+    check_ms: Option<u128>,
+}
+
 /// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
 ///
 /// Returns the posted segments so the caller can build a consolidated season NZB.
@@ -441,6 +450,7 @@ async fn run_single_upload(
 ) -> Result<UploadResult> {
     let config = &params.config;
     let upload_start = std::time::Instant::now();
+    let mut timings = PhaseTimings::default();
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
@@ -503,6 +513,7 @@ async fn run_single_upload(
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
         let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
 
+        let t_compress = std::time::Instant::now();
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
             total_bytes: compress_input_bytes,
         });
@@ -542,6 +553,9 @@ async fn run_single_upload(
 
         poll_handle.abort();
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
+        let compress_ms = t_compress.elapsed().as_millis();
+        info!(elapsed_ms = compress_ms, phase = "compress", "phase done");
+        timings.compress_ms = Some(compress_ms);
 
         let archive_name = result
             .path
@@ -612,6 +626,7 @@ async fn run_single_upload(
     // at write time so no filesystem access is needed before posting starts.
     let nzb_out_path: Option<PathBuf> = nzb_base_path.clone();
 
+    let t_post = std::time::Instant::now();
     let outcome = pesto::poster::post_files_with_progress(
         config,
         &inputs,
@@ -620,6 +635,7 @@ async fn run_single_upload(
     )
     .await?;
     let _ = renderer.await;
+    timings.post_ms = Some(t_post.elapsed().as_millis());
 
     // ── Post-check STAT pass ──────────────────────────────────────────────────
     let check_missing: Vec<String> = if config.check
@@ -633,6 +649,7 @@ async fn run_single_upload(
         } else {
             pesto::progress::spawn_terminal_renderer_with(params.renderer_opts.clone())
         };
+        let t_check = std::time::Instant::now();
         let missing = pesto::poster::check_articles(config, &outcome.segments, Some(&check_tx))
             .await
             .unwrap_or_else(|e| {
@@ -641,6 +658,9 @@ async fn run_single_upload(
             });
         drop(check_tx);
         let _ = check_renderer.await;
+        let check_ms = t_check.elapsed().as_millis();
+        info!(elapsed_ms = check_ms, phase = "check", "phase done");
+        timings.check_ms = Some(check_ms);
         missing
     } else {
         Vec::new()
@@ -860,6 +880,26 @@ async fn run_single_upload(
     // Cleanup temp dirs.
     if let Some(dir) = compress_temp_dir {
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 26g — per-phase timing summary (only when -v is active)
+    if tracing::enabled!(tracing::Level::INFO) {
+        let total_ms = upload_start.elapsed().as_millis();
+        let mut parts = Vec::<String>::new();
+        if let Some(ms) = timings.compress_ms {
+            parts.push(format!("compress={ms}ms"));
+        }
+        if let Some(ms) = timings.post_ms {
+            parts.push(format!("post={ms}ms"));
+        }
+        if let Some(ms) = timings.check_ms {
+            parts.push(format!("check={ms}ms"));
+        }
+        info!(
+            total_ms,
+            phases = %parts.join(" "),
+            "upload timing summary"
+        );
     }
 
     Ok(UploadResult {
@@ -1163,6 +1203,7 @@ async fn main() -> Result<()> {
 
     // Initialise logging before anything else so early errors are captured.
     logging::init(cli.verbose, cli.log_file.as_deref())?;
+    logging::log_system_info();
 
     // `pesto --config` with no value: launch the interactive setup wizard.
     if matches!(cli.config, Some(None)) {

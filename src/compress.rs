@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use tracing::debug;
 
 /// Supported archive formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -175,6 +176,27 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
 }
 
 fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
+    // Log the sanitized command (password arguments are never in the visible
+    // args here because callers embed -p<pass>/-hp<pass> as a single opaque
+    // arg string; we still redact anything that looks like a password flag).
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let prog = cmd.get_program().to_string_lossy();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| {
+                let s = a.to_string_lossy();
+                // Redact -p<pass>, -hp<pass>, -p<pass> patterns (7z / rar).
+                if (s.starts_with("-p") || s.starts_with("-hp")) && s.len() > 3 {
+                    let prefix = if s.starts_with("-hp") { "-hp" } else { "-p" };
+                    format!("{prefix}[MASKED]")
+                } else {
+                    s.into_owned()
+                }
+            })
+            .collect();
+        debug!(program = %prog, args = ?args, "compressor command");
+    }
+
     let output = cmd.output().with_context(|| format!("running `{tool}`"))?;
 
     if !output.status.success() {
@@ -185,8 +207,11 @@ fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
         } else {
             stdout.trim().to_string()
         };
+        debug!(tool, status = %output.status, stderr = %stderr.trim(), "compressor failed");
         bail!("`{tool}` exited with {}: {detail}", output.status);
     }
+
+    debug!(tool, status = %output.status, "compressor ok");
     Ok(())
 }
 

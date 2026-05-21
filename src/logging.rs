@@ -73,3 +73,45 @@ pub fn init(verbose: u8, log_file: Option<&Path>) -> Result<()> {
 pub fn debug_enabled() -> bool {
     tracing::enabled!(tracing::Level::DEBUG)
 }
+
+/// Emit a structured INFO event with OS and CPU capability information.
+///
+/// Called once at startup when `-v` is active. Useful for bug reports: the
+/// log captures exactly which SIMD paths are available on the reporter's CPU.
+pub fn log_system_info() {
+    if !tracing::enabled!(tracing::Level::INFO) {
+        return;
+    }
+
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    // CPU feature detection (x86_64)
+    #[cfg(target_arch = "x86_64")]
+    let cpu_features = {
+        let mut feats = Vec::new();
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("gfni")
+        {
+            feats.push("avx512+gfni");
+        }
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
+            feats.push("avx2+gfni");
+        } else if std::is_x86_feature_detected!("avx2") {
+            feats.push("avx2");
+        }
+        if std::is_x86_feature_detected!("ssse3") {
+            feats.push("ssse3");
+        }
+        feats.join(",")
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    let cpu_features = "neon".to_string();
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let cpu_features = "scalar".to_string();
+
+    tracing::info!(os, arch, cpu_features = %cpu_features, "system info");
+}

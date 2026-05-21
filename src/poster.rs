@@ -162,6 +162,8 @@ struct Shared {
     /// here after encoding so the producer and reader tasks can reuse it
     /// instead of allocating a fresh `Vec<u8>` for every article.
     pool: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Total number of post attempts that failed and triggered a retry (26d).
+    total_retries: std::sync::atomic::AtomicUsize,
 }
 
 impl Shared {
@@ -327,6 +329,7 @@ pub async fn post_files_with_progress(
         resume: resume_arc,
         resume_path: resume_path_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
+        total_retries: std::sync::atomic::AtomicUsize::new(0),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -379,6 +382,7 @@ pub async fn post_files_with_progress(
         })
     };
 
+    let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
     let tx_opt = if worker_count > 0 {
         let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
@@ -418,6 +422,17 @@ pub async fn post_files_with_progress(
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
     let failures = std::mem::take(&mut *shared.failures.lock().unwrap());
     let cancelled = shared.cancelled.load(Ordering::Relaxed);
+
+    // 26d/26g — network performance summary + post phase timing
+    let total_retries = shared.total_retries.load(Ordering::Relaxed);
+    info!(
+        posted = segments.len(),
+        failed = failures.len(),
+        retries = total_retries,
+        elapsed_ms = t_post_start.elapsed().as_millis(),
+        phase = "post",
+        "network summary"
+    );
 
     Ok(PostOutcome {
         segments,
@@ -702,6 +717,14 @@ async fn producer(
     };
 
     if recovery_count > 0 {
+        let simd_method = detect_par2_simd();
+        info!(
+            simd = simd_method,
+            threads = performance_core_count(),
+            passes = passes.len(),
+            "RS encoder"
+        );
+
         let chunk_size_bytes = 16384usize * 2; // 16384 u16 words × 2 bytes = 32 KiB
         shared.emit(crate::progress::ProgressEvent::Par2EncodeStarted {
             input_bytes: metas.iter().map(|m| m.size).sum(),
@@ -711,7 +734,7 @@ async fn producer(
             slice_size: par2_slice_size,
             passes: passes.len(),
             chunk_size: chunk_size_bytes,
-            simd_method: detect_par2_simd().to_string(),
+            simd_method: simd_method.to_string(),
             threads: performance_core_count(),
             memory_limit,
         });
@@ -863,7 +886,14 @@ async fn producer(
             shared.emit(ProgressEvent::Status {
                 text: "computing PAR2 recovery data".to_string(),
             });
+            let t_par2_compute = std::time::Instant::now();
             let (recovery_slices, slice_checksums) = enc.finish();
+            let par2_compute_ms = t_par2_compute.elapsed().as_millis();
+            info!(
+                elapsed_ms = par2_compute_ms,
+                phase = "par2_compute",
+                "phase done"
+            );
             shared.emit(ProgressEvent::Status {
                 text: String::new(),
             });
@@ -939,6 +969,7 @@ async fn producer(
                 }
             }
 
+            let t_par2_write = std::time::Instant::now();
             let volumes = layout::plan_volumes(recovery_count as u32);
             for slice in recovery_slices {
                 let vol = volumes
@@ -972,6 +1003,11 @@ async fn producer(
                     }
                 }
             }
+            info!(
+                elapsed_ms = t_par2_write.elapsed().as_millis(),
+                phase = "par2_write",
+                "phase done"
+            );
         }
     }
 
@@ -1182,6 +1218,7 @@ async fn worker(
                             error = %last_err,
                             "connection failed; will retry"
                         );
+                        shared.total_retries.fetch_add(1, Ordering::Relaxed);
                         let backoff = slot.retry_delay();
                         if attempt < max_attempts {
                             tokio::time::sleep(backoff).await;
@@ -1227,6 +1264,7 @@ async fn worker(
                             error = %last_err,
                             "post failed; rotating server"
                         );
+                        shared.total_retries.fetch_add(1, Ordering::Relaxed);
                         slot.invalidate();
                     }
                 }
@@ -1681,6 +1719,7 @@ mod tests {
             resume: None,
             resume_path: None,
             pool: Arc::new(Mutex::new(Vec::new())),
+            total_retries: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

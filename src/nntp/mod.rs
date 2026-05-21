@@ -14,6 +14,9 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, trace};
 
+/// Monotonic timer for per-command latency logging (26b).
+use std::time::Instant;
+
 pub mod pool;
 
 /// Read + write stream, in either plain or TLS form, behind a trait object so
@@ -172,12 +175,21 @@ impl Connection {
     /// the caller keep secrets (such as a password) out of `prefix`, which is
     /// the part safe to mention in errors.
     async fn send_command(&mut self, prefix: &str, suffix: &str) -> Result<Response> {
+        let t0 = Instant::now();
         trace!(cmd = prefix.trim_end(), "→");
         self.stream.write_all(prefix.as_bytes()).await?;
         self.stream.write_all(suffix.as_bytes()).await?;
         self.stream.write_all(b"\r\n").await?;
         self.stream.flush().await?;
-        self.read_response().await
+        let resp = self.read_response().await?;
+        let elapsed_ms = t0.elapsed().as_millis();
+        trace!(
+            cmd = prefix.trim_end(),
+            code = resp.code,
+            elapsed_ms,
+            "← RTT"
+        );
+        Ok(resp)
     }
 
     /// Read one response line from the server.

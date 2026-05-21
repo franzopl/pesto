@@ -1149,7 +1149,8 @@ Essential for public beta: allow users to provide detailed logs when reporting i
 - [x] Log every NNTP command prefix sent (`→ POST`, `→ AUTHINFO USER`, …) at TRACE
 - [x] Log every NNTP response received (`← 240 Article received`) at TRACE
 - [x] Log TLS handshake completion and server greeting at DEBUG
-- [ ] Include wall-clock timestamps with millisecond precision around each command/response pair for latency diagnosis
+- [x] Round-trip time in milliseconds logged after each command/response pair at TRACE
+      (`← RTT  cmd=POST  code=240  elapsed_ms=12`)
 
 ### 26c — Internal State & Transition Logging (Priority 3: Medium) ✅
 
@@ -1161,35 +1162,34 @@ Essential for public beta: allow users to provide detailed logs when reporting i
 ### 26d — Diagnostic Output & File Logging (Priority 4: Low) ✅
 
 - [x] `--log-file FILE` flag redirects verbose output to a file; terminal panel runs alongside normally
-- [ ] Summary of system info at start (OS, CPU features detected: AVX2/GFNI/NEON, memory limit in use)
-- [ ] Final network performance summary: total retries, per-server error counts, approximate per-article latency
+- [x] `logging::log_system_info()` emits OS, architecture and CPU feature flags at startup
+      (`info  os=linux  arch=x86_64  cpu_features=avx2+gfni,avx2,ssse3  system info`)
+- [x] Network performance summary at end of run: segments posted, failed, total retries
+      (`info  posted=1234  failed=0  retries=2  elapsed_ms=...  network summary`)
 
-### 26e — SIMD Path Selection Logging (Priority 5: Low)
+### 26e — SIMD Path Selection Logging (Priority 5: Low) ✅
 
-Emit which Reed-Solomon SIMD path was chosen at startup so users know which
-hardware acceleration is active without running a separate benchmark.
+- [x] Log the selected RS path at INFO in `producer()` before the encode starts:
+      `info  simd=avx2+gfni  threads=6  passes=1  RS encoder`
+- [x] `Par2EncodeStarted.simd_method` field already carries the same string to JSON consumers
 
-- [ ] Log the selected path at INFO when `-v` is active: e.g. `info!(path = "avx2+gfni", "RS encoder")`
-- [ ] Include the path in `Par2EncodeStarted` progress event (already has `threads`) so JSON consumers can read it
+### 26f — Compression Command Logging (Priority 6: Low) ✅
 
-### 26f — Compression Command Logging (Priority 6: Low)
+- [x] `run_command()` in `compress.rs` emits a DEBUG event with program + args before spawning;
+      `-p<pass>` / `-hp<pass>` arguments are replaced with `[MASKED]`
+- [x] On non-zero exit: tool name, exit status and stderr logged at DEBUG
+- [x] On success: tool name and exit status logged at DEBUG
 
-When `--compress` is active, log the exact command that was executed (with the
-password argument replaced by `[MASKED]`) so users can reproduce or debug
-archive failures.
+### 26g — Per-Phase Timing Summary (Priority 7: Low) ✅
 
-- [ ] Emit the sanitized command at DEBUG in `src/compress.rs` before spawning the child process
-- [ ] Log the exit status and stderr output of the compressor at DEBUG on non-zero exit
-
-### 26g — Per-Phase Timing Summary (Priority 7: Low)
-
-Print a structured timing breakdown at the end of each run when `-v` is active,
-showing how long each phase took (compress, PAR2 compute, PAR2 write, post,
-check) so bottlenecks are immediately visible in bug reports.
-
-- [ ] Wrap each phase in an `Instant` pair and emit a structured `info!` event at
-      phase end: `info!(phase = "par2_compute", elapsed_ms = 12340, "phase done")`
-- [ ] Accumulate and print a one-line summary table on completion
+- [x] Each phase emits `info!(elapsed_ms, phase = "...", "phase done")` on completion:
+      - `compress` — in `run_single_upload` (main.rs)
+      - `par2_compute` — in `producer()` after `enc.finish()` (poster.rs)
+      - `par2_write` — in `producer()` after all recovery volumes are written (poster.rs)
+      - `post` — in `post_files_with_progress` as part of the network summary (poster.rs)
+      - `check` — in `run_single_upload` after the STAT pass (main.rs)
+- [x] One-line timing summary emitted at upload completion:
+      `info  total_ms=4200  phases="compress=800ms post=3100ms check=300ms"  upload timing summary`
 
 ---
 
