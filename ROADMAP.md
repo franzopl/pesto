@@ -1130,6 +1130,37 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 
 ---
 
+## Phase 26 — Verbose Mode & Diagnostics
+
+Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
+
+### 26a — Logging Infrastructure & Masking (Priority 1: High)
+
+- [ ] Add `-v`, `--verbose` flag (increments log level: `-v` = info, `-vv` = debug, `-vvv` = trace)
+- [ ] Implement a global `Log` macro or integration with `tracing`/`log` crate
+- [ ] **Crucial:** Implement automatic credential masking (mask `AUTHINFO PASS` values and passwords in URLs/configs) in all logs
+- [ ] Suppress the interactive terminal panel when high verbosity is enabled to avoid screen flickering/corruption
+
+### 26b — Sanitized Network Trace (Priority 2: High)
+
+- [ ] Log every NNTP command sent and response received (excluding article body data)
+- [ ] Include timestamps with millisecond precision for latency diagnosis
+- [ ] Log TLS handshake details (protocol version, cipher suite used)
+
+### 26c — Internal State & Transition Logging (Priority 3: Medium)
+
+- [ ] Log worker pool events: "Worker 3 connecting to server A", "Worker 3 authenticated", "Worker 3 starting post"
+- [ ] Log retry/failover decisions: "Segment 42 failed (441); retrying on server B (attempt 2/3)"
+- [ ] Log file discovery and PAR2 geometry: "Found 12 files", "Targeting 1024 PAR2 slices of 768KB"
+
+### 26d — Diagnostic Output & File Logging (Priority 4: Low)
+
+- [ ] `--log-file PATH` flag to redirect all verbose output to a file while keeping the terminal clean
+- [ ] Summary of system info at start (OS, CPU features detected like AVX2/GFNI, memory limits)
+- [ ] Final summary of network performance: total retries, average latency per article, server uptime/error ratio
+
+---
+
 ## Phase 20 — Future Ideas & Brainstorming (To Be Evaluated)
 
 *A collection of concepts to improve resilience, extreme-environment performance, pipelining, visual feedback, and open-source composability. Kept here for future selection.*
