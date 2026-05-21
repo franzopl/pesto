@@ -1,14 +1,14 @@
 #!/bin/bash
-# Post-upload hook: send the NZB (and optional NFO) to Curupira.cc.
+# Post-upload hook: send the NZB (and optional NFO) to a generic Newznab-compatible indexer.
 #
 # Install:
-#   cp curupira.sh ~/.config/pesto/hooks/
-#   chmod +x ~/.config/pesto/hooks/curupira.sh
+#   cp generic-indexer.sh ~/.config/pesto/hooks/
+#   chmod +x ~/.config/pesto/hooks/generic-indexer.sh
 #
-# Edit the two variables below before use.
+# Edit the variables below before use.
 
 # --- CONFIGURATION ---
-API_URL="https://curupira.cc/v1/releases"
+API_URL="https://indexer.example.com/v1/releases"
 API_KEY="your-api-key"
 CATEGORY_ID=0  # 0 = auto-detect
 
@@ -18,11 +18,11 @@ CATEGORY_ID=0  # 0 = auto-detect
 # PESTO_NAME — release name
 
 if [ -z "$PESTO_NZB" ] || [ ! -f "$PESTO_NZB" ]; then
-    echo "[Curupira] Error: NZB not found (PESTO_NZB=$PESTO_NZB)."
+    echo "[Indexer] Error: NZB not found (PESTO_NZB=$PESTO_NZB)."
     exit 1
 fi
 
-echo "[Curupira] Sending: $(basename "$PESTO_NZB")"
+echo "[Indexer] Sending: $(basename "$PESTO_NZB")"
 
 ARGS=(
     -s -X POST "${API_URL}?apikey=${API_KEY}"
@@ -32,15 +32,15 @@ ARGS=(
 
 if [ -n "$PESTO_NFO" ] && [ -f "$PESTO_NFO" ]; then
     ARGS+=(-F "nfo_file=@${PESTO_NFO}")
-    echo "[Curupira] With NFO: $(basename "$PESTO_NFO")"
+    echo "[Indexer] With NFO: $(basename "$PESTO_NFO")"
 fi
 
 RESPONSE=$(curl "${ARGS[@]}")
 
 if echo "$RESPONSE" | grep -q '"public_id"'; then
     PUB_ID=$(echo "$RESPONSE" | grep -oP '(?<="public_id":")[^"]*')
-    echo "[Curupira] OK — public_id: $PUB_ID"
+    echo "[Indexer] OK — public_id: $PUB_ID"
 else
-    echo "[Curupira] FAILED: $RESPONSE"
+    echo "[Indexer] FAILED: $RESPONSE"
     exit 1
 fi

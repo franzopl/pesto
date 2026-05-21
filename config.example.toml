@@ -153,6 +153,9 @@ groups = ["alt.binaries.test"]
 # variables are available: PESTO_NZB, PESTO_NFO, PESTO_NAME, PESTO_BYTES,
 # PESTO_GROUP, PESTO_PASSWORD, PESTO_SERVER.
 # post_hook = "notify-send 'pesto' 'Upload done: $PESTO_NAME'"
+#
+# See examples/hooks/ for ready-made hook scripts (generic Newznab and legacy upload API).
+# post_hook = "/path/to/hooks/other-indexer.sh"
 
 # history — write a record to history.jsonl after each upload. Default: true.
 # history = true
