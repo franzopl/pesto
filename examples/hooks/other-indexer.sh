@@ -36,6 +36,11 @@ if [ -n "$PESTO_NAME" ]; then
     ARGS+=(-F "rlsname=${PESTO_NAME}")
 fi
 
+if [ -n "$PESTO_NFO" ] && [ -f "$PESTO_NFO" ]; then
+    ARGS+=(-F "nfo=@${PESTO_NFO}")
+    echo "[Indexer] With NFO: $(basename "$PESTO_NFO")"
+fi
+
 RESPONSE=$(curl "${ARGS[@]}" "${UPLOAD_URL}?user=${USER}&api=${API_KEY}")
 
 if echo "$RESPONSE" | grep -qi "<response>"; then
