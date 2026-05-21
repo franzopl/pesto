@@ -56,8 +56,6 @@ fi
 
 RESPONSE=$(curl "${ARGS[@]}" "${UPLOAD_URL}?user=${USER}&api=${API_KEY}")
 
-echo "[Indexer] Response: ${RESPONSE}"
-
 if echo "$RESPONSE" | grep -qi "successfully"; then
     echo "[Indexer] OK"
 else
