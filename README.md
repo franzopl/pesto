@@ -1,4 +1,5 @@
-# pesto
+
+# Pesto
 
 **Fast, lean Usenet poster written in Rust.**
 
@@ -6,6 +7,9 @@
 [![crates.io](https://img.shields.io/crates/v/pesto-poster.svg)](https://crates.io/crates/pesto-poster)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.87+](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+
+<img width="102" height="153" alt="5jPd0-removebg-preview (1)" src="https://github.com/user-attachments/assets/e61a0276-efc4-4fbd-8868-386021940618" />
+
 
 yEnc-encodes files, posts them over parallel NNTP connections, generates a `.nzb`,
 and stays out of your way. Inspired by [`nyuu`](https://github.com/animetosho/Nyuu),
