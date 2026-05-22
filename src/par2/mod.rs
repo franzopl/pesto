@@ -11,6 +11,7 @@
 //! - [`layout`] — volume-split file layout (phase 7b)
 //! - [`encoder`] — streaming Reed-Solomon encoder (phase 7c)
 
+pub mod altmap;
 pub mod encoder;
 pub mod gf16;
 pub mod layout;

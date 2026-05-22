@@ -136,6 +136,62 @@ impl Gf16 {
     }
 }
 
+/// XOR bit-dependency matrix for multiplying by a constant in GF(2¹⁶).
+///
+/// Returns `deps` where `deps[k]` is a 16-bit mask: bit `j` is set when input
+/// bit `j` contributes (via XOR) to output bit `k` of the product `input × coeff`.
+///
+/// Applying the matrix to a single word `x`:
+/// ```ignore
+/// let mut result = 0u16;
+/// for k in 0..16 {
+///     let bits = x & deps[k];
+///     result |= (bits.count_ones() as u16 & 1) << k;
+/// }
+/// ```
+///
+/// For `coeff == 0` all entries are zero (product is always 0).
+/// For `coeff == 1` the matrix is the identity.
+///
+/// The algorithm follows the "XOR Bit Dependencies" method from ParPar's
+/// `fast-gf-multiplication.md`: simulate the shift-and-XOR multiplication in
+/// GF(2¹⁶) symbolically, tracking which input bits reach each output bit.
+pub fn xor_dep_matrix(coeff: u16) -> [u16; 16] {
+    if coeff == 0 {
+        return [0u16; 16];
+    }
+
+    // deps[k] = bitmask of input bits that XOR into output bit k.
+    let mut deps = [0u16; 16];
+
+    for b in (0..16).rev() {
+        if (coeff >> b) & 1 == 1 {
+            // This power of 2 is present in `coeff`; add its contribution
+            // (the identity shifted into the current position).
+            for (k, d) in deps.iter_mut().enumerate() {
+                *d ^= 1 << k;
+            }
+        }
+
+        if b > 0 {
+            // Multiply the accumulated dependencies by 2 in GF(2¹⁶):
+            // shift left by one bit position and XOR in the polynomial
+            // for any term that overflowed bit 15.
+            let high = deps[15];
+            deps.copy_within(0..15, 1);
+            deps[0] = 0;
+            // POLYNOMIAL = 0x1_100B = x^16 + x^12 + x^3 + x + 1.
+            // The bit positions of the lower 16 bits of the polynomial
+            // are 0 (x^0), 1 (x^1), 3 (x^3), 12 (x^12).
+            for k in [0usize, 1, 3, 12] {
+                deps[k] ^= high;
+            }
+        }
+    }
+
+    deps
+}
+
 impl Default for Gf16 {
     fn default() -> Self {
         Self::new()
@@ -242,6 +298,74 @@ mod tests {
             assert!(!seen[value as usize], "duplicate value {value}");
             assert_ne!(value, 0);
             seen[value as usize] = true;
+        }
+    }
+
+    /// Apply a dependency matrix to a single u16 word.
+    fn apply_dep_matrix(deps: &[u16; 16], x: u16) -> u16 {
+        let mut result = 0u16;
+        for (k, &mask) in deps.iter().enumerate() {
+            let bits = x & mask;
+            result |= (bits.count_ones() as u16 & 1) << k;
+        }
+        result
+    }
+
+    #[test]
+    fn xor_dep_matrix_special_cases() {
+        // coeff = 0: all-zero matrix, product always 0.
+        let deps0 = xor_dep_matrix(0);
+        assert_eq!(deps0, [0u16; 16]);
+        for x in [0u16, 1, 0xFF, 0x1234, 0xFFFF] {
+            assert_eq!(apply_dep_matrix(&deps0, x), 0);
+        }
+
+        // coeff = 1: identity matrix, product equals input.
+        let deps1 = xor_dep_matrix(1);
+        for k in 0..16u16 {
+            assert_eq!(deps1[k as usize], 1 << k, "identity bit {k}");
+        }
+        for x in [0u16, 1, 0xFF, 0x1234, 0xFFFF] {
+            assert_eq!(apply_dep_matrix(&deps1, x), x);
+        }
+    }
+
+    #[test]
+    fn xor_dep_matrix_matches_gf_mul_exhaustive() {
+        // For a representative set of coefficients, verify that applying the
+        // dependency matrix to every 16-bit input matches gf.mul(input, coeff).
+        let gf = Gf16::new();
+        let test_coeffs: &[u16] = &[
+            2, 3, 4, 7, 16, 128, 256, 1000, 0x1234, 0x8000, 0xABCD, 0xFFFE, 65534,
+        ];
+        for &coeff in test_coeffs {
+            let deps = xor_dep_matrix(coeff);
+            for x in 0u32..=65535 {
+                let x = x as u16;
+                let expected = gf.mul(x, coeff);
+                let got = apply_dep_matrix(&deps, x);
+                assert_eq!(
+                    got, expected,
+                    "coeff={coeff:#06x} x={x:#06x}: expected {expected:#06x}, got {got:#06x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn xor_dep_matrix_matches_gf_mul_all_coefficients() {
+        // Spot-check all 65535 non-zero coefficients against a random input.
+        // Using a fixed seed (the input value 0xA5C3) keeps the test deterministic.
+        let gf = Gf16::new();
+        let x: u16 = 0xA5C3;
+        for coeff in 1u16..=65535 {
+            let deps = xor_dep_matrix(coeff);
+            let expected = gf.mul(x, coeff);
+            let got = apply_dep_matrix(&deps, x);
+            assert_eq!(
+                got, expected,
+                "coeff={coeff:#06x}: expected {expected:#06x}, got {got:#06x}"
+            );
         }
     }
 }

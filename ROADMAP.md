@@ -1250,6 +1250,240 @@ The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominat
 
 ---
 
+## Phase 27 — ALTMAP + XOR Bit-Dependency AVX2 Kernel
+
+**Goal:** close the remaining ~24 % end-to-end gap vs parpar on AVX2-only hardware
+(no GFNI, no AVX-512) by replacing the `flush_avx2` PSHUFB kernel with an ALTMAP +
+XOR bit-dependency kernel, the same technique at the core of parpar's speed advantage.
+
+### Background
+
+The `perf stat` analysis in 25d established that on an i5-10400 (AVX2-only) pesto
+executes **117.8 insn/byte** vs parpar's **68.2 insn/byte** — a 1.73× gap that
+accounts for the full 24 % wall-clock difference. All pipeline bottlenecks (flush
+serialisation, article-buffer round-trip, buffer allocations) were fixed in 25f/25g.
+The remaining gap lives entirely in the RS kernel.
+
+**Why PSHUFB is the bottleneck:**
+For each (recovery_block, input_slice) pair the current kernel:
+1. Deinterleaves lo/hi bytes (2 `vpunpck` + 2 `vpand` + 1 `vpsrlw`)
+2. Extracts 4 nibbles per 16-bit word (4 `vpshufb` for lo byte, 4 for hi byte)
+3. XORs the 8 partial products (7 `vpxor`)
+4. Re-interleaves (1 `vpackuswb`)
+→ ~20 instructions per 32 input bytes per recovery block.
+
+**Why XOR_DEPENDS + ALTMAP is faster:**
+For a fixed GF(2¹⁶) coefficient *n*, every output bit is a linear XOR of a fixed
+subset of the 16 input bits — a 16×16 GF(2) dependency matrix. With data stored
+in *bit-plane* (ALTMAP) format (bit plane *k* = all *k*-th bits of N consecutive
+16-bit words packed contiguously), applying the matrix is a sequence of
+`vpxor` operations on full 256-bit vectors. One vector holds 256 words of one bit
+plane; typical coefficients need ~112 `vpxor` total across all 16 output planes.
+Per byte: 112 XOR / 512 bytes = **0.22 ops/byte** vs 0.59 for PSHUFB — a 2.7×
+instruction reduction, matching the measured gap.
+
+The bit-plane transpose of a slice costs ~65 µs on i5-10400 and is paid **once per
+slice**, not once per flush, making it negligible at scale.
+
+**Reference:** animetosho's *Fast Galois Field Region Multiplication Techniques*
+(ParPar repo, `fast-gf-multiplication.md`) — section "XOR Bit Dependencies" and
+the companion `xor_depends/info.md`.
+
+### Coefficient pre-computation analysis
+
+A session with N input slices and R recovery blocks has up to N×R distinct
+(slice, rec) coefficient values, but empirically most of GF(2¹⁶) is covered:
+- 1 GB @ 10 % redundancy, 768 KB slices → 1 398 × 139 pairs → **~60 K unique coefficients**
+- 5 GB @ 10 % → 6 990 × 699 → **~65 K unique coefficients**
+
+Each dependency matrix is 16 × u16 = 32 bytes.
+Pre-computing all 65 535 non-zero coefficients at session start: **2 MB, ~10 ms** —
+negligible overhead, eliminates all per-flush setup.
+
+---
+
+### 27a — XOR dependency matrix generator (small, 1–2 h) ✅
+
+Implement a pure-Rust function that, given a `u16` GF(2¹⁶) coefficient, returns the
+16×16 dependency matrix as `[u16; 16]` (entry `deps[k]` is the bitmask of input bits
+that XOR into output bit `k`).
+
+The algorithm (from `fast-gf-multiplication.md`, "XOR Bit Dependencies"):
+
+```
+deps = [0u16; 16]
+for b in (0..16).rev():
+    if (n >> b) & 1 == 1:
+        for i in 0..16: deps[i] ^= 1 << i   // add identity contribution
+    if b > 0:
+        high = deps[15]
+        deps[1..16].copy_from_slice(&deps[0..15])
+        deps[0] = 0
+        for i in 0..16:
+            if (POLYNOMIAL >> i) & 1 == 1: deps[i] ^= high
+```
+
+- [ ] Add `pub fn xor_dep_matrix(coeff: u16) -> [u16; 16]` to `gf16.rs`
+- [ ] Unit-test: verify that applying `deps` to all 65 536 input values matches
+      `gf.mul(input, coeff)` for a representative set of coefficients (n=2, n=3,
+      n=65534, 100 random values)
+- [ ] Verify the special cases n=0 (all-zero matrix) and n=1 (identity matrix)
+
+### 27b — Session-start coefficient table (small, 1 h) ✅
+
+Build a `[[ u16; 16]; 65536]` flat array (indices 0..=65535, index 0 unused) at the
+start of every `RecoveryEncoder::new` call, containing the dependency matrix for
+every possible GF coefficient. This replaces per-flush PSHUFB table construction.
+
+```
+let dep_tables: Box<[[u16; 16]; 65536]> = {
+    let mut t = Box::new([[0u16; 16]; 65536]);
+    for n in 1u16..=65535 {
+        t[n as usize] = xor_dep_matrix(n);
+    }
+    t
+};
+```
+
+- [ ] Implement and store in `RecoveryEncoder` as `dep_tables: Box<[[u16; 16]; 65536]>`
+- [ ] Benchmark construction time: must be < 5 ms on i5-10400
+- [ ] Keep the existing PSHUFB tables intact; the two paths will coexist until 27g
+
+### 27c — ALTMAP layout helpers (small, 2–3 h) ✅
+
+ALTMAP stores N consecutive GF(2¹⁶) words (each 2 bytes) as 16 contiguous *bit
+planes*, where plane *k* contains the *k*-th bit of every word packed as `ceil(N/8)`
+bytes. For AVX2 we process 256 words at a time (one 256-bit vector per plane).
+
+Alignment requirement: each plane must start on a 32-byte boundary for aligned
+`vmovdqa256` loads/stores.
+
+- [ ] Add `src/par2/altmap.rs`
+- [ ] `fn to_altmap(src: &[u16], dst: &mut [u8])` — transpose N u16 words into 16
+      bit-planes; use `_mm256_movemask_epi8` + shift loop for the inner kernel
+      (processes 16 words → 16 bits per plane per iteration; one 128-bit lane at a
+      time for the movemask approach)
+- [ ] `fn from_altmap(src: &[u8], dst: &mut [u16])` — inverse transpose
+- [ ] Round-trip property test: `from_altmap(to_altmap(x)) == x` for random inputs
+      of varying lengths (multiples of 16 u16 words)
+- [ ] Benchmark transpose cost on 768 KB slice: must be < 100 µs on i5-10400
+
+### 27d — ALTMAP recovery buffers (medium, 3–4 h) ✅
+
+Change the recovery buffer storage format from `Vec<u16>` (normal layout) to
+`Vec<u8>` in ALTMAP format. The buffer for one recovery block of `slice_words` u16
+values becomes `16 × ceil(slice_words / 256) × 32` bytes, where each group of 32
+bytes is one AVX2 bit-plane vector.
+
+This is the most invasive structural change. Keep the existing normal-layout buffers
+as a parallel code path gated on a feature flag `altmap` (see 27g for integration).
+
+- [ ] Introduce `RecoveryBufferSet` enum: `Normal(Vec<Vec<u16>>)` / `Altmap(Vec<Vec<u8>>)`
+- [ ] Add `RecoveryEncoder::new_altmap(...)` constructor that allocates ALTMAP buffers
+- [ ] `altmap_buffer_size(slice_words: usize) -> usize` helper
+- [ ] Verify that allocating ALTMAP buffers for a 1 GB, 10 % redundancy session stays
+      within the same memory footprint as the current normal-layout buffers (they are
+      the same size in bits; ALTMAP is a layout change, not a size change)
+
+### 27e — `flush_avx2_altmap_work` kernel (large, 1 day)
+
+The core kernel: for each (recovery_block, input_slice) pair, apply the XOR
+dependency matrix to the bit-plane-format input slice and XOR the result into the
+bit-plane-format recovery buffer.
+
+Inner loop structure (one recovery block, one input slice):
+```
+let deps = &dep_tables[coeff as usize];  // [u16; 16]
+for plane_out in 0..16 {
+    let mask = deps[plane_out];
+    // XOR all input planes where the corresponding bit in mask is set
+    let mut acc = _mm256_setzero_si256();
+    for plane_in in 0..16 {
+        if (mask >> plane_in) & 1 == 1 {
+            acc = _mm256_xor_si256(acc, load_plane(input_altmap, plane_in, vec_idx));
+        }
+    }
+    store_plane_xor(rec_altmap, plane_out, vec_idx, acc);
+}
+```
+
+Optimisation opportunities:
+- **Skip zero-mask planes:** `if mask == 0 { continue }` (saves ~2–3 % on average)
+- **Unroll over recovery blocks (4-way):** load each input plane once, apply four
+  dependency matrices simultaneously — halves input plane loads
+- **CSE across adjacent output planes:** if two output planes share common input
+  subexpressions (e.g. `in[3] ^ in[7]`), compute the intermediate once and reuse.
+  The "adjacent pairs" heuristic from `xor_depends/info.md` is sufficient for a
+  first pass; full greedy CSE can be added later.
+
+Steps:
+- [ ] Implement `flush_avx2_altmap_work` with the 4-way recovery unroll
+- [ ] Gate behind `#[cfg(target_feature = "avx2")]` (same as current `flush_avx2`)
+- [ ] Correctness test: for 50 random coefficients and a 4 MB input slice, verify
+      that ALTMAP flush produces the same recovery bytes as `flush_avx2_work` after
+      `from_altmap` conversion of the output
+- [ ] Internal bench (`cargo bench --features bench-internals`): must exceed
+      `flush_avx2_work` throughput on i5-10400 by ≥ 20 %
+
+### 27f — Integrate ALTMAP into the encode loop (medium, 3–4 h)
+
+Wire the new path into `RecoveryEncoder::add_slice` and the background flush worker:
+
+1. After reading each input slice, call `to_altmap` before pushing to the flush queue
+2. `flush_avx2_altmap_work` reads from altmap input, XORs into altmap recovery buffers
+3. After `enc.finish()`, call `from_altmap` on each recovery buffer before PAR2 packet
+   assembly (packet.rs expects normal `&[u16]` layout)
+
+The transpose-on-read and transpose-on-finish are both O(slice_size) and paid once
+per slice — not per flush call.
+
+- [ ] Add `to_altmap` call in the slice-queuing path (inside `add_slice` or in the
+      background worker before the flush)
+- [ ] Ensure that `from_altmap` is called after `enc.finish()` and before the first
+      `RecoveryEncoder::recovery_slice(i)` call in `packet.rs`
+- [ ] End-to-end correctness: `par2cmdline` must successfully repair a damaged file
+      produced by the ALTMAP path (use the existing `par2cmdline` repair test harness)
+- [ ] Memory: confirm no extra allocation beyond the ALTMAP buffer itself (no
+      temporary normal-layout copy during the flush hot path)
+
+### 27g — Benchmark and gate (small, 2–3 h)
+
+Measure end-to-end throughput on both i5-10400 (AVX2-only) and i5-14400 (GFNI+AVX2)
+using `bench_pesto_vs_parpar.sh`.
+
+- [ ] On AVX2-only (i5-10400): `Pesto ≥ Parpar` for 1G, 5G, 10G
+- [ ] On GFNI hardware (i5-14400): ALTMAP path is **not** used (GFNI path already
+      wins); confirm no regression in GFNI throughput
+- [ ] `cargo clippy --all-targets -- -D warnings` clean
+- [ ] `cargo test` clean (all existing tests pass, including `par2cmdline` repair
+      integration test)
+- [ ] Remove the `altmap` feature flag; make ALTMAP the default AVX2 path if the
+      benchmark confirms ≥ 20 % improvement; keep PSHUFB as compile-time fallback
+      under `#[cfg(not(target_feature = "avx2"))]`
+
+### 27h — Apply ALTMAP to SSSE3 path (small, 2 h)
+
+The `flush_ssse3_work` path (for pre-Haswell CPUs) currently has the same structural
+inefficiency as `flush_avx2_work`. Adapt the kernel to use 128-bit ALTMAP
+(`_mm_movemask_epi8`, 128-bit XOR), once the AVX2 ALTMAP path is proven correct.
+
+- [ ] Implement `flush_ssse3_altmap_work` using 128-bit intrinsics
+- [ ] Benchmark on SSSE3-only hardware or emulate with `RUSTFLAGS="-C target-feature=+ssse3,-avx2"`
+- [ ] Gate behind a correctness test identical to 27e's
+
+### Definition of done
+
+- [ ] On i5-10400 (AVX2-only), `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar
+      for 1G, 5G **and** 10G
+- [ ] On i5-14400 (GFNI), no regression vs Phase 25 measurements
+- [ ] `par2cmdline` successfully repairs files produced by the ALTMAP path
+- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
+      all clean
+- [ ] Internal SIMD bench shows `flush_avx2_altmap_work` ≥ 20 % faster than
+      `flush_avx2_work` on warm 64–256 MiB workloads
+
+---
+
 ## Phase 26 — Verbose Mode & Diagnostics
 
 Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
