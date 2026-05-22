@@ -1140,6 +1140,22 @@ follows the `flush_avx2` path which was not modified. The 8-way GFNI arm will
 be exercised on Intel 11th-gen+, AMD Zen 4+ and Ice Lake Xeon. End-to-end
 improvement on those platforms requires a GFNI-capable benchmark machine.
 
+**25e2 — 8-way unroll for plain AVX2 nibble-shuffle — NEGATIVE, reverted.**
+
+Attempted in commit `64c98aa`, reverted in `d83302d`. Measured on i5-10400:
+
+| Size | Before (4-way) | After (8-way) | Delta |
+|------|----------------|---------------|-------|
+| 1G   | ~433 MB/s      | 395 MB/s      | **−9%** |
+| 5G   | ~374 MB/s      | 341 MB/s      | **−9%** |
+
+Root cause: GFNI uses 2 YMM registers per block; 8 blocks = 16 registers — fits
+exactly in AVX2's 16 YMM registers. The nibble-shuffle path uses 8 YMM registers
+per block (4 pairs of PSHUFB tables); 4 blocks already = 32 registers, forcing
+spills. Doubling to 8 blocks doubles the spill traffic, hurting more than the
+saved input loads. The 4-way unroll is the correct ceiling for this kernel on
+AVX2 (without GFNI). The i5-10400 gap cannot be closed by unrolling alone.
+
 ### 25f — Background flush worker ✅
 
 `flush()` previously ran to completion inline; the tokio reader was blocked via
