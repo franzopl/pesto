@@ -241,6 +241,11 @@ struct Cli {
     #[arg(long, value_name = "CMD")]
     post_hook: Option<String>,
 
+    /// Skip all post-upload hooks for this run (both --post-hook and
+    /// scripts in ~/.config/pesto/hooks/).
+    #[arg(long)]
+    no_hooks: bool,
+
     /// Skip writing to the upload history catalog for this run
     /// [config: output.history = false].
     #[arg(long)]
@@ -404,6 +409,7 @@ impl Cli {
             no_archive: if self.no_archive { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
             post_hook: self.post_hook.clone(),
+            no_hooks: self.no_hooks,
             nfo: if self.nfo { Some(true) } else { None },
             check: if self.check { Some(true) } else { None },
             check_delay_secs: self.check_delay,
@@ -866,14 +872,16 @@ async fn run_single_upload(
             server: &config.host,
         };
 
-        // Run --post-hook command.
-        if let Some(cmd) = &config.post_hook {
-            run_post_hook(cmd, &hook_env);
-        }
+        if !config.no_hooks {
+            // Run --post-hook command.
+            if let Some(cmd) = &config.post_hook {
+                run_post_hook(cmd, &hook_env);
+            }
 
-        // Run every executable script found in ~/.config/pesto/hooks/.
-        if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
-            run_hooks_dir(&hooks_dir, &hook_env);
+            // Run every executable script found in ~/.config/pesto/hooks/.
+            if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
+                run_hooks_dir(&hooks_dir, &hook_env);
+            }
         }
     }
 
@@ -1005,8 +1013,13 @@ async fn run_batch(
     if let Some(season_path) = season_nzb {
         if !all_segments.is_empty() {
             let config = &params.config;
+            let season_name = config.nzb_name.clone().or_else(|| {
+                season_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+            });
             let nzb_meta = NzbMeta {
-                name: config.nzb_name.clone(),
+                name: season_name,
                 password: config
                     .nzb_password
                     .clone()
@@ -1093,11 +1106,13 @@ async fn run_batch(
                 password: effective_password.as_deref(),
                 server: &config.host,
             };
-            if let Some(cmd) = &config.post_hook {
-                run_post_hook(cmd, &hook_env);
-            }
-            if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
-                run_hooks_dir(&hooks_dir, &hook_env);
+            if !config.no_hooks {
+                if let Some(cmd) = &config.post_hook {
+                    run_post_hook(cmd, &hook_env);
+                }
+                if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
+                    run_hooks_dir(&hooks_dir, &hook_env);
+                }
             }
         }
     }

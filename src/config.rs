@@ -345,6 +345,8 @@ pub struct Overrides {
     pub message_id_domain: Option<String>,
     /// Shell command to run after a successful upload.
     pub post_hook: Option<String>,
+    /// `--no-hooks`: skip all post-upload hooks for this run.
+    pub no_hooks: bool,
     /// Generate a `.nfo` file next to the `.nzb` after posting.
     pub nfo: Option<bool>,
     /// Run a deferred STAT check on every posted article after upload finishes.
@@ -438,6 +440,8 @@ pub struct Config {
     pub notify: Option<bool>,
     /// Shell command to run after a successful upload.
     pub post_hook: Option<String>,
+    /// Skip all post-upload hooks for this run (`--no-hooks`).
+    pub no_hooks: bool,
     /// Generate a `.nfo` file next to the `.nzb` after posting.
     pub nfo: bool,
     /// Show only a single spinner line (quiet mode).
@@ -648,6 +652,7 @@ impl Config {
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
             post_hook: cli.post_hook.or(file.output.post_hook),
+            no_hooks: cli.no_hooks,
             nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),
             quiet: file.output.quiet.unwrap_or(false),
             bell: file.output.bell.unwrap_or(false),

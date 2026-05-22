@@ -50,6 +50,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         no_archive: false,
         message_id_domain: None,
         post_hook: None,
+        no_hooks: false,
         nfo: false,
         quiet: false,
         bell: false,

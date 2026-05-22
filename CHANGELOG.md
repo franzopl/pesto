@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.18] — 2026-05-22
+
+### Added
+- **`--no-hooks`**: skip all post-upload hooks for a single run (both
+  `--post-hook` commands and scripts in `~/.config/pesto/hooks/`).
+  Useful when testing or reposting without triggering indexer notifications.
+
+### Fixed
+- **Season NZB folder name**: the consolidated season `.nzb` now includes
+  `<meta type="name">` set to the season stem (e.g.
+  `Show.S01.1080p.WEB-DL`) so that SABnzbd and NZBGet name the download
+  folder after the season pack instead of the first episode.
+
 ## [0.2.17] — 2026-05-21
 
 ### Added
