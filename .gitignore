@@ -9,7 +9,8 @@ Terapia atraves da Escrita*/
 file10G.bin
 file1G.bin
 file5G.bin
+bench_*.bin
 *.par2
 /bench_par2_out/
-/bench_pesto_vs_parpar.sh
+/bench_out/
 /file10M.bin
