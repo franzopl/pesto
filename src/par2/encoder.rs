@@ -210,6 +210,15 @@ impl RecoveryEncoder {
         self.queued_slices = queued;
     }
 
+    /// Remove all currently pooled free buffers and return them to the caller.
+    ///
+    /// Used by the background-worker path in `poster.rs` to ferry recycled
+    /// slice allocations back to the producer without exposing `free_buffers`
+    /// directly.
+    pub fn drain_free_buffers(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.free_buffers)
+    }
+
     /// Feed one input slice, already zero-padded to the slice size.
     ///
     /// Ownership of `slice` is taken so the encoder can queue it for batched

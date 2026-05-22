@@ -1125,15 +1125,46 @@ The GFNI inner loop uses 2 matrix registers per recovery block × 4-way unroll =
 - [ ] Spill cleanly: prefer `par_chunks_mut(8)` only when `n_rec % 8 == 0`, otherwise fall through to existing 4/2/1 arms
 - [ ] Verify via `cargo bench --features bench-internals` that throughput improves at 64 MiB (compute-bound) before checking end-to-end
 
-### 25f — Background flush worker (medium, half day) — **largest expected end-to-end win**
+### 25f — Background flush worker ✅
 
-`flush()` currently runs to completion inline; the tokio reader is blocked via `block_in_place` for the entire flush. On a 1 GB file we flush ~8 times serially with reads.
+`flush()` previously ran to completion inline; the tokio reader was blocked via
+`block_in_place` for the entire RS flush duration. On a 1 GB file that means
+~19 serial flush/read cycles (flush every ~26 slices × 10 MB = 260 MB).
 
-- [ ] Spawn a long-lived rayon task that owns the buffers and consumes from a bounded `crossbeam_channel` (depth = 2 batches)
-- [ ] `add_slice` becomes a non-blocking send; full channel back-pressures the reader naturally
-- [ ] Convert `finish()` to drain the channel + join the worker
-- [ ] Keep current single-thread path under a feature flag during validation
-- [ ] Target: lift 1G/5G from ~490 MB/s towards the 1700+ MB/s SIMD ceiling, capped by disk read
+- [x] Added `Par2Worker` in `poster.rs`: wraps `RecoveryEncoder` in a dedicated
+      OS thread. Producer sends completed slices via `std::sync::mpsc::sync_channel`
+      (capacity 256 — ~2 flush batches). Worker calls `enc.add_slice` (which
+      auto-triggers flushes) and returns recycled buffers via a second bounded
+      channel (capacity 128), avoiding re-allocation per slice.
+- [x] `feed_par2_slice` now calls `worker.send_slice` — still wrapped in
+      `block_in_place` for tokio correctness, but the send completes in
+      microseconds unless the channel is full (worker mid-flush). RS work
+      happens concurrently on the dedicated thread.
+- [x] `par2_only_ingest` updated to accept `&Par2Worker` instead of
+      `&mut RecoveryEncoder`.
+- [x] `worker.finish()` closes the channel, waits for the worker to drain the
+      remaining slices and run the final flush, then returns the results.
+- [x] Added `RecoveryEncoder::drain_free_buffers()` to let the worker ferry
+      recycled allocations back to the producer without exposing internal state.
+- [x] Verified bit-correct with `par2cmdline verify` on a 1 GiB test file.
+- [x] No new crate dependencies — uses `std::sync::mpsc` throughout.
+
+**Measured impact (i5-10400, sparse files, median of 2 runs):**
+
+| Size | Before 25f | After 25f | Delta   | vs parpar |
+|------|-----------|-----------|---------|-----------|
+| 1G   | ~360 MB/s | ~433 MB/s | **+21%** | −13% (was −25%) |
+| 5G   | ~341 MB/s | ~374 MB/s | **+10%** | −13% (was −24%) |
+
+Gap vs parpar halved from ~24% to ~13% on AVX2-only hardware. The improvement
+comes from overlapping I/O (page-cache reads) with RS computation: while the
+worker is flushing batch N, the async reader fills batch N+1. The 1G benefit
+is larger because the I/O overhead is a bigger fraction of total time for
+smaller inputs.
+
+**Residual gap (~13%):** Entirely in RS kernel instruction efficiency
+(117.8 vs 68.2 insn/byte on AVX2-only hardware). Item 25e (8-way unroll) or
+a deeper AVX2 kernel rewrite are the correct next steps.
 
 ### 25g — Skip the article-buffer round trip in `--par2-only` ✅
 
@@ -1159,9 +1190,9 @@ out to be in the RS kernel itself, not the pipeline.
 the memory-write traffic during the read phase). This benefit is masked by the sparse-file
 benchmark because page-cache reads of zeros are near-free.
 
-**Revised priority:** the remaining ~24% gap vs parpar on AVX2-only hardware is entirely
-in the RS kernel instruction count (117.8 vs 68.2 insn/byte, measured in 25d). Items 25e
-(8-way unroll) or a deeper AVX2 kernel rewrite are the correct next steps.
+**Revised priority:** after 25f, the remaining ~13% gap vs parpar on AVX2-only hardware
+is entirely in the RS kernel instruction count (117.8 vs 68.2 insn/byte, measured in 25d).
+Items 25e (8-way unroll) or a deeper AVX2 kernel rewrite are the correct next steps.
 
 ### 25h — Double-buffered queue (medium, half day)
 
