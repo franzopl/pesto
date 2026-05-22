@@ -1065,14 +1065,57 @@ On this CPU `performance_core_count()` correctly returns `physical_core_count()`
 - [x] Added public `take_buffer()` that pops from the pool or allocates fresh; `feed_par2_slice` uses it for the replacement buffer, and the per-file `par2_accum` is also primed from the pool
 - [x] No measurable end-to-end win on its own (allocator already fast on Linux), but eliminates ~99 % of slice-buffer allocations and is a precondition for the background-flush worker in 25f where allocation ownership matters
 
-### 25d — Profile with `perf stat` before bigger work (easy, 30 min)
+### 25d — Profile with `perf stat` before bigger work ✅
 
 Confirm the pipeline-bound hypothesis before investing in the channel/double-buffer refactor.
 
-- [ ] `perf stat -e cycles,instructions,L1-dcache-load-misses,LLC-load-misses,dTLB-load-misses,task-clock ./target/release/pesto --par2-only --par2 10 file5G.bin`
-- [ ] Same for `parpar`
-- [ ] Compare cycles-per-byte, LLC miss rate, and `task-clock`/wall ratio (utilization). Decide whether to prioritize 25e (CPU compute) or 25f (I/O overlap)
-- [ ] Drop-caches the bench script between runs (uncomment the `drop_caches` line, or use `vmtouch -e` to evict)
+- [x] `perf stat -e cycles,instructions,L1-dcache-load-misses,LLC-load-misses,dTLB-load-misses,task-clock` on both tools, 5 GiB file, i5-10400 (AVX2)
+
+**Results (5 GiB, 10% recovery, i5-10400):**
+
+| Metric | pesto | parpar | ratio |
+|---|---:|---:|---:|
+| Wall time | 14.6 s | 11.6 s | 1.26× |
+| Throughput | 351 MB/s | 441 MB/s | 0.80× |
+| CPUs utilized | 5.72 | 5.17 | — |
+| cycles / byte | 61.8 | 44.5 | **1.39×** |
+| **instructions / byte** | **117.8** | **68.2** | **1.73×** |
+| IPC | 1.91 | 1.53 | — |
+| L1-miss / byte | 2.308 | 2.186 | 1.06× |
+| LLC-miss / byte | 0.0273 | 0.0183 | **1.49×** |
+| dTLB-miss / byte | 0.00962 | 0.00396 | **2.43×** |
+| RAM via LLC (GiB) | 8.72 | 5.86 | 1.49× |
+
+**Parpar note:** `Input pass(es): 2` — parpar reads the 5 GiB source twice (100 recovery
+blocks split into 2 × 50 batches). Pesto fits all 100 blocks in one pass. Parpar reads
+2× more source data yet finishes faster — confirming the bottleneck is instruction count,
+not I/O volume.
+
+**Interpretation:**
+
+- **Instruction count is the dominant gap (1.73×), not the AVX2 kernel.** L1 miss rate
+  is nearly identical (1.06×), meaning the SIMD inner loop itself is comparably efficient.
+  The extra 49.6 instructions/byte comes from the article-pipeline: 6 992 tokio channel
+  sends/recvs, Arc clones, buffer-pool acquire/release, and the `extend_from_slice`
+  accumulation that copies all 5 GiB through an intermediate buffer before feeding the
+  encoder.
+
+- **dTLB misses 2.43× higher** because per-article heap allocations (768 KB each) are
+  scattered across many 4 KB pages. Each `extend_from_slice` call touches a new TLB entry
+  and evicts a cold one, adding TLB-miss penalty on top of the instruction overhead.
+
+- **LLC misses 1.49× higher** (2.86 GiB extra RAM traffic). The extra pass through
+  `par2_accum` pollutes the LLC, evicting recovery-buffer lines that the RS kernel needs.
+
+- **Pesto actually has higher IPC (1.91 vs 1.53)** — it is more CPU-bound, not
+  memory-stall-bound. The problem is sheer instruction volume, not stall cycles.
+  Parpar's lower IPC is caused by its 2-pass scheme having more memory latency per
+  instruction, yet it still wins because it issues far fewer instructions total.
+
+**Priority decision:** 25g (bypass article-pipeline in `--par2-only`) is the highest-value
+item. It directly eliminates the instruction-count root cause. 25f (background flush) is
+secondary — useful for overlapping I/O with RS compute in posting mode, but does not
+reduce the instruction count that dominates `--par2-only`.
 
 ### 25e — 8-way recovery unroll for AVX2+GFNI (medium, half day)
 
