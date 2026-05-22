@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.19] — 2026-05-22
+
+### Changed
+- **AVX-512+GFNI PAR2 path enabled in production**: `flush_avx512_gfni` is now
+  active by default on CPUs that report AVX-512F + AVX-512BW + GFNI (Intel Ice
+  Lake and newer). Previously gated behind the `par2-avx2-gfni-unsafe` feature;
+  validated via `gfni_recovery_matches_scalar` on Intel Ice Lake Xeon (AWS m6i).
+
 ## [0.2.18] — 2026-05-22
 
 ### Added
