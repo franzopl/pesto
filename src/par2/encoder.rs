@@ -1097,18 +1097,181 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        // 32 KiB recovery buffer chunk: 4 (par_chunks_mut group) × 32 KiB fits L1
-        // and produces ~8× fewer rayon tasks than the previous 4 KiB chunk. End-to-end
-        // A/B at 5G @ 10% measured +1.7% over chunk_size=2048; internal SIMD bench is
-        // within run-to-run noise.
+        // 32 KiB recovery buffer chunk: chunk × group fits L1/L2 and amortizes
+        // the rayon task overhead. 8 × 32 KiB = 256 KiB stays in L2 on most
+        // modern CPUs; if L2 is smaller (older Skylake clients) the hardware
+        // prefetcher compensates adequately.
         let chunk_size = 16384usize;
 
         buffers
-            .par_chunks_mut(4)
+            .par_chunks_mut(8)
             .enumerate()
             .for_each(|(group_idx, buf_group)| {
-                let i = group_idx * 4;
+                let i = group_idx * 8;
                 match buf_group {
+                    // 8-way unroll: one input load + one deinterleave feeds 8 recovery blocks,
+                    // halving the loadu/shuffle overhead compared with the 4-way arm.
+                    [buf_a, buf_b, buf_c, buf_d, buf_e, buf_f, buf_g, buf_h] => {
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        let base_c = (i + 2) * n_queued;
+                        let base_d = (i + 3) * n_queued;
+                        let base_e = (i + 4) * n_queued;
+                        let base_f = (i + 5) * n_queued;
+                        let base_g = (i + 6) * n_queued;
+                        let base_h = (i + 7) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size)
+                            .zip(buf_b.par_chunks_mut(chunk_size))
+                            .zip(buf_c.par_chunks_mut(chunk_size))
+                            .zip(buf_d.par_chunks_mut(chunk_size))
+                            .zip(buf_e.par_chunks_mut(chunk_size))
+                            .zip(buf_f.par_chunks_mut(chunk_size))
+                            .zip(buf_g.par_chunks_mut(chunk_size))
+                            .zip(buf_h.par_chunks_mut(chunk_size))
+                            .enumerate()
+                            .for_each(
+                                |(
+                                    chunk_idx,
+                                    (
+                                        (
+                                            (
+                                                ((((chunk_a, chunk_b), chunk_c), chunk_d), chunk_e),
+                                                chunk_f,
+                                            ),
+                                            chunk_g,
+                                        ),
+                                        chunk_h,
+                                    ),
+                                )| unsafe {
+                                    let byte_offset = chunk_idx * chunk_size * 2;
+                                    let byte_len = chunk_a.len() * 2;
+                                    let blocks_32 = byte_len / 32;
+                                    let remainder = byte_len % 32;
+
+                                    for q_idx in 0..n_queued {
+                                        let (mat_lo_a, mat_hi_a, ref tlow_a, ref thigh_a) =
+                                            all_tables[base_a + q_idx];
+                                        let (mat_lo_b, mat_hi_b, ref tlow_b, ref thigh_b) =
+                                            all_tables[base_b + q_idx];
+                                        let (mat_lo_c, mat_hi_c, ref tlow_c, ref thigh_c) =
+                                            all_tables[base_c + q_idx];
+                                        let (mat_lo_d, mat_hi_d, ref tlow_d, ref thigh_d) =
+                                            all_tables[base_d + q_idx];
+                                        let (mat_lo_e, mat_hi_e, ref tlow_e, ref thigh_e) =
+                                            all_tables[base_e + q_idx];
+                                        let (mat_lo_f, mat_hi_f, ref tlow_f, ref thigh_f) =
+                                            all_tables[base_f + q_idx];
+                                        let (mat_lo_g, mat_hi_g, ref tlow_g, ref thigh_g) =
+                                            all_tables[base_g + q_idx];
+                                        let (mat_lo_h, mat_hi_h, ref tlow_h, ref thigh_h) =
+                                            all_tables[base_h + q_idx];
+
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                        let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
+                                        let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_e = chunk_e.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_f = chunk_f.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_g = chunk_g.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_h = chunk_h.as_mut_ptr() as *mut __m256i;
+                                        let end = ptr_in.add(blocks_32);
+
+                                        while ptr_in < end {
+                                            _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
+                                            let input = _mm256_loadu_si256(ptr_in);
+                                            let separated = _mm256_shuffle_epi8(input, deint_mask);
+
+                                            macro_rules! gfni_block {
+                                                ($mat_lo:expr, $mat_hi:expr, $ptr:expr) => {{
+                                                    let vlo = _mm256_gf2p8affine_epi64_epi8(
+                                                        separated, $mat_lo, 0,
+                                                    );
+                                                    let vhi = _mm256_gf2p8affine_epi64_epi8(
+                                                        separated, $mat_hi, 0,
+                                                    );
+                                                    let out = _mm256_unpacklo_epi8(
+                                                        _mm256_xor_si256(
+                                                            vlo,
+                                                            _mm256_bsrli_epi128::<8>(vlo),
+                                                        ),
+                                                        _mm256_xor_si256(
+                                                            vhi,
+                                                            _mm256_bsrli_epi128::<8>(vhi),
+                                                        ),
+                                                    );
+                                                    _mm256_storeu_si256(
+                                                        $ptr,
+                                                        _mm256_xor_si256(
+                                                            _mm256_loadu_si256($ptr),
+                                                            out,
+                                                        ),
+                                                    );
+                                                }};
+                                            }
+
+                                            gfni_block!(mat_lo_a, mat_hi_a, ptr_a);
+                                            gfni_block!(mat_lo_b, mat_hi_b, ptr_b);
+                                            gfni_block!(mat_lo_c, mat_hi_c, ptr_c);
+                                            gfni_block!(mat_lo_d, mat_hi_d, ptr_d);
+                                            gfni_block!(mat_lo_e, mat_hi_e, ptr_e);
+                                            gfni_block!(mat_lo_f, mat_hi_f, ptr_f);
+                                            gfni_block!(mat_lo_g, mat_hi_g, ptr_g);
+                                            gfni_block!(mat_lo_h, mat_hi_h, ptr_h);
+
+                                            ptr_in = ptr_in.add(1);
+                                            ptr_a = ptr_a.add(1);
+                                            ptr_b = ptr_b.add(1);
+                                            ptr_c = ptr_c.add(1);
+                                            ptr_d = ptr_d.add(1);
+                                            ptr_e = ptr_e.add(1);
+                                            ptr_f = ptr_f.add(1);
+                                            ptr_g = ptr_g.add(1);
+                                            ptr_h = ptr_h.add(1);
+                                        }
+
+                                        if remainder > 0 {
+                                            let ow = blocks_32 * 16;
+                                            let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                            let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                            let mut pw_c = chunk_c[ow..].as_mut_ptr();
+                                            let mut pw_d = chunk_d[ow..].as_mut_ptr();
+                                            let mut pw_e = chunk_e[ow..].as_mut_ptr();
+                                            let mut pw_f = chunk_f[ow..].as_mut_ptr();
+                                            let mut pw_g = chunk_g[ow..].as_mut_ptr();
+                                            let mut pw_h = chunk_h[ow..].as_mut_ptr();
+                                            let mut p_in = slice_chunk[blocks_32 * 32..].as_ptr();
+                                            let tail_end = p_in.add(remainder);
+                                            while p_in < tail_end {
+                                                let lo = *p_in as usize;
+                                                let hi = *p_in.add(1) as usize;
+                                                *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                                *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                                *pw_c ^= tlow_c[lo] ^ thigh_c[hi];
+                                                *pw_d ^= tlow_d[lo] ^ thigh_d[hi];
+                                                *pw_e ^= tlow_e[lo] ^ thigh_e[hi];
+                                                *pw_f ^= tlow_f[lo] ^ thigh_f[hi];
+                                                *pw_g ^= tlow_g[lo] ^ thigh_g[hi];
+                                                *pw_h ^= tlow_h[lo] ^ thigh_h[hi];
+                                                pw_a = pw_a.add(1);
+                                                pw_b = pw_b.add(1);
+                                                pw_c = pw_c.add(1);
+                                                pw_d = pw_d.add(1);
+                                                pw_e = pw_e.add(1);
+                                                pw_f = pw_f.add(1);
+                                                pw_g = pw_g.add(1);
+                                                pw_h = pw_h.add(1);
+                                                p_in = p_in.add(2);
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                    }
                     [buf_a, buf_b, buf_c, buf_d] => {
                         let base_a = i * n_queued;
                         let base_b = (i + 1) * n_queued;
@@ -1602,17 +1765,127 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        // 2D parallel loop: outer = recovery block pairs, inner = 32 KiB chunks of
-        // each recovery buffer. Total rayon tasks = (n_rec/2) × (slice_words/16384),
-        // saturating all available cores instead of the previous n_rec/2 ceiling.
-        let chunk_size = 16384usize; // 32 KiB recovery buffer chunk stays in L1/L2
+        // 2D parallel loop: outer = recovery block groups, inner = 32 KiB chunks of
+        // each recovery buffer. 4 × 32 KiB = 128 KiB fits comfortably in L2 on all
+        // current AVX-512 CPUs (512 KB L2 on Ice Lake/Sapphire Rapids).
+        let chunk_size = 16384usize;
 
         buffers
-            .par_chunks_mut(2)
+            .par_chunks_mut(4)
             .enumerate()
-            .for_each(|(pair_idx, buf_pair)| {
-                let i = pair_idx * 2;
-                match buf_pair {
+            .for_each(|(group_idx, buf_group)| {
+                let i = group_idx * 4;
+                match buf_group {
+                    // 4-way: one input load + deinterleave feeds 4 recovery blocks.
+                    [buf_a, buf_b, buf_c, buf_d] => {
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        let base_c = (i + 2) * n_queued;
+                        let base_d = (i + 3) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size)
+                            .zip(buf_b.par_chunks_mut(chunk_size))
+                            .zip(buf_c.par_chunks_mut(chunk_size))
+                            .zip(buf_d.par_chunks_mut(chunk_size))
+                            .enumerate()
+                            .for_each(
+                                |(chunk_idx, (((chunk_a, chunk_b), chunk_c), chunk_d))| unsafe {
+                                    let byte_offset = chunk_idx * chunk_size * 2;
+                                    let byte_len = chunk_a.len() * 2;
+                                    let blocks_64 = byte_len / 64;
+                                    let remainder = byte_len % 64;
+
+                                    for q_idx in 0..n_queued {
+                                        let (mat_lo_a, mat_hi_a, ref tlow_a, ref thigh_a) =
+                                            all_tables[base_a + q_idx];
+                                        let (mat_lo_b, mat_hi_b, ref tlow_b, ref thigh_b) =
+                                            all_tables[base_b + q_idx];
+                                        let (mat_lo_c, mat_hi_c, ref tlow_c, ref thigh_c) =
+                                            all_tables[base_c + q_idx];
+                                        let (mat_lo_d, mat_hi_d, ref tlow_d, ref thigh_d) =
+                                            all_tables[base_d + q_idx];
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                        let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
+                                        let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m512i;
+                                        let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m512i;
+                                        let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m512i;
+                                        let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m512i;
+                                        let end = ptr_in.add(blocks_64);
+
+                                        while ptr_in < end {
+                                            let input = _mm512_loadu_si512(ptr_in.cast());
+                                            let separated = _mm512_shuffle_epi8(input, deint_mask);
+
+                                            macro_rules! gfni512_block {
+                                                ($mat_lo:expr, $mat_hi:expr, $ptr:expr) => {{
+                                                    let vlo = _mm512_gf2p8affine_epi64_epi8(
+                                                        separated, $mat_lo, 0,
+                                                    );
+                                                    let vhi = _mm512_gf2p8affine_epi64_epi8(
+                                                        separated, $mat_hi, 0,
+                                                    );
+                                                    let out = _mm512_unpacklo_epi8(
+                                                        _mm512_xor_si512(
+                                                            vlo,
+                                                            _mm512_bsrli_epi128::<8>(vlo),
+                                                        ),
+                                                        _mm512_xor_si512(
+                                                            vhi,
+                                                            _mm512_bsrli_epi128::<8>(vhi),
+                                                        ),
+                                                    );
+                                                    _mm512_storeu_si512(
+                                                        ($ptr as *mut __m512i).cast(),
+                                                        _mm512_xor_si512(
+                                                            _mm512_loadu_si512(
+                                                                ($ptr as *const __m512i).cast(),
+                                                            ),
+                                                            out,
+                                                        ),
+                                                    );
+                                                }};
+                                            }
+
+                                            gfni512_block!(mat_lo_a, mat_hi_a, ptr_a);
+                                            gfni512_block!(mat_lo_b, mat_hi_b, ptr_b);
+                                            gfni512_block!(mat_lo_c, mat_hi_c, ptr_c);
+                                            gfni512_block!(mat_lo_d, mat_hi_d, ptr_d);
+
+                                            ptr_in = ptr_in.add(1);
+                                            ptr_a = ptr_a.add(1);
+                                            ptr_b = ptr_b.add(1);
+                                            ptr_c = ptr_c.add(1);
+                                            ptr_d = ptr_d.add(1);
+                                        }
+
+                                        if remainder > 0 {
+                                            let ow = blocks_64 * 32;
+                                            let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                            let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                            let mut pw_c = chunk_c[ow..].as_mut_ptr();
+                                            let mut pw_d = chunk_d[ow..].as_mut_ptr();
+                                            let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
+                                            let tail_end = p_in.add(remainder);
+                                            while p_in < tail_end {
+                                                let lo = *p_in as usize;
+                                                let hi = *p_in.add(1) as usize;
+                                                *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                                *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                                *pw_c ^= tlow_c[lo] ^ thigh_c[hi];
+                                                *pw_d ^= tlow_d[lo] ^ thigh_d[hi];
+                                                pw_a = pw_a.add(1);
+                                                pw_b = pw_b.add(1);
+                                                pw_c = pw_c.add(1);
+                                                pw_d = pw_d.add(1);
+                                                p_in = p_in.add(2);
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                    }
                     [buf_a, buf_b] => {
                         let base_a = i * n_queued;
                         let base_b = (i + 1) * n_queued;
@@ -1623,7 +1896,6 @@ impl RecoveryEncoder {
                             .for_each(|(chunk_idx, (chunk_a, chunk_b))| unsafe {
                                 let byte_offset = chunk_idx * chunk_size * 2;
                                 let byte_len = chunk_a.len() * 2;
-                                // 512-bit (64-byte) iterations; remainder handled by scalar path.
                                 let blocks_64 = byte_len / 64;
                                 let remainder = byte_len % 64;
 

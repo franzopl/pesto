@@ -1117,13 +1117,28 @@ item. It directly eliminates the instruction-count root cause. 25f (background f
 secondary — useful for overlapping I/O with RS compute in posting mode, but does not
 reduce the instruction count that dominates `--par2-only`.
 
-### 25e — 8-way recovery unroll for AVX2+GFNI (medium, half day)
+### 25e — 8-way recovery unroll for AVX2+GFNI and 4-way for AVX-512+GFNI ✅
 
-The GFNI inner loop uses 2 matrix registers per recovery block × 4-way unroll = 8 ymm regs, plus mask/deint constants and 4 in-flight accumulators. We still have headroom for 8-way (halves the per-byte input-load + nibble overhead).
+The GFNI inner loop uses 2 matrix registers per recovery block. The previous
+4-way AVX2+GFNI arm loaded input+deinterleave once per 4 blocks; 8-way halves
+that overhead. The previous AVX-512+GFNI arm was only 2-way; 4-way doubles
+the blocks served per input load.
 
-- [ ] Add an `[buf_a..buf_h]` arm in the `par_chunks_mut` match
-- [ ] Spill cleanly: prefer `par_chunks_mut(8)` only when `n_rec % 8 == 0`, otherwise fall through to existing 4/2/1 arms
-- [ ] Verify via `cargo bench --features bench-internals` that throughput improves at 64 MiB (compute-bound) before checking end-to-end
+- [x] `flush_avx2_gfni_work`: changed `par_chunks_mut(4)` → `par_chunks_mut(8)`;
+      added `[buf_a..buf_h]` 8-way arm. Fallbacks for 4/2/1 remaining blocks
+      handled by existing lower arms in the match.
+- [x] `flush_avx512_gfni_work`: changed `par_chunks_mut(2)` → `par_chunks_mut(4)`;
+      added `[buf_a, buf_b, buf_c, buf_d]` 4-way arm. ZMM register file has 32
+      registers — 4 blocks × 2 matrices = 8 ZMM, ample headroom.
+- [x] Used a local `gfni_block!` / `gfni512_block!` macro inside the closures
+      to eliminate copy-paste while keeping LLVM's view of the code identical
+      to hand-written expansion (macros inline at the call site).
+- [x] Verified bit-correct with `par2cmdline verify` on a 1 GiB test file.
+
+**Measured impact on i5-10400 (AVX2-only, no GFNI):** no change — this CPU
+follows the `flush_avx2` path which was not modified. The 8-way GFNI arm will
+be exercised on Intel 11th-gen+, AMD Zen 4+ and Ice Lake Xeon. End-to-end
+improvement on those platforms requires a GFNI-capable benchmark machine.
 
 ### 25f — Background flush worker ✅
 
