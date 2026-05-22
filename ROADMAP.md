@@ -1140,6 +1140,24 @@ follows the `flush_avx2` path which was not modified. The 8-way GFNI arm will
 be exercised on Intel 11th-gen+, AMD Zen 4+ and Ice Lake Xeon. End-to-end
 improvement on those platforms requires a GFNI-capable benchmark machine.
 
+### 25e2 — 8-way recovery unroll for plain AVX2 nibble-shuffle ✅
+
+Extended the same unrolling strategy to `flush_avx2_work` (the nibble-shuffle
+path used on AVX2-only hardware with no GFNI).
+
+- [x] Changed `par_chunks_mut(4)` → `par_chunks_mut(8)` in `flush_avx2_work`.
+- [x] Added `[buf_a..buf_h]` 8-way arm before the existing 4/2/rest arms.
+      One `_mm256_loadu_si256` + two `_mm256_and_si256`/`_mm256_srli_epi16`
+      nibble decompositions now serve 8 recovery blocks instead of 4, halving
+      the input-load and deinterleave overhead per byte.
+- [x] Used a local `pshufb_block!` macro (n0_2, n1_3, mask_even passed as
+      parameters to avoid Rust's macro hygiene restriction).
+- [x] Existing 4/2/rest arms cover remainder blocks when `n_rec % 8 ≠ 0`.
+- [x] All 253 unit + integration tests pass; clippy and fmt clean.
+
+**Expected impact on i5-10400:** reduces per-byte instruction count in the hot
+RS loop. End-to-end measurement required on the hardware to confirm gap closure.
+
 ### 25f — Background flush worker ✅
 
 `flush()` previously ran to completion inline; the tokio reader was blocked via

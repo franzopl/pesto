@@ -586,22 +586,314 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        // 2D parallel loop: outer dimension = recovery block pairs (91 tasks for 183
-        // blocks), inner dimension = 32 KiB chunks of each recovery buffer (960 chunks
-        // for a 30 MiB slice). Total rayon tasks = 91 × 960 = ~87 K, saturating all
-        // available cores instead of the previous 91-task ceiling.
-        //
-        // Each rayon task handles a group of consecutive recovery blocks (4× unrolling
-        // over the recovery dimension). One input load + one nibble decomposition serves
-        // all blocks in the group, halving the load and AND/SRL overhead per byte processed.
+        // 2D parallel loop: outer dimension = recovery block groups (8× unrolling),
+        // inner dimension = 32 KiB chunks of each recovery buffer.  One input load +
+        // one nibble decomposition (AND + SRL) serves all 8 blocks in the group,
+        // halving the per-byte overhead compared with the previous 4-way arm.
+        // Remainder groups of 4 or 2 fall to the narrower arms; 1/3/5/6/7 fall to
+        // the scalar `rest` arm.
         let chunk_size = 16384usize; // 32 KiB recovery buffer chunk (see avx2_gfni A/B notes)
 
         buffers
-            .par_chunks_mut(4)
+            .par_chunks_mut(8)
             .enumerate()
             .for_each(|(group_idx, buf_group)| {
-                let i = group_idx * 4;
+                let i = group_idx * 8;
                 match buf_group {
+                    // 8-way unroll: one input load + one nibble decomposition feeds 8 recovery blocks.
+                    [buf_a, buf_b, buf_c, buf_d, buf_e, buf_f, buf_g, buf_h] => {
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        let base_c = (i + 2) * n_queued;
+                        let base_d = (i + 3) * n_queued;
+                        let base_e = (i + 4) * n_queued;
+                        let base_f = (i + 5) * n_queued;
+                        let base_g = (i + 6) * n_queued;
+                        let base_h = (i + 7) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size)
+                            .zip(buf_b.par_chunks_mut(chunk_size))
+                            .zip(buf_c.par_chunks_mut(chunk_size))
+                            .zip(buf_d.par_chunks_mut(chunk_size))
+                            .zip(buf_e.par_chunks_mut(chunk_size))
+                            .zip(buf_f.par_chunks_mut(chunk_size))
+                            .zip(buf_g.par_chunks_mut(chunk_size))
+                            .zip(buf_h.par_chunks_mut(chunk_size))
+                            .enumerate()
+                            .for_each(
+                                |(
+                                    chunk_idx,
+                                    (
+                                        (
+                                            (
+                                                ((((chunk_a, chunk_b), chunk_c), chunk_d), chunk_e),
+                                                chunk_f,
+                                            ),
+                                            chunk_g,
+                                        ),
+                                        chunk_h,
+                                    ),
+                                )| unsafe {
+                                    let byte_offset = chunk_idx * chunk_size * 2;
+                                    let byte_len = chunk_a.len() * 2;
+                                    let blocks_32 = byte_len / 32;
+                                    let remainder = byte_len % 32;
+
+                                    for q_idx in 0..n_queued {
+                                        let (
+                                            v_tl_l_a,
+                                            v_tl_h_a,
+                                            v_th_l_a,
+                                            v_th_h_a,
+                                            v_hl_l_a,
+                                            v_hl_h_a,
+                                            v_hh_l_a,
+                                            v_hh_h_a,
+                                            ref tlow_a,
+                                            ref thigh_a,
+                                        ) = all_tables[base_a + q_idx];
+                                        let (
+                                            v_tl_l_b,
+                                            v_tl_h_b,
+                                            v_th_l_b,
+                                            v_th_h_b,
+                                            v_hl_l_b,
+                                            v_hl_h_b,
+                                            v_hh_l_b,
+                                            v_hh_h_b,
+                                            ref tlow_b,
+                                            ref thigh_b,
+                                        ) = all_tables[base_b + q_idx];
+                                        let (
+                                            v_tl_l_c,
+                                            v_tl_h_c,
+                                            v_th_l_c,
+                                            v_th_h_c,
+                                            v_hl_l_c,
+                                            v_hl_h_c,
+                                            v_hh_l_c,
+                                            v_hh_h_c,
+                                            ref tlow_c,
+                                            ref thigh_c,
+                                        ) = all_tables[base_c + q_idx];
+                                        let (
+                                            v_tl_l_d,
+                                            v_tl_h_d,
+                                            v_th_l_d,
+                                            v_th_h_d,
+                                            v_hl_l_d,
+                                            v_hl_h_d,
+                                            v_hh_l_d,
+                                            v_hh_h_d,
+                                            ref tlow_d,
+                                            ref thigh_d,
+                                        ) = all_tables[base_d + q_idx];
+                                        let (
+                                            v_tl_l_e,
+                                            v_tl_h_e,
+                                            v_th_l_e,
+                                            v_th_h_e,
+                                            v_hl_l_e,
+                                            v_hl_h_e,
+                                            v_hh_l_e,
+                                            v_hh_h_e,
+                                            ref tlow_e,
+                                            ref thigh_e,
+                                        ) = all_tables[base_e + q_idx];
+                                        let (
+                                            v_tl_l_f,
+                                            v_tl_h_f,
+                                            v_th_l_f,
+                                            v_th_h_f,
+                                            v_hl_l_f,
+                                            v_hl_h_f,
+                                            v_hh_l_f,
+                                            v_hh_h_f,
+                                            ref tlow_f,
+                                            ref thigh_f,
+                                        ) = all_tables[base_f + q_idx];
+                                        let (
+                                            v_tl_l_g,
+                                            v_tl_h_g,
+                                            v_th_l_g,
+                                            v_th_h_g,
+                                            v_hl_l_g,
+                                            v_hl_h_g,
+                                            v_hh_l_g,
+                                            v_hh_h_g,
+                                            ref tlow_g,
+                                            ref thigh_g,
+                                        ) = all_tables[base_g + q_idx];
+                                        let (
+                                            v_tl_l_h,
+                                            v_tl_h_h,
+                                            v_th_l_h,
+                                            v_th_h_h,
+                                            v_hl_l_h,
+                                            v_hl_h_h,
+                                            v_hh_l_h,
+                                            v_hh_h_h,
+                                            ref tlow_h,
+                                            ref thigh_h,
+                                        ) = all_tables[base_h + q_idx];
+
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+
+                                        let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
+                                        let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_e = chunk_e.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_f = chunk_f.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_g = chunk_g.as_mut_ptr() as *mut __m256i;
+                                        let mut ptr_h = chunk_h.as_mut_ptr() as *mut __m256i;
+                                        let end = ptr_in.add(blocks_32);
+
+                                        macro_rules! pshufb_block {
+                                            ($tll:expr, $tlh:expr, $thl:expr, $thh:expr,
+                                             $hll:expr, $hlh:expr, $hhl:expr, $hhh:expr,
+                                             $n02:expr, $n13:expr, $me:expr,
+                                             $ptr:expr) => {{
+                                                let rle = _mm256_xor_si256(
+                                                    _mm256_shuffle_epi8($tll, $n02),
+                                                    _mm256_shuffle_epi8($tlh, $n13),
+                                                );
+                                                let rhe = _mm256_xor_si256(
+                                                    _mm256_shuffle_epi8($thl, $n02),
+                                                    _mm256_shuffle_epi8($thh, $n13),
+                                                );
+                                                let rlo = _mm256_xor_si256(
+                                                    _mm256_shuffle_epi8($hll, $n02),
+                                                    _mm256_shuffle_epi8($hlh, $n13),
+                                                );
+                                                let rho = _mm256_xor_si256(
+                                                    _mm256_shuffle_epi8($hhl, $n02),
+                                                    _mm256_shuffle_epi8($hhh, $n13),
+                                                );
+                                                let out = _mm256_or_si256(
+                                                    _mm256_and_si256(
+                                                        _mm256_xor_si256(
+                                                            rle,
+                                                            _mm256_srli_epi16(rlo, 8),
+                                                        ),
+                                                        $me,
+                                                    ),
+                                                    _mm256_slli_epi16(
+                                                        _mm256_xor_si256(
+                                                            rhe,
+                                                            _mm256_srli_epi16(rho, 8),
+                                                        ),
+                                                        8,
+                                                    ),
+                                                );
+                                                _mm256_storeu_si256(
+                                                    $ptr,
+                                                    _mm256_xor_si256(_mm256_loadu_si256($ptr), out),
+                                                );
+                                            }};
+                                        }
+
+                                        while ptr_in < end {
+                                            _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
+                                            let input = _mm256_loadu_si256(ptr_in);
+                                            let n0_2 = _mm256_and_si256(input, mask_f);
+                                            let n1_3 = _mm256_and_si256(
+                                                _mm256_srli_epi16(input, 4),
+                                                mask_f,
+                                            );
+
+                                            pshufb_block!(
+                                                v_tl_l_a, v_tl_h_a, v_th_l_a, v_th_h_a, v_hl_l_a,
+                                                v_hl_h_a, v_hh_l_a, v_hh_h_a, n0_2, n1_3,
+                                                mask_even, ptr_a
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_b, v_tl_h_b, v_th_l_b, v_th_h_b, v_hl_l_b,
+                                                v_hl_h_b, v_hh_l_b, v_hh_h_b, n0_2, n1_3,
+                                                mask_even, ptr_b
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_c, v_tl_h_c, v_th_l_c, v_th_h_c, v_hl_l_c,
+                                                v_hl_h_c, v_hh_l_c, v_hh_h_c, n0_2, n1_3,
+                                                mask_even, ptr_c
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_d, v_tl_h_d, v_th_l_d, v_th_h_d, v_hl_l_d,
+                                                v_hl_h_d, v_hh_l_d, v_hh_h_d, n0_2, n1_3,
+                                                mask_even, ptr_d
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_e, v_tl_h_e, v_th_l_e, v_th_h_e, v_hl_l_e,
+                                                v_hl_h_e, v_hh_l_e, v_hh_h_e, n0_2, n1_3,
+                                                mask_even, ptr_e
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_f, v_tl_h_f, v_th_l_f, v_th_h_f, v_hl_l_f,
+                                                v_hl_h_f, v_hh_l_f, v_hh_h_f, n0_2, n1_3,
+                                                mask_even, ptr_f
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_g, v_tl_h_g, v_th_l_g, v_th_h_g, v_hl_l_g,
+                                                v_hl_h_g, v_hh_l_g, v_hh_h_g, n0_2, n1_3,
+                                                mask_even, ptr_g
+                                            );
+                                            pshufb_block!(
+                                                v_tl_l_h, v_tl_h_h, v_th_l_h, v_th_h_h, v_hl_l_h,
+                                                v_hl_h_h, v_hh_l_h, v_hh_h_h, n0_2, n1_3,
+                                                mask_even, ptr_h
+                                            );
+
+                                            ptr_in = ptr_in.add(1);
+                                            ptr_a = ptr_a.add(1);
+                                            ptr_b = ptr_b.add(1);
+                                            ptr_c = ptr_c.add(1);
+                                            ptr_d = ptr_d.add(1);
+                                            ptr_e = ptr_e.add(1);
+                                            ptr_f = ptr_f.add(1);
+                                            ptr_g = ptr_g.add(1);
+                                            ptr_h = ptr_h.add(1);
+                                        }
+
+                                        if remainder > 0 {
+                                            let ow = blocks_32 * 16;
+                                            let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                            let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                            let mut pw_c = chunk_c[ow..].as_mut_ptr();
+                                            let mut pw_d = chunk_d[ow..].as_mut_ptr();
+                                            let mut pw_e = chunk_e[ow..].as_mut_ptr();
+                                            let mut pw_f = chunk_f[ow..].as_mut_ptr();
+                                            let mut pw_g = chunk_g[ow..].as_mut_ptr();
+                                            let mut pw_h = chunk_h[ow..].as_mut_ptr();
+                                            let mut p_in = slice_chunk[blocks_32 * 32..].as_ptr();
+                                            let tail_end = p_in.add(remainder);
+                                            while p_in < tail_end {
+                                                let lo = *p_in as usize;
+                                                let hi = *p_in.add(1) as usize;
+                                                *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                                *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                                *pw_c ^= tlow_c[lo] ^ thigh_c[hi];
+                                                *pw_d ^= tlow_d[lo] ^ thigh_d[hi];
+                                                *pw_e ^= tlow_e[lo] ^ thigh_e[hi];
+                                                *pw_f ^= tlow_f[lo] ^ thigh_f[hi];
+                                                *pw_g ^= tlow_g[lo] ^ thigh_g[hi];
+                                                *pw_h ^= tlow_h[lo] ^ thigh_h[hi];
+                                                pw_a = pw_a.add(1);
+                                                pw_b = pw_b.add(1);
+                                                pw_c = pw_c.add(1);
+                                                pw_d = pw_d.add(1);
+                                                pw_e = pw_e.add(1);
+                                                pw_f = pw_f.add(1);
+                                                pw_g = pw_g.add(1);
+                                                pw_h = pw_h.add(1);
+                                                p_in = p_in.add(2);
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                    }
                     [buf_a, buf_b, buf_c, buf_d] => {
                         // 4× unrolled: four recovery blocks share one input load.
                         let base_a = i * n_queued;
