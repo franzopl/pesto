@@ -1010,6 +1010,16 @@ Baseline measurement on i5-14400 (16 threads, GFNI+AVX2, no AVX-512), `bench_pes
 
 Internal SIMD bench (`cargo bench --features bench-internals`) shows the GFNI+AVX2 kernel at **1991–2348 MiB/s** on warm 64–256 MiB workloads — i.e. the RS math is ~4× faster than the end-to-end number. The bottleneck is the *pipeline* (stop-the-world flush, double copies, single reader), not the SIMD kernel. Pesto already wins on 10G because parpar runs into the same memory ceiling; the goal of this phase is to win on 1G and 5G too.
 
+**i5-10400 (Comet Lake, 6 cores / 12 HT, AVX2 only, no GFNI), `bench_pesto_vs_parpar.sh`, `--par2 10`:**
+
+| File | Pesto MB/s | Parpar-12t MB/s | Parpar-6t MB/s | Pesto vs Parpar |
+|------|----------:|---------------:|---------------:|----------------:|
+| 1G   | 360.7 | 475.0 | 464.4 | −25.0% |
+| 5G   | 329.7 | 437.2 | 437.6 | −24.7% |
+| 10G  | 333.0 | 416.2 | 406.8 | −20.8% |
+
+Key finding: **parpar -t 6 ≈ parpar -t 12** (≤ 3% delta) — the RS workload saturates memory bandwidth with 6 physical cores; HyperThreading adds nothing. Pesto already uses 6 rayon threads (`performance_core_count()` → `physical_core_count()` on this non-hybrid CPU). The ~24% gap is therefore 100% pipeline and kernel efficiency, not threading. On AVX2-only hardware the GFNI speedup is unavailable, so this gap is harder to close than on GFNI machines — items 25f and 25g are the highest-leverage levers here.
+
 Items are listed in order of expected win-per-effort.
 
 ### 25Z — `flush_avx2_gfni` correctness bug diagnosed and fixed ✅
@@ -1042,6 +1052,9 @@ i5-14400 reports 16 logical threads (6P+HT + 4E). `configure_rayon` was already 
 - [x] Falls back to `physical_core_count()` on non-hybrid or non-Linux systems
 - [x] Wired into `configure_rayon` and the `Par2EncodeStarted` `threads` event
 - [x] Measured on i5-14400: P-cores only is faster than physical core count by ~2% on 5G
+
+**Validation on pure-HT CPU (i5-10400, 6 cores / 12 logical, no E-cores, AVX2 only):**
+On this CPU `performance_core_count()` correctly returns `physical_core_count()` = 6 (all cores are HT-paired, none are solo, so the hybrid branch is never taken). A/B of parpar `-t 6` vs `-t 12` shows ≤ 3% difference — the RS workload hits the memory bandwidth ceiling with 6 physical cores and HyperThreading does not help further. Thread count is confirmed **not** the bottleneck on this hardware; the remaining gap (≈ 28% on AVX2-only hardware) is entirely pipeline and kernel efficiency.
 
 ### 25c — Recycle queued slice buffers ✅
 
@@ -1116,8 +1129,9 @@ The producer reads files strictly sequentially. With multiple input files (and e
 The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominated by warm-up).
 
 - [ ] Run each tool 3× per file and report the median
-- [ ] Drop OS caches between runs (`vmtouch -e <file>` works without sudo)
-- [ ] Report wall, user, sys separately so we can spot CPU-utilization regressions
+- [ ] Drop OS caches between runs (`vmtouch -e <file>` works without sudo; the current `echo 3 > /proc/sys/vm/drop_caches` requires sudo which silently fails on many setups)
+- [ ] Report wall, user, sys separately (via `/usr/bin/time -v`) so we can spot CPU-utilization regressions and confirm thread count
+- [ ] Add a `-t N` column for parpar to isolate thread-count effects in a single run (validated on i5-10400: parpar -t 6 ≈ parpar -t 12, ≤ 3% difference — memory-bandwidth limited)
 
 ### Definition of done
 
