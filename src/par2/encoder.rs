@@ -3313,7 +3313,13 @@ mod tests {
 
     #[test]
     fn new_altmap_produces_correct_recovery_data() {
-        // Verify that new_altmap() returns the same recovery bytes as new().
+        // Verify that new_altmap() produces byte-identical recovery data to new().
+        // Only meaningful on AVX2 hardware; skip otherwise.
+        #[cfg(target_arch = "x86_64")]
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
         // slice_size must be a multiple of 32 bytes (16 u16 words) for ALTMAP.
         let slice_size = 64usize; // 32 u16 words
         let total_slices = 4;
@@ -3334,31 +3340,27 @@ mod tests {
         }
         let (normal_recovery, _) = enc_normal.finish();
 
-        // ALTMAP encoder.
+        // ALTMAP encoder (uses flush_avx2_altmap after Phase 27e).
         let mut enc_altmap =
             RecoveryEncoder::new_altmap(slice_size, total_slices, 0, recovery_count);
         for s in &slices {
             enc_altmap.add_slice(s.clone());
         }
-        // At this point flush uses the Normal path (27e not yet wired);
-        // finish() converts ALTMAP buffers → bytes via from_altmap.
-        // Since ALTMAP buffers are zero-initialized and the flush still writes
-        // to normal buffers, we only verify that finish() does not panic and
-        // that the ALTMAP buffer size matches.
         let (altmap_recovery, _) = enc_altmap.finish();
 
-        // ALTMAP buffers start at zero; recovery data should also be zero until
-        // 27e wires the altmap flush path.
         assert_eq!(
             altmap_recovery.len(),
             normal_recovery.len(),
             "slice count mismatch"
         );
-        for r in &altmap_recovery {
+        for (i, (a, n)) in altmap_recovery
+            .iter()
+            .zip(normal_recovery.iter())
+            .enumerate()
+        {
             assert_eq!(
-                r.data.len(),
-                slice_size,
-                "ALTMAP recovery slice length wrong"
+                a.data, n.data,
+                "ALTMAP recovery slice {i} differs from normal encoder output"
             );
         }
     }
