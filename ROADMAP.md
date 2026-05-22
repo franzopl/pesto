@@ -1135,13 +1135,33 @@ The GFNI inner loop uses 2 matrix registers per recovery block × 4-way unroll =
 - [ ] Keep current single-thread path under a feature flag during validation
 - [ ] Target: lift 1G/5G from ~490 MB/s towards the 1700+ MB/s SIMD ceiling, capped by disk read
 
-### 25g — Skip the article-buffer round trip in `--par2-only` (medium, half day)
+### 25g — Skip the article-buffer round trip in `--par2-only` ✅
 
 In `--par2-only` mode, articles are produced only to feed `par2_accum`, then released. The `extend_from_slice` is a redundant pass over the input.
 
-- [ ] When `tx_opt.is_none()` (par2-only), bypass the article reader and use a dedicated reader that `pread`s directly into pooled `par2_slice_size` buffers
-- [ ] Skip yEnc segmentation entirely on this path (segments are still needed for slice geometry; compute lengths without producing data)
-- [ ] Verify zero behavioural change vs current path with a byte-for-byte PAR2 diff on a 1G test file
+- [x] Added `par2_only_ingest()` — reads source files in `par2_slice_size` chunks
+      directly into the encoder's recycled buffer, bypassing the article-channel
+      pipeline entirely. Uses unsafe spare-capacity writes to avoid the zero-init
+      overhead that `resize()` would impose.
+- [x] Gated on `tx_opt.is_none() && encoder.is_some()`; existing path unchanged for
+      posting, dry-run and `par2 = 0` edge cases.
+- [x] Emits `SegmentDone` in `article_size` increments for smooth progress display.
+- [x] Verified bit-correct with `par2cmdline verify` on a 1 GiB test file.
+
+**Measured impact (i5-10400, sparse 5 GiB file):** negligible (within run-to-run noise
+of ±5%). Root cause: the RS kernel accounts for ~99% of wall time; the per-article
+channel overhead (~7 000 sends/GiB × a few µs each ≈ tens of ms) was invisible against
+a 14 s encode. The improvement predicted by the instruction-count analysis (25d) turned
+out to be in the RS kernel itself, not the pipeline.
+
+**Expected benefit on real files (non-sparse, spinning/SSD):** avoiding the article-level
+`extend_from_slice` copy eliminates one full sequential pass over the input (5 GiB → half
+the memory-write traffic during the read phase). This benefit is masked by the sparse-file
+benchmark because page-cache reads of zeros are near-free.
+
+**Revised priority:** the remaining ~24% gap vs parpar on AVX2-only hardware is entirely
+in the RS kernel instruction count (117.8 vs 68.2 insn/byte, measured in 25d). Items 25e
+(8-way unroll) or a deeper AVX2 kernel rewrite are the correct next steps.
 
 ### 25h — Double-buffered queue (medium, half day)
 
