@@ -30,6 +30,19 @@ use crate::resume::ResumeState;
 use crate::walk::InputFile;
 use crate::yenc;
 
+/// A unit of work for the [`Par2Worker`].
+enum Par2Work {
+    /// A completed input slice to be added to the recovery set.
+    Slice {
+        /// The slice data (possibly zero-padded to `par2_slice_size`).
+        data: Vec<u8>,
+        /// The number of real (unpadded) bytes from the source file in this slice.
+        actual_len: usize,
+        /// True if this is the last slice of a file, triggering hash finalisation.
+        is_last_of_file: bool,
+    },
+}
+
 /// Wraps a [`RecoveryEncoder`] running on a dedicated OS thread so that RS
 /// flush work overlaps with the async reader and NNTP posting pipeline.
 ///
@@ -39,29 +52,69 @@ use crate::yenc;
 /// avoids re-allocating slice-sized buffers on every iteration.
 struct Par2Worker {
     /// Bounded send end — blocks naturally when the worker is mid-flush.
-    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    tx: std::sync::mpsc::SyncSender<Par2Work>,
     /// Receives buffers the worker recycled after internal flushes.
     /// Wrapped in `Mutex` so `&Par2Worker` is `Sync` (required by async tasks).
     free_rx: std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
     /// The worker thread; held until [`Par2Worker::finish`] is called.
-    handle: std::thread::JoinHandle<(Vec<crate::par2::encoder::RecoverySlice>, Vec<SliceChecksum>)>,
+    handle: std::thread::JoinHandle<(
+        Vec<crate::par2::encoder::RecoverySlice>,
+        Vec<SliceChecksum>,
+        Vec<crate::par2::encoder::FileHashes>,
+    )>,
 }
 
 impl Par2Worker {
-    fn spawn(enc: RecoveryEncoder) -> Self {
-        // Channel depth: 256 slices — enough to hold ~2 flush batches so the
-        // producer stays ahead of the worker without ever blocking on normal
-        // workloads (each batch is 128 slices or flush_limit_bytes, whichever
-        // comes first; the producer fills the next batch while the worker
-        // processes the current one).
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
-        // Return channel for recycled buffers; drop-on-full is fine — the
-        // producer falls back to a fresh allocation when the pool is empty.
+    fn spawn(enc: RecoveryEncoder, compute_hashes: bool) -> Self {
+        // Channel depth: 256 slices — enough to hold ~2 flush batches.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Par2Work>(256);
+        // Return channel for recycled buffers.
         let (free_tx, free_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(128);
 
         let handle = std::thread::spawn(move || {
+            let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+            let (hash_tx, hash_rx) = std::sync::mpsc::sync_channel::<Vec<crate::par2::encoder::FileHashes>>(1);
+
+            // Step 1: Spawn the MD5 hasher thread. It consumes Par2Work and
+            // feeds raw Vec<u8> buffers to the RS encoder thread.
+            if compute_hashes {
+                std::thread::spawn(move || {
+                    let mut hashes = Vec::new();
+                    let mut current_hasher = crate::par2::encoder::FileHasher::new();
+                    while let Ok(work) = rx.recv() {
+                        match work {
+                            Par2Work::Slice {
+                                data,
+                                actual_len,
+                                is_last_of_file,
+                            } => {
+                                current_hasher.update(&data[..actual_len]);
+                                if is_last_of_file {
+                                    hashes.push(current_hasher.finish());
+                                    current_hasher = crate::par2::encoder::FileHasher::new();
+                                }
+                                let _ = rs_tx.send(data);
+                            }
+                        }
+                    }
+                    let _ = hash_tx.send(hashes);
+                });
+            } else {
+                std::thread::spawn(move || {
+                    while let Ok(work) = rx.recv() {
+                        match work {
+                            Par2Work::Slice { data, .. } => {
+                                let _ = rs_tx.send(data);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Step 2: This thread acts as the RS encoder. It consumes slices
+            // from the hasher thread and performs Reed-Solomon flushes.
             let mut enc = enc;
-            while let Ok(slice) = rx.recv() {
+            while let Ok(slice) = rs_rx.recv() {
                 enc.add_slice(slice);
                 // After add_slice, if a flush was triggered, free_buffers holds
                 // the recycled slices. Ferry them back to the producer.
@@ -69,7 +122,13 @@ impl Par2Worker {
                     let _ = free_tx.try_send(buf); // drop if return channel is full
                 }
             }
-            enc.finish()
+            let (slices, checksums) = enc.finish();
+            let hashes = if compute_hashes {
+                hash_rx.recv().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            (slices, checksums, hashes)
         });
 
         Self {
@@ -94,13 +153,25 @@ impl Par2Worker {
     ///
     /// Blocks when the channel is full (worker mid-flush). Callers from async
     /// context must wrap with `block_in_place` so tokio can park the thread.
-    fn send_slice(&self, slice: Vec<u8>) {
+    fn send_slice(&self, slice: Vec<u8>, actual_len: usize, is_last_of_file: bool) {
         // Only errors if the worker panicked; propagate as a panic here too.
-        self.tx.send(slice).expect("par2 worker thread died");
+        self.tx
+            .send(Par2Work::Slice {
+                data: slice,
+                actual_len,
+                is_last_of_file,
+            })
+            .expect("par2 worker thread died");
     }
 
     /// Signal end-of-input, wait for the worker to finish, and return results.
-    fn finish(self) -> (Vec<crate::par2::encoder::RecoverySlice>, Vec<SliceChecksum>) {
+    fn finish(
+        self,
+    ) -> (
+        Vec<crate::par2::encoder::RecoverySlice>,
+        Vec<SliceChecksum>,
+        Vec<crate::par2::encoder::FileHashes>,
+    ) {
         drop(self.tx); // closing the channel causes rx.recv() to return Err
         self.handle.join().expect("par2 worker thread panicked")
     }
@@ -645,13 +716,19 @@ fn physical_core_count() -> usize {
 /// Pad the accumulated real bytes to the full PAR2 slice size and forward
 /// the slice to the background [`Par2Worker`]. Leaves `accum` empty (and
 /// pre-loaded with a recycled buffer) for the next slice.
-fn feed_par2_slice(accum: &mut Vec<u8>, par2_slice_size: usize, worker: &Par2Worker) {
+fn feed_par2_slice(
+    accum: &mut Vec<u8>,
+    par2_slice_size: usize,
+    worker: &Par2Worker,
+    actual_len: usize,
+    is_last_of_file: bool,
+) {
     let next = worker.take_buffer(par2_slice_size);
     let mut padded = std::mem::replace(accum, next);
     padded.resize(par2_slice_size, 0);
     // send_slice blocks only when the channel is full (worker mid-flush).
     // block_in_place keeps the tokio scheduler aware that this thread may stall.
-    tokio::task::block_in_place(|| worker.send_slice(padded));
+    tokio::task::block_in_place(|| worker.send_slice(padded, actual_len, is_last_of_file));
 }
 
 /// Base name for the PAR2 set's on-disk files. A published name may be a
@@ -729,7 +806,9 @@ async fn par2_only_ingest(
             }
 
             if slice_buf.len() >= par2_slice_size {
-                feed_par2_slice(&mut slice_buf, par2_slice_size, worker);
+                let actual_len = slice_buf.len();
+                let is_last = remaining == 0;
+                feed_par2_slice(&mut slice_buf, par2_slice_size, worker, actual_len, is_last);
                 *par2_slices_fed += 1;
                 shared.emit(ProgressEvent::Par2InputProgress {
                     done: *par2_slices_fed,
@@ -751,7 +830,8 @@ async fn par2_only_ingest(
         // Flush the final partial slice for this file (zero-padded inside
         // feed_par2_slice). No Par2InputProgress here, matching the standard path.
         if !slice_buf.is_empty() {
-            feed_par2_slice(&mut slice_buf, par2_slice_size, worker);
+            let actual_len = slice_buf.len();
+            feed_par2_slice(&mut slice_buf, par2_slice_size, worker, actual_len, true);
         }
     }
 
@@ -863,33 +943,6 @@ async fn producer(
 
     let mut all_checksums: Vec<Vec<SliceChecksum>> = vec![Vec::new(); metas.len()];
 
-    // Melhoria 2: hash each source file on its own Tokio task, running
-    // concurrently with the PAR2 encode pass so the ~13s MD5 cost overlaps
-    // with Reed-Solomon computation instead of being sequential.
-    let mut file_hash_tasks: Vec<_> = if recovery_count > 0 {
-        metas
-            .iter()
-            .map(|meta| {
-                let path = meta.path.clone();
-                tokio::spawn(async move {
-                    let mut hasher = FileHasher::new();
-                    let mut file = File::open(&path).await?;
-                    let mut buf = vec![0u8; 512 * 1024];
-                    loop {
-                        let n = file.read(&mut buf).await?;
-                        if n == 0 {
-                            break;
-                        }
-                        hasher.update(&buf[..n]);
-                    }
-                    Ok::<_, anyhow::Error>(hasher.finish())
-                })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     if recovery_count > 0 {
         let simd_method = detect_par2_simd();
         info!(
@@ -951,7 +1004,7 @@ async fn producer(
             } else {
                 enc
             };
-            Some(Par2Worker::spawn(enc))
+            Some(Par2Worker::spawn(enc, pass_idx == 0))
         } else {
             None
         };
@@ -1029,7 +1082,14 @@ async fn producer(
                         // the partial-slice flush after the loop.
                         par2_accum.extend_from_slice(&buf);
                         if par2_accum.len() >= par2_slice_size {
-                            feed_par2_slice(&mut par2_accum, par2_slice_size, worker);
+                            let actual_len = par2_accum.len();
+                            feed_par2_slice(
+                                &mut par2_accum,
+                                par2_slice_size,
+                                worker,
+                                actual_len,
+                                false,
+                            );
                             par2_slices_fed += 1;
                             shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
                                 done: par2_slices_fed,
@@ -1075,12 +1135,13 @@ async fn producer(
                     }
                 }
 
-                let _ = reader_handle.await;
+                let _ = reader_handle.await?;
 
                 // Flush the file's final, partial PAR2 slice (zero-padded).
                 if let Some(worker) = &worker_opt {
                     if !par2_accum.is_empty() {
-                        feed_par2_slice(&mut par2_accum, par2_slice_size, worker);
+                        let actual_len = par2_accum.len();
+                        feed_par2_slice(&mut par2_accum, par2_slice_size, worker, actual_len, true);
                     }
                 }
             }
@@ -1093,7 +1154,7 @@ async fn producer(
             let t_par2_compute = std::time::Instant::now();
             // finish() closes the slice channel and waits for the worker thread
             // to drain any remaining slices and run the final flush.
-            let (recovery_slices, slice_checksums) =
+            let (recovery_slices, slice_checksums, hashes) =
                 tokio::task::block_in_place(|| worker.finish());
             let par2_compute_ms = t_par2_compute.elapsed().as_millis();
             info!(
@@ -1114,17 +1175,16 @@ async fn producer(
                     all_checksums[file_idx] = cs_iter.by_ref().take(file_slices).collect();
                 }
 
-                // Melhoria 2: await the parallel file-hash tasks that have
-                // been running concurrently with the encode pass.
+                // Melhoria 2: hashes were computed during the first read pass
+                // (Single-Pass Read) to avoid redundant I/O.
                 let mut file_ids = Vec::new();
-                let mut hashes = Vec::new();
+                let mut final_hashes = Vec::new();
 
-                for (idx, task) in file_hash_tasks.drain(..).enumerate() {
-                    let fh = task.await??;
+                for (idx, fh) in hashes.into_iter().enumerate() {
                     let fid =
                         packet::compute_file_id(&fh.md5_16k, fh.length, &metas[idx].real_name);
                     file_ids.push(fid);
-                    hashes.push(fh);
+                    final_hashes.push(fh);
                 }
 
                 let main_b = packet::main_body(par2_slice_size as u64, &file_ids);
@@ -1139,7 +1199,7 @@ async fn producer(
                 base_packets.extend(pkt_main);
                 base_packets.extend(pkt_creator);
 
-                for (idx, fh) in hashes.iter().enumerate() {
+                for (idx, fh) in final_hashes.iter().enumerate() {
                     let fid = &file_ids[idx];
                     let pkt_file_desc = packet::serialize_packet(
                         &rsid,
