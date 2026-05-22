@@ -584,6 +584,108 @@ fn feed_par2_slice(accum: &mut Vec<u8>, par2_slice_size: usize, enc: &mut Recove
 /// relative path (`season01/ep01.mkv`); the PAR2 index and volume files live
 /// at a single level, so they take the top-level component (the root folder,
 /// or the file's own name for a single-file upload) as their base.
+/// `--par2-only` fast read path. Reads source files in `par2_slice_size`
+/// chunks and feeds them directly to the encoder, bypassing the article-sized
+/// channel pipeline that exists for the posting path. Each file is treated
+/// independently (slice boundaries reset at every file boundary), matching the
+/// behaviour of the standard path.
+///
+/// Emits `SegmentDone` events in `article_size` increments so the progress bar
+/// advances at the same cadence as the standard path.
+async fn par2_only_ingest(
+    metas: &[Arc<FileMeta>],
+    enc: &mut RecoveryEncoder,
+    par2_slice_size: usize,
+    article_size: usize,
+    total_slices: usize,
+    par2_slices_fed: &mut usize,
+    shared: &Arc<Shared>,
+) -> Result<()> {
+    for meta in metas {
+        if shared.cancelled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let mut file = File::open(&meta.path)
+            .await
+            .with_context(|| format!("opening `{}`", meta.path.display()))?;
+
+        // Fresh slice buffer per file — same as the standard path which calls
+        // enc.take_buffer() at the start of each file's inner loop.
+        let mut slice_buf = enc.take_buffer();
+        slice_buf.clear();
+
+        let mut remaining = meta.size as usize;
+        let mut credited: usize = 0; // bytes emitted via SegmentDone so far
+
+        while remaining > 0 {
+            if shared.cancelled.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            let space = par2_slice_size - slice_buf.len();
+            let to_read = space.min(remaining);
+
+            // Read directly into spare capacity, bypassing the zero-init that
+            // `resize` would impose. Using spare capacity avoids writing 10 GiB
+            // of zeros (one full pass over memory per 5 GiB input) that would
+            // otherwise evict RS recovery buffers from LLC.
+            //
+            // SAFETY: `read_exact` either fills every byte in the slice or
+            // returns an error. `set_len` is only reached on success, so no
+            // byte is ever observed uninitialised.
+            let base = slice_buf.len();
+            slice_buf.reserve(to_read);
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(slice_buf.as_mut_ptr().add(base), to_read)
+            };
+            file.read_exact(dst)
+                .await
+                .with_context(|| format!("reading `{}`", meta.path.display()))?;
+            unsafe { slice_buf.set_len(base + to_read) };
+            remaining -= to_read;
+
+            // Emit SegmentDone for each complete article worth of bytes consumed.
+            let consumed = meta.size as usize - remaining;
+            while credited + article_size <= consumed {
+                shared.emit(ProgressEvent::SegmentDone {
+                    file: meta.real_name.clone(),
+                    bytes: article_size as u64,
+                    ok: true,
+                });
+                credited += article_size;
+            }
+
+            if slice_buf.len() >= par2_slice_size {
+                feed_par2_slice(&mut slice_buf, par2_slice_size, enc);
+                *par2_slices_fed += 1;
+                shared.emit(ProgressEvent::Par2InputProgress {
+                    done: *par2_slices_fed,
+                    total: total_slices,
+                });
+            }
+        }
+
+        // Credit the last partial article of this file.
+        let leftover = meta.size as usize - credited;
+        if leftover > 0 {
+            shared.emit(ProgressEvent::SegmentDone {
+                file: meta.real_name.clone(),
+                bytes: leftover as u64,
+                ok: true,
+            });
+        }
+
+        // Flush the final partial slice for this file (zero-padded inside
+        // feed_par2_slice). No Par2InputProgress here, matching the standard path.
+        if !slice_buf.is_empty() {
+            feed_par2_slice(&mut slice_buf, par2_slice_size, enc);
+        }
+    }
+
+    Ok(())
+}
+
 fn par2_base(name: &str) -> &str {
     name.split('/').next().unwrap_or(name)
 }
@@ -771,116 +873,134 @@ async fn producer(
 
         let mut par2_slices_fed: usize = 0;
 
-        for meta in metas.iter() {
-            let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
-            let total_parts = segments.len() as u32;
+        // Fast path for `--par2-only`: read directly in slice-sized chunks,
+        // skipping the article-channel pipeline that exists for posting.
+        // Only used when there is recovery work to do (encoder is Some).
+        if tx_opt.is_none() {
+            if let Some(enc) = &mut encoder {
+                par2_only_ingest(
+                    &metas,
+                    enc,
+                    par2_slice_size,
+                    article_size,
+                    total_slices,
+                    &mut par2_slices_fed,
+                    &shared,
+                )
+                .await?;
+            }
+        } else {
+            for meta in metas.iter() {
+                let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
+                let total_parts = segments.len() as u32;
 
-            // Double-buffered reader task (Phase 12a): reads articles from
-            // disk into a bounded channel of capacity 2. This lets the OS
-            // begin fetching article N+1 while the producer is processing
-            // article N (PAR2 accumulation, channel send, or block_in_place).
-            let (read_tx, mut read_rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
+                // Double-buffered reader task (Phase 12a): reads articles from
+                // disk into a bounded channel of capacity 2. This lets the OS
+                // begin fetching article N+1 while the producer is processing
+                // article N (PAR2 accumulation, channel send, or block_in_place).
+                let (read_tx, mut read_rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
 
-            let reader_path = meta.path.clone();
-            let reader_shared = shared.clone();
-            let reader_segs = segments.clone();
-            let reader_handle = tokio::spawn(async move {
-                let mut file = File::open(&reader_path).await?;
-                for (offset, len) in reader_segs {
-                    // Phase 12b: acquire a buffer from the shared pool if
-                    // available, otherwise allocate. Workers return buffers
-                    // to the same pool after yEnc encoding.
-                    let buf = reader_shared.acquire_buffer(len);
-                    let mut buf = buf;
-                    file.read_exact(&mut buf).await?;
-                    if read_tx.send((offset, buf)).await.is_err() {
-                        break; // producer dropped its end (cancelled)
+                let reader_path = meta.path.clone();
+                let reader_shared = shared.clone();
+                let reader_segs = segments.clone();
+                let reader_handle = tokio::spawn(async move {
+                    let mut file = File::open(&reader_path).await?;
+                    for (offset, len) in reader_segs {
+                        // Phase 12b: acquire a buffer from the shared pool if
+                        // available, otherwise allocate. Workers return buffers
+                        // to the same pool after yEnc encoding.
+                        let buf = reader_shared.acquire_buffer(len);
+                        let mut buf = buf;
+                        file.read_exact(&mut buf).await?;
+                        if read_tx.send((offset, buf)).await.is_err() {
+                            break; // producer dropped its end (cancelled)
+                        }
                     }
-                }
-                Ok::<_, anyhow::Error>(())
-            });
+                    Ok::<_, anyhow::Error>(())
+                });
 
-            // Real bytes of the PAR2 input slice currently being assembled.
-            // Source the buffer from the encoder's free-list so subsequent files
-            // reuse allocations from earlier flushes.
-            let mut par2_accum: Vec<u8> = match encoder.as_mut() {
-                Some(enc) => enc.take_buffer(),
-                None => Vec::new(),
-            };
+                // Real bytes of the PAR2 input slice currently being assembled.
+                // Source the buffer from the encoder's free-list so subsequent files
+                // reuse allocations from earlier flushes.
+                let mut par2_accum: Vec<u8> = match encoder.as_mut() {
+                    Some(enc) => enc.take_buffer(),
+                    None => Vec::new(),
+                };
 
-            let mut i: u32 = 0;
-            while let Some((offset, buf)) = read_rx.recv().await {
-                if shared.cancelled.load(Ordering::Relaxed) {
-                    drop(read_rx);
-                    let _ = reader_handle.await;
-                    return Ok(());
-                }
-
-                // The encoder is `Some` exactly when PAR2 is enabled, so all
-                // PAR2 work — hashing, checksums, recovery — is gated on it.
-                if let Some(enc) = &mut encoder {
-                    // Append the article to the current PAR2 slice. Every
-                    // article but a file's last is exactly `article_size`, so
-                    // the accumulator reaches `par2_slice_size` precisely on
-                    // the K-th article; a short final article falls through to
-                    // the partial-slice flush after the loop.
-                    par2_accum.extend_from_slice(&buf);
-                    if par2_accum.len() >= par2_slice_size {
-                        feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
-                        par2_slices_fed += 1;
-                        shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
-                            done: par2_slices_fed,
-                            total: total_slices,
-                        });
+                let mut i: u32 = 0;
+                while let Some((offset, buf)) = read_rx.recv().await {
+                    if shared.cancelled.load(Ordering::Relaxed) {
+                        drop(read_rx);
+                        let _ = reader_handle.await;
+                        return Ok(());
                     }
-                }
 
-                i += 1;
-                if pass_idx == 0 {
-                    if let Some(tx) = &tx_opt {
-                        // Send buf to the worker; the worker will return it to
-                        // the pool (Phase 12b) after encoding the article.
-                        if tx
-                            .send(PostTask {
-                                meta: meta.clone(),
-                                part: i,
-                                total: total_parts,
-                                offset,
-                                data: buf,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            drop(read_rx);
-                            let _ = reader_handle.await;
-                            return Ok(()); // channel closed
+                    // The encoder is `Some` exactly when PAR2 is enabled, so all
+                    // PAR2 work — hashing, checksums, recovery — is gated on it.
+                    if let Some(enc) = &mut encoder {
+                        // Append the article to the current PAR2 slice. Every
+                        // article but a file's last is exactly `article_size`, so
+                        // the accumulator reaches `par2_slice_size` precisely on
+                        // the K-th article; a short final article falls through to
+                        // the partial-slice flush after the loop.
+                        par2_accum.extend_from_slice(&buf);
+                        if par2_accum.len() >= par2_slice_size {
+                            feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
+                            par2_slices_fed += 1;
+                            shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
+                                done: par2_slices_fed,
+                                total: total_slices,
+                            });
+                        }
+                    }
+
+                    i += 1;
+                    if pass_idx == 0 {
+                        if let Some(tx) = &tx_opt {
+                            // Send buf to the worker; the worker will return it to
+                            // the pool (Phase 12b) after encoding the article.
+                            if tx
+                                .send(PostTask {
+                                    meta: meta.clone(),
+                                    part: i,
+                                    total: total_parts,
+                                    offset,
+                                    data: buf,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                drop(read_rx);
+                                let _ = reader_handle.await;
+                                return Ok(()); // channel closed
+                            }
+                        } else {
+                            // No posting pool (`--par2-only`): report progress
+                            // and return the buffer to the pool immediately.
+                            let bytes = buf.len() as u64;
+                            shared.release_buffer(buf);
+                            shared.emit(ProgressEvent::SegmentDone {
+                                file: meta.real_name.clone(),
+                                bytes,
+                                ok: true,
+                            });
                         }
                     } else {
-                        // No posting pool (`--par2-only`): report progress
-                        // and return the buffer to the pool immediately.
-                        let bytes = buf.len() as u64;
+                        // Subsequent pass: buffer no longer needed; return to pool.
                         shared.release_buffer(buf);
-                        shared.emit(ProgressEvent::SegmentDone {
-                            file: meta.real_name.clone(),
-                            bytes,
-                            ok: true,
-                        });
                     }
-                } else {
-                    // Subsequent pass: buffer no longer needed; return to pool.
-                    shared.release_buffer(buf);
+                }
+
+                let _ = reader_handle.await;
+
+                // Flush the file's final, partial PAR2 slice (zero-padded).
+                if let Some(enc) = &mut encoder {
+                    if !par2_accum.is_empty() {
+                        feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
+                    }
                 }
             }
-
-            let _ = reader_handle.await;
-
-            // Flush the file's final, partial PAR2 slice (zero-padded).
-            if let Some(enc) = &mut encoder {
-                if !par2_accum.is_empty() {
-                    feed_par2_slice(&mut par2_accum, par2_slice_size, enc);
-                }
-            }
-        }
+        } // end else (standard posting path)
 
         if let Some(enc) = encoder {
             shared.emit(ProgressEvent::Status {
