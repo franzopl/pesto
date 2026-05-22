@@ -1582,15 +1582,19 @@ AND/SHIFT/OR packing needed by the plain nibble-shuffle path.
 - [x] Correctness tests: `new_shuffle2x_produces_correct_recovery_data` and
       `new_shuffle2x_exponent_start_offset` compare byte-for-byte vs normal encoder.
 
-### 28c — Dual-slice processing (medium, 3–4 h)
+### 28c — Input pre-transform (attempted; reverted)
 
-When `n_queued ≥ 2`, pack two slices' coefficient tables into the same 8 YMM
-registers (following parpar's `JOIN_VEC(prodLo0, prodHi2, i)` pattern) and process
-both slices per inner-loop iteration, halving coefficient-register reload cost:
+Tested pre-transforming all queued input slices to Shuffle2x layout in-place,
+eliminating `vpshufb + vpermq 0xD8` from the hot loop. **Result: regressed by ~10%.**
 
-- [ ] Build "paired" tables when `q_idx + 1 < n_queued`
-- [ ] Dedicated loop body for the 2-slice case; scalar pair fallback for odd remainder
-- [ ] Measure separately to confirm the second-slice amortisation pays
+Root cause: despite removing 2 instructions per block, the pre-transformation introduced
+more memory bandwidth pressure (read-modify-write per slice + re-load by kernel) and
+cache eviction. The `sep_mask` was already cache-hot in the kernel and amortized by ILP.
+Reverted to 28b state.
+
+**28c proper approach:** dual-slice processing (2 q_idx per iteration) to halve
+recovery-buffer load/store cost — significantly more complex (register pressure with
+4-way block unroll) and requires different loop structure. Deferred.
 
 ### 28d — Benchmark and gate ✅ (small, 2–3 h)
 
