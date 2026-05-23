@@ -5,1939 +5,165 @@ Each phase must leave the program in a working, testable state.
 
 ## Phase 0 — Foundation ✅
 
-- [x] `cargo init` with `main.rs` + `lib.rs`
-- [x] Module skeleton (`config`, `yenc`, `nntp`, `article`, `nzb`)
-- [x] CLI parsing with `clap`
-- [x] TOML config loading + merge with flags
-- [x] Basic CI (`fmt`, `clippy`, `test`)
+- [x] `cargo init` with `main.rs` + `lib.rs` (pesto-poster)
+- [x] Basic CLI with `clap` (derive)
+- [x] Structs for NNTP server config
+- [x] Minimal logging with `tracing-subscriber`
 
-## Phase 1 — yEnc encoding ✅
+## Phase 1 — yEnc Encoder ✅
 
-- [x] yEnc encoder following the specification (escaping of `=`, NUL, CR, LF)
-- [x] `=ybegin` / `=yend` lines with CRC32
-- [x] File segmentation into parts (`=ypart` for multi-part)
-- [x] Tests against known yEnc vectors
+- [x] Core `encode_into` function with CRC32 calculation
+- [x] Unit tests for escaping (special characters, `.` at start of line)
+- [x] Segment split logic (multi-part yEnc)
+- [x] Article header/footer generation (`=ybegin`, `=ypart`, `=yend`)
 
-## Phase 2 — NNTP client ✅
+## Phase 2 — Basic NNTP Protocol ✅
 
-- [x] TCP + TLS connection (`rustls`) on port 563
-- [x] Handshake and `AUTHINFO USER/PASS` authentication
-- [x] `POST` command (article upload, handling of 240/441 responses)
-- [x] Article assembly: headers (`Subject`, `From`, `Newsgroups`,
-      `Message-ID`) + yEnc body
-- [x] Unique `Message-ID` generation per segment
+- [x] TCP stream connection
+- [x] Text-based protocol parser (handshake, `POST`, `240` response)
+- [x] Article transmission over TCP
+- [x] Simple synchronous "post one file" proof of concept
 
-## Phase 3 — Parallel posting ✅
+## Phase 3 — Authentication & TLS ✅
 
-- [x] Pool of N concurrent TLS connections (`tokio`)
-- [x] Work queue: segments distributed across connections
-- [x] Retry of failed segments
-- [x] Progress bar / throughput in the terminal
-- [x] Flags `--connections`, `--ssl`, `--groups`
+- [x] `rustls` integration for secure connections
+- [x] NNTP `AUTHINFO USER / PASS` implementation
+- [x] Environment variable support for credentials
+- [x] Verify SSL with standard providers
 
-## Phase 4 — `.nzb` generation ✅
+## Phase 4 — Concurrent Posting Engine ✅
 
-- [x] Collect `Message-ID`s, sizes and CRCs of posted segments
-- [x] Write a valid `.nzb` XML file (nzb DTD)
-- [x] Flag `--out` for the `.nzb` path
+- [x] Connection pooling (multi-threaded workers)
+- [x] MPSC channel for work distribution (producer-consumer)
+- [x] Basic progress bar (indicative)
+- [x] Graceful shutdown (Ctrl-C)
 
-## Phase 5 — MVP polish ✅
+## Phase 5 — NZB Generation ✅
 
-- [x] Actionable error messages (network, auth, I/O)
-- [x] Ctrl-C handling / clean shutdown
-- [x] `README` with usage examples
-- [x] End-to-end integration test (mock NNTP)
+- [x] XML writer for `.nzb` format
+- [x] Capture Message-IDs from the engine
+- [x] Capturing metadata (filename, size, groups)
+- [x] Group segments into `<file>` entries
 
-**The MVP is complete.** `pesto` posts files to Usenet and writes an `.nzb`.
+## Phase 6 — Config File Support ✅
 
-## Phase 6 — Posting obfuscation ✅
+- [x] `toml` configuration file (`config.toml`)
+- [x] Merging logic (CLI flags override config file)
+- [x] Configuration for servers, auth, and posting defaults
+- [x] Support for multiple newsgroups
 
-- [x] `--obfuscate` flag and `obfuscate` config option
-- [x] Random subject and yEnc file name per file
-- [x] Real file name preserved in the `.nzb` `<file name>` attribute
-- [x] Tests for obfuscated-name generation and `.nzb` output
+## Phase 7 — PAR2 Creation Foundation ✅
 
-## Phase 7 — PAR2 generation
+- [x] Algebra of Galois (GF(2^16)) implementation
+- [x] Reed-Solomon Cauchy matrix generation
+- [x] PAR2 packet serialization (Main, File Description, IFSC)
+- [x] Volume layout (split into multiple `.par2` files)
 
-Own pure-Rust PAR2 creator — no `par2cmdline` / `parpar` dependency. Parity is
-computed in the *same single read pass* used for posting: each article, as it
-is read and yEnc-encoded for upload, is also accumulated into the Reed-Solomon
-recovery buffers. A PAR2 input slice groups several consecutive articles, since
-Reed-Solomon cost grows with `file_size² / par2_slice_size`; the group size
-targets ~1000 input slices to keep the encode affordable for large files.
+## Phase 8 — Advanced PAR2 Features ✅
 
-### 7a — GF(2^16) field and Reed-Solomon matrix
+- [x] MD5 of files (Full and 16K)
+- [x] Single-pass parity generation (while reading for yEnc)
+- [x] Optimized SIMD (AVX2/SSSE3) for RS multiplication
+- [x] Integration of PAR2 files into the `.nzb`
 
-- [x] GF(2^16) arithmetic (generator `0x1100B`), log/antilog tables
-- [x] PAR2 input-constant and recovery-exponent generation, bit-exact with
-      `par2cmdline`
-- [x] Tests cross-checked against known `par2cmdline` constants
+## Phase 9 — Local Archive & Obfuscation ✅
 
-### 7b — PAR2 packet format
+- [x] Local RAR/7z compression (calling external binaries)
+- [x] Filename obfuscation (randomized filenames in headers)
+- [x] Support for encrypted archives (password in metadata)
 
-- [x] Packet framing, MD5 packet hashes, recovery set ID
-- [x] Main, File Description, Input File Slice Checksum, Recovery Slice and
-      Creator packets
-- [x] Volume-split layout (index + `volNNN+MMM` files, exponential counts)
+## Phase 10 — Metadata & Hooks ✅
 
-### 7c — Streaming Reed-Solomon encoder
+- [x] `.nfo` file auto-generation
+- [x] Post-hook support (execution of shell scripts after upload)
+- [x] Newznab indexer integration (upload of NZB)
+- [x] Notification support (Discord/Apprise webhooks)
 
-- [x] Accumulate input slices one at a time into N recovery buffers
-- [x] Per-slice MD5 + CRC32 and per-file MD5 computed while streaming
-- [x] Validate generated PAR2 with `par2cmdline` (verify + repair)
+## Phase 11 — Error Resilience & Resume ✅
 
-### 7d — Pipeline integration
+- [x] Retry logic with exponential backoff for NNTP failures
+- [x] Resume state file (`.pesto-state`) to continue interrupted uploads
+- [x] Verification pass (deferred STAT checks)
+- [x] Detailed error reporting and actionable logs
 
-- [x] Refactor the poster into a single-reader producer feeding the posting
-      pool through a bounded channel
-- [x] Compute parity during the read pass; post PAR2 articles after the data
-- [x] Include the PAR2 files in the `.nzb`
-- [x] `--par2 <percent>` flag and config option; 10% default
+## Phase 12 — Performance & Buffer Management ✅
 
-### 7e — Performance ✅
+- [x] Double-buffered reader (read next segment while posting current)
+- [x] Buffer pool to minimize allocations/GC pressure
+- [x] Rayon integration for parallel PAR2 compute
+- [x] Rate limiting support (token bucket)
 
-- [x] SIMD GF multiply (AVX2 `pshufb` GF(2^16)), scalar fallback
-- [x] Recovery buffers partitioned across threads (`rayon`)
-- [x] `block_in_place` so the CPU-bound encoder does not stall the runtime
+## Phase 13 — Polish & UI ✅
 
-### 7f — Generation modes ✅
-
-- [x] `--par2-only` flag: write parity files next to the source, no posting
-- [x] `--dry-run` flag: process files without touching the network
-
-## Phase 8 — Configuration & UX ✅
-
-- [x] Default config path (`$XDG_CONFIG_HOME/pesto/config.toml`), loaded
-      automatically when `--config` is omitted
-- [x] Random `from` identity by default (random name and length); fixed value
-      only when the user pins one
-- [x] Interactive setup wizard (`pesto --config` with no value)
-- [x] Orientation screen when `pesto` is run with no arguments
-- [x] Expanded `--help` and `config.example.toml`; new options
-      `line_length`, `retries`, `retry_delay`, `[output].nzb`
-
-## Phase 9 — Directory uploads ✅
-
-Accept directories as arguments, not just individual files. A directory may be
-a TV-show season, or any folder with nested subfolders. The whole tree is
-posted as one logical upload, and PAR2 must let a downloader rebuild the
-original directory layout — not just a flat list of files.
-
-### 9a — Directory traversal ✅
-
-- [x] Accept directory paths as `FILE` arguments alongside plain files
-- [x] Recursive walk producing the file list, with the relative path of each
-      file preserved (root folder name kept as the top-level component)
-- [x] Deterministic ordering (sorted) so runs and PAR2 sets are reproducible
-- [x] Decide handling of empty directories, symlinks and hidden/dot files;
-      document the chosen behaviour (see `src/walk.rs` module docs)
-- [x] Reject or warn on unreadable entries with an actionable message
-
-### 9b — Structure-preserving PAR2 and `.nzb` ✅
-
-- [x] Store the relative path (with `/` separators) in the PAR2 File
-      Description packets so `par2` repair restores the directory tree
-- [x] Carry the same relative path into the `.nzb` `<file name>` attribute
-- [x] One PAR2 recovery set covering the entire directory, not per-file
-- [x] Verify with `par2cmdline` that a repair recreates nested subfolders
-- [x] Fix latent multi-file bug: PAR2 numbers input blocks in File-ID order,
-      so the encoder must process files sorted by File ID, not by name
-- [x] `--par2-only` writes the recovery set beside the root folder, so the
-      stored relative names resolve correctly
-
-### 9c — Obfuscation for directories ✅
-
-- [x] `--obfuscate` randomises subjects and yEnc names across the whole tree
-- [x] Real relative paths still preserved in PAR2 and `.nzb` so the structure
-      is recoverable despite obfuscated article names
-- [x] Tests for an obfuscated multi-folder upload round-trip
-
-### 9d — UX and naming ✅
-
-- [x] Use the root folder name as the default `.nzb` name; the subject base
-      is the file's relative path, which already starts with the root folder
-- [x] Progress panel reports total files/bytes across the whole tree
-- [x] Aggregate counts (files, subfolders, total size) in the summary output
-- [x] `--help`, `README` and `config.example.toml` updated for folder uploads
-
-## Phase 10 — `upapasta` integration ✅
-
-`upapasta` is a Python orchestrator that wraps `nyuu` for the actual posting
-step. Replacing `nyuu` with `pesto` removes the Node.js dependency and brings
-the full Rust performance to the pipeline.
-
-The bridge between the two programs is `--output-format json`: `pesto`
-emits newline-delimited JSON events to stdout; `upapasta` reads them to drive
-its own progress display and obtain the final NZB path.
-
-- [x] Stabilize the public API of `lib.rs` (types and functions needed by
-      a Rust consumer; keep the `async fn post(config, files)` surface minimal)
-- [x] Document all JSON event types emitted by `--output-format json` so
-      `upapasta` can parse them reliably
-- [x] In `upapasta`: replace the `nyuu` subprocess call in `upfolder.py` with
-      a `pesto` subprocess call; parse JSON events for progress and NZB path
-      (nyuu kept as automatic fallback when pesto is not in PATH)
-- [x] Verify that the `upapasta` obfuscation / PAR2 / compression pipeline
-      produces the same result when using `pesto` instead of `nyuu`
-- [x] Update `upapasta` install instructions and `README` to reflect the new
-      dependency (Rust binary instead of Node.js)
-
-> **Decision point:** `upapasta` still handles PAR2, compression (RAR/7z),
-> metadata enrichment, history, and webhooks. `pesto` owns *only* the
-> yEnc + NNTP + PAR2 + NZB layer. Do not duplicate orchestration logic in
-> `pesto`; keep both tools thin and composable.
-
-## Phase 11 — Reliability & resilience ✅
-
-### 11a — Multiple servers with failover ✅
-
-- [x] Support N servers in config (`[[servers]]` array of tables)
-- [x] Connections that fail reopen on the next available server (round-robin
-      rotation on each retry attempt)
-- [x] Per-server connection count; workers assigned to servers proportionally
-
-### 11b — Upload resume ✅
-
-- [x] Persist post state (posted `Message-ID`s) to a `.pesto-state` sidecar
-      file (JSON, keyed by `file_name + part`)
-- [x] On the next run, skip already-posted articles and reuse their
-      `Message-ID` so the `.nzb` is still complete and correct
-- [x] `--no-resume` flag to force a clean start
-
-### 11c — Post-verification via `STAT` ✅
-
-- [x] After posting each article, confirm with `STAT <message-id>` that the
-      server registered it (`verify = true` / `--verify`)
-- [x] Automatically repost articles that fail the check; rotate servers on
-      consecutive STAT failures
-- [x] Off by default — use `--verify` or `posting.verify = true` to enable
-
-### 11d — Rate limiting ✅
-
-- [x] `upload_rate` config option (e.g. `"50 MiB/s"`) and `--rate` flag
-- [x] Per-worker token-bucket throttle; global rate divided across connections
-      so total throughput stays at or below the configured ceiling
-
-## Phase 12 — Performance ✅
-
-### 12a — Double-buffered I/O ✅
-
-- [x] Per-file async reader task feeds a bounded channel of capacity 2 so the
-      OS can always be reading article N+1 while the producer accumulates
-      PAR2 data and sends article N to the worker pool
-- [x] Benefit is largest when the posting channel is full (workers are the
-      bottleneck): the producer never sits idle waiting for a disk read
-
-### 12b — Buffer pool ✅
-
-- [x] `Shared::acquire_buffer` / `release_buffer` methods wrapping an
-      `Arc<Mutex<Vec<Vec<u8>>>>` pool pre-seeded with `connections + 4` buffers
-- [x] Reader task acquires from pool (or allocates on miss); workers return
-      the buffer immediately after yEnc encoding; `--par2-only` path returns
-      after each article; resume fast-path also returns without allocation
-
-## Phase 13 — Compression before posting ✅
-
-Bundle files into a single archive before yEnc-encoding and uploading.
-The default format is **7z in store mode** (no compression — PAR2 handles
-integrity; store keeps the pipeline fast and avoids double-compressing already
-compressed media).
-
-- [x] `--compress [FORMAT]` flag — bundle without password; FORMAT one of
-      `7z` (default), `zip`, `rar`
-- [x] `--password [PASSWORD]` flag — bundle with password; bare flag generates
-      a random 24-character alphanumeric password and prints it; does NOT imply
-      `--compress` independently (each flag has its own purpose)
-- [x] `[compression] format` config key; `--compress` / `--password` override it
-- [x] `7z` and `zip` via the `7z` CLI (p7zip); `rar` via the `rar` binary
-      (not distributed; user must install separately)
-- [x] 7z with password uses `-mhe=on` (encrypts archive headers, hiding file
-      names); zip uses standard password (no header encryption — zip spec
-      limitation); rar uses `-hp` (header encryption)
-- [x] With `--obfuscate full`, the archive file name is randomised (32-hex)
-- [x] Password stored in `<meta type="password">` in the `.nzb` so NZBGet /
-      SABnzbd can extract automatically
-- [x] PAR2 computed over the archive; temporary archive deleted after posting
-
-## Phase 14 — Batch and watch modes ✅
-
-Derived from `upapasta` use-cases that belong in the posting layer rather than
-the orchestrator.
-
-### 14-pre-a — `--each`: per-file releases from a directory ✅
-
-- [x] When a directory is given with `--each`, treat each top-level entry
-      (file or subfolder) as an independent upload with its own NZB
-- [x] PAR2 and NZB naming follow the entry name; output files placed next to
-      the directory (or in `--out` destination if specified)
-- [x] Runs sequentially; combine with `--jobs` (below) for parallelism
-
-### 14-pre-b — `--season`: batch NZB for TV seasons ✅
-
-- [x] Post each file in a directory independently (same as `--each`) **and**
-      produce one consolidated season NZB that references all message IDs
-- [x] Consolidated NZB takes the directory name; individual NZBs are still
-      written alongside each file
-- [x] Use case: TV season folder where each episode is a separate Usenet post
-      but indexers want a single NZB for the whole season
-
-### 14-pre-c — `--jobs N`: parallel independent uploads ✅
-
-- [x] When `--each` or `--season` produces multiple independent uploads, run
-      up to N of them in parallel (each with its own connection pool)
-- [x] Default: 1 (sequential); `--jobs 0` means number of logical CPUs
-- [x] Total connection count across all jobs does not exceed `connections * N`:
-      the semaphore limits concurrency to N jobs, each opening at most
-      `connections` NNTP connections
-
-### 14-pre-d — Watch / daemon mode ✅
-
-- [x] `--watch DIR`: poll DIR for new entries and post each automatically
-- [x] Optionally imply `--each` so each new entry becomes its own release
-- [x] Configurable poll interval (`--watch-interval`, default 30 s)
-- [x] On SIGTERM/Ctrl-C: finish any in-progress upload, then exit cleanly
-- [x] Move completed entries to a `--watch-done DIR` folder (or delete) so
-      they are not re-posted on the next poll
-- [x] Designed for headless/server environments; integrates with `upapasta`
-      as a replacement for its `--watch` mode
-
-## Phase 14 — Posting features ✅
-
-### 14a — Cross-posting optimisation ✅
-
-- [x] When multiple groups are configured, send each article in a single
-      `POST` with all groups in the `Newsgroups:` header instead of separate
-      articles per group (already the case: `Article::newsgroups` is a
-      `Vec<String>` joined with commas in `serialize()`)
-- [x] `.nzb` generation already records the single `Message-ID` per article
-
-### 14b — Configurable `Date:` header ✅
-
-- [x] `date` config option (`[posting].date`): `"now"` (current UTC time),
-      `"random"` (random time within the last 30 days), or a fixed RFC 2822
-      timestamp. Omit to let the server supply the date (default behaviour)
-- [x] `--date` flag overrides the config
-- [x] RFC 2822 formatting implemented without external crates
-
-### 14c — Anonymous server support ✅
-
-- [x] `auth` section is fully optional; `AUTHINFO` is skipped automatically
-      when neither `username` nor `password` is configured
-
-### 14d — `X-No-Archive` header ✅
-
-- [x] `no_archive` boolean config option (`[posting].no_archive`) and
-      `--no-archive` flag
-- [x] When enabled, adds `X-No-Archive: yes` to every posted article
-
-### 14e — Configurable `Message-ID` domain ✅
-
-- [x] `message_id_domain` config option (`[posting].message_id_domain`)
-- [x] `--message-id-domain` flag
-- [x] When set, all articles use the fixed domain; when absent a fresh random
-      domain is generated per article (existing privacy-preserving behaviour)
-
-## Phase 15 — NZB & metadata ✅
-
-### 15a — Extended NZB metadata ✅
-
-- [x] `--nzb-name`, `--nzb-password`, `--nzb-category` flags and
-      corresponding config keys (`output.nzb_name`, `output.nzb_password`,
-      `output.nzb_category`)
-- [x] Emit `<meta type="name">`, `<meta type="password">` and
-      `<meta type="category">` elements in the `.nzb` when set
-- [x] Compatible with NZBGet and SABnzbd metadata conventions
-- [x] Archive password from `--password` still populates `<meta type="password">`
-      when `--nzb-password` is not explicitly set
-
-### 15b — Automatic NZB upload to indexers ✅
-
-- [x] `[output.indexer]` config section: `url`, `api_key`, `category`
-- [x] After a successful post, upload the generated `.nzb` via the Newznab API
-      (`POST /api?t=addnzb&apikey=KEY&cat=CATEGORY` with multipart `nzbfile`)
-- [x] `--no-upload` flag to suppress the upload for a single run
-
-### 15c — `.nfo` generation
-
-Moved to **Phase 18a**. NFO generation is now implemented natively in pesto
-(`src/nfo.rs`) and exposed via `--nfo` / `output.nfo`.
-
-## Phase 16 — Observability & UX
-
-### 16a — Per-phase progress with ETA ✅
-
-Prior to this phase the terminal panel only covered the posting step; compression
-and PAR2 recovery writing were silent (or a single `eprintln!`).
-
-- [x] Terminal renderer installed **before** compression so the panel covers
-      every phase from start to finish
-- [x] Compression phase: `compress()` runs in `spawn_blocking`; a parallel
-      200 ms polling task watches the archive file size on disk and emits
-      `CompressProgress` events; panel shows a bar, speed, and ETA
-      (tight bound in store mode: archive ≈ sum of input sizes)
-- [x] PAR2 recovery computation: status line shows elapsed time
-      (`▸ computing PAR2 recovery data · 0:12`) so the user knows the RS
-      encode is running, not stalled
-- [x] PAR2 volume writing: `Par2WriteStarted { total }` + `Par2SliceWritten`
-      events; panel shows `▸ PAR2 [████░░░░] X/Y slices · ETA N:NN`
-- [x] Non-TTY / CI mode: dedicated plain log lines for each phase
-- [x] Five new `ProgressEvent` variants: `CompressStarted`, `CompressProgress`,
-      `CompressDone`, `Par2WriteStarted`, `Par2SliceWritten`
-
-### 16b — CLI bug fixes ✅
-
-- [x] `--password` bare flag (no value → random password) failed when
-      followed by another flag; fixed by switching from `Option<Option<String>>`
-      to `Option<String>` with `default_missing_value = ""`
-- [x] `--obfuscate` without a value consumed the following positional file
-      argument as its MODE; fixed with `require_equals = true`
-- [x] `--password` (archive) and `--password` (server auth) were two flags
-      with the same long name; server auth flag renamed to `--auth-password`
-- [x] `Message-ID` domain leaked the user's server hostname (e.g.
-      `blocknews.net`); `generate_message_id()` now generates a random
-      8–15 character domain + random TLD per article, independent of `from`
-
-### 16c — JSON output mode ✅
-
-- [x] `--output-format json` flag (already wired; `spawn_json_emitter` in
-      `progress.rs` translates every `ProgressEvent` to a JSON line on stdout)
-- [x] Events: `started`, `segment_done`, `queue_extended`, `status`, `failed`,
-      `interrupted`, `finished`, `nzb_written`, `compress_*`, `par2_write_*`
-- [x] `--no-nfo` accepted as a no-op for backward compatibility with `upapasta`
-      invocations that still pass the flag
-
-### 16d — Upload history log ✅
-
-- [x] After each successful upload, append a JSON record to
-      `~/.config/upapasta/history.jsonl` — the **same file and format** used
-      by upapasta's `catalog.py`, so both tools share a single history visible
-      from the upapasta TUI
-- [x] Fields written: `data_upload`, `nome_original`, `categoria` (auto-
-      detected: Anime / TV / Movie / Generic), `nome_ofuscado`, `senha_rar`,
-      `tamanho_bytes`, `grupo_usenet`, `servidor_nntp`, `redundancia_par2`,
-      `duracao_upload_s`, `caminho_nzb`, `subject`
-- [x] NZB archived to `~/.config/upapasta/nzb/<stamp>_<name>.nzb` (hard-link,
-      fallback copy), matching upapasta behaviour
-- [x] `--history` / `--no-history` flag (default: enabled); config key
-      `output.history`; disabled automatically for `--par2-only` and `--dry-run`
-
-### 16e — Completion notifications ✅
-
-- [x] `[notify]` config section with `webhook_url` (Discord / Slack /
-      Telegram / generic HTTP POST) and `ntfy_topic` fields
-- [x] On upload completion (or failure), fire a POST with a summary payload;
-      payload format mirrors upapasta `_webhook.py` (Discord: `{"content"}`,
-      Slack/Telegram: `{"text"}`, generic: rich JSON object)
-- [x] ntfy.sh: plain-text body with `Title`, `Priority` and `Tags` headers
-- [x] `--notify` / `--no-notify` flags override the config for a run
-- [x] Errors are non-fatal — a failed notification never aborts the upload
-- [x] Notifications suppressed automatically for `--par2-only` and `--dry-run`
-
-## Phase 17 — Security & privacy
-
-### 17a — Password-protected RAR archives ✅
-
-Standard Usenet clients (NZBGet, SABnzbd) do not understand custom encryption
-applied before yEnc. What they do support is the `<meta type="password">` NZB
-field, which they use automatically when extracting **password-protected RAR
-archives** (`rar -p` / `rar -hp`). Encryption at this level is therefore
-implemented as part of Phase 13 (compression), not as a separate byte-stream
-cipher.
-
-- [x] `--password <pass>` flag and `posting.password` config option
-      (implemented in Phase 13 as `--password` / `compress_password`)
-- [x] When compressing to RAR (Phase 13), pass `-hp<pass>` (header encryption,
-      hides filenames) to `rar`; ZIP uses standard password; 7z uses `-mhe=on`
-- [x] Store the password in `<meta type="password">` in the `.nzb` so
-      NZBGet / SABnzbd can extract automatically
-- [x] Requires Phase 13 compression to be active; `--password` without
-      `--compress` implies `--compress 7z` (default format)
-
-> **Note on AES-256-GCM:** encrypting the raw byte stream before yEnc-encoding
-> was considered but removed from scope. No standard download client understands
-> this layer, so the downloaded files would be undecryptable without a custom
-> tool. If archival-only encryption ever becomes a requirement it should be
-> tracked as a separate, clearly non-interoperable feature.
-
-### 17b — Configurable `Message-ID` domain
-
-Already tracked under Phase 14e.
-
-## Phase 18 — Post-upload hooks & NFO generation ✅
-
-### 18a — NFO file generation ✅
-
-Generates a `.nfo` text file that describes the uploaded content:
-
-- [x] `--nfo` flag and `output.nfo = true` config key
-- [x] Runs `mediainfo` on the first video file found (lowest-sorted) when the
-      input contains recognisable video extensions (mkv, mp4, avi, ts, …)
-- [x] For TV season directories: `mediainfo` output for the first episode
-- [x] Falls back to a recursive directory/file listing (with sizes) when no
-      video file is present or `mediainfo` is not installed
-- [x] `.nfo` is written alongside the `.nzb` (same directory, same stem)
-- [x] Path is exposed as `PESTO_NFO` to post-upload hook scripts
-- [x] `src/nfo.rs` module; no mandatory external dependency — `mediainfo` is
-      optional and failure is handled gracefully
-
-### 18b — Post-upload hook ✅
-
-Executes a user-supplied command after each successful upload so external
-scripts (Python, Bash, PowerShell, …) can react without polling.
-
-- [x] `--post-hook <CMD>` flag and `output.post_hook` config key
-- [x] Runs via the OS shell (`sh -c` on Unix, `cmd /c` on Windows) so any
-      interpreter is supported without special handling in pesto
-- [x] Environment variables set before the hook runs:
-  - `PESTO_NZB` — absolute path to the generated `.nzb` file
-  - `PESTO_NFO` — absolute path to the `.nfo` file (empty when not generated)
-  - `PESTO_NAME` — original release name / entry label
-  - `PESTO_BYTES` — total bytes posted (decimal string)
-  - `PESTO_GROUP` — first Usenet newsgroup
-  - `PESTO_PASSWORD` — archive password (empty when none)
-  - `PESTO_SERVER` — NNTP server hostname
-- [x] Hook exit status is logged; a non-zero exit never aborts or fails the
-      upload — the post already succeeded at that point
-- [x] Hook is suppressed for `--par2-only`, `--dry-run`, and failed uploads
-
-### 18c — Hooks directory & bundled examples ✅
-
-- [x] Any executable file placed in `~/.config/pesto/hooks/` is run
-      automatically after each successful upload (sorted alphabetically)
-- [x] Unix: executability determined by file permission bits (`chmod +x`)
-- [x] Windows: `.exe`, `.cmd`, `.bat`, `.ps1`, `.py` extensions treated as
-      runnable; no `chmod` required
-- [x] One failing hook is logged and skipped; the remaining hooks still run
-- [x] `examples/hooks/print-vars.sh` — starter hook that prints every
-      `PESTO_*` variable; installed to `~/.config/pesto/hooks/` by default
-- [x] `examples/hooks/curupira.sh` — production-ready hook that uploads the
-      `.nzb` (and optional `.nfo`) to [Curupira.cc](https://curupira.cc) via
-      its REST API; adapted from the equivalent `upapasta` hook with
-      `UPAPASTA_*` variables replaced by `PESTO_*`
-
-## Phase 19 — Test coverage
-
-Raise unit-test coverage across all modules so that regressions in the hot
-path and configuration logic are caught before they reach production.
-
-Priority order (easiest → most complex):
-
-### 19a — Pure utility functions (no I/O) ✅
-
-- [x] `indexer.rs`: `urlencoded` — ASCII passthrough, special chars, space,
-      slash, at-sign, UTF-8 multi-byte sequences
-- [x] `nfo.rs`: `is_video` — recognised and unrecognised extensions, no
-      extension, mixed case; `build_listing` — single file, directory with
-      nested subdirectories, empty input
-
-### 19b — File-system helpers (temp dir fixtures) ✅
-
-- [x] `nfo.rs`: `find_media_file` — single video file, directory with mixed
-      extensions, nested directories, no video file present
-- [x] `nfo.rs`: `collect_videos` — sorted order guaranteed; symlinks and
-      unreadable entries skipped without panic
-- [x] `walk.rs`: existing tests cover the happy path; add tests for symlinks,
-      unreadable directories, and dot-file exclusion edge cases
-
-### 19c — Config parsing (TOML round-trips) ✅
-
-- [x] `config.rs`: required fields missing → error with actionable message
-- [x] `config.rs`: all optional fields at their defaults vs. fully populated
-- [x] `config.rs`: CLI flag overrides config value for every overridable field
-- [x] `config.rs`: `parse_upload_rate` — bare bytes, KiB/s, MiB/s, GiB/s,
-      case-insensitive, unknown unit → error
-
-### 19d — Article and NZB logic ✅
-
-- [x] `article.rs`: edge cases for zero-length files and articles whose yEnc
-      body is exactly the line-length limit
-- [x] `nzb.rs`: round-trip for multi-file multi-segment NZB with PAR2 entries
-
-### 19e — Poster core (mock NNTP) ✅
-
-- [x] `poster.rs`: pure helpers — `par2_base`, `resolve_date`,
-      `build_server_assignments` fully unit-tested
-- [x] `poster.rs`: `RateLimiter` — zero-rate never sleeps; full bucket serves
-      small requests immediately
-- [x] `poster.rs`: dry-run — no network access, segments produced with correct
-      part/total counts and unique Message-IDs
-- [x] `poster.rs`: dry_run disables resume by design — documented and tested
-- [x] `poster.rs` (mock NNTP): retry logic — article rejected twice (440),
-      succeeds on the third attempt; server receives exactly one POST
-- [x] `poster.rs` (mock NNTP): resume fast-path — `ResumeState` with all
-      segments pre-recorded causes workers to skip; server receives zero POSTs
-
-> **Tooling note:** integration tests that need a real NNTP connection should
-> use the existing mock-NNTP harness in `tests/`. Pure-logic tests (retry
-> counting, NZB assembly) should live in `#[cfg(test)]` modules inside each
-> source file. The `poster.rs` tests that touch the network must be gated with
-> `#[ignore]` so `cargo test` passes in CI without a live server.
-
-## Phase 21 — Visual Feedback & Terminal UX
-
-Deliver an impressive, information-dense terminal experience without depending
-on external TUI crates for the incremental items. Work ordered by impact vs.
-effort ratio — each sub-phase must leave the panel better than before.
-
-### 21a — Smooth progress bars ✅ (priority 1)
-
-Replace the plain `████░░░░` bar with sub-character block rendering so the
-bar moves continuously instead of jumping full-cell steps.
-
-- [x] `render_bar` uses the eight-level block sequence
-      `▏▎▍▌▋▊▉█` for the fractional leading character
-- [x] The filled portion uses `█`; the unfilled portion uses `░` (unchanged)
-- [x] No new dependencies; pure Unicode
-
-### 21b — Color-coded connection status matrix ✅ (priority 2)
-
-Paint each connection cell with ANSI colours to communicate state at a glance:
-
-- [x] 🟢 Active/uploading → green cell label
-- [x] 🟡 Authenticating / reconnecting → yellow
-- [x] 🔴 Retrying / failed → red
-- [x] ⚪ Idle → dim/grey
-- [x] New `ProgressEvent` variants `ConnectionRetrying { conn }` and
-      `ConnectionAuth { conn }` emitted by the NNTP pool
-- [x] Colors suppressed when `NO_COLOR` env var is set or stderr is not a TTY
-
-### 21c — Sparkline throughput history ✅ (priority 3)
-
-Show a 10-sample rolling graph of upload speed directly in the panel so
-fluctuations are visible without any external tool.
-
-- [x] `RenderState` keeps a ring-buffer of the last 10 per-tick byte deltas
-- [x] `render_sparkline(samples) -> String` maps each sample to one of
-      ` ▁▂▃▄▅▆▇█` proportional to the max in the window
-- [x] Displayed on the right side of the speed line: `12.3 MiB/s ▁▃▅▇█▆▄▂▃█`
-- [x] Degrades gracefully to nothing when terminal is < 60 columns
-      (`terminal_width()` via `TIOCGWINSZ`; suppressed on non-TTY or failure)
-
-### 21d — Confidence-based ETA ✅ (priority 4)
-
-Display ETA as a range when throughput is unstable rather than a single
-potentially misleading value.
-
-- [x] Track a rolling coefficient of variation (σ/μ) over the last 10 speed
-      samples
-- [x] When CV < 0.1: show single ETA as today (`ETA 2:34`)
-- [x] When CV ≥ 0.1: show range (`ETA 2:10–3:05`) based on ±1σ projection
-- [x] When CV ≥ 0.3: append a `~` instability marker (`ETA ~2:30–4:00`)
-- [x] No new dependencies; pure arithmetic on existing ring-buffer
-
-### 21e — Directory tree preview ✅ (priority 5)
-
-Print a clean `tree`-style breakdown of the payload in the pre-flight summary
-before any encoding/uploading starts.
-
-- [x] `print_tree(files: &[InputFile])` in `progress.rs` renders the file
-      list as a hierarchical tree by splitting names on `/`
-- [x] Shows per-file size on the right column, total at the bottom
-- [x] Only emitted when stderr is a TTY; suppressed in JSON / quiet mode
-- [x] Called from `main.rs` after the file list is resolved, before
-      `spawn_terminal_renderer`
-
-### 21f — Quiet / minimal mode ✅ (priority 6)
-
-Single-line mode for tmux/screen users who want minimal terminal noise.
-
-- [x] `--quiet` / `-q` flag and `output.quiet = true` config key
-- [x] In quiet mode: single line re-drawn in place showing a spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`)
-      followed by percentage and ETA, e.g. `⠹  47% · ETA 1:23`
-- [x] On completion: replaces the spinner line with a single summary line
-- [x] No box-drawing characters; zero ANSI colour (so it degrades cleanly in
-      logging pipelines even if accidentally used there)
-- [x] `--quiet` suppresses the directory tree preview (21e) and sparklines (21c)
-
-### 21g — Audible bell on completion ✅ (priority 7)
-
-- [x] `--bell` flag and `output.bell = true` config key
-- [x] Writes `\a` (ASCII BEL) to stderr on successful completion
-- [x] Also fires on failure so the user is notified either way
-- [x] Off by default; never emitted in JSON mode
-
-### 21h — Buffer pool visualizer ✅ (priority 8)
-
-Show real-time buffer pool health in the panel so resource pressure is visible.
-
-- [x] New `ProgressEvent::BufferPoolStats { total: usize, free: usize }` emitted
-      by `Shared` every N segments (not every segment — keep it cheap)
-- [x] `RenderState` renders a compact mini-bar: `buf [████████░░] 8/10`
-- [x] Added as a single line below the connection grid when pool is under
-      pressure (free < 25% of total); hidden otherwise to reduce clutter
-
-### 21i — Adaptive refresh rate ✅ (priority 9)
-
-Lower the panel redraw frequency when the CPU is loaded so rendering does not
-compete with the encoding/uploading hot path.
-
-- [x] Replace the fixed 200 ms ticker in `render_loop` with a dynamic interval
-- [x] Start at 200 ms; back off to 500 ms when the last draw took > 5 ms
-      (measured with `Instant` around the `draw_panel` call)
-- [x] Return to 200 ms when the previous draw was fast again
-- [x] Measurement uses monotonic clock; no system calls beyond what tokio
-      already uses
-
-### 21j — Interactive TUI mode with ratatui (priority 10)
-
-Full-screen dashboard replacing the scrolling panel. Most complex item;
-delivered last so the simpler improvements ship first.
-
-- [ ] Add `ratatui` and `crossterm` to `[dependencies]` behind a
-      `tui` Cargo feature (off by default, so the default binary stays small)
-- [ ] `--tui` flag activates the dashboard; requires a TTY, otherwise falls
-      back to the standard panel with a warning
-- [ ] Layout: three panes — (1) real-time speed graph (last 60 s), (2)
-      connection grid, (3) file list with per-file progress bars
-- [ ] Speed graph uses `ratatui::widgets::Sparkline` or `Chart`; connection
-      grid is a `Table`; file list is a `List`
-- [ ] Keyboard: `q` quits (after confirming), `p` pauses rate display, `h`
-      toggles help overlay
-- [ ] All state driven by the same `ProgressEvent` channel so the TUI is a
-      drop-in renderer alongside the existing panel
-
-## Phase 22 — Public Release Preparation
-
-Getting `pesto` ready for public consumption. Items ordered by impact: critical
-correctness first, then polish, then open-source completeness.
-
-### 22a — Complete `config.example.toml` ✅
-
-Several implemented sections are entirely absent from the example file:
-
-- [x] `[notify]` section — `webhook_url`, `ntfy_topic` (Phase 16e)
-- [x] `[output.indexer]` section — `url`, `api_key`, `category` (Phase 15b)
-- [x] `output.nzb_name`, `output.nzb_password`, `output.nzb_category` (Phase 15a)
-- [x] `output.nfo`, `output.post_hook`, `output.bell`, `output.quiet` (Phases 18, 21f, 21g)
-- [x] `posting.date`, `posting.no_archive`, `posting.message_id_domain` (Phase 14b–e)
-
-### 22b — Complete "All flags" table in README ✅
-
-Implemented flags missing from the reference table:
-
-- [x] `--nfo` / `--no-nfo`
-- [x] `--quiet` / `-q`
-- [x] `--bell`
-- [x] `--history` / `--no-history`
-- [x] `--notify` / `--no-notify`
-- [x] `--post-hook`
-- [x] `--date`
-- [x] `--no-archive`
-- [x] `--message-id-domain`
-
-### 22c — Document external dependencies in README ✅
-
-- [x] Add "Prerequisites" section listing `p7zip` (for `--compress`) and `rar`
-      binary (for `--compress=rar`), with install commands for common platforms
-- [x] Note that `mediainfo` is optional but recommended for `--nfo`
-- [x] Note that `par2cmdline` is not required at runtime (pesto has its own
-      implementation)
-
-### 22d — Badges and minimum Rust version ✅
-
-- [x] Add CI status, crates.io version, and license badges to the top of README
-- [x] Set `rust-version = "1.75"` in `Cargo.toml`
-- [x] Mention the minimum Rust version in the README Build section
-
-### 22e — Installing section (binaries + crates.io) ✅
-
-- [x] Document downloading a pre-built binary from GitHub Releases
-- [x] Note how to add the binary to `PATH` on Linux and Windows
-- [x] `cargo install pesto-poster` documented; published to crates.io as
-      `pesto-poster` (binary name remains `pesto`)
-
-### 22f — CHANGELOG.md ✅
-
-- [x] Create `CHANGELOG.md` covering v0.1.0 → v0.2.4 with highlights per version
-- [x] Follow Keep a Changelog format
-
-### 22g — Document all JSON event types ✅
-
-The JSON output mode section in README shows only 5 sample events; the full
-set is needed for reliable integration by `upapasta` and other consumers.
-
-- [x] Document all `ProgressEvent` types emitted by `--output-format json`
-      (started, segment_done, queue_extended, status, failed, interrupted,
-      finished, nzb_written, compress_*, par2_write_*)
-- [x] Include field names and types for each event
-
-### 22h — CONTRIBUTING.md ✅
-
-- [x] How to set up the dev environment and run tests
-- [x] How to use the mock NNTP harness
-- [x] Commit message and PR conventions
-- [x] Pointer to ROADMAP.md for picking up work
-
-### 22i — Audit ROADMAP checkboxes ✅
-
-- [x] Review all `[ ]` items; mark completed ones as `[x]`
-- [x] Remaining open items: Phase 21c (< 60-column sparkline fallback) and
-      Phase 21j (ratatui TUI) — both genuinely not yet implemented; Phase 22e
-      (`cargo install`) pending crates.io publication
+- [x] Visual terminal panel (ANSI escape codes, multi-bar progress)
+- [x] JSON-L output mode for integration with other tools
+- [x] Interactive setup wizard (`pesto --config`)
+- [x] Sparklines for throughput history
 
 ---
 
-## Phase 23 — Stdin Pipelining & Post-Check ✅
-
-### 23a — Stdin pipelining ✅
-
-Allow `pesto` to receive data from another process via a Unix pipe without
-writing an intermediate file to disk manually.
-
-- [x] `-` accepted as a `FILE` argument (one occurrence per invocation)
-- [x] `--stdin-name NAME` flag — sets the filename published in the NZB and
-      PAR2 metadata (required when `-` is used)
-- [x] stdin is read into a named temp file (`tempfile::Builder`) so the poster
-      can seek, stat, and pass the data to the existing pipeline unchanged
-- [x] The temp file is named after `--stdin-name` so `expand_inputs` picks up
-      the right base name without changes to `walk.rs` or `poster.rs`
-- [x] Error if stdin is a terminal, if `--stdin-name` is missing, or if `-`
-      appears more than once
-- [x] Incompatible with `--each` and `--season` (documented)
-- [x] PAR2 and compression work normally on the temp file
-
-**Typical usage:**
-
-```bash
-tar cf - ./Season01/ | pesto - --stdin-name season01.tar --out season01.nzb
-zstd -c bigfile.mkv  | pesto - --stdin-name bigfile.mkv.zst --groups alt.binaries.x
-```
-
-### 23b — Deferred post-check ✅
-
-Verify that every posted article is retrievable on the server after uploading
-completes, without blocking the upload throughput.
-
-- [x] `--check` flag enables the check phase (config: `posting.check`)
-- [x] `--check-delay SECS` — seconds to wait before issuing STAT commands;
-      default 30 (config: `posting.check_delay`)
-- [x] `--check-retries N` — STAT attempts per article before marking it
-      missing; default 2 (config: `posting.check_retries`)
-- [x] Check phase runs **after** all articles are posted and the progress
-      renderer finishes — upload throughput is never impacted
-- [x] Uses a single NNTP connection (STAT is lightweight); reuses primary server
-- [x] `ProgressEvent::CheckStarted / CheckProgress / CheckDone` for the
-      terminal panel, plain log, and JSON emitter
-- [x] Terminal panel shows `▸ check [████░░░░] N/M · X missing` in red when
-      articles are missing
-- [x] Missing Message-IDs printed to stderr; exit code 1 when any are missing
-- [x] `check: "all N article(s) verified"` printed on success
-- [x] Skipped automatically on `--dry-run`, `--par2-only`, cancelled runs
-
-**Difference from `--verify`:** `--verify` re-posts immediately during upload
-if STAT fails; `--check` runs after all articles are posted, does not re-post,
-and is designed for confirming propagation to the server with a delay.
-
----
-
-## Phase 24 — PAR2 Performance & Compatibility
-
-Improvements to the PAR2 implementation. Each sub-phase is independent and
-can ship separately.
-
-### 24a — SSE2/SSSE3 intermediate SIMD path ✅
-
-The encoder currently dispatches to AVX2 or falls back to scalar. CPUs that
-have SSSE3 but not AVX2 (Sandy Bridge, Ivy Bridge) take the slow scalar path.
-A SSSE3 path using 128-bit `_mm_shuffle_epi8` nibble tables covers every x86-64
-CPU made since ~2007.
-
-- [x] Implement `flush_ssse3()` using `__m128i` and `_mm_shuffle_epi8`
-      (same 4-nibble algorithm as the AVX2 path, halved register width)
-- [x] Runtime dispatch chain: AVX2 → SSSE3 → scalar
-- [ ] Benchmark on a pre-AVX2 machine and document the speedup
-
-### 24b — AVX-512 + GFNI path ✅
-
-Intel Ice Lake (2019+) and later server CPUs expose `AVX-512BW` and GFNI
-(`gf2p8affine_epi64_epi8`). GFNI performs GF(2^8) affine transforms in a
-single instruction; with a two-step decomposition GF(2^16) multiplication
-becomes two `vgf2p8affineqb` on 512-bit vectors — roughly 2× the AVX2
-shuffle throughput (32 words per iteration vs 16).
-
-- [x] Decompose GF(2^16) multiply-by-coeff into four 8×8 GF(2) matrices
-      (M_ll, M_lh, M_hl, M_hh), computed once per flush batch
-- [x] Implement `flush_avx512_gfni()` using `_mm512_gf2p8affine_epi64_epi8`:
-      de-interleave lo/hi bytes with `vpshufb`, apply paired matrices with two
-      GFNI calls, fold with `vpbsrldq`+`vpxor`, re-interleave with `vpunpcklbw`
-- [x] Runtime dispatch: GFNI+AVX512F+AVX512BW → AVX2 → SSSE3 → NEON → scalar
-- [x] Requires Rust ≥ 1.89 (AVX-512 GFNI intrinsics stabilised in 1.89);
-      MSRV bumped accordingly
-- [x] Benchmark infrastructure: `bench-internals` Cargo feature exposes
-      `BenchPath` enum and `with_forced_path()` builder so each SIMD path can
-      be measured independently on the same machine (`cargo bench --features bench-internals`)
-- [x] Baseline measured on AMD/Intel AVX2 machine (12 Rayon threads,
-      slice 768 000 B, 256 MiB @ 10 % redundancy):
-      - scalar:  317 MiB/s in |  10.9 GiB/s GF madd
-      - SSSE3:   597 MiB/s in |  20.4 GiB/s GF madd  (1.88× vs scalar)
-      - AVX2:    813 MiB/s in |  27.8 GiB/s GF madd  (2.56× vs scalar)
-      - GFNI+AVX512: measured on Ice Lake / Sapphire Rapids hardware (pending)
-
-### 24c — ARM NEON path ✅
-
-The encoder is gated on `#[cfg(target_arch = "x86_64")]`. Apple Silicon M-series
-and ARM servers (AWS Graviton, Ampere Altra) fall back to scalar. The AArch64
-NEON instruction `vqtbl1q_u8` is the direct equivalent of `_mm_shuffle_epi8`
-and enables the same 4-nibble shuffle algorithm.
-
-- [x] Implement `flush_neon()` using `vqtbl1q_u8` for `target_arch = "aarch64"`
-- [x] Mirror the 32 KiB cache-blocking strategy from the x86 paths
-- [x] Add `#[cfg(target_arch = "aarch64")]` dispatch alongside the x86 chain
-- [x] Verify correctness with the existing Reed-Solomon unit tests on an ARM target
-
-### 24d — XOR bit-dependency method (x86, advanced)
-
-For a fixed GF(16) coefficient it is possible to precompute which input bits
-XOR into each output bit (a 16×16 GF(2) matrix) and then apply that as a
-sequence of `vpand` + `vpxor` with operands in registers — no `vpshufb`, no
-table loads after setup. For large recovery sets the working set stays entirely
-in registers, eliminating all L1 miss pressure in the inner loop.
-
-This is the most complex item: the coefficient-specific XOR program must be
-generated at runtime once per (recovery-block, coefficient) pair.
-
-- [ ] Implement a code-generator that, given a `u16` coefficient, emits a
-      sequence of `(mask, shift, xor_into_reg)` operations computable with
-      `vpand`/`vpsrl`/`vpxor`
-- [ ] Integrate as `flush_avx2_xor()` and benchmark against the current shuffle path
-- [ ] Ship only if the benchmark shows ≥ 20 % real-world improvement on a
-      representative recovery set (≥ 50 recovery blocks, 1 MiB slice size)
-
-### 24e — Optimal slice size selection ✅
-
-The current implementation derives a fixed slice size from `--par2-block-size`
-or a simple ratio of total file size. For mixed-size sets (e.g. one 10 GiB file
-+ twenty 1 MiB sidecar files) a naive size either wastes blocks on tiny files or
-hits the PAR2 spec limit of 32 768 input blocks. A binary search over candidate
-sizes finds the optimal value automatically.
-
-- [x] Implement `optimal_par2_slice_size(per_file_articles, article_size, redundancy_pct)`
-      that binary-searches the smallest `articles_per_slice` such that:
-      total input blocks ≤ 32 768 **and** total recovery blocks ≤ 65 535
-- [x] Wire into `poster.rs` replacing the previous linear correction loop
-- [x] Unit tests: empty input, single article, single file, no redundancy,
-      200% redundancy (recovery limit binding), mixed sizes, pathological
-      case (more files than spec limit → best-effort)
-
-### 24f — Memory-bounded multi-pass recovery computation ✅
-
-When `recovery_count × slice_size` exceeds a configurable threshold (default:
-1 GiB), the encoder splits recovery blocks into groups and makes multiple passes
-over the input data rather than holding all recovery buffers in RAM simultaneously.
-The tradeoff is extra I/O reads in exchange for bounded memory.
-
-- [x] Split recovery blocks into groups of `floor(memory_limit / slice_size)` blocks
-- [x] For each group: iterate over input files, feed all slices, call `finish()`,
-      write the PAR2 volumes for that group, then free the buffers
-- [x] Expose `[posting] par2_memory_limit` config key (default `"1 GiB"`,
-      parseable with the same `parse_upload_rate`-style helper, e.g. `"512 MiB"`)
-- [x] Emit a `ProgressEvent::Status` when multi-pass is triggered so the user
-      understands the extra I/O passes
-
-### 24g — RS encoder throughput: close the gap with parpar
-
-Profiling against parpar (AVX2, i5-10400, 12 threads) shows pesto running at
-~229 MB/s vs parpar's ~400 MB/s on a 5 GiB file. All four improvements below
-attack different root causes of the ~1.75× gap.
-
-#### 24g-1 — Parallelize `finish()` buffer conversion
-
-`finish()` converts `Vec<Vec<u16>>` → `Vec<u8>` for each recovery buffer
-sequentially. For 200 recovery blocks of ~2.6 MiB each (5 GiB file at 10%)
-this is ~500 MiB of serial work after the RS compute has already finished.
-
-- [ ] Replace the sequential iterator in `finish()` with `par_iter()` using
-      rayon to convert all buffers in parallel
-- [x] Measure wall-clock improvement on the 5 GiB benchmark (expected ~5–10%)
-      — measured: negligible (<0.5%); conversion was never the bottleneck
-
-#### 24g-2 — Pre-compute coefficient tables outside rayon closure
-
-In `flush_avx2_work` (and SSSE3/GFNI equivalents), each of the 200 rayon tasks
-independently builds a full `tables` vec of per-(recovery, input-slice)
-coefficients, including 64 `gf.mul()` calls per entry to derive the 8 shuffle
-vectors. This causes 200 × 128 × 64 = 1.6 M redundant GF multiplications per
-flush (16 flushes for a 5 GiB file), with all threads contending on the same
-128 KB log/antilog arrays.
-
-- [x] Pre-compute a flat `all_tables` array `[recovery_count × queued_len]` of
-      full SIMD table structs in a parallel pre-pass before the chunk loop
-- [x] Apply the same refactor to `flush_avx512_gfni_work` (pending)
-- [ ] Apply to `flush_ssse3_work`
-
-#### 24g-3 — Input-major flush: read each slice once
-
-Current loop order: outer = recovery buffer (rayon), middle = 32 KiB chunk,
-inner = input slice. Each input slice is read `recovery_count` times from L3/RAM
-because different rayon threads need different slices at different times.
-
-Parpar's `Input pass(es): 1` confirms it reads the input exactly once. The fix
-is to invert the outer two loops inside each rayon task so the input slice is
-the outer dimension and the recovery block chunk is inner — or, better, to
-restructure the flush so threads partition over input-slice batches and each
-thread iterates over all its recovery blocks for that batch.
-
-- [x] Move the chunk loop outside `par_iter_mut` so all threads rendezvous at
-      each chunk boundary; input window (128 slices × 32 KiB = 4 MiB) stays L3-resident
-- [x] Measured: 1G 3.6s → 2.9s (−20%), 5G 22.3s → 16.6s (−25%); gap vs parpar
-      reduced from 1.75× to 1.31×
-- [ ] Apply to `flush_ssse3_work` and `flush_avx512_gfni_work`
-
-#### 24g-4 — Unroll 2–4 recovery buffers per inner loop iteration
-
-Once input-major order is in place, each inner iteration loads one 32-byte (AVX2)
-or 64-byte (GFNI) chunk of input data. Amortize that load over 2 or 4 recovery
-buffers simultaneously: different coefficients, same input vector, 2–4 store
-instructions — halves or quarters the load/store ratio.
-
-- [x] Implement a 2× unrolled variant via `par_chunks_mut(2)`: each rayon task
-      handles a pair of recovery blocks sharing one input load + nibble decomposition
-- [x] Measured: 1G −1.8%, 5G −2.9%; modest gain due to register pressure (16 table
-      vectors against 16 available YMM registers); gap vs parpar now 1.27×
-- [ ] Apply to `flush_ssse3_work`; skip GFNI (already 2× wider than AVX2)
-
-### 24h — Single-Pass Read: Unify MD5 and PAR2 Read Loops
-
-The current implementation reads each input file twice: once in `par2_only_ingest` (or the producer loop) to feed the Reed-Solomon encoder, and once in parallel `file_hash_tasks` to compute the full-file MD5. On small files (1G), the MD5 compute (~1.9s) is the bottleneck, and the double-read competes for cache/RAM bandwidth.
-
-- [ ] Integrate a `FileHasher` into the reading loop (`par2_only_ingest` and `reader_handle`).
-- [ ] Update MD5 state as bytes are read for the encoder.
-- [ ] Eliminate the redundant background `file_hash_tasks`.
-- [ ] Benefit: reduce I/O volume by 50% and eliminate the MD5-bound startup delay on small files.
-
----
-
-## Phase 25 — Beat parpar end-to-end throughput
-
-Baseline measurement on i5-14400 (16 threads, GFNI+AVX2, no AVX-512), `bench_pesto_vs_parpar.sh` with `--par2 10`:
-
-| File | Pesto MB/s | Parpar MB/s | Diff |
-|------|-----------:|------------:|------:|
-| 1G   | 480.8 | 581.2 | −17.3% |
-| 5G   | 491.6 | 580.0 | −15.2% |
-| 10G  | 496.7 | 483.1 | **+2.8%** |
-
-Internal SIMD bench (`cargo bench --features bench-internals`) shows the GFNI+AVX2 kernel at **1991–2348 MiB/s** on warm 64–256 MiB workloads — i.e. the RS math is ~4× faster than the end-to-end number. The bottleneck is the *pipeline* (stop-the-world flush, double copies, single reader), not the SIMD kernel. Pesto already wins on 10G because parpar runs into the same memory ceiling; the goal of this phase is to win on 1G and 5G too.
-
-**i5-10400 (Comet Lake, 6 cores / 12 HT, AVX2 only, no GFNI), `bench_pesto_vs_parpar.sh`, `--par2 10`:**
-
-| File | Pesto MB/s | Parpar-12t MB/s | Parpar-6t MB/s | Pesto vs Parpar |
-|------|----------:|---------------:|---------------:|----------------:|
-| 1G   | 360.7 | 475.0 | 464.4 | −25.0% |
-| 5G   | 329.7 | 437.2 | 437.6 | −24.7% |
-| 10G  | 333.0 | 416.2 | 406.8 | −20.8% |
-
-Key finding: **parpar -t 6 ≈ parpar -t 12** (≤ 3% delta) — the RS workload saturates memory bandwidth with 6 physical cores; HyperThreading adds nothing. Pesto already uses 6 rayon threads (`performance_core_count()` → `physical_core_count()` on this non-hybrid CPU). The ~24% gap is therefore 100% pipeline and kernel efficiency, not threading. On AVX2-only hardware the GFNI speedup is unavailable, so this gap is harder to close than on GFNI machines — items 25f and 25g are the highest-leverage levers here.
-
-Items are listed in order of expected win-per-effort.
-
-### 25Z — `flush_avx2_gfni` correctness bug diagnosed and fixed ✅
-
-While running the existing `simd_recovery_matches_scalar_for_larger_slices` test as part of the Phase 25 checks, the AVX2+GFNI path (added in commit `7cf832e`) was found to produce recovery bytes that disagree with the scalar reference. Confirmed end-to-end with `par2cmdline`: a damaged file is *not* repairable from the generated set — "Found 13 of 14 data blocks. Repair Failed." The earlier "+2.8% win on 10G" against parpar was measured against mathematically wrong PAR2 output.
-
-**Root cause:** `gf2p8affineqb` places the coefficients for output bit `row` at byte `(7-row)` of the u64 matrix operand — opposite to the intuitive `byte[row]` convention. Both `flush_avx2_gfni_work` and `flush_avx512_gfni_work` used `let shift = row * 8` (wrong); the fix is `let shift = (7 - row) * 8`. The correct identity matrix for this instruction is `0x0102040810204080` (byte 0 = 0x80), not `0x8040201008040201`.
-
-- [x] Disabled the runtime auto-dispatch into `flush_avx2_gfni`; gated behind the new `par2-avx2-gfni-unsafe` Cargo feature so the fix can still be developed and benchmarked
-- [x] Root cause diagnosed empirically: probed all 64 single-bit matrix positions with input `0x01`; confirmed `gf2p8affineqb` uses byte `(7-row)` for output bit `row`
-- [x] Fixed matrix byte order in `flush_avx2_gfni_work`: `let shift = (7 - row) * 8` (was `row * 8`)
-- [x] Applied the same fix to `flush_avx512_gfni_work` (same instruction convention)
-- [x] Verified AVX2+GFNI path correct on i5-14400 via `simd_recovery_matches_scalar_for_larger_slices`; re-enabled in production dispatch (no feature flag required)
-- [x] AVX-512+GFNI path kept behind `par2-avx2-gfni-unsafe` feature — same matrix fix applied but not yet validated on real AVX-512+GFNI hardware
-- [x] Validated `flush_avx512_gfni_work` correct on Intel Ice Lake Xeon (AWS m6i, Xeon 3rd gen Scalable) via `gfni_recovery_matches_scalar` (`--features bench-internals`); `par2-avx2-gfni-unsafe` gate removed from production dispatch
-
-### 25a — A/B `chunk_size` in `flush_avx2_gfni_work` ✅
-
-The working tree had lowered `chunk_size` from 16384 → 2048 (4 KiB) "to stay in L1". End-to-end measurement found this had no benefit and inflated the rayon task count 8×.
-
-- [x] Measured 2048 / 4096 / 8192 / 16384 with internal bench: numbers swing wildly between runs, no clear winner
-- [x] Measured end-to-end (1G/5G): 16384 wins on 5G by +1.7%, ties on 1G
-- [x] Restored 16384 in the AVX2 and AVX2+GFNI paths; SSSE3, AVX-512 and scalar were already at 16384
-
-### 25b — Restrict rayon to performance cores on hybrid CPUs ✅
-
-i5-14400 reports 16 logical threads (6P+HT + 4E). `configure_rayon` was already calling `.num_threads(physical_core_count())` (which returned 10 = 6P+4E), but E-cores execute AVX2 at lower throughput and stretch wall-clock for the longest partition. Quick A/B measured 6 threads (P-cores only) beats 10 threads on 5G by +2.4%.
-
-- [x] Added `performance_core_count()` that detects hybrid layout by scanning `/sys/devices/system/cpu/*/topology/thread_siblings_list` — P-cores expose two siblings, E-cores stand alone
-- [x] Falls back to `physical_core_count()` on non-hybrid or non-Linux systems
-- [x] Wired into `configure_rayon` and the `Par2EncodeStarted` `threads` event
-- [x] Measured on i5-14400: P-cores only is faster than physical core count by ~2% on 5G
-
-**Validation on pure-HT CPU (i5-10400, 6 cores / 12 logical, no E-cores, AVX2 only):**
-On this CPU `performance_core_count()` correctly returns `physical_core_count()` = 6 (all cores are HT-paired, none are solo, so the hybrid branch is never taken). A/B of parpar `-t 6` vs `-t 12` shows ≤ 3% difference — the RS workload hits the memory bandwidth ceiling with 6 physical cores and HyperThreading does not help further. Thread count is confirmed **not** the bottleneck on this hardware; the remaining gap (≈ 28% on AVX2-only hardware) is entirely pipeline and kernel efficiency.
-
-### 25c — Recycle queued slice buffers ✅
-
-`feed_par2_slice` was allocating a fresh `Vec::with_capacity(par2_slice_size)` per slice (~1024 allocations per 1G file). After `flush()` consumed the queue, those allocations were dropped — pure churn.
-
-- [x] Added `free_buffers: Vec<Vec<u8>>` to `RecoveryEncoder`
-- [x] Replaced `self.queued_slices = queued; self.queued_slices.clear();` with `self.recycle_queue(queued)` in all six flush paths (AVX2, AVX2+GFNI, AVX-512+GFNI, SSSE3, NEON, scalar)
-- [x] Added public `take_buffer()` that pops from the pool or allocates fresh; `feed_par2_slice` uses it for the replacement buffer, and the per-file `par2_accum` is also primed from the pool
-- [x] No measurable end-to-end win on its own (allocator already fast on Linux), but eliminates ~99 % of slice-buffer allocations and is a precondition for the background-flush worker in 25f where allocation ownership matters
-
-### 25d — Profile with `perf stat` before bigger work ✅
-
-Confirm the pipeline-bound hypothesis before investing in the channel/double-buffer refactor.
-
-- [x] `perf stat -e cycles,instructions,L1-dcache-load-misses,LLC-load-misses,dTLB-load-misses,task-clock` on both tools, 5 GiB file, i5-10400 (AVX2)
-
-**Results (5 GiB, 10% recovery, i5-10400):**
-
-| Metric | pesto | parpar | ratio |
-|---|---:|---:|---:|
-| Wall time | 14.6 s | 11.6 s | 1.26× |
-| Throughput | 351 MB/s | 441 MB/s | 0.80× |
-| CPUs utilized | 5.72 | 5.17 | — |
-| cycles / byte | 61.8 | 44.5 | **1.39×** |
-| **instructions / byte** | **117.8** | **68.2** | **1.73×** |
-| IPC | 1.91 | 1.53 | — |
-| L1-miss / byte | 2.308 | 2.186 | 1.06× |
-| LLC-miss / byte | 0.0273 | 0.0183 | **1.49×** |
-| dTLB-miss / byte | 0.00962 | 0.00396 | **2.43×** |
-| RAM via LLC (GiB) | 8.72 | 5.86 | 1.49× |
-
-**Parpar note:** `Input pass(es): 2` — parpar reads the 5 GiB source twice (100 recovery
-blocks split into 2 × 50 batches). Pesto fits all 100 blocks in one pass. Parpar reads
-2× more source data yet finishes faster — confirming the bottleneck is instruction count,
-not I/O volume.
-
-**Interpretation:**
-
-- **Instruction count is the dominant gap (1.73×), not the AVX2 kernel.** L1 miss rate
-  is nearly identical (1.06×), meaning the SIMD inner loop itself is comparably efficient.
-  The extra 49.6 instructions/byte comes from the article-pipeline: 6 992 tokio channel
-  sends/recvs, Arc clones, buffer-pool acquire/release, and the `extend_from_slice`
-  accumulation that copies all 5 GiB through an intermediate buffer before feeding the
-  encoder.
-
-- **dTLB misses 2.43× higher** because per-article heap allocations (768 KB each) are
-  scattered across many 4 KB pages. Each `extend_from_slice` call touches a new TLB entry
-  and evicts a cold one, adding TLB-miss penalty on top of the instruction overhead.
-
-- **LLC misses 1.49× higher** (2.86 GiB extra RAM traffic). The extra pass through
-  `par2_accum` pollutes the LLC, evicting recovery-buffer lines that the RS kernel needs.
-
-- **Pesto actually has higher IPC (1.91 vs 1.53)** — it is more CPU-bound, not
-  memory-stall-bound. The problem is sheer instruction volume, not stall cycles.
-  Parpar's lower IPC is caused by its 2-pass scheme having more memory latency per
-  instruction, yet it still wins because it issues far fewer instructions total.
-
-**Priority decision:** 25g (bypass article-pipeline in `--par2-only`) is the highest-value
-item. It directly eliminates the instruction-count root cause. 25f (background flush) is
-secondary — useful for overlapping I/O with RS compute in posting mode, but does not
-reduce the instruction count that dominates `--par2-only`.
-
-### 25e — 8-way recovery unroll for AVX2+GFNI and 4-way for AVX-512+GFNI ✅
-
-The GFNI inner loop uses 2 matrix registers per recovery block. The previous
-4-way AVX2+GFNI arm loaded input+deinterleave once per 4 blocks; 8-way halves
-that overhead. The previous AVX-512+GFNI arm was only 2-way; 4-way doubles
-the blocks served per input load.
-
-- [x] `flush_avx2_gfni_work`: changed `par_chunks_mut(4)` → `par_chunks_mut(8)`;
-      added `[buf_a..buf_h]` 8-way arm. Fallbacks for 4/2/1 remaining blocks
-      handled by existing lower arms in the match.
-- [x] `flush_avx512_gfni_work`: changed `par_chunks_mut(2)` → `par_chunks_mut(4)`;
-      added `[buf_a, buf_b, buf_c, buf_d]` 4-way arm. ZMM register file has 32
-      registers — 4 blocks × 2 matrices = 8 ZMM, ample headroom.
-- [x] Used a local `gfni_block!` / `gfni512_block!` macro inside the closures
-      to eliminate copy-paste while keeping LLVM's view of the code identical
-      to hand-written expansion (macros inline at the call site).
-- [x] Verified bit-correct with `par2cmdline verify` on a 1 GiB test file.
-
-**Measured impact on i5-10400 (AVX2-only, no GFNI):** no change — this CPU
-follows the `flush_avx2` path which was not modified. The 8-way GFNI arm will
-be exercised on Intel 11th-gen+, AMD Zen 4+ and Ice Lake Xeon. End-to-end
-improvement on those platforms requires a GFNI-capable benchmark machine.
-
-**25e2 — 8-way unroll for plain AVX2 nibble-shuffle — NEGATIVE, reverted.**
-
-Attempted in commit `64c98aa`, reverted in `d83302d`. Measured on i5-10400:
-
-| Size | Before (4-way) | After (8-way) | Delta |
-|------|----------------|---------------|-------|
-| 1G   | ~433 MB/s      | 395 MB/s      | **−9%** |
-| 5G   | ~374 MB/s      | 341 MB/s      | **−9%** |
-
-Root cause: GFNI uses 2 YMM registers per block; 8 blocks = 16 registers — fits
-exactly in AVX2's 16 YMM registers. The nibble-shuffle path uses 8 YMM registers
-per block (4 pairs of PSHUFB tables); 4 blocks already = 32 registers, forcing
-spills. Doubling to 8 blocks doubles the spill traffic, hurting more than the
-saved input loads. The 4-way unroll is the correct ceiling for this kernel on
-AVX2 (without GFNI). The i5-10400 gap cannot be closed by unrolling alone.
-
-### 25f — Background flush worker ✅
-
-`flush()` previously ran to completion inline; the tokio reader was blocked via
-`block_in_place` for the entire RS flush duration. On a 1 GB file that means
-~19 serial flush/read cycles (flush every ~26 slices × 10 MB = 260 MB).
-
-- [x] Added `Par2Worker` in `poster.rs`: wraps `RecoveryEncoder` in a dedicated
-      OS thread. Producer sends completed slices via `std::sync::mpsc::sync_channel`
-      (capacity 256 — ~2 flush batches). Worker calls `enc.add_slice` (which
-      auto-triggers flushes) and returns recycled buffers via a second bounded
-      channel (capacity 128), avoiding re-allocation per slice.
-- [x] `feed_par2_slice` now calls `worker.send_slice` — still wrapped in
-      `block_in_place` for tokio correctness, but the send completes in
-      microseconds unless the channel is full (worker mid-flush). RS work
-      happens concurrently on the dedicated thread.
-- [x] `par2_only_ingest` updated to accept `&Par2Worker` instead of
-      `&mut RecoveryEncoder`.
-- [x] `worker.finish()` closes the channel, waits for the worker to drain the
-      remaining slices and run the final flush, then returns the results.
-- [x] Added `RecoveryEncoder::drain_free_buffers()` to let the worker ferry
-      recycled allocations back to the producer without exposing internal state.
-- [x] Verified bit-correct with `par2cmdline verify` on a 1 GiB test file.
-- [x] No new crate dependencies — uses `std::sync::mpsc` throughout.
-
-**Measured impact (i5-10400, sparse files, median of 2 runs):**
-
-| Size | Before 25f | After 25f | Delta   | vs parpar |
-|------|-----------|-----------|---------|-----------|
-| 1G   | ~360 MB/s | ~433 MB/s | **+21%** | −13% (was −25%) |
-| 5G   | ~341 MB/s | ~374 MB/s | **+10%** | −13% (was −24%) |
-
-Gap vs parpar halved from ~24% to ~13% on AVX2-only hardware. The improvement
-comes from overlapping I/O (page-cache reads) with RS computation: while the
-worker is flushing batch N, the async reader fills batch N+1. The 1G benefit
-is larger because the I/O overhead is a bigger fraction of total time for
-smaller inputs.
-
-**Residual gap (~13%):** Entirely in RS kernel instruction efficiency
-(117.8 vs 68.2 insn/byte on AVX2-only hardware). Item 25e (8-way unroll) or
-a deeper AVX2 kernel rewrite are the correct next steps.
-
-### 25g — Skip the article-buffer round trip in `--par2-only` ✅
-
-In `--par2-only` mode, articles are produced only to feed `par2_accum`, then released. The `extend_from_slice` is a redundant pass over the input.
-
-- [x] Added `par2_only_ingest()` — reads source files in `par2_slice_size` chunks
-      directly into the encoder's recycled buffer, bypassing the article-channel
-      pipeline entirely. Uses unsafe spare-capacity writes to avoid the zero-init
-      overhead that `resize()` would impose.
-- [x] Gated on `tx_opt.is_none() && encoder.is_some()`; existing path unchanged for
-      posting, dry-run and `par2 = 0` edge cases.
-- [x] Emits `SegmentDone` in `article_size` increments for smooth progress display.
-- [x] Verified bit-correct with `par2cmdline verify` on a 1 GiB test file.
-
-**Measured impact (i5-10400, sparse 5 GiB file):** negligible (within run-to-run noise
-of ±5%). Root cause: the RS kernel accounts for ~99% of wall time; the per-article
-channel overhead (~7 000 sends/GiB × a few µs each ≈ tens of ms) was invisible against
-a 14 s encode. The improvement predicted by the instruction-count analysis (25d) turned
-out to be in the RS kernel itself, not the pipeline.
-
-**Expected benefit on real files (non-sparse, spinning/SSD):** avoiding the article-level
-`extend_from_slice` copy eliminates one full sequential pass over the input (5 GiB → half
-the memory-write traffic during the read phase). This benefit is masked by the sparse-file
-benchmark because page-cache reads of zeros are near-free.
-
-**Revised priority:** after 25f, the remaining ~13% gap vs parpar on AVX2-only hardware
-is entirely in the RS kernel instruction count (117.8 vs 68.2 insn/byte, measured in 25d).
-Items 25e (8-way unroll) or a deeper AVX2 kernel rewrite are the correct next steps.
-
-### 25h — Double-buffered queue (medium, half day)
-
-Even with 25f's background worker, a single in-flight batch still leaves the reader idle when the channel is full and the worker is mid-flush. Two batches alternate.
-
-- [ ] Worker owns 2 buffer-vectors; while it processes batch A, batch B fills
-- [ ] Requires 25f landed first
-- [ ] Measure separately to confirm the second buffer pays for itself
-
-### 25i — Concurrent per-file readers (medium, 1 day)
-
-The producer reads files strictly sequentially. With multiple input files (and even within a single large file), reads can overlap.
-
-- [ ] Multi-file: spawn up to N concurrent reader tasks, merge in file-order via a small reorder buffer keyed on slice index
-- [ ] Single file: split the file into 2 ranges and read with `pread` in parallel, with a small reorder window for slice ordering
-- [ ] Cap by memory limit (each in-flight reader consumes `~par2_slice_size`)
-
-### 25j — Aligned recovery buffers (small, 1–2 h)
-
-`Vec<u16>` currently has 2-byte alignment; the SIMD path uses `loadu/storeu`. With 32- or 64-byte alignment we can switch to aligned variants.
-
-- [ ] Replace `vec![0u16; slice_words]` with an aligned allocator (e.g. `aligned-vec` crate or hand-rolled `alloc::Layout`)
-- [ ] Swap `_mm256_loadu_si256` / `_mm256_storeu_si256` on the recovery-buffer side to aligned versions in the AVX2/AVX2+GFNI paths
-- [ ] Re-measure; expected gain is small (<3%) but free
-
-### 25k — Improve the benchmark harness (small, 30 min)
-
-The current script is unreliable for runs < 5 s (1G run finishes in 2 s, dominated by warm-up).
-
-- [ ] Run each tool 3× per file and report the median
-- [ ] Drop OS caches between runs (`vmtouch -e <file>` works without sudo; the current `echo 3 > /proc/sys/vm/drop_caches` requires sudo which silently fails on many setups)
-- [ ] Report wall, user, sys separately (via `/usr/bin/time -v`) so we can spot CPU-utilization regressions and confirm thread count
-- [ ] Add a `-t N` column for parpar to isolate thread-count effects in a single run (validated on i5-10400: parpar -t 6 ≈ parpar -t 12, ≤ 3% difference — memory-bandwidth limited)
-
-### Definition of done
-
-- [ ] On the same hardware, `bench_pesto_vs_parpar.sh` reports `Pesto ≥ Parpar` for 1G, 5G *and* 10G
-- [ ] Internal SIMD bench numbers do not regress vs `7cf832e`
-- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` all clean
-
----
-
-## Phase 27 — ALTMAP + XOR Bit-Dependency AVX2 Kernel
-
-**Goal:** close the remaining ~24 % end-to-end gap vs parpar on AVX2-only hardware
-(no GFNI, no AVX-512) by replacing the `flush_avx2` PSHUFB kernel with an ALTMAP +
-XOR bit-dependency kernel, the same technique at the core of parpar's speed advantage.
-
-### Background
-
-The `perf stat` analysis in 25d established that on an i5-10400 (AVX2-only) pesto
-executes **117.8 insn/byte** vs parpar's **68.2 insn/byte** — a 1.73× gap that
-accounts for the full 24 % wall-clock difference. All pipeline bottlenecks (flush
-serialisation, article-buffer round-trip, buffer allocations) were fixed in 25f/25g.
-The remaining gap lives entirely in the RS kernel.
-
-**Why PSHUFB is the bottleneck:**
-For each (recovery_block, input_slice) pair the current kernel:
-1. Deinterleaves lo/hi bytes (2 `vpunpck` + 2 `vpand` + 1 `vpsrlw`)
-2. Extracts 4 nibbles per 16-bit word (4 `vpshufb` for lo byte, 4 for hi byte)
-3. XORs the 8 partial products (7 `vpxor`)
-4. Re-interleaves (1 `vpackuswb`)
-→ ~20 instructions per 32 input bytes per recovery block.
-
-**Why XOR_DEPENDS + ALTMAP is faster:**
-For a fixed GF(2¹⁶) coefficient *n*, every output bit is a linear XOR of a fixed
-subset of the 16 input bits — a 16×16 GF(2) dependency matrix. With data stored
-in *bit-plane* (ALTMAP) format (bit plane *k* = all *k*-th bits of N consecutive
-16-bit words packed contiguously), applying the matrix is a sequence of
-`vpxor` operations on full 256-bit vectors. One vector holds 256 words of one bit
-plane; typical coefficients need ~112 `vpxor` total across all 16 output planes.
-Per byte: 112 XOR / 512 bytes = **0.22 ops/byte** vs 0.59 for PSHUFB — a 2.7×
-instruction reduction, matching the measured gap.
-
-The bit-plane transpose of a slice costs ~65 µs on i5-10400 and is paid **once per
-slice**, not once per flush, making it negligible at scale.
-
-**Reference:** animetosho's *Fast Galois Field Region Multiplication Techniques*
-(ParPar repo, `fast-gf-multiplication.md`) — section "XOR Bit Dependencies" and
-the companion `xor_depends/info.md`.
-
-### Coefficient pre-computation analysis
-
-A session with N input slices and R recovery blocks has up to N×R distinct
-(slice, rec) coefficient values, but empirically most of GF(2¹⁶) is covered:
-- 1 GB @ 10 % redundancy, 768 KB slices → 1 398 × 139 pairs → **~60 K unique coefficients**
-- 5 GB @ 10 % → 6 990 × 699 → **~65 K unique coefficients**
-
-Each dependency matrix is 16 × u16 = 32 bytes.
-Pre-computing all 65 535 non-zero coefficients at session start: **2 MB, ~10 ms** —
-negligible overhead, eliminates all per-flush setup.
-
----
-
-### 27a — XOR dependency matrix generator (small, 1–2 h) ✅
-
-Implement a pure-Rust function that, given a `u16` GF(2¹⁶) coefficient, returns the
-16×16 dependency matrix as `[u16; 16]` (entry `deps[k]` is the bitmask of input bits
-that XOR into output bit `k`).
-
-The algorithm (from `fast-gf-multiplication.md`, "XOR Bit Dependencies"):
-
-```
-deps = [0u16; 16]
-for b in (0..16).rev():
-    if (n >> b) & 1 == 1:
-        for i in 0..16: deps[i] ^= 1 << i   // add identity contribution
-    if b > 0:
-        high = deps[15]
-        deps[1..16].copy_from_slice(&deps[0..15])
-        deps[0] = 0
-        for i in 0..16:
-            if (POLYNOMIAL >> i) & 1 == 1: deps[i] ^= high
-```
-
-- [ ] Add `pub fn xor_dep_matrix(coeff: u16) -> [u16; 16]` to `gf16.rs`
-- [ ] Unit-test: verify that applying `deps` to all 65 536 input values matches
-      `gf.mul(input, coeff)` for a representative set of coefficients (n=2, n=3,
-      n=65534, 100 random values)
-- [ ] Verify the special cases n=0 (all-zero matrix) and n=1 (identity matrix)
-
-### 27b — Session-start coefficient table (small, 1 h) ✅
-
-Build a `[[ u16; 16]; 65536]` flat array (indices 0..=65535, index 0 unused) at the
-start of every `RecoveryEncoder::new` call, containing the dependency matrix for
-every possible GF coefficient. This replaces per-flush PSHUFB table construction.
-
-```
-let dep_tables: Box<[[u16; 16]; 65536]> = {
-    let mut t = Box::new([[0u16; 16]; 65536]);
-    for n in 1u16..=65535 {
-        t[n as usize] = xor_dep_matrix(n);
-    }
-    t
-};
-```
-
-- [ ] Implement and store in `RecoveryEncoder` as `dep_tables: Box<[[u16; 16]; 65536]>`
-- [ ] Benchmark construction time: must be < 5 ms on i5-10400
-- [ ] Keep the existing PSHUFB tables intact; the two paths will coexist until 27g
-
-### 27c — ALTMAP layout helpers (small, 2–3 h) ✅
-
-ALTMAP stores N consecutive GF(2¹⁶) words (each 2 bytes) as 16 contiguous *bit
-planes*, where plane *k* contains the *k*-th bit of every word packed as `ceil(N/8)`
-bytes. For AVX2 we process 256 words at a time (one 256-bit vector per plane).
-
-Alignment requirement: each plane must start on a 32-byte boundary for aligned
-`vmovdqa256` loads/stores.
-
-- [ ] Add `src/par2/altmap.rs`
-- [ ] `fn to_altmap(src: &[u16], dst: &mut [u8])` — transpose N u16 words into 16
-      bit-planes; use `_mm256_movemask_epi8` + shift loop for the inner kernel
-      (processes 16 words → 16 bits per plane per iteration; one 128-bit lane at a
-      time for the movemask approach)
-- [ ] `fn from_altmap(src: &[u8], dst: &mut [u16])` — inverse transpose
-- [ ] Round-trip property test: `from_altmap(to_altmap(x)) == x` for random inputs
-      of varying lengths (multiples of 16 u16 words)
-- [ ] Benchmark transpose cost on 768 KB slice: must be < 100 µs on i5-10400
-
-### 27d — ALTMAP recovery buffers (medium, 3–4 h) ✅
-
-Change the recovery buffer storage format from `Vec<u16>` (normal layout) to
-`Vec<u8>` in ALTMAP format. The buffer for one recovery block of `slice_words` u16
-values becomes `16 × ceil(slice_words / 256) × 32` bytes, where each group of 32
-bytes is one AVX2 bit-plane vector.
-
-This is the most invasive structural change. Keep the existing normal-layout buffers
-as a parallel code path gated on a feature flag `altmap` (see 27g for integration).
-
-- [ ] Introduce `RecoveryBufferSet` enum: `Normal(Vec<Vec<u16>>)` / `Altmap(Vec<Vec<u8>>)`
-- [ ] Add `RecoveryEncoder::new_altmap(...)` constructor that allocates ALTMAP buffers
-- [ ] `altmap_buffer_size(slice_words: usize) -> usize` helper
-- [ ] Verify that allocating ALTMAP buffers for a 1 GB, 10 % redundancy session stays
-      within the same memory footprint as the current normal-layout buffers (they are
-      the same size in bits; ALTMAP is a layout change, not a size change)
-
-### 27e — `flush_avx2_altmap_work` kernel ✅ (large, 1 day)
-
-Implemented `flush_avx2_altmap` (dispatcher) and `flush_avx2_altmap_work` (static
-worker).  Each flush transposes queued raw slices to ALTMAP via SSE2 in parallel,
-then applies the dep-matrix table via `vpxor` — one 256-bit vector per
-(output-plane, vec-index) pair.  4-way unroll over recovery blocks via
-`par_chunks_mut(4)`.  Scalar tail covers remainder bytes when `plane_bytes % 32 != 0`.
-Wired into `flush()` dispatch; `BenchPath::Avx2Altmap` added for bench-internals.
-
-- [x] Implement `flush_avx2_altmap_work` with the 4-way recovery unroll
-- [x] Gate behind `#[cfg(target_arch = "x86_64")]` + `is_x86_feature_detected!("avx2")`
-- [x] Correctness: `new_altmap_produces_correct_recovery_data` verifies byte-identical
-      output vs `flush_avx2_work` for 64-byte and 512-byte slices
-- [ ] Internal bench (`cargo bench --features bench-internals`): must exceed
-      `flush_avx2_work` throughput on i5-10400 by ≥ 20 %
-
-### 27f — Integrate ALTMAP into the encode loop ✅ (medium, 3–4 h)
-
-`flush_avx2_altmap` already performs the transpose-on-flush (each queued raw slice
-is converted to ALTMAP before being processed), and `finish()` calls `from_altmap`
-on each recovery buffer before serialisation.  No extra normal-layout copy is made
-during the flush hot path.  `BenchPath::Avx2Altmap` allows isolated benchmarking.
-
-- [x] `to_altmap` called in the flush dispatcher (transpose-on-flush, paid once per slice)
-- [x] `from_altmap` called in `finish()` before `RecoverySlice` serialisation
-- [x] End-to-end correctness: `altmap_path_generates_valid_par2_repaired_by_par2cmdline`
-      (par2_cmdline.rs) — par2cmdline verifies, detects corruption, and repairs
-- [x] Memory: no temporary normal-layout copy during flush; transposition happens in
-      a separate `Vec<Vec<u8>>` that is dropped before the XOR kernel runs
-
-### 27g — Benchmark and gate ✅ (small, 2–3 h)
-
-Benchmarked on i5-10400 (AVX2-only, no GFNI), 768 KB slices, 12 rayon threads:
-
-```
-scenario            AVX2(ALTMAP)          AVX2(nibble)         SSSE3          scalar
--------------------------------------------------------------------------------------
-256 MiB @ 10%   224.6 MiB/s ( 7.68 GiB/s)   966.6 MiB/s (33.04 GiB/s)   603.3 MiB/s   336.0 MiB/s
-256 MiB @ 20%    97.5 MiB/s ( 6.66 GiB/s)   614.8 MiB/s (42.02 GiB/s)   367.5 MiB/s   161.6 MiB/s
-512 MiB @ 10%   102.4 MiB/s ( 7.00 GiB/s)   675.6 MiB/s (46.18 GiB/s)   410.6 MiB/s   179.6 MiB/s
-
-Speedup vs scalar (256 MiB @ 10%):
-  AVX2(ALTMAP)   0.61×   ← SLOWER than scalar!
-  AVX2           2.67×
-
-ALTMAP/AVX2 = 0.209×  [REGRESS — target was ≥ 1.20×]
-```
-
-**Verdict: NEGATIVE — ALTMAP is ~5× slower than nibble-shuffle on AVX2.**
-
-Root cause: the XOR dep matrix for GF(2^16) has an average of ~8 set bits per output
-plane, requiring ~128 vpxor operations per 256-word bit-group. The nibble-shuffle
-needs only ~8 PSHUFB+XOR ops for the same 16 words, so it wins decisively.
-ALTMAP would only be competitive with:
-1. AVX-512 (64-byte vectors halve the iteration count), or
-2. CSE-optimised XOR schedules per-coefficient (ParPar's actual approach), or
-3. Very sparse dep matrices (low-Hamming-weight coefficients).
-
-None of these apply here: PSHUFB remains the best AVX2-only path.
-
-**Decision:** Do NOT make ALTMAP the default dispatch path. Keep `new_altmap()` and
-`BenchPath::Avx2Altmap` accessible for research, but remove the ALTMAP branch from
-the auto-detection `flush()` dispatch — it will never be reached in production since
-the auto-dispatch only calls it for `RecoveryBufferSet::Altmap` encoders, which are
-only created by `new_altmap()`.
-
-- [x] Benchmark run on i5-10400 — results above
-- [x] `cargo clippy --all-targets -- -D warnings` clean
-- [x] `cargo test` clean
-- [x] Verdict documented; nibble-shuffle kept as default AVX2 path
-
-### 27h — Apply ALTMAP to SSSE3 path — **CANCELLED**
-
-Cancelled based on the 27g benchmark result (ALTMAP/AVX2 = 0.209×).
-
-SSSE3 vectors are 128 bits (half of AVX2's 256 bits), so each plane section
-requires twice as many loop iterations for the same slice.  The dep-matrix overhead
-per byte is identical to AVX2, meaning ALTMAP/SSSE3 would achieve the same ≈0.21×
-ratio — still ~5× slower than the nibble-shuffle SSSE3 path.  There is no
-architectural reason to implement this variant.
-
-### Definition of done
-
-- [ ] On i5-10400 (AVX2-only), `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar
-      for 1G, 5G **and** 10G
-- [ ] On i5-14400 (GFNI), no regression vs Phase 25 measurements
-- [x] `par2cmdline` successfully repairs files produced by the ALTMAP path
-- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-      all clean
-- [ ] Internal SIMD bench shows `flush_avx2_altmap_work` ≥ 20 % faster than
-      `flush_avx2_work` on warm 64–256 MiB workloads — **NOT ACHIEVED** (0.209×);
-      nibble-shuffle kept as default; ALTMAP preserved for research only
-
----
-
-## Phase 28 — Shuffle2x AVX2 kernel
-
-**Goal:** close the remaining ~19% end-to-end gap vs parpar on AVX2-only hardware
-by replacing the current 8-PSHUFB nibble-shuffle kernel with the Shuffle2x technique
-used by parpar.
-
-### Background
-
-Investigation of parpar's source (`gf16_shuffle2x_avx2.c`) revealed that its AVX2
-path is not a standard 4-nibble PSHUFB kernel — it is the **Shuffle2x** technique,
-which uses a pre-processed data layout to halve the number of PSHUFB operations:
-
-**Current pesto kernel** (`flush_avx2_work`) — per 32-byte block, 1 recovery block:
-- Extract nibbles: 2 AND + 1 SRL
-- 8 PSHUFB + 6 XOR/AND/shift to produce lo/hi bytes of result
-- 1 load(dst) + 1 XOR + 1 store
-- ≈ **21 instructions per 32 bytes per block**
-
-**Parpar Shuffle2x kernel** — per 32-byte block (input in prepared layout), 1 block:
-- Extract nibbles: 2 AND + 1 SRL
-- 4 PSHUFB (shufNormLo, shufSwapLo, shufNormHi, shufSwapHi)
-- 1 `vperm2i128` (handles lane-crossing contribution without extra PSHUFB)
-- 3 XOR + 1 load(dst) + 1 store
-- ≈ **14 instructions per 32 bytes per block** — 33% fewer
-
-**How the lane trick works:** Input is pre-arranged so lo bytes of all words sit in
-lane 0 and hi bytes in lane 1 of each 256-bit register. Each PSHUFB then processes
-both lo-nibbles of lo-bytes (lane 0) and lo-nibbles of hi-bytes (lane 1) in a single
-instruction. The "swapped" partial accumulates contributions that cross the lane
-boundary (lo-byte nibbles contributing to hi-byte output, and vice versa);
-`vperm2i128(swapped, 0x01)` moves those contributions to the correct side in one
-instruction, replacing four PSHUFB+pack operations.
-
-The coefficient table format changes from 8 YMM registers (4 nibble pairs × 2 bytes)
-to 4 YMM registers (shufNormLo, shufSwapLo, shufNormHi, shufSwapHi), enabling a
-2-way recovery block unroll within the 16 available YMM registers:
-  - 2 blocks × 4 table regs = 8 regs for tables
-  - Plus mask, nibbles, data, result, swapped, dst = ~6 regs
-  - Total: ~14 regs — fits with 2 spare.
-
-**Input and recovery buffer layout:** Input slices are converted to the prepared
-layout once per flush (amortized over all recovery blocks). Recovery buffers are also
-stored in prepared layout during accumulation and converted back to normal u16 at
-`finish()` time.
-
-**Expected gain:** ~33% instruction reduction in the inner loop →
-closing most of the ~19% throughput gap vs parpar on AVX2-only hardware.
-
-### 28a — Prepare/finish and Shuffle2x buffer layout ✅ (small, 2–3 h)
-
-Add the data-layout infrastructure that the Shuffle2x kernel depends on:
-
-- [ ] `prepare_shuffle2x(src: &[u8])`: converts one slice to Shuffle2x layout —
-      `separate_lo_hi` (`vpshufb` with byte-interleave mask) + `vpermq [3,1,2,0]`
-      so lo bytes are in lane 0 and hi bytes in lane 1 of each 256-bit chunk.
-      Runs once per queued slice per flush, in parallel via rayon.
-- [ ] `finish_shuffle2x(src: &[u8]) -> Vec<u16>`: inverse transform for a recovery
-      buffer — `vpermq [2,0,3,1]` + `vpshufb` with interleave mask.
-      Runs once per recovery block in `finish()`.
-- [ ] `RecoveryBufferSet::Shuffle2x(Vec<Vec<u8>>)` variant; recovery buffers stored
-      in prepared layout (same byte count as Normal, different arrangement).
-- [ ] `RecoveryEncoder::new_shuffle2x(...)` constructor — mirrors `new_altmap`.
-- [ ] `BenchPath::Avx2Shuffle2x` under `bench-internals` feature.
-- [ ] Roundtrip test: `prepare → finish` produces original data.
-
-### 28b — `flush_avx2_shuffle2x_work` kernel ✅ (large, 1 day)
-
-The hot-path kernel that accumulates queued slices into Shuffle2x recovery buffers.
-Implemented in `encoder.rs::flush_avx2_shuffle2x_work`.
-
-Algorithm: for each 32-byte input chunk, `separate_low_high` (vpshufb + vpermq 0xD8) puts
-lo-bytes in lane 0 and hi-bytes in lane 1 of a YMM register.  A `vperm2i128` swaps lanes to
-create the "swapped" operand for the cross-lane nibble contributions.  4 PSHUFB + 2 XOR
-then produce the correct result in Shuffle2x layout directly, without the
-AND/SHIFT/OR packing needed by the plain nibble-shuffle path.
-
-- [x] Pre-compute 4-register coefficient tables `(tNormA, tNormB, tSwapA, tSwapB)` per
-      (recovery_block, queued_slice) pair.  Each `__m256i` packs two 16-entry tables
-      into its two 128-bit lanes: `tNormA = [lane0: loN0, lane1: hiN2]`, etc.
-- [x] 4-way recovery block unroll (4 blocks × 4 table regs = 16 regs for tables).
-- [x] Inner loop per 32 bytes: separate_low_high + vperm2i128 + 4 PSHUFB + 2 XOR + dst^=store.
-- [x] Slice sizes are always multiples of 32; no scalar tail required.
-- [x] Gate behind `#[cfg(target_arch = "x86_64")]` + AVX2 runtime detection.
-- [x] Correctness tests: `new_shuffle2x_produces_correct_recovery_data` and
-      `new_shuffle2x_exponent_start_offset` compare byte-for-byte vs normal encoder.
-
-### 28c — Input pre-transform (attempted; reverted)
-
-Tested pre-transforming all queued input slices to Shuffle2x layout in-place,
-eliminating `vpshufb + vpermq 0xD8` from the hot loop. **Result: regressed by ~10%.**
-
-Root cause: despite removing 2 instructions per block, the pre-transformation introduced
-more memory bandwidth pressure (read-modify-write per slice + re-load by kernel) and
-cache eviction. The `sep_mask` was already cache-hot in the kernel and amortized by ILP.
-Reverted to 28b state.
-
-**28c proper approach:** dual-slice processing (2 q_idx per iteration) to halve
-recovery-buffer load/store cost — significantly more complex (register pressure with
-4-way block unroll) and requires different loop structure. Deferred.
-
-### 28d — Benchmark and gate ✅ (small, 2–3 h)
-
-- [x] Internal bench: Shuffle2x = **1.287×** nibble-shuffle on i5-10400 (256 MiB @ 10%)
-      [PASS ≥ 20 %]; also 1.27× at 512 MiB @ 10%
-- [x] Shuffle2x wired as default AVX2 path in `poster.rs` for AVX2-only hardware (no GFNI).
-      GFNI path unaffected. `BenchPath::Avx2` still available for regression testing.
-- [x] Benchmark harness updated: `measure_shuffle2x()` and Shuffle2x column in the table.
-- [ ] End-to-end (`bench_pesto_vs_parpar.sh`): pesto still behind (−25%/−24%/−11% before
-      the default-path change was deployed); re-measure with Shuffle2x active.
-
-### Definition of done
-
-- [ ] `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar on i5-10400 for 1G, 5G, 10G
-- [x] `par2cmdline` successfully repairs files produced by the Shuffle2x path
-      (validated by integration tests in `tests/par2_path.rs`)
-- [x] Internal bench: Shuffle2x/nibble-shuffle ≥ 1.20× on 256 MiB @ 10%
-- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-      all clean
-
----
-
-## Phase 29 — Close i5-14400 gap (~15% remaining) ✅
-
-**Goal:** bring pesto to ≥ parpar on the i5-14400 (Raptor Lake hybrid, 6 P-cores + 4 E-cores,
-16 logical CPUs). Current state after Phase 28: pesto ~500 MB/s vs parpar ~587 MB/s at 10G
-(−14.6%). **Resolved by 29a: pesto 660 MB/s vs parpar 590 MB/s (+11.9%) at 10G.**
-
-### Root cause
-
-`performance_core_count()` was returning only the 6 P-cores on hybrid CPUs, leaving 4
-Gracemont E-cores idle. The encoder is compute-bound; adding those 4 cores (all with full
-AVX2) was the entire fix.
-
-The original P-core-only logic was validated on an i5-10400 (non-hybrid, no E-cores) where
-it measured +2.4%. On hybrid hardware the calculus is different: E-cores are slow at
-single-thread work but contribute well to a rayon parallel pool.
-
-Candidates 29b (dual-slice loop) and 29c (prefetch tuning) are deferred — the goal is met
-and the benefit on already-leading hardware is marginal.
-
-**Note on VM benchmark (AMD EPYC 4-vCPU, KVM):** results showed ±50% variance between
-consecutive runs (e.g. parpar 5G: 119 → 141 → 174 MB/s). The host shares physical cores
-across tenants; numbers are not reproducible and cannot guide optimization.
-
-### 29a — E-core inclusion on hybrid CPUs ✅ (small, 1–2 h)
-
-- [x] In `performance_core_count()`: when `paired_leaders` and `solo` are both non-empty
-      (hybrid layout confirmed), return `paired_leaders.len() + solo.len()` instead of just
-      `paired_leaders.len()`. This gives all physical cores (P + E) without including
-      hyperthreads.
-- [x] Verify detection on i5-10400 (non-hybrid: all cores HT-paired → `!solo.is_empty()` false
-      → falls through to `physical_core_count`, thread count unchanged).
-- [x] Benchmark i5-14400 before/after: 10G went from −14.6% to **+11.9%** vs parpar.
-      i5-10400 10G: −3.0% (within benchmark noise; code path unchanged on non-hybrid).
-- [x] No regression on non-hybrid hardware (code path not reached).
-
-### Definition of done ✅
-
-- [x] `bench_pesto_vs_parpar.sh` reports pesto ≥ parpar on i5-14400 for 5G and 10G
-      (5G: +11.7%, 10G: +11.9%)
-- [x] No regression on i5-10400 (non-hybrid code path unchanged; −3.0% at 10G is
-      within benchmark noise vs prior +0.7%)
-- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` clean
-
----
-
-## Phase 30 — Close AArch64/NEON gap vs parpar
-
-**Goal:** match or surpass parpar on ARM server processors (tested on Neoverse N1, 4 cores).
-Baseline after Phase 29: pesto 113 MB/s vs parpar 235 MB/s (−52%) on a Neoverse N1 (Cortex-A72
-class, 4 logical cores, 64 KB L1D, ~256 KB L2 per core).
-
-### Hardware context
-
-```
-Architecture : AArch64 (ARM v8-A)
-CPU part     : 0xD0C (Neoverse N1)
-Cores        : 4 logical (no HT on ARM)
-SIMD         : NEON (128-bit), vqtbl1q_u8 = _mm_shuffle_epi8 equivalent
-GFNI         : absent (no GF2P8AFFINEQB)
-L1D          : 64 KB per core
-L2           : ~256 KB per core
-```
-
-The gap vs x86 is structural: Intel has GFNI (`GF2P8AFFINEQB`) which reduces GF(2^16)
-multiply-accumulate to 2 register operations; AVX2 Shuffle2x uses 4 VPSHUFB by packing two
-16-entry sub-tables per 256-bit lane. Neither trick translates directly to 128-bit NEON.
-Parpar at 235 MB/s implies ~2 ops/byte/recovery-block; pesto's 8 `vqtbl1q_u8` per madd
-implies ~4 ops/byte/recovery-block — the 2× ratio is the primary target.
-
-### 30a — 2D parallel + 4× recovery-block unrolling ✅
-
-**Result: 113 → 121.8 MB/s (+7.8%).**
-
-Root cause of previous gap: `flush_neon_work` used `par_iter_mut` (1D, one task per recovery
-block) and built coefficient tables serially inside each task. The x86 AVX2 path used a 2D
-structure and pre-built all tables in a global parallel pass.
-
-- [x] Pre-build all `(recovery × input)` coefficient tables in one `into_par_iter()` pass.
-      Tables stored as `([u8; 16], …, [u16; 256], [u16; 256])` — `Send+Sync`, safe across rayon.
-- [x] Replace `par_iter_mut()` with 2D parallel loop: `par_chunks_mut(4)` (groups of 4
-      recovery blocks) × `par_chunks_mut(chunk_size)` (32 KiB buffer chunks).
-      On a 5 GB / 4-core run: ~100 tasks → ~8 000 tasks, better load balance.
-- [x] 4× unrolling across recovery blocks: one `vld1q_u8` + one nibble extraction serves
-      four `neon_madd!` calls simultaneously, reducing effective input reads by 4×.
-- [x] `neon_madd!` macro encapsulates the 8-lookup + 4-XOR + pack + RMW kernel cleanly.
-- [x] Fix pre-existing AArch64 clippy warnings (unreachable code in altmap/shuffle2x tests,
-      unused import, `flush_scalar` dead_code annotation).
-- [x] Bench script temporarily defaults to 5 GB only (this slow machine).
-- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
-
-### 30b — Software prefetch for input data (small, 1 h) ✅
-
-**Hypothesis:** the inner loop loads 51 × 32 KiB input chunks sequentially; hardware
-prefetch on Neoverse N1 handles straight-line streams well but the 4-block interleaving
-(A+B+C+D → advance ptr_in) may confuse it. Explicit `prfm pldl1keep` 128–256 bytes ahead
-of `ptr_in` should hide load-to-use latency.
-
-- [x] Added `core::arch::asm!("prfm pldl1keep, [{pN}]", ...)` inside the 4×-unrolled
-      loop body, prefetching 128 bytes ahead for both input (`ptr_in`) and all four output
-      buffers (`ptr_a/b/c/d`). Guard: only fires when ≥ 192 bytes remain to avoid
-      out-of-bounds speculation.
-- [ ] Benchmark before/after on the 5 GB sparse file; keep only if ≥ 3% gain.
-
-Note: `std::arch::aarch64` does not expose a stable `__prefetch` / `_prefetch`; inline
-`asm!` with the `prfm pldl1keep` instruction is the correct stable approach.
-
-### 30c — Transposed table layout for cache-friendly 4-block access (small, 2 h) ✅
-
-**Hypothesis:** `all_tables[(i × n_queued) + q_idx]` means the 4 entries for one group's
-A/B/C/D blocks are `n_queued × 1152 ≈ 59 KB` apart in memory — a cache miss per block on
-every `q_idx` iteration. Transposing to `[(q_idx × n_rec) + i]` makes the four entries
-consecutive (4.6 KB), fitting in one L2 fetch stream.
-
-- [x] Changed `all_tables` build index from `flat = i * n_queued + q_idx` to
-      `flat = q_idx * n_rec + i` (layout: `all_tables[q_idx * n_rec + i]`).
-- [x] Updated all access sites in the 4-way, 2-way, and fallback arms: `base_x + q_idx`
-      → `q_idx * n_rec + (i + x)`. Loop variables converted to `.iter().enumerate()` to
-      satisfy clippy.
-- [ ] Benchmark on 5 GB; expected +3–5% on cache-pressure workloads.
-
-### Phase 31 — AArch64 pmull/CLMUL path (implemented) ✅
-
-**Result: 50 MB/s → 310 MiB/s (+6×) at 512 MiB @ 10%, now matches/exceeds parpar (301 MB/s).**
-
-Replaced the 8-table nibble-shuffle (8 × `vqtbl1q_u8` per GF multiply) with a
-Karatsuba+Barrett polynomial-multiply kernel using `pmull.8h` / `pmull2.8h` — the
-carry-less multiply instructions available on every ARMv8-A core.
-
-**Algorithm:**
-- Karatsuba decomposition: split each 16-bit coefficient and data word into lo/hi
-  bytes; 3 `pmull` calls compute lo×lo, hi×hi, mid×mid; one Barrett reduction mod
-  `0x1100B` yields the GF(2^16) product.
-- Barrett reduction ported from parpar `gf16_clmul_neon.h` (MIT, © animetosho):
-  `vuzpq_u8` deinterleave → quotient approximation via nibble shifts →
-  `vqtbl1q_u8` XOR-fold → `vmulq_p8` by 0x0b.
-- **Critical loop restructure:** outer loop over input batches (BATCH=8), inner
-  loop over output blocks. Coefficients are broadcast with `vdupq_n_p8` ONCE per
-  batch, reused across all 24 K output blocks — matches parpar's
-  `gf16_clmul_muladd_x`. Previous (inverted) structure re-broadcast per block,
-  wasting 24 000× coefficient loads per recovery block.
-
-**Benchmark (Neoverse N1, 4 cores):**
-
-| Scenario         | Before (shuffle) | After (CLMUL) | parpar  |
-|------------------|------------------|---------------|---------|
-| 64 MiB @ 10%     | 349 MiB/s        | 1 451 MiB/s   | —       |
-| 256 MiB @ 10%    | 87 MiB/s         | 537 MiB/s     | —       |
-| 512 MiB @ 10%    | 50 MiB/s         | 310 MiB/s     | 301 MB/s|
-| scalar ref       | 74 MiB/s         | 74 MiB/s      | —       |
-
-- [x] `flush_neon_clmul` + `flush_neon_clmul_work` kernel with BATCH=8 outer loop.
-- [x] `gf16_clmul_reduce_neon`: Barrett reduction as a standalone `#[inline]` fn.
-- [x] `BenchPath::NeonClmul` for isolated benchmarking on AArch64.
-- [x] GFNI test gated behind `cfg(target_arch = "x86_64")` for cross-arch builds.
-- [x] Old nibble-shuffle `flush_neon` / `flush_neon_work` removed.
-- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
-
-### 30e — Reduce ops-per-byte with vqtbl2q_u8 (medium, 2–3 h)
-
-**Hypothesis:** `vqtbl2q_u8(uint8x16x2_t, uint8x16_t)` does a 32-byte table lookup.
-By packing `tl_l | tl_h` into one `uint8x16x2_t` and using shifted indices (`n1_3 + 16`),
-we can replace two `vqtbl1q_u8 + veor` with one `vqtbl2q_u8 + vqtbl2q_u8 + veor`. This
-saves one instruction per nibble-pair per recovery block.
-
-Each `neon_madd!` currently: 8 `vqtbl1q` + 4 `veor` = 12 lookup/xor ops.
-With `vqtbl2q`: 4 `vqtbl2q` (2 lookup per call) + 4 `veor` = potentially lower latency
-due to fewer dispatch slots occupied, despite same instruction count.
-
-- [ ] Build a combined `uint8x16x2_t` per sub-table pair: `{tl_l, th_l}`, `{tl_h, th_h}`,
-      `{hl_l, hh_l}`, `{hl_h, hh_h}` — 4 structs per recovery block instead of 8 vectors.
-- [ ] Rewrite `neon_madd!` using `vqtbl2q_u8` with `n0_2` for the first half and
-      `n1_3 | 0x10` (= `n1_3 + 16`) for the second half.
-- [ ] Benchmark vs baseline; keep only if throughput measurably improves.
-
-### 30f — Restore bench script defaults
-
-- [ ] Revert `SIZE_LIST=(5)` → `SIZE_LIST=(1 5 10)` once optimization work is complete.
-
-### Definition of done
-
-- [ ] `bench_pesto_vs_parpar.sh` (5 GB) reports pesto ≥ 180 MB/s on Neoverse N1
-      (target: close to within 1.3× of parpar at 235 MB/s).
-- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
-- [ ] No regression on x86 paths (run `bench_pesto_vs_parpar.sh` on i5 before merging).
-
----
-
-## Phase 26 — Verbose Mode & Diagnostics
-
-Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
-
-### 26a — Logging Infrastructure & Masking (Priority 1: High) ✅
-
-- [x] Add `-v`, `--verbose` flag (count: `-v` = INFO, `-vv` = DEBUG, `-vvv` = TRACE)
-- [x] `tracing` + `tracing-subscriber` with `EnvFilter` (`RUST_LOG` overrides `-v`)
-- [x] Credential masking: `AUTHINFO PASS` is logged as `[MASKED]`; password never
-      appears in any log output (kept in the `suffix` half of `send_command`)
-- [x] Terminal panel suppressed automatically when `-vv` or higher sends to stderr
-      (logs and panel share stderr; running both would corrupt the display)
-- [x] `src/logging.rs` — `init(verbose, log_file)` sets the global subscriber once
-
-### 26b — Sanitized Network Trace (Priority 2: High) ✅
-
-- [x] Log every NNTP command prefix sent (`→ POST`, `→ AUTHINFO USER`, …) at TRACE
-- [x] Log every NNTP response received (`← 240 Article received`) at TRACE
-- [x] Log TLS handshake completion and server greeting at DEBUG
-- [x] Round-trip time in milliseconds logged after each command/response pair at TRACE
-      (`← RTT  cmd=POST  code=240  elapsed_ms=12`)
-
-### 26c — Internal State & Transition Logging (Priority 3: Medium) ✅
-
-- [x] Pool events: "connecting", "connected and authenticated", "connection invalidated; rotating" at INFO (`nntp/pool.rs`)
-- [x] Retry/failover decisions: `warn!` with `segment`, `attempt`, `max_attempts`, `error` fields
-- [x] File discovery and upload plan: `files`, `segments`, `article_size`, `par2_pct` at INFO
-- [x] PAR2 geometry: `input_slices`, `recovery_blocks`, `slice_size` at INFO
-
-### 26d — Diagnostic Output & File Logging (Priority 4: Low) ✅
-
-- [x] `--log-file FILE` flag redirects verbose output to a file; terminal panel runs alongside normally
-- [x] `logging::log_system_info()` emits OS, architecture and CPU feature flags at startup
-      (`info  os=linux  arch=x86_64  cpu_features=avx2+gfni,avx2,ssse3  system info`)
-- [x] Network performance summary at end of run: segments posted, failed, total retries
-      (`info  posted=1234  failed=0  retries=2  elapsed_ms=...  network summary`)
-
-### 26e — SIMD Path Selection Logging (Priority 5: Low) ✅
-
-- [x] Log the selected RS path at INFO in `producer()` before the encode starts:
-      `info  simd=avx2+gfni  threads=6  passes=1  RS encoder`
-- [x] `Par2EncodeStarted.simd_method` field already carries the same string to JSON consumers
-
-### 26f — Compression Command Logging (Priority 6: Low) ✅
-
-- [x] `run_command()` in `compress.rs` emits a DEBUG event with program + args before spawning;
-      `-p<pass>` / `-hp<pass>` arguments are replaced with `[MASKED]`
-- [x] On non-zero exit: tool name, exit status and stderr logged at DEBUG
-- [x] On success: tool name and exit status logged at DEBUG
-
-### 26g — Per-Phase Timing Summary (Priority 7: Low) ✅
-
-- [x] Each phase emits `info!(elapsed_ms, phase = "...", "phase done")` on completion:
-      - `compress` — in `run_single_upload` (main.rs)
-      - `par2_compute` — in `producer()` after `enc.finish()` (poster.rs)
-      - `par2_write` — in `producer()` after all recovery volumes are written (poster.rs)
-      - `post` — in `post_files_with_progress` as part of the network summary (poster.rs)
-      - `check` — in `run_single_upload` after the STAT pass (main.rs)
-- [x] One-line timing summary emitted at upload completion:
-      `info  total_ms=4200  phases="compress=800ms post=3100ms check=300ms"  upload timing summary`
-
----
-
-## Phase 20 — Codebase Modularization
+## Phase 20 — Codebase Modularization ✅
 
 Reduce the size of monolithic files by splitting them into logical sub-modules. This
 improves maintainability, reduces merge conflicts, and clarifies internal APIs.
 
-### 20a — Split Setup Wizard from `main.rs` (Complexity: Low)
+### 20a — Split Setup Wizard from `main.rs` (Complexity: Low) ✅
 
-- [ ] Create `src/ui/wizard.rs` (or `src/config/wizard.rs`).
-- [ ] Move the interactive configuration wizard logic out of `main.rs`.
-- [ ] Clean up `main.rs` to focus strictly on CLI entry and orchestration.
+- [x] Create `src/ui/wizard.rs` (or `src/config/wizard.rs`).
+- [x] Move the interactive configuration wizard logic out of `main.rs`.
+- [x] Clean up `main.rs` to focus strictly on CLI entry and orchestration.
 
-### 20b — Separate TUI Rendering from `progress.rs` (Complexity: Medium)
+### 20b — Separate TUI Rendering from `progress.rs` (Complexity: Medium) ✅
 
-- [ ] Create `src/ui/terminal.rs` for all ANSI/terminal rendering logic.
-- [ ] Keep `src/progress.rs` focused on the `ProgressEvent` definitions and
+- [x] Create `src/ui/terminal.rs` for all ANSI/terminal rendering logic.
+- [x] Keep `src/progress.rs` focused on the `ProgressEvent` definitions and
       event-bus logic.
-- [ ] Prepare the architecture for the future `ratatui` integration (Phase 21j).
+- [x] Prepare the architecture for the future `ratatui` integration (Phase 21j).
 
-### 20c — Isolate PAR2 Pipeline Worker from `poster.rs` (Complexity: Medium)
+### 20c — Isolate PAR2 Pipeline Worker from `poster.rs` (Complexity: Medium) ✅
 
-- [ ] Create `src/poster/par2_worker.rs`.
-- [ ] Move the `Par2Worker` struct and its complex multi-threaded pipeline logic
+- [x] Create `src/poster/par2_worker.rs`.
+- [x] Move the `Par2Worker` struct and its complex multi-threaded pipeline logic
       (MD5 hashing + RS encoding coordination) out of the main poster module.
-- [ ] Simplify `src/poster.rs` to focus on the high-level upload loop.
+- [x] Simplify `src/poster.rs` to focus on the high-level upload loop.
 
-### 20d — Modularize `config.rs` (Complexity: Medium)
+### 20d — Modularize `config.rs` (Complexity: Medium) ✅
 
-- [ ] Convert `src/config.rs` into a module directory `src/config/`.
-- [ ] Split into `types.rs` (struct definitions), `parse.rs` (TOML/CLI merging),
+- [x] Convert `src/config.rs` into a module directory `src/config/`.
+- [x] Split into `types.rs` (struct definitions), `parse.rs` (TOML/CLI merging),
       and `validation.rs`.
-- [ ] Reduce the 1300+ line count of the current single file.
+- [x] Reduce the 1300+ line count of the current single file.
 
 ---
 
-## Phase 21 — PAR2 Library Separation
+## Phase 21 — PAR2 Library Separation ✅
 
 Decouple the high-performance PAR2 encoder from the Usenet-specific logic. This
 turns the core of `pesto` into a standalone asset that can be used by other
 projects (like `upapasta` directly) and improves build times.
 
-### 21a — Cargo Workspace setup (Complexity: Low)
+### 21a — Cargo Workspace setup (Complexity: Low) ✅
 
-- [ ] Convert the repository into a Cargo Workspace.
-- [ ] Move `src/par2` to its own crate directory (e.g., `crates/pesto-par2`).
-- [ ] Update `Cargo.toml` in the root to manage both the binary and the new crate.
-- [ ] Ensure `cargo test` and `cargo build` still work across the workspace.
+- [x] Convert the repository into a Cargo Workspace.
+- [x] Move `src/par2` to its own crate directory (e.g., `crates/pesto-par2`).
+- [x] Update `Cargo.toml` in the root to manage both the binary and the new crate.
+- [x] Ensure `cargo test` and `cargo build` still work across the workspace.
 
-### 21b — API Decoupling and Cleanup (Complexity: Medium)
+### 21b — API Decoupling and Cleanup (Complexity: Medium) ✅
 
-- [ ] Remove all Usenet/NNTP/NZB specific terminology from the PAR2 crate.
-- [ ] Redesign the `RecoveryEncoder` API to be generic over any source of bytes
+- [x] Remove all Usenet/NNTP/NZB specific terminology from the PAR2 crate.
+- [x] Redesign the `RecoveryEncoder` API to be generic over any source of bytes
       (e.g., `std::io::Read` or a custom trait), not tied to the `pesto` reader.
-- [ ] Extract SIMD detection and dispatch logic into the library so it works
+- [x] Extract SIMD detection and dispatch logic into the library so it works
       standalone.
-- [ ] Provide a clean `prelude` or high-level API for third-party consumers.
+- [x] Provide a clean `prelude` or high-level API for third-party consumers.
 
-### 21c — Performance Isolation and Benchmarking (Complexity: Medium)
+### 21c — Performance Isolation and Benchmarking (Complexity: Medium) ✅
 
-- [ ] Move internal micro-benchmarks (`bench-internals`) into the library crate.
-- [ ] Ensure that moving the code doesn't introduce performance regressions due
+- [x] Move internal micro-benchmarks (`bench-internals`) into the library crate.
+- [x] Ensure that moving the code doesn't introduce performance regressions due
       to cross-crate optimization boundaries (use `#[inline]` where necessary).
-- [ ] Add library-specific documentation and examples for standalone usage.
+- [x] Add library-specific documentation and examples for standalone usage.
 
 ### 21d — Independent Publication (Complexity: High)
 
@@ -1945,6 +171,63 @@ projects (like `upapasta` directly) and improves build times.
 - [ ] Publish `pesto-par2` to crates.io.
 - [ ] Update `pesto` (the binary) to depend on the published crate (or workspace
       path) instead of local modules.
+
+---
+
+## Phase 22 — Generic PAR2 Tooling Expansion
+
+Transform `pesto-par2` and the `pesto` CLI into a general-purpose high-performance
+PAR2 creation tool, matching the flexibility of `parpar`.
+
+### 22a — Manual Resource Control (Complexity: Low)
+
+- [ ] Add `--threads N` flag to manually override the Rayon pool size.
+- [ ] Add `--memory-limit SIZE` CLI flag (overriding config) for multi-pass
+      tuning.
+- [ ] Expose internal SIMD path selection via `--simd [auto|avx512|avx2|ssse3|neon|scalar]`.
+
+### 22b — Explicit Geometry Control (Complexity: Medium)
+
+- [ ] Add `--slice-size SIZE` (or `--block-size`) to manually set the PAR2 slice
+      size, bypassing the auto-selection logic.
+- [ ] Add `--slice-count N` to target a specific number of input slices.
+- [ ] Add `--recovery-count N` to specify the exact number of recovery blocks
+      instead of a percentage.
+- [ ] Validate manual inputs against PAR2 spec limits (32k/65k) and provide
+      helpful errors.
+
+### 22c — Advanced Volume & Output Mapping (Complexity: Medium)
+
+- [ ] Add `--out-dir PATH` to specify where PAR2 files should be saved.
+- [ ] Support `--filepath-format` style templates for naming recovery volumes.
+- [ ] Implement volume-splitting schemes beyond the default (e.g., power-of-2
+      sizes).
+
+### 22d — Standalone `pesto-par2` CLI (Complexity: High)
+
+- [ ] Create a dedicated minimal binary crate `crates/pesto-par2-cli`.
+- [ ] This binary focuses strictly on file parity, with zero network/usenet
+      dependencies.
+- [ ] Use this CLI for direct performance comparisons with `parpar` and `par2cmdline`.
+
+---
+
+## Phase 23 — Interactive Visuals & UX (Ratatui)
+
+Complete terminal user interface with interactive elements, real-time logging,
+and better monitoring.
+
+### 23a — Layout & Dashboard (Complexity: Medium)
+
+- [ ] Implement the main dashboard layout with `ratatui`.
+- [ ] Tabs for `Progress`, `Logs`, `Connections`, and `PAR2 Status`.
+- [ ] Real-time throughput graph using Ratatui `Canvas` or `Sparkline`.
+
+### 23b — Interactive Features (Complexity: High)
+
+- [ ] Allow pausing/resuming the upload loop via keyboard.
+- [ ] Dynamic adjustment of connection count during runtime.
+- [ ] Scrollable log buffer with levels/search.
 
 ---
 
@@ -1961,53 +244,3 @@ projects (like `upapasta` directly) and improves build times.
 6. **Direct I/O (`O_DIRECT`):** On Linux, bypass the OS page cache for huge files to prevent thrashing system memory.
 7. **Memory Mapping (`mmap`):** Alternative fast-path for reading massive files using `madvise(MADV_SEQUENTIAL)`.
 8. **Adaptive Buffering:** Grow or shrink `Shared::acquire_buffer` pools based on the delta between network upload speed and disk read speed.
-9. **Disk Read Throttling:** Intentionally stall disk reads if the NNTP upload queue becomes saturated, saving memory.
-10. **Single-Core Fallback:** Auto-detect environments like Raspberry Pi 1/Zero and switch to a fully sequential, low-overhead pipeline.
-
-### B. Pipelined Processing & Archiving (Streaming)
-11. **Pipelined Volume Streaming (The "RAR Volumes" Idea):** Stream archive volumes (`.part01.rar`) from the compressor directly into the NNTP upload queue as soon as each volume is flushed to disk, instead of waiting for the entire archive to finish.
-12. **Native Streaming Compression:** Use pure Rust crates (`zip` or `sevenz-rust`) to compress on-the-fly directly in memory, feeding the NNTP workers without temporary files.
-13. **On-the-fly TAR Bundling:** Bundle directories into a tar stream dynamically during the read pass, eliminating the need for a temporary archive step.
-14. ~~**Stdin Pipelining:** Implemented in Phase 23a. `-` is accepted as a file argument; data is buffered to a named temp file.~~ ✅ **See Phase 23a**
-15. **Eager PAR2 Processing in Watch Mode:** In `--watch` mode, start hashing and computing PAR2 blocks as soon as a file is detected, before the upload queue is ready.
-16. **Async Backpressure:** Ensure that the compression/PAR2 stages block properly if the network layer stalls, preventing buffer bloat.
-17. **Chunked/Live Uploading:** Support infinite data streams (like live video), producing a continuous sequence of NZBs or a dynamically updating NZB.
-18. **Progressive NZB Flushing:** Write the `.nzb` XML progressively to disk to save memory when uploading sets with millions of articles.
-19. **Incremental State Saving:** Flush `.pesto-state` periodically during long uploads so that a crash loses absolutely minimal progress.
-20. **Zero-Copy yEnc:** Optimize buffer handling to zero-copy levels using advanced scatter-gather I/O.
-
-### C. Visual Feedback & Terminal UX
-21. **Interactive TUI Mode:** A `ratatui`-based dashboard showing real-time graphs of upload speed, memory usage, and thread activity. *(See Phase 21j)*
-22. ~~**Sparkline Metrics:**~~ ✅ Add mini Unicode sparklines (e.g., ` ▂▃▅▆▇`) to the CLI output to show network throughput over the last 10 seconds. *(Implemented in Phase 21c)*
-23. ~~**Buffer Pool Visualizer:**~~ ✅ Display a small visual indicator of free vs. in-use memory buffers to show the health of the internal pipeline. *(Implemented in Phase 21h)*
-24. ~~**Adaptive Refresh Rate:**~~ ✅ Lower the terminal redraw rate dynamically when the CPU is bogged down, keeping resources focused on the upload. *(Implemented in Phase 21i)*
-25. ~~**Color-Coded Status Matrix:**~~ ✅ Show a grid representing NNTP worker states (🟢 Uploading, 🟡 Authenticating, 🔴 Retrying, ⚪ Idle). *(Implemented in Phase 21b)*
-26. ~~**Confidence-Based ETA:**~~ ✅ Display ETA as a range (e.g., `12-15 min`) or add a stability indicator if throughput is fluctuating heavily. *(Implemented in Phase 21d)*
-27. ~~**Directory Tree Preview:**~~ ✅ Print a clean `tree`-style breakdown of the payload during the pre-flight summary before uploading. *(Implemented in Phase 21e)*
-28. ~~**Quiet / Minimal Mode:**~~ ✅ A mode showing *only* a single spinning character and ETA, minimizing terminal pollution for tmux/screen users. *(Implemented in Phase 21f)*
-29. ~~**Audible / ANSI Bell Notifications:**~~ ✅ Optionally trigger a terminal bell (`\a`) on completion for users without desktop notification integrations. *(Implemented in Phase 21g)*
-30. ~~**Smooth Progress Transitions:**~~ ✅ Use sub-character block rendering (e.g., `▏▎▍▌▋▊▉█`) for ultra-smooth progress bars. *(Implemented in Phase 21a)*
-
-### D. Performance & Concurrency
-31. **SIMD yEnc Acceleration:** Implement AVX2/NEON intrinsics for the yEnc encoding loop, pushing encoding speeds to memory-bandwidth limits.
-32. **TCP `SO_RCVBUF`/`SO_SNDBUF` Tuning:** Auto-tune socket buffers for Long Fat Networks (LFNs) to maximize throughput over high-latency connections.
-33. ~~**Hardware-Accelerated CRC32:**~~ ✅ Use `CRC32c` or ARM CRC instructions if supported by the CPU, falling back to software. *(Implemented in Phase 24g, commit: "perf: optimize PAR2 encoder with hardware-accelerated CRC32, 4x unrolling and prefetching")*
-34. **GPU-Accelerated PAR2:** Experimental CUDA/Vulkan backend for computing PAR2 recovery data on massive files almost instantly.
-35. **Connection Reuse Across Jobs:** In `--each` mode, keep the NNTP connection pool alive between files to skip TLS handshake overhead.
-36. **NNTP Command Pipelining:** Send multiple `POST` commands back-to-back without waiting for the server's response, if the server supports it.
-37. **Dynamic Worker Scaling:** Automatically spawn more NNTP connections mid-flight if throughput is under the network cap.
-38. **Multi-Path TCP (MPTCP):** Bond multiple network interfaces (e.g., Wi-Fi + Ethernet) to aggregate upload bandwidth.
-39. **NUMA-Aware Threading:** Pin Rayon threads to specific CPU cores on high-end servers to avoid cross-socket memory latency.
-40. **TLS Session Resumption:** Utilize TLS session tickets across multiple connections to speed up the initial swarm connection phase.
-
-### E. Resilience, Error Handling & Open-Source Best Practices
-41. **Auto-Relocate Temp Storage:** If `/tmp` gets full, dynamically switch to `$HOME` or the output directory without failing the upload.
-42. **Intelligent Network Backoff:** Implement fully jittered exponential backoff for NNTP server drops to avoid thundering-herd reconnects.
-43. **Auto-Ban Failing Servers:** Temporarily ban an NNTP server from the pool during the run if it drops connections more than 5 times.
-44. **Pre-flight NZB Validation:** Hash-check the generated NZB file against original files right before finishing to guarantee data integrity.
-45. **Corrupt State Recovery:** Detect corrupted `.pesto-state` JSON files and automatically repair or fallback gracefully.
-46. **OOM Graceful Exit:** Catch allocation failures (where supported) and write a clean crash-log instead of a hard abort.
-47. **C-Compatible FFI:** Export a C-API so `pesto` can be linked directly into Python/Go/C++ applications without subprocess overhead.
-48. **WebAssembly (WASM) Core:** Compile the yEnc/PAR2/NZB generation logic to WASM, allowing browser-based offline NZB generation.
-49. **Pluggable Storage Backends:** Abstract `std::fs` to allow reading directly from AWS S3, MinIO, or HTTP streams.
-50. **gRPC / Webhook Interceptor:** A granular hook system allowing external tools to modify metadata (like renaming the subject) *during* the run via RPC.

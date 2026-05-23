@@ -15,6 +15,7 @@ use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, 
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
+use pesto_par2::SimdPath;
 use tracing::info;
 
 /// One-line summary shown at the top of `--help`.
@@ -140,6 +141,20 @@ struct Cli {
     /// [config: posting.par2, default 10].
     #[arg(long, value_name = "PERCENT")]
     par2: Option<u8>,
+
+    /// Maximum RAM for PAR2 recovery buffers, e.g. "512 MiB"
+    /// [config: posting.par2_memory_limit, default "1 GiB"].
+    #[arg(long, value_name = "SIZE")]
+    memory_limit: Option<String>,
+
+    /// Number of threads for parallel PAR2 compute
+    /// [default: physical cores].
+    #[arg(long, value_name = "N")]
+    threads: Option<usize>,
+
+    /// Force a specific SIMD multiplication backend for PAR2.
+    #[arg(long, value_enum, value_name = "MODE", default_value_t = SimdPath::Auto)]
+    simd: SimdPath,
 
     /// Only generate PAR2 files next to the sources; do not post.
     #[arg(long)]
@@ -371,6 +386,12 @@ impl Cli {
             dry_run: if self.dry_run { Some(true) } else { None },
             par2: self.par2,
             par2_only: if self.par2_only { Some(true) } else { None },
+            par2_memory_limit: self
+                .memory_limit
+                .as_ref()
+                .and_then(|s| parse_upload_rate(s).ok()),
+            threads: self.threads,
+            simd: Some(self.simd),
             resume: if self.resume { Some(true) } else { Some(false) },
             verify: if self.verify { Some(true) } else { None },
             upload_rate: self

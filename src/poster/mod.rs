@@ -222,7 +222,7 @@ pub async fn post_files_with_progress(
     events: Option<ProgressSender>,
     resume_state_path: Option<&Path>,
 ) -> Result<PostOutcome> {
-    configure_rayon();
+    configure_rayon(config.threads);
 
     let mut metas = Vec::with_capacity(files.len());
     for input in files {
@@ -454,13 +454,16 @@ fn par2_temp_dir() -> PathBuf {
 /// SIMD/ALU work; sibling hyperthreads contend for the same execution ports
 /// and add almost nothing, so one worker per logical CPU only heats the
 /// machine. Called once; a no-op if a global pool already exists.
-fn configure_rayon() {
+fn configure_rayon(threads: usize) {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(pesto_par2::performance_core_count())
-            .build_global();
+        let n = if threads > 0 {
+            threads
+        } else {
+            pesto_par2::performance_core_count()
+        };
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
     });
 }
 
@@ -709,10 +712,19 @@ async fn producer(
     let mut all_checksums: Vec<Vec<SliceChecksum>> = vec![Vec::new(); metas.len()];
 
     if recovery_count > 0 {
-        let simd_method = pesto_par2::detect_simd();
+        let simd_method = if shared.config.simd != pesto_par2::SimdPath::Auto {
+            shared.config.simd.to_string()
+        } else {
+            pesto_par2::detect_simd().to_string()
+        };
+        let effective_threads = if shared.config.threads > 0 {
+            shared.config.threads
+        } else {
+            pesto_par2::performance_core_count()
+        };
         info!(
             simd = simd_method,
-            threads = pesto_par2::performance_core_count(),
+            threads = effective_threads,
             passes = passes.len(),
             "RS encoder"
         );
@@ -760,7 +772,7 @@ async fn producer(
             // We use 1/4 of the available memory limit for the queue, capped
             // between 256MB and 2GB.
             let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
-            let enc = enc.with_flush_limit(queue_limit);
+            let enc = enc.with_flush_limit(queue_limit).with_simd_path(shared.config.simd);
 
             // Melhoria 1: on pass 0 enable parallel checksum computation inside
             // the encoder so rayon::join overlaps MD5+CRC32 with RS work.

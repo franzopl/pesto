@@ -8,6 +8,41 @@ pub mod yenc;
 
 pub use encoder::{altmap_buffer_size, shuffle2x_buffer_size};
 
+/// Multiplication backend for the Reed-Solomon encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum SimdPath {
+    /// Auto-detect the fastest supported path for the current CPU.
+    #[default]
+    Auto,
+    /// Pure Rust scalar implementation (no SIMD).
+    Scalar,
+    /// Intel/AMD SSSE3 (128-bit shuffles).
+    Ssse3,
+    /// Intel/AMD AVX2 (256-bit shuffles).
+    Avx2,
+    /// Intel Ice Lake+ / Sapphire Rapids+ AVX2 with GFNI.
+    Avx2Gfni,
+    /// Intel Ice Lake+ / Sapphire Rapids+ AVX-512 with GFNI.
+    Avx512Gfni,
+    /// ARM NEON (AArch64 128-bit shuffles).
+    Neon,
+}
+
+impl std::fmt::Display for SimdPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Scalar => write!(f, "scalar"),
+            Self::Ssse3 => write!(f, "ssse3"),
+            Self::Avx2 => write!(f, "avx2"),
+            Self::Avx2Gfni => write!(f, "avx2-gfni"),
+            Self::Avx512Gfni => write!(f, "avx512-gfni"),
+            Self::Neon => write!(f, "neon"),
+        }
+    }
+}
+
 /// Returns the name of the SIMD path that the PAR2 encoder will use at runtime.
 pub fn detect_simd() -> &'static str {
     #[cfg(target_arch = "x86_64")]
