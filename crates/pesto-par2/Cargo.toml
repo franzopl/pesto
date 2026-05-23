@@ -12,6 +12,7 @@ md-5 = { version = "0.10", features = ["asm"] }
 crc32fast = "1.4"
 tracing = "0.1"
 anyhow = "1"
+tokio = { version = "1", features = ["fs", "io-util", "rt", "rt-multi-thread"] }
 clap = { version = "4", features = ["derive"], optional = true }
 
 [features]

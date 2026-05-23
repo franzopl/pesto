@@ -30,10 +30,9 @@ use crate::resume::ResumeState;
 use crate::walk::InputFile;
 use crate::yenc;
 
-pub mod par2_worker;
-use self::par2_worker::Par2Worker;
+use pesto_par2::worker::Par2Worker;
 
-/// Target number of PAR2 input slices. Reed-Solomon encoding cost grows with
+/// Returns `(slice_size_bytes, total_input_slices)`.
 /// `file_size² / par2_slice_size`, so tying the PAR2 slice to the (small)
 /// article size makes large files quadratically expensive. Several articles
 /// are grouped into one PAR2 slice to keep the input-block count near this

@@ -1,5 +1,5 @@
-use pesto_par2::encoder::{RecoveryEncoder, RecoverySlice, FileHashes};
-use pesto_par2::packet::SliceChecksum;
+use crate::encoder::{RecoveryEncoder, RecoverySlice, FileHashes};
+use crate::packet::SliceChecksum;
 
 /// A unit of work for the [`Par2Worker`].
 pub enum Par2Work {
@@ -52,7 +52,7 @@ impl Par2Worker {
             if compute_hashes {
                 std::thread::spawn(move || {
                     let mut hashes = Vec::new();
-                    let mut current_hasher = pesto_par2::encoder::FileHasher::new();
+                    let mut current_hasher = crate::encoder::FileHasher::new();
                     while let Ok(work) = rx.recv() {
                         match work {
                             Par2Work::Slice {
@@ -63,7 +63,7 @@ impl Par2Worker {
                                 current_hasher.update(&data[..actual_len]);
                                 if is_last_of_file {
                                     hashes.push(current_hasher.finish());
-                                    current_hasher = pesto_par2::encoder::FileHasher::new();
+                                    current_hasher = crate::encoder::FileHasher::new();
                                 }
                                 let _ = rs_tx.send(data);
                             }

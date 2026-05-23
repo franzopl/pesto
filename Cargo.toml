@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/pesto-par2",
+    "crates/parmesan",
 ]
 
 [package]

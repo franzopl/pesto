@@ -203,12 +203,12 @@ PAR2 creation tool, matching the flexibility of `parpar`.
 - [ ] Implement volume-splitting schemes beyond the default (e.g., power-of-2
       sizes).
 
-### 22d — Standalone `pesto-par2` CLI (Complexity: High)
+### 22d — Standalone `parmesan` CLI (Complexity: High)
 
-- [ ] Create a dedicated minimal binary crate `crates/pesto-par2-cli`.
-- [ ] This binary focuses strictly on file parity, with zero network/usenet
+- [ ] Create a dedicated minimal binary crate `crates/parmesan`.
+- [ ] This binary focuses strictly on file parity, with zero network/Usenet
       dependencies.
-- [ ] Use this CLI for direct performance comparisons with `parpar` and `par2cmdline`.
+- [ ] Use `parmesan` for direct performance comparisons with `parpar` and `par2cmdline`.
 
 ---
 

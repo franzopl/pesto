@@ -1,0 +1,17 @@
+[package]
+name = "parmesan"
+version = "0.2.21"
+edition = "2021"
+rust-version = "1.89"
+description = "Fast, standalone PAR2 (Reed-Solomon) creation tool"
+license = "MIT"
+
+[dependencies]
+pesto-par2 = { path = "../pesto-par2" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1.12.0"
+indicatif = "0.17"
