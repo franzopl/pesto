@@ -1,6 +1,6 @@
 use super::*;
-use tempfile::NamedTempFile;
 use std::io::Write;
+use tempfile::NamedTempFile;
 
 fn base_overrides() -> Overrides {
     Overrides {

@@ -159,7 +159,8 @@ impl Config {
                     Some(limit as usize)
                 } else if let Some(s) = file.posting.par2_memory_limit {
                     Some(
-                        parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")? as usize,
+                        parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")?
+                            as usize,
                     )
                 } else {
                     None

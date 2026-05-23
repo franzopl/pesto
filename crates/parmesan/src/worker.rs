@@ -1,4 +1,4 @@
-use crate::encoder::{RecoveryEncoder, RecoverySlice, FileHashes};
+use crate::encoder::{FileHashes, RecoveryEncoder, RecoverySlice};
 use crate::packet::SliceChecksum;
 
 /// A unit of work for the [`Par2Worker`].
@@ -28,11 +28,7 @@ pub struct Par2Worker {
     /// Wrapped in `Mutex` so `&Par2Worker` is `Sync` (required by async tasks).
     free_rx: std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
     /// The worker thread; held until [`Par2Worker::finish`] is called.
-    handle: std::thread::JoinHandle<(
-        Vec<RecoverySlice>,
-        Vec<SliceChecksum>,
-        Vec<FileHashes>,
-    )>,
+    handle: std::thread::JoinHandle<(Vec<RecoverySlice>, Vec<SliceChecksum>, Vec<FileHashes>)>,
 }
 
 impl Par2Worker {
@@ -44,8 +40,7 @@ impl Par2Worker {
 
         let handle = std::thread::spawn(move || {
             let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
-            let (hash_tx, hash_rx) =
-                std::sync::mpsc::sync_channel::<Vec<FileHashes>>(1);
+            let (hash_tx, hash_rx) = std::sync::mpsc::sync_channel::<Vec<FileHashes>>(1);
 
             // Step 1: Spawn the MD5 hasher thread. It consumes Par2Work and
             // feeds raw Vec<u8> buffers to the RS encoder thread.
@@ -137,13 +132,7 @@ impl Par2Worker {
     }
 
     /// Signal end-of-input, wait for the worker to finish, and return results.
-    pub fn finish(
-        self,
-    ) -> (
-        Vec<RecoverySlice>,
-        Vec<SliceChecksum>,
-        Vec<FileHashes>,
-    ) {
+    pub fn finish(self) -> (Vec<RecoverySlice>, Vec<SliceChecksum>, Vec<FileHashes>) {
         drop(self.tx); // closing the channel causes rx.recv() to return Err
         self.handle.join().expect("par2 worker thread panicked")
     }

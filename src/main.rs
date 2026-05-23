@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use parmesan::SimdPath;
 use pesto::compress::{compress, random_password, ArchiveFormat};
 use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
-use parmesan::SimdPath;
 use tracing::info;
 
 /// One-line summary shown at the top of `--help`.

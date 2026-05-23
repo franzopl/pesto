@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::config;
+use anyhow::{Context, Result};
 use std::io::{self, Write};
 
 /// Run the interactive setup wizard.

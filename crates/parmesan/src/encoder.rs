@@ -236,11 +236,21 @@ impl RecoveryEncoder {
             && slice_size.is_multiple_of(32)
         {
             // On AVX2 hardware without GFNI, Shuffle2x is the fastest known layout.
-            return Self::new_shuffle2x(slice_size, total_input_slices, exponent_start, recovery_count);
+            return Self::new_shuffle2x(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
         }
 
         // Default fallback.
-        Self::new(slice_size, total_input_slices, exponent_start, recovery_count)
+        Self::new(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        )
     }
 
     /// Create an encoder for `total_input_slices` input slices of `slice_size`

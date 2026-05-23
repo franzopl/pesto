@@ -22,13 +22,13 @@ use crate::article::{
 };
 use crate::config::{Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
-use parmesan::encoder::{FileHasher, RecoveryEncoder};
-use parmesan::layout;
-use parmesan::packet::{self, SliceChecksum};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::ResumeState;
 use crate::walk::InputFile;
 use crate::yenc;
+use parmesan::encoder::{FileHasher, RecoveryEncoder};
+use parmesan::layout;
+use parmesan::packet::{self, SliceChecksum};
 
 use parmesan::worker::Par2Worker;
 
@@ -462,7 +462,9 @@ fn configure_rayon(threads: usize) {
         } else {
             parmesan::performance_core_count()
         };
-        let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global();
     });
 }
 
@@ -774,13 +776,16 @@ async fn producer(
 
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         let worker_opt: Option<Par2Worker> = if rec_count > 0 {
-            let enc = RecoveryEncoder::new_smart(par2_slice_size, total_slices, exp_start, rec_count);
+            let enc =
+                RecoveryEncoder::new_smart(par2_slice_size, total_slices, exp_start, rec_count);
             // On passes with many recovery blocks, increasing the queue size
             // (cache blocking) amortizes the flush cost over more input data.
             // We use 1/4 of the available memory limit for the queue, capped
             // between 256MB and 2GB.
             let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
-            let enc = enc.with_flush_limit(queue_limit).with_simd_path(shared.config.simd);
+            let enc = enc
+                .with_flush_limit(queue_limit)
+                .with_simd_path(shared.config.simd);
 
             // On pass 0 enable parallel checksum computation inside the encoder
             // so rayon::join overlaps MD5+CRC32 with RS work.
