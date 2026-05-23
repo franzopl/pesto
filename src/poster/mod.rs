@@ -466,20 +466,6 @@ fn configure_rayon(threads: usize) {
     });
 }
 
-/// Returns the name of the SIMD path that the PAR2 encoder will use at runtime.
-
-/// Number of performance-class cores. On hybrid CPUs (Intel 12th gen and later)
-/// Detects hybrid layout via Linux topology: P-cores expose two
-/// `thread_siblings_list` entries (HT pair), E-cores stand alone.
-/// On hybrid CPUs (P + E mix) return all physical cores (paired leaders + solo),
-/// one rayon thread per physical core. On non-hybrid CPUs fall back to
-/// [`physical_core_count`]. Hyperthreads are always excluded — they contend for
-/// the same execution ports and add noise on pure SIMD/ALU workloads.
-
-/// Number of physical CPU cores, derived from `/proc/cpuinfo` by counting
-/// distinct `(physical id, core id)` pairs. Falls back to the logical CPU
-/// count when that information is unavailable.
-
 /// Pad the accumulated real bytes to the full PAR2 slice size and forward
 /// the slice to the background [`Par2Worker`]. Leaves `accum` empty (or
 /// containing the leftover bytes if a split occurred).
@@ -670,14 +656,15 @@ async fn producer(
     // to keep input-block count near TARGET_PAR2_SLICES while satisfying both
     // PAR2 spec limits (32 768 input blocks, 65 535 recovery blocks).
     let (par2_slice_size, total_slices) = if let Some(size) = shared.config.par2_slice_size {
-        // Manual slice size. SNAP to multiple of 4 as per spec requirements.
-        let s = (size / 4 * 4).max(4);
+        // Align to 64 bytes so SIMD kernels (Shuffle2x, ALTMAP) can operate
+        // without a scalar tail on every chunk boundary.
+        let s = (size / 64 * 64).max(64);
         let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
         (s, n)
     } else if let Some(count) = shared.config.par2_slice_count {
-        // Target a specific number of input slices.
+        // Target a specific number of input slices (64-byte aligned).
         let total_bytes: u64 = metas.iter().map(|m| m.size).sum();
-        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 4 * 4).max(4);
+        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 64 * 64).max(64);
         let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
         (s, n)
     } else {
@@ -795,8 +782,8 @@ async fn producer(
             let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
             let enc = enc.with_flush_limit(queue_limit).with_simd_path(shared.config.simd);
 
-            // Melhoria 1: on pass 0 enable parallel checksum computation inside
-            // the encoder so rayon::join overlaps MD5+CRC32 with RS work.
+            // On pass 0 enable parallel checksum computation inside the encoder
+            // so rayon::join overlaps MD5+CRC32 with RS work.
             let enc = if pass_idx == 0 {
                 enc.with_checksums()
             } else {
@@ -961,8 +948,8 @@ async fn producer(
                     all_checksums[file_idx] = cs_iter.by_ref().take(file_slices).collect();
                 }
 
-                // Melhoria 2: hashes were computed during the first read pass
-                // (Single-Pass Read) to avoid redundant I/O.
+                // Hashes were computed during the first read pass to avoid
+                // redundant I/O.
                 let mut file_ids = Vec::new();
                 let mut final_hashes = Vec::new();
 
