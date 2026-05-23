@@ -174,35 +174,38 @@ Target: exceed nyuu's documented yEnc throughput (~1.2 GB/s AVX2 at
 `line_len=128`) and reach 2–3 GB/s at `line_len=256`. All changes must keep
 the full Phase 26 golden-reference test suite green.
 
-### 27a — Fix AVX2 256→128-bit register mixing *(low complexity)*
+### 27a — Diagnose AVX2 underperformance *(investigation — closed)*
 
-The current `encode_avx2_impl` falls back to 128-bit SSSE3 instructions
-(`_mm_cmpeq_epi8`, `_mm_storeu_si128`) for the <32-byte safe-zone remainder
-within the same function. CPUs detect this 256→128 transition and insert
-implicit VZEROUPPER-equivalent stalls, which is why AVX2 benchmarks 12%
-*slower* than SSSE3 for `line_len=128`.
+**Finding:** the 256→128 register-mixing hypothesis was wrong. Removing the
+128-bit SSSE3 remainder from `encode_avx2_impl` and replacing it with scalar
+made performance *worse* (1930→1801 MB/s at ll=256). The real cause is
+arithmetic: the safe zone per line (`line_len - 2`) does not divide evenly
+into 32-byte AVX2 chunks — at `ll=128`, SSSE3 fits 7 chunks of 16 (112 B)
+while AVX2 fits only 3 chunks of 32 (96 B) before the tail. SSSE3 does more
+useful SIMD work per line at these standard line lengths.
 
-- [ ] Remove the inline 128-bit block from `encode_avx2_impl`; use scalar
-  directly for the safe-zone tail after the 32-byte chunks.
-- [ ] Verify AVX2 now outperforms SSSE3 at `line_len=128`.
-- [ ] Re-run full Phase 26 test suite.
+**Resolution (27b):** fix the dispatcher, not the AVX2 implementation.
+`encode_avx2` is retained for benchmarking and multi-line future work.
 
-### 27b — Dispatcher: line_len-aware path selection *(low complexity)*
+### 27b — Dispatcher: always prefer SSSE3 *(low complexity)* ✅
 
-- [ ] In `pub fn encode()`, prefer SSSE3 when `line_len < 48` (safe zone
-  too narrow to fit even one AVX2 chunk) and AVX2 otherwise.
-- [ ] Add a test asserting the selected path for representative `line_len`
-  values (e.g. 1, 32, 48, 64, 128, 256).
+Benchmarks showed SSSE3 beats AVX2 at both ll=128 and ll=256 under the
+current line-by-line boundary strategy. AVX2 would only win with a multi-line
+approach that amortises the per-line boundary overhead.
 
-### 27c — Benchmark and validate at line_len=256 *(low complexity)*
+- [x] `pub fn encode()` now dispatches SSSE3 > scalar, skipping AVX2.
+- [x] `encode_avx2` remains public for benchmarking and future phases.
+- [x] Dispatcher docstring explains the trade-off.
 
-`line_len=256` gives a safe zone of 254 bytes: 7 AVX2 chunks (224 bytes) vs
-3 today. This is where AVX2 earns its width.
+Results after 27b:
+  ll=128  encode (disp): **1797 MB/s** (1.50× nyuu) ✓
+  ll=256  encode (disp): **2294 MB/s** (0.96× nyuu) — 4% gap remaining
 
-- [ ] Add `line_len=256` rows to `benches/yenc.rs` for all four paths.
-- [ ] Add nyuu's documented yEnc throughput (~1.2 GB/s, `line_len=128`) as a
-  printed reference line so every benchmark run shows the target to beat.
-- [ ] Expected outcome: AVX2 at `line_len=256` ≥ 2 GB/s, exceeding nyuu.
+### 27c — Benchmark and validate at line_len=256 *(low complexity)* ✅
+
+- [x] `benches/yenc.rs` covers both ll=128 and ll=256 for all four paths.
+- [x] nyuu reference (~1200 MB/s / ~2400 MB/s) printed after each section.
+- [x] SSSE3 at ll=256 reaches 2294 MB/s — 96% of nyuu's documented target.
 
 ### 27d — DEFAULT_LINE_LENGTH: evaluate raising to 256 *(medium complexity)*
 

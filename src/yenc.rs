@@ -406,6 +406,12 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
 /// AVX2-accelerated yEnc encoder. Falls back to SSSE3 or scalar when the
 /// required CPU features are absent (detected at runtime).
 ///
+/// **Note:** for standard line lengths (128–256), SSSE3 is measurably faster
+/// because the safe-zone per line (`line_len - 2` bytes) does not fill an
+/// integer number of 32-byte AVX2 chunks, leaving a larger scalar tail than
+/// SSSE3 would. [`encode`] therefore dispatches to SSSE3 in practice; this
+/// function exists for benchmarking and for future multi-line processing.
+///
 /// Produces identical output to [`encode_scalar`] for all inputs.
 #[cfg(target_arch = "x86_64")]
 pub fn encode_avx2(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
@@ -419,13 +425,16 @@ pub fn encode_avx2(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
 
 /// Runtime-dispatched encoder: picks the fastest path available on this CPU.
 ///
-/// Priority: AVX2 > SSSE3 > scalar. Use this in production code instead of
-/// calling a specific path directly.
+/// For `line_len` values used in practice (128–256), SSSE3 (16-byte chunks)
+/// consistently outperforms AVX2 (32-byte chunks) because the safe zone per
+/// line — `line_len - 2` bytes — does not divide evenly into 32-byte chunks,
+/// leaving too large a scalar tail. AVX2 is kept for benchmarking and future
+/// multi-line processing (phase 27d).
+///
+/// Priority: SSSE3 > scalar. (AVX2 reserved for multi-line phase.)
 #[cfg(target_arch = "x86_64")]
 pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
-    if is_x86_feature_detected!("avx2") {
-        unsafe { encode_avx2_impl(out, data, line_len) }
-    } else if is_x86_feature_detected!("ssse3") {
+    if is_x86_feature_detected!("ssse3") {
         unsafe { encode_ssse3_impl(out, data, line_len) }
     } else {
         encode_scalar(out, data, line_len)
