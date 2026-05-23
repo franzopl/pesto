@@ -641,7 +641,6 @@ impl RecoveryEncoder {
             unsafe {
                 self.flush_ssse3();
             }
-            return;
         }
 
         // NEON is mandatory on AArch64; pmull.8h is part of base NEON (ARMv8-A).

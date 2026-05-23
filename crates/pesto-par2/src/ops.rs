@@ -1,6 +1,6 @@
 use crate::worker::Par2Worker;
 use crate::SimdPath;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 
 /// High-level PAR2 creation parameters.
