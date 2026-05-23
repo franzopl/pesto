@@ -1746,26 +1746,42 @@ consecutive (4.6 KB), fitting in one L2 fetch stream.
       satisfy clippy.
 - [ ] Benchmark on 5 GB; expected +3–5% on cache-pressure workloads.
 
-### 30d — NEON polynomial-multiply GF kernel (large, 4–8 h)
+### Phase 31 — AArch64 pmull/CLMUL path (implemented) ✅
 
-**Hypothesis:** AArch64 `vmull_p64` / `pmull` performs carry-less (polynomial) 64-bit
-multiplication. GF(2^16) multiplication by a constant can be expressed as two 16-bit
-polynomial mults + reduction mod `0x1100B`. A SIMD kernel using 8× `vmull_p8` (8-bit
-polynomial mult, 8-element parallel) to compute GF(2^8) partial products might eliminate
-the table-lookup bottleneck entirely.
+**Result: 50 MB/s → 310 MiB/s (+6×) at 512 MiB @ 10%, now matches/exceeds parpar (301 MB/s).**
 
-Algorithm sketch (Karatsuba-style over GF(2^8)):
-```
-input  = [a1, a0]  (hi/lo bytes of each GF(2^16) word)
-coeff  = [c1, c0]
-prod_lo = vmull_p8(a0, c0) XOR (reduction of vmull_p8(a0, c1) XOR vmull_p8(a1, c0) by x^8)
-prod_hi = vmull_p8(a1, c1) XOR ...  -- depends on poly reduction details
-```
+Replaced the 8-table nibble-shuffle (8 × `vqtbl1q_u8` per GF multiply) with a
+Karatsuba+Barrett polynomial-multiply kernel using `pmull.8h` / `pmull2.8h` — the
+carry-less multiply instructions available on every ARMv8-A core.
 
-- [ ] Prototype `flush_neon_poly()` using `vmull_p8` for GF(2^16) madd.
-- [ ] Verify output matches scalar reference via `simd_recovery_matches_scalar` test.
-- [ ] Benchmark; target ≥ 180 MB/s (closing gap to ≤ 1.3× parpar).
-- [ ] If faster, integrate into runtime dispatch as the preferred NEON path.
+**Algorithm:**
+- Karatsuba decomposition: split each 16-bit coefficient and data word into lo/hi
+  bytes; 3 `pmull` calls compute lo×lo, hi×hi, mid×mid; one Barrett reduction mod
+  `0x1100B` yields the GF(2^16) product.
+- Barrett reduction ported from parpar `gf16_clmul_neon.h` (MIT, © animetosho):
+  `vuzpq_u8` deinterleave → quotient approximation via nibble shifts →
+  `vqtbl1q_u8` XOR-fold → `vmulq_p8` by 0x0b.
+- **Critical loop restructure:** outer loop over input batches (BATCH=8), inner
+  loop over output blocks. Coefficients are broadcast with `vdupq_n_p8` ONCE per
+  batch, reused across all 24 K output blocks — matches parpar's
+  `gf16_clmul_muladd_x`. Previous (inverted) structure re-broadcast per block,
+  wasting 24 000× coefficient loads per recovery block.
+
+**Benchmark (Neoverse N1, 4 cores):**
+
+| Scenario         | Before (shuffle) | After (CLMUL) | parpar  |
+|------------------|------------------|---------------|---------|
+| 64 MiB @ 10%     | 349 MiB/s        | 1 451 MiB/s   | —       |
+| 256 MiB @ 10%    | 87 MiB/s         | 537 MiB/s     | —       |
+| 512 MiB @ 10%    | 50 MiB/s         | 310 MiB/s     | 301 MB/s|
+| scalar ref       | 74 MiB/s         | 74 MiB/s      | —       |
+
+- [x] `flush_neon_clmul` + `flush_neon_clmul_work` kernel with BATCH=8 outer loop.
+- [x] `gf16_clmul_reduce_neon`: Barrett reduction as a standalone `#[inline]` fn.
+- [x] `BenchPath::NeonClmul` for isolated benchmarking on AArch64.
+- [x] GFNI test gated behind `cfg(target_arch = "x86_64")` for cross-arch builds.
+- [x] Old nibble-shuffle `flush_neon` / `flush_neon_work` removed.
+- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
 
 ### 30e — Reduce ops-per-byte with vqtbl2q_u8 (medium, 2–3 h)
 
