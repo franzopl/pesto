@@ -154,12 +154,20 @@ impl Config {
             obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
-            par2_memory_limit: if let Some(s) = file.posting.par2_memory_limit {
-                Some(parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")? as usize)
-            } else {
-                None
+            par2_memory_limit: {
+                if let Some(limit) = cli.par2_memory_limit {
+                    Some(limit as usize)
+                } else if let Some(s) = file.posting.par2_memory_limit {
+                    Some(
+                        parse_upload_rate(&s).with_context(|| "parsing par2_memory_limit")? as usize,
+                    )
+                } else {
+                    None
+                }
             },
             par2_only,
+            threads: cli.threads.unwrap_or(0), // 0 means auto
+            simd: cli.simd.unwrap_or_default(),
             verify: cli.verify.or(file.posting.verify).unwrap_or(false),
             resume: cli
                 .resume

@@ -12,7 +12,9 @@ md-5 = { version = "0.10", features = ["asm"] }
 crc32fast = "1.4"
 tracing = "0.1"
 anyhow = "1"
+clap = { version = "4", features = ["derive"], optional = true }
 
 [features]
+default = ["clap"]
 bench-internals = []
 par2-avx2-gfni-unsafe = []

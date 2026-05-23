@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
+use pesto_par2::SimdPath;
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -205,6 +206,9 @@ pub struct Overrides {
     pub dry_run: Option<bool>,
     pub par2: Option<u8>,
     pub par2_only: Option<bool>,
+    pub par2_memory_limit: Option<u64>,
+    pub threads: Option<usize>,
+    pub simd: Option<SimdPath>,
     pub resume: Option<bool>,
     pub verify: Option<bool>,
     pub upload_rate: Option<u64>,
@@ -252,6 +256,8 @@ pub struct Config {
     pub par2: u8,
     pub par2_memory_limit: Option<usize>,
     pub par2_only: bool,
+    pub threads: usize,
+    pub simd: SimdPath,
     pub verify: bool,
     pub resume: bool,
     pub upload_rate: u64,

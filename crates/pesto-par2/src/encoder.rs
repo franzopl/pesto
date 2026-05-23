@@ -22,6 +22,7 @@ use super::gf16::xor_dep_matrix;
 use super::gf16::{input_logbases, Gf16, ORDER};
 use super::packet::{md5, SliceChecksum};
 use crate::yenc::crc32;
+use crate::SimdPath;
 
 /// Bytes covered by the per-file 16k hash.
 const HEAD_LEN: usize = 16 * 1024;
@@ -179,6 +180,8 @@ pub struct RecoveryEncoder {
     /// parallel with the Reed-Solomon work and accumulates them here.
     compute_checksums: bool,
     pending_checksums: Vec<SliceChecksum>,
+    /// Manual override for the SIMD multiplication backend.
+    pub(super) simd_path: SimdPath,
     /// Force a specific SIMD path instead of auto-detecting; only available
     /// when built with the `bench-internals` Cargo feature.
     #[cfg(feature = "bench-internals")]
@@ -245,6 +248,7 @@ impl RecoveryEncoder {
             flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
+            simd_path: SimdPath::Auto,
             #[cfg(feature = "bench-internals")]
             forced_path: None,
             #[cfg(target_arch = "x86_64")]
@@ -309,6 +313,7 @@ impl RecoveryEncoder {
             flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
+            simd_path: SimdPath::Auto,
             #[cfg(feature = "bench-internals")]
             forced_path: None,
             #[cfg(target_arch = "x86_64")]
@@ -351,6 +356,7 @@ impl RecoveryEncoder {
             flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
+            simd_path: SimdPath::Auto,
             #[cfg(feature = "bench-internals")]
             forced_path: None,
             // Shuffle2x never uses dep_tables (those are only for the ALTMAP path).
@@ -378,6 +384,12 @@ impl RecoveryEncoder {
     /// Call [`drain_checksums`] after [`finish`] to retrieve them in slice order.
     pub fn with_checksums(mut self) -> Self {
         self.compute_checksums = true;
+        self
+    }
+
+    /// Set a manual override for the SIMD multiplication backend.
+    pub fn with_simd_path(mut self, path: SimdPath) -> Self {
+        self.simd_path = path;
         self
     }
 
@@ -450,6 +462,48 @@ impl RecoveryEncoder {
     fn flush(&mut self) {
         if self.queued_slices.is_empty() {
             return;
+        }
+
+        // ── Manual Override (SimdPath) ───────────────────────────────────────
+        match self.simd_path {
+            SimdPath::Auto => {} // proceed to auto-detection
+            SimdPath::Scalar => {
+                self.flush_scalar();
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Ssse3 if std::is_x86_feature_detected!("ssse3") => {
+                unsafe { self.flush_ssse3() };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx2 if std::is_x86_feature_detected!("avx2") => {
+                unsafe { self.flush_avx2() };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx2Gfni
+                if std::is_x86_feature_detected!("avx2")
+                    && std::is_x86_feature_detected!("gfni") =>
+            {
+                unsafe { self.flush_avx2_gfni() };
+                return;
+            }
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx512Gfni
+                if std::is_x86_feature_detected!("avx512f")
+                    && std::is_x86_feature_detected!("avx512bw")
+                    && std::is_x86_feature_detected!("gfni") =>
+            {
+                unsafe { self.flush_avx512_gfni() };
+                return;
+            }
+            #[cfg(target_arch = "aarch64")]
+            SimdPath::Neon => {
+                self.flush_neon();
+                return;
+            }
+            _ => {} // specified path not supported/available; fall through to auto
         }
 
         // ALTMAP path: AVX2 XOR bit-dependency kernel (Phase 27e).
