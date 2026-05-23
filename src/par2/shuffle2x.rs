@@ -289,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unreachable_code)]
     fn scalar_and_simd_agree() {
         #[cfg(not(target_arch = "x86_64"))]
         return;

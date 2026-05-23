@@ -14,7 +14,9 @@ use rayon::prelude::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-use super::gf16::{input_logbases, xor_dep_matrix, Gf16, ORDER};
+#[cfg(target_arch = "x86_64")]
+use super::gf16::xor_dep_matrix;
+use super::gf16::{input_logbases, Gf16, ORDER};
 use super::packet::{md5, SliceChecksum};
 use crate::yenc::crc32;
 
@@ -556,13 +558,10 @@ impl RecoveryEncoder {
 
         // NEON is mandatory on AArch64; no runtime check required.
         #[cfg(target_arch = "aarch64")]
-        {
-            unsafe {
-                self.flush_neon();
-            }
-            return;
+        unsafe {
+            self.flush_neon();
         }
-
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         self.flush_scalar();
     }
 
@@ -3228,6 +3227,9 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
+    /// Rewritten in Phase 30a: 2D parallel structure (recovery-block groups ×
+    /// buffer chunks) with 4× unrolling across recovery blocks so one input
+    /// load serves four accumulators simultaneously, matching the x86 AVX2 path.
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
     unsafe fn flush_neon_work(
@@ -3238,17 +3240,32 @@ impl RecoveryEncoder {
         exponent_start: u32,
         gf: &Gf16,
     ) {
-        use std::arch::aarch64::*;
+        // Store table entries as plain byte/u16 arrays so they are Send+Sync
+        // and can cross rayon task boundaries. Each element is loaded as a
+        // uint8x16_t via vld1q_u8 inside the closure.
+        type NeonTable = (
+            [u8; 16], // tl_l
+            [u8; 16], // tl_h
+            [u8; 16], // th_l
+            [u8; 16], // th_h
+            [u8; 16], // hl_l
+            [u8; 16], // hl_h
+            [u8; 16], // hh_l
+            [u8; 16], // hh_h
+            [u16; 256],
+            [u16; 256],
+        );
 
-        let mask_f = vdupq_n_u8(0x0F);
-        // 0x00FF per 16-bit lane: bytes [0xFF, 0x00, 0xFF, 0x00, ...].
-        let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
 
-        buffers.par_iter_mut().enumerate().for_each(|(i, buffer)| {
-            let exponent = exponent_start + i as u32;
-
-            let mut tables = Vec::with_capacity(queued.len());
-            for (q_idx, _) in queued.iter().enumerate() {
+        // Pre-build all (recovery_block × input_slice) tables in one parallel pass.
+        let all_tables: Vec<NeonTable> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
                 let coeff = gf.exp(log_coeff);
@@ -3261,255 +3278,894 @@ impl RecoveryEncoder {
                 let mut hl_h = [0u8; 16];
                 let mut hh_l = [0u8; 16];
                 let mut hh_h = [0u8; 16];
-
                 for val in 0..16usize {
                     let r0 = gf.mul(val as u16, coeff);
                     tl_l[val] = (r0 & 0xFF) as u8;
                     th_l[val] = (r0 >> 8) as u8;
-
                     let r1 = gf.mul((val as u16) << 4, coeff);
                     tl_h[val] = (r1 & 0xFF) as u8;
                     th_h[val] = (r1 >> 8) as u8;
-
                     let r2 = gf.mul((val as u16) << 8, coeff);
                     hl_l[val] = (r2 & 0xFF) as u8;
                     hh_l[val] = (r2 >> 8) as u8;
-
                     let r3 = gf.mul((val as u16) << 12, coeff);
                     hl_h[val] = (r3 & 0xFF) as u8;
                     hh_h[val] = (r3 >> 8) as u8;
                 }
-
-                let v_tl_l = vld1q_u8(tl_l.as_ptr());
-                let v_tl_h = vld1q_u8(tl_h.as_ptr());
-                let v_th_l = vld1q_u8(th_l.as_ptr());
-                let v_th_h = vld1q_u8(th_h.as_ptr());
-                let v_hl_l = vld1q_u8(hl_l.as_ptr());
-                let v_hl_h = vld1q_u8(hl_h.as_ptr());
-                let v_hh_l = vld1q_u8(hh_l.as_ptr());
-                let v_hh_h = vld1q_u8(hh_h.as_ptr());
-
                 let mut table_low = [0u16; 256];
                 let mut table_high = [0u16; 256];
                 for b in 0..=255usize {
                     table_low[b] = gf.mul(b as u16, coeff);
                     table_high[b] = gf.mul((b as u16) << 8, coeff);
                 }
+                (
+                    tl_l, tl_h, th_l, th_h, hl_l, hl_h, hh_l, hh_h, table_low, table_high,
+                )
+            })
+            .collect();
 
-                tables.push((
-                    v_tl_l, v_tl_h, v_th_l, v_th_h, v_hl_l, v_hl_h, v_hh_l, v_hh_h, table_low,
-                    table_high,
-                ));
-            }
+        // 16384 words = 32 KiB: fits in Neoverse N1's 64 KB L1D per core.
+        let chunk_size = 16384usize;
 
-            // 16384 words == 32 KiB: keeps the recovery chunk L1-resident
-            // across all queued input slices.
-            let chunk_size = 16384;
-            for (chunk_idx, buffer_chunk) in buffer.chunks_mut(chunk_size).enumerate() {
-                let byte_offset = chunk_idx * chunk_size * 2;
-                let byte_len = buffer_chunk.len() * 2;
-                let blocks_16 = byte_len / 16;
-                let remainder = byte_len % 16;
+        // Macro: one GF(2^16) multiply-accumulate into ptr_out for one 16-byte
+        // input vector whose nibbles are already extracted into n02/n13.
+        // Each call: 8 vqtbl1q_u8 + 4 veorq + 2 vshrq + 1 vshlq + 1 vorrq + 1 vandq
+        //            + 1 vld1q + 1 vst1q = 19 instructions for one recovery block.
+        macro_rules! neon_madd {
+            ($tll:expr, $tlh:expr, $thl:expr, $thh:expr,
+             $hll:expr, $hlh:expr, $hhl:expr, $hhh:expr,
+             $n02:expr, $n13:expr, $ptr:expr, $me:expr) => {{
+                use std::arch::aarch64::*;
+                let rle = veorq_u8(vqtbl1q_u8($tll, $n02), vqtbl1q_u8($tlh, $n13));
+                let rhe = veorq_u8(vqtbl1q_u8($thl, $n02), vqtbl1q_u8($thh, $n13));
+                let rlo = veorq_u8(vqtbl1q_u8($hll, $n02), vqtbl1q_u8($hlh, $n13));
+                let rho = veorq_u8(vqtbl1q_u8($hhl, $n02), vqtbl1q_u8($hhh, $n13));
+                let slo = veorq_u8(
+                    rle,
+                    vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo), 8)),
+                );
+                let shi = veorq_u8(
+                    rhe,
+                    vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho), 8)),
+                );
+                let out = vorrq_u8(
+                    vandq_u8(slo, $me),
+                    vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(shi), 8)),
+                );
+                vst1q_u8($ptr, veorq_u8(vld1q_u8($ptr), out));
+            }};
+        }
 
-                for (q_idx, slice) in queued.iter().enumerate() {
-                    let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
-                    let (
-                        v_tl_l,
-                        v_tl_h,
-                        v_th_l,
-                        v_th_h,
-                        v_hl_l,
-                        v_hl_h,
-                        v_hh_l,
-                        v_hh_h,
-                        ref table_low,
-                        ref table_high,
-                    ) = tables[q_idx];
+        buffers
+            .par_chunks_mut(4)
+            .enumerate()
+            .for_each(|(group_idx, buf_group)| {
+                let i = group_idx * 4;
+                match buf_group {
+                    [buf_a, buf_b, buf_c, buf_d] => {
+                        // 4× unrolled across recovery blocks: one input load serves all four.
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        let base_c = (i + 2) * n_queued;
+                        let base_d = (i + 3) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size)
+                            .zip(buf_b.par_chunks_mut(chunk_size))
+                            .zip(buf_c.par_chunks_mut(chunk_size))
+                            .zip(buf_d.par_chunks_mut(chunk_size))
+                            .enumerate()
+                            .for_each(
+                                |(chunk_idx, (((chunk_a, chunk_b), chunk_c), chunk_d))| unsafe {
+                                    use std::arch::aarch64::*;
+                                    let mask_f = vdupq_n_u8(0x0F);
+                                    let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
 
-                    let mut ptr_buf = buffer_chunk.as_mut_ptr() as *mut u8;
-                    let mut ptr_in = slice_chunk.as_ptr();
-                    let end = ptr_in.add(blocks_16 * 16);
+                                    let byte_offset = chunk_idx * chunk_size * 2;
+                                    let byte_len = chunk_a.len() * 2;
+                                    let blocks_16 = byte_len / 16;
+                                    let remainder = byte_len % 16;
 
-                    while ptr_in.add(64) <= end {
-                        let input0 = vld1q_u8(ptr_in);
-                        let input1 = vld1q_u8(ptr_in.add(16));
-                        let input2 = vld1q_u8(ptr_in.add(32));
-                        let input3 = vld1q_u8(ptr_in.add(48));
+                                    for q_idx in 0..n_queued {
+                                        let (
+                                            ref tll_a,
+                                            ref tlh_a,
+                                            ref thl_a,
+                                            ref thh_a,
+                                            ref hll_a,
+                                            ref hlh_a,
+                                            ref hhl_a,
+                                            ref hhh_a,
+                                            ref tlow_a,
+                                            ref thigh_a,
+                                        ) = all_tables[base_a + q_idx];
+                                        let (
+                                            ref tll_b,
+                                            ref tlh_b,
+                                            ref thl_b,
+                                            ref thh_b,
+                                            ref hll_b,
+                                            ref hlh_b,
+                                            ref hhl_b,
+                                            ref hhh_b,
+                                            ref tlow_b,
+                                            ref thigh_b,
+                                        ) = all_tables[base_b + q_idx];
+                                        let (
+                                            ref tll_c,
+                                            ref tlh_c,
+                                            ref thl_c,
+                                            ref thh_c,
+                                            ref hll_c,
+                                            ref hlh_c,
+                                            ref hhl_c,
+                                            ref hhh_c,
+                                            ref tlow_c,
+                                            ref thigh_c,
+                                        ) = all_tables[base_c + q_idx];
+                                        let (
+                                            ref tll_d,
+                                            ref tlh_d,
+                                            ref thl_d,
+                                            ref thh_d,
+                                            ref hll_d,
+                                            ref hlh_d,
+                                            ref hhl_d,
+                                            ref hhh_d,
+                                            ref tlow_d,
+                                            ref thigh_d,
+                                        ) = all_tables[base_d + q_idx];
 
-                        // Nibble extraction
-                        let n0_2_0 = vandq_u8(input0, mask_f);
-                        let n1_3_0 = vandq_u8(
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input0), 4)),
-                            mask_f,
-                        );
-                        let n0_2_1 = vandq_u8(input1, mask_f);
-                        let n1_3_1 = vandq_u8(
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input1), 4)),
-                            mask_f,
-                        );
-                        let n0_2_2 = vandq_u8(input2, mask_f);
-                        let n1_3_2 = vandq_u8(
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input2), 4)),
-                            mask_f,
-                        );
-                        let n0_2_3 = vandq_u8(input3, mask_f);
-                        let n1_3_3 = vandq_u8(
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input3), 4)),
-                            mask_f,
-                        );
+                                        // Load 8 NEON table vectors per recovery block (32 total).
+                                        let vtll_a = vld1q_u8(tll_a.as_ptr());
+                                        let vtlh_a = vld1q_u8(tlh_a.as_ptr());
+                                        let vthl_a = vld1q_u8(thl_a.as_ptr());
+                                        let vthh_a = vld1q_u8(thh_a.as_ptr());
+                                        let vhll_a = vld1q_u8(hll_a.as_ptr());
+                                        let vhlh_a = vld1q_u8(hlh_a.as_ptr());
+                                        let vhhl_a = vld1q_u8(hhl_a.as_ptr());
+                                        let vhhh_a = vld1q_u8(hhh_a.as_ptr());
+                                        let vtll_b = vld1q_u8(tll_b.as_ptr());
+                                        let vtlh_b = vld1q_u8(tlh_b.as_ptr());
+                                        let vthl_b = vld1q_u8(thl_b.as_ptr());
+                                        let vthh_b = vld1q_u8(thh_b.as_ptr());
+                                        let vhll_b = vld1q_u8(hll_b.as_ptr());
+                                        let vhlh_b = vld1q_u8(hlh_b.as_ptr());
+                                        let vhhl_b = vld1q_u8(hhl_b.as_ptr());
+                                        let vhhh_b = vld1q_u8(hhh_b.as_ptr());
+                                        let vtll_c = vld1q_u8(tll_c.as_ptr());
+                                        let vtlh_c = vld1q_u8(tlh_c.as_ptr());
+                                        let vthl_c = vld1q_u8(thl_c.as_ptr());
+                                        let vthh_c = vld1q_u8(thh_c.as_ptr());
+                                        let vhll_c = vld1q_u8(hll_c.as_ptr());
+                                        let vhlh_c = vld1q_u8(hlh_c.as_ptr());
+                                        let vhhl_c = vld1q_u8(hhl_c.as_ptr());
+                                        let vhhh_c = vld1q_u8(hhh_c.as_ptr());
+                                        let vtll_d = vld1q_u8(tll_d.as_ptr());
+                                        let vtlh_d = vld1q_u8(tlh_d.as_ptr());
+                                        let vthl_d = vld1q_u8(thl_d.as_ptr());
+                                        let vthh_d = vld1q_u8(thh_d.as_ptr());
+                                        let vhll_d = vld1q_u8(hll_d.as_ptr());
+                                        let vhlh_d = vld1q_u8(hlh_d.as_ptr());
+                                        let vhhl_d = vld1q_u8(hhl_d.as_ptr());
+                                        let vhhh_d = vld1q_u8(hhh_d.as_ptr());
 
-                        // Lookup lo-bytes even
-                        let rle0 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_0), vqtbl1q_u8(v_tl_h, n1_3_0));
-                        let rle1 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_1), vqtbl1q_u8(v_tl_h, n1_3_1));
-                        let rle2 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_2), vqtbl1q_u8(v_tl_h, n1_3_2));
-                        let rle3 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_3), vqtbl1q_u8(v_tl_h, n1_3_3));
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                        let mut ptr_a = chunk_a.as_mut_ptr() as *mut u8;
+                                        let mut ptr_b = chunk_b.as_mut_ptr() as *mut u8;
+                                        let mut ptr_c = chunk_c.as_mut_ptr() as *mut u8;
+                                        let mut ptr_d = chunk_d.as_mut_ptr() as *mut u8;
+                                        let mut ptr_in = slice_chunk.as_ptr();
+                                        let end = ptr_in.add(blocks_16 * 16);
 
-                        // Lookup hi-bytes even
-                        let rhe0 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_0), vqtbl1q_u8(v_th_h, n1_3_0));
-                        let rhe1 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_1), vqtbl1q_u8(v_th_h, n1_3_1));
-                        let rhe2 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_2), vqtbl1q_u8(v_th_h, n1_3_2));
-                        let rhe3 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_3), vqtbl1q_u8(v_th_h, n1_3_3));
+                                        // 4× input unrolling: 64 input bytes per iteration.
+                                        // Nibbles extracted once per input chunk, reused for A/B/C/D.
+                                        while ptr_in.add(64) <= end {
+                                            let i0 = vld1q_u8(ptr_in);
+                                            let n02_0 = vandq_u8(i0, mask_f);
+                                            let n13_0 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i0),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            let i1 = vld1q_u8(ptr_in.add(16));
+                                            let n02_1 = vandq_u8(i1, mask_f);
+                                            let n13_1 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i1),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            let i2 = vld1q_u8(ptr_in.add(32));
+                                            let n02_2 = vandq_u8(i2, mask_f);
+                                            let n13_2 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i2),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            let i3 = vld1q_u8(ptr_in.add(48));
+                                            let n02_3 = vandq_u8(i3, mask_f);
+                                            let n13_3 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i3),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
 
-                        // Lookup lo-bytes odd
-                        let rlo0 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_0), vqtbl1q_u8(v_hl_h, n1_3_0));
-                        let rlo1 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_1), vqtbl1q_u8(v_hl_h, n1_3_1));
-                        let rlo2 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_2), vqtbl1q_u8(v_hl_h, n1_3_2));
-                        let rlo3 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_3), vqtbl1q_u8(v_hl_h, n1_3_3));
+                                            neon_madd!(
+                                                vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a,
+                                                vhhl_a, vhhh_a, n02_0, n13_0, ptr_a, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b,
+                                                vhhl_b, vhhh_b, n02_0, n13_0, ptr_b, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_c, vtlh_c, vthl_c, vthh_c, vhll_c, vhlh_c,
+                                                vhhl_c, vhhh_c, n02_0, n13_0, ptr_c, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_d, vtlh_d, vthl_d, vthh_d, vhll_d, vhlh_d,
+                                                vhhl_d, vhhh_d, n02_0, n13_0, ptr_d, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_a,
+                                                vtlh_a,
+                                                vthl_a,
+                                                vthh_a,
+                                                vhll_a,
+                                                vhlh_a,
+                                                vhhl_a,
+                                                vhhh_a,
+                                                n02_1,
+                                                n13_1,
+                                                ptr_a.add(16),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_b,
+                                                vtlh_b,
+                                                vthl_b,
+                                                vthh_b,
+                                                vhll_b,
+                                                vhlh_b,
+                                                vhhl_b,
+                                                vhhh_b,
+                                                n02_1,
+                                                n13_1,
+                                                ptr_b.add(16),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_c,
+                                                vtlh_c,
+                                                vthl_c,
+                                                vthh_c,
+                                                vhll_c,
+                                                vhlh_c,
+                                                vhhl_c,
+                                                vhhh_c,
+                                                n02_1,
+                                                n13_1,
+                                                ptr_c.add(16),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_d,
+                                                vtlh_d,
+                                                vthl_d,
+                                                vthh_d,
+                                                vhll_d,
+                                                vhlh_d,
+                                                vhhl_d,
+                                                vhhh_d,
+                                                n02_1,
+                                                n13_1,
+                                                ptr_d.add(16),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_a,
+                                                vtlh_a,
+                                                vthl_a,
+                                                vthh_a,
+                                                vhll_a,
+                                                vhlh_a,
+                                                vhhl_a,
+                                                vhhh_a,
+                                                n02_2,
+                                                n13_2,
+                                                ptr_a.add(32),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_b,
+                                                vtlh_b,
+                                                vthl_b,
+                                                vthh_b,
+                                                vhll_b,
+                                                vhlh_b,
+                                                vhhl_b,
+                                                vhhh_b,
+                                                n02_2,
+                                                n13_2,
+                                                ptr_b.add(32),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_c,
+                                                vtlh_c,
+                                                vthl_c,
+                                                vthh_c,
+                                                vhll_c,
+                                                vhlh_c,
+                                                vhhl_c,
+                                                vhhh_c,
+                                                n02_2,
+                                                n13_2,
+                                                ptr_c.add(32),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_d,
+                                                vtlh_d,
+                                                vthl_d,
+                                                vthh_d,
+                                                vhll_d,
+                                                vhlh_d,
+                                                vhhl_d,
+                                                vhhh_d,
+                                                n02_2,
+                                                n13_2,
+                                                ptr_d.add(32),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_a,
+                                                vtlh_a,
+                                                vthl_a,
+                                                vthh_a,
+                                                vhll_a,
+                                                vhlh_a,
+                                                vhhl_a,
+                                                vhhh_a,
+                                                n02_3,
+                                                n13_3,
+                                                ptr_a.add(48),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_b,
+                                                vtlh_b,
+                                                vthl_b,
+                                                vthh_b,
+                                                vhll_b,
+                                                vhlh_b,
+                                                vhhl_b,
+                                                vhhh_b,
+                                                n02_3,
+                                                n13_3,
+                                                ptr_b.add(48),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_c,
+                                                vtlh_c,
+                                                vthl_c,
+                                                vthh_c,
+                                                vhll_c,
+                                                vhlh_c,
+                                                vhhl_c,
+                                                vhhh_c,
+                                                n02_3,
+                                                n13_3,
+                                                ptr_c.add(48),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_d,
+                                                vtlh_d,
+                                                vthl_d,
+                                                vthh_d,
+                                                vhll_d,
+                                                vhlh_d,
+                                                vhhl_d,
+                                                vhhh_d,
+                                                n02_3,
+                                                n13_3,
+                                                ptr_d.add(48),
+                                                mask_even
+                                            );
 
-                        // Lookup hi-bytes odd
-                        let rho0 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_0), vqtbl1q_u8(v_hh_h, n1_3_0));
-                        let rho1 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_1), vqtbl1q_u8(v_hh_h, n1_3_1));
-                        let rho2 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_2), vqtbl1q_u8(v_hh_h, n1_3_2));
-                        let rho3 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_3), vqtbl1q_u8(v_hh_h, n1_3_3));
+                                            ptr_in = ptr_in.add(64);
+                                            ptr_a = ptr_a.add(64);
+                                            ptr_b = ptr_b.add(64);
+                                            ptr_c = ptr_c.add(64);
+                                            ptr_d = ptr_d.add(64);
+                                        }
 
-                        // Final Summing & Packing 0
-                        let sum_lo0 = veorq_u8(
-                            rle0,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo0), 8)),
-                        );
-                        let sum_hi0 = veorq_u8(
-                            rhe0,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho0), 8)),
-                        );
-                        let out0 = vorrq_u8(
-                            vandq_u8(sum_lo0, mask_even),
-                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi0), 8)),
-                        );
-                        vst1q_u8(ptr_buf, veorq_u8(vld1q_u8(ptr_buf), out0));
+                                        while ptr_in < end {
+                                            let inp = vld1q_u8(ptr_in);
+                                            let n02 = vandq_u8(inp, mask_f);
+                                            let n13 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(inp),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            neon_madd!(
+                                                vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a,
+                                                vhhl_a, vhhh_a, n02, n13, ptr_a, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b,
+                                                vhhl_b, vhhh_b, n02, n13, ptr_b, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_c, vtlh_c, vthl_c, vthh_c, vhll_c, vhlh_c,
+                                                vhhl_c, vhhh_c, n02, n13, ptr_c, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll_d, vtlh_d, vthl_d, vthh_d, vhll_d, vhlh_d,
+                                                vhhl_d, vhhh_d, n02, n13, ptr_d, mask_even
+                                            );
+                                            ptr_in = ptr_in.add(16);
+                                            ptr_a = ptr_a.add(16);
+                                            ptr_b = ptr_b.add(16);
+                                            ptr_c = ptr_c.add(16);
+                                            ptr_d = ptr_d.add(16);
+                                        }
 
-                        // Final Summing & Packing 1
-                        let sum_lo1 = veorq_u8(
-                            rle1,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo1), 8)),
-                        );
-                        let sum_hi1 = veorq_u8(
-                            rhe1,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho1), 8)),
-                        );
-                        let out1 = vorrq_u8(
-                            vandq_u8(sum_lo1, mask_even),
-                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi1), 8)),
-                        );
-                        vst1q_u8(ptr_buf.add(16), veorq_u8(vld1q_u8(ptr_buf.add(16)), out1));
-
-                        // Final Summing & Packing 2
-                        let sum_lo2 = veorq_u8(
-                            rle2,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo2), 8)),
-                        );
-                        let sum_hi2 = veorq_u8(
-                            rhe2,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho2), 8)),
-                        );
-                        let out2 = vorrq_u8(
-                            vandq_u8(sum_lo2, mask_even),
-                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi2), 8)),
-                        );
-                        vst1q_u8(ptr_buf.add(32), veorq_u8(vld1q_u8(ptr_buf.add(32)), out2));
-
-                        // Final Summing & Packing 3
-                        let sum_lo3 = veorq_u8(
-                            rle3,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo3), 8)),
-                        );
-                        let sum_hi3 = veorq_u8(
-                            rhe3,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho3), 8)),
-                        );
-                        let out3 = vorrq_u8(
-                            vandq_u8(sum_lo3, mask_even),
-                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi3), 8)),
-                        );
-                        vst1q_u8(ptr_buf.add(48), veorq_u8(vld1q_u8(ptr_buf.add(48)), out3));
-
-                        ptr_in = ptr_in.add(64);
-                        ptr_buf = ptr_buf.add(64);
+                                        if remainder > 0 {
+                                            let ow = blocks_16 * 8;
+                                            let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                            let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                            let mut pw_c = chunk_c[ow..].as_mut_ptr();
+                                            let mut pw_d = chunk_d[ow..].as_mut_ptr();
+                                            let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
+                                            let tail_end = p_in.add(remainder);
+                                            while p_in < tail_end {
+                                                let lo = *p_in as usize;
+                                                let hi = *p_in.add(1) as usize;
+                                                *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                                *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                                *pw_c ^= tlow_c[lo] ^ thigh_c[hi];
+                                                *pw_d ^= tlow_d[lo] ^ thigh_d[hi];
+                                                pw_a = pw_a.add(1);
+                                                pw_b = pw_b.add(1);
+                                                pw_c = pw_c.add(1);
+                                                pw_d = pw_d.add(1);
+                                                p_in = p_in.add(2);
+                                            }
+                                        }
+                                    }
+                                },
+                            );
                     }
+                    [buf_a, buf_b] => {
+                        // 2× unrolled fallback for the trailing pair when n_rec % 4 == 2.
+                        let base_a = i * n_queued;
+                        let base_b = (i + 1) * n_queued;
+                        buf_a
+                            .par_chunks_mut(chunk_size)
+                            .zip(buf_b.par_chunks_mut(chunk_size))
+                            .enumerate()
+                            .for_each(|(chunk_idx, (chunk_a, chunk_b))| unsafe {
+                                use std::arch::aarch64::*;
+                                let mask_f = vdupq_n_u8(0x0F);
+                                let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
 
-                    while ptr_in < end {
-                        let input = vld1q_u8(ptr_in);
+                                let byte_offset = chunk_idx * chunk_size * 2;
+                                let byte_len = chunk_a.len() * 2;
+                                let blocks_16 = byte_len / 16;
+                                let remainder = byte_len % 16;
 
-                        // n0_2: low nibble of each byte (n0 for lo-bytes, n2 for hi-bytes).
-                        let n0_2 = vandq_u8(input, mask_f);
-                        // n1_3: high nibble of each byte via 16-bit logical shift right by 4.
-                        let n1_3 = vandq_u8(
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input), 4)),
-                            mask_f,
-                        );
+                                for q_idx in 0..n_queued {
+                                    let (
+                                        ref tll_a,
+                                        ref tlh_a,
+                                        ref thl_a,
+                                        ref thh_a,
+                                        ref hll_a,
+                                        ref hlh_a,
+                                        ref hhl_a,
+                                        ref hhh_a,
+                                        ref tlow_a,
+                                        ref thigh_a,
+                                    ) = all_tables[base_a + q_idx];
+                                    let (
+                                        ref tll_b,
+                                        ref tlh_b,
+                                        ref thl_b,
+                                        ref thh_b,
+                                        ref hll_b,
+                                        ref hlh_b,
+                                        ref hhl_b,
+                                        ref hhh_b,
+                                        ref tlow_b,
+                                        ref thigh_b,
+                                    ) = all_tables[base_b + q_idx];
 
-                        let res_lo_even =
-                            veorq_u8(vqtbl1q_u8(v_tl_l, n0_2), vqtbl1q_u8(v_tl_h, n1_3));
-                        let res_hi_even =
-                            veorq_u8(vqtbl1q_u8(v_th_l, n0_2), vqtbl1q_u8(v_th_h, n1_3));
-                        let res_lo_odd =
-                            veorq_u8(vqtbl1q_u8(v_hl_l, n0_2), vqtbl1q_u8(v_hl_h, n1_3));
-                        let res_hi_odd =
-                            veorq_u8(vqtbl1q_u8(v_hh_l, n0_2), vqtbl1q_u8(v_hh_h, n1_3));
+                                    let vtll_a = vld1q_u8(tll_a.as_ptr());
+                                    let vtlh_a = vld1q_u8(tlh_a.as_ptr());
+                                    let vthl_a = vld1q_u8(thl_a.as_ptr());
+                                    let vthh_a = vld1q_u8(thh_a.as_ptr());
+                                    let vhll_a = vld1q_u8(hll_a.as_ptr());
+                                    let vhlh_a = vld1q_u8(hlh_a.as_ptr());
+                                    let vhhl_a = vld1q_u8(hhl_a.as_ptr());
+                                    let vhhh_a = vld1q_u8(hhh_a.as_ptr());
+                                    let vtll_b = vld1q_u8(tll_b.as_ptr());
+                                    let vtlh_b = vld1q_u8(tlh_b.as_ptr());
+                                    let vthl_b = vld1q_u8(thl_b.as_ptr());
+                                    let vthh_b = vld1q_u8(thh_b.as_ptr());
+                                    let vhll_b = vld1q_u8(hll_b.as_ptr());
+                                    let vhlh_b = vld1q_u8(hlh_b.as_ptr());
+                                    let vhhl_b = vld1q_u8(hhl_b.as_ptr());
+                                    let vhhh_b = vld1q_u8(hhh_b.as_ptr());
 
-                        // Combine even-byte and odd-byte contributions.
-                        // srli_epi16(x, 8) == vshrq_n_u16 reinterpreted as u8.
-                        let sum_lo_even = veorq_u8(
-                            res_lo_even,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(res_lo_odd), 8)),
-                        );
-                        let sum_hi_even = veorq_u8(
-                            res_hi_even,
-                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(res_hi_odd), 8)),
-                        );
+                                    let slice_chunk =
+                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                    let mut ptr_a = chunk_a.as_mut_ptr() as *mut u8;
+                                    let mut ptr_b = chunk_b.as_mut_ptr() as *mut u8;
+                                    let mut ptr_in = slice_chunk.as_ptr();
+                                    let end = ptr_in.add(blocks_16 * 16);
 
-                        // Pack: low byte of each output word from sum_lo_even,
-                        // high byte from sum_hi_even (shifted left 8 within each u16 lane).
-                        let r_l_masked = vandq_u8(sum_lo_even, mask_even);
-                        let r_h_shifted =
-                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi_even), 8));
-                        let out = vorrq_u8(r_l_masked, r_h_shifted);
+                                    while ptr_in.add(64) <= end {
+                                        let i0 = vld1q_u8(ptr_in);
+                                        let n02_0 = vandq_u8(i0, mask_f);
+                                        let n13_0 = vandq_u8(
+                                            vreinterpretq_u8_u16(vshrq_n_u16(
+                                                vreinterpretq_u16_u8(i0),
+                                                4,
+                                            )),
+                                            mask_f,
+                                        );
+                                        let i1 = vld1q_u8(ptr_in.add(16));
+                                        let n02_1 = vandq_u8(i1, mask_f);
+                                        let n13_1 = vandq_u8(
+                                            vreinterpretq_u8_u16(vshrq_n_u16(
+                                                vreinterpretq_u16_u8(i1),
+                                                4,
+                                            )),
+                                            mask_f,
+                                        );
+                                        let i2 = vld1q_u8(ptr_in.add(32));
+                                        let n02_2 = vandq_u8(i2, mask_f);
+                                        let n13_2 = vandq_u8(
+                                            vreinterpretq_u8_u16(vshrq_n_u16(
+                                                vreinterpretq_u16_u8(i2),
+                                                4,
+                                            )),
+                                            mask_f,
+                                        );
+                                        let i3 = vld1q_u8(ptr_in.add(48));
+                                        let n02_3 = vandq_u8(i3, mask_f);
+                                        let n13_3 = vandq_u8(
+                                            vreinterpretq_u8_u16(vshrq_n_u16(
+                                                vreinterpretq_u16_u8(i3),
+                                                4,
+                                            )),
+                                            mask_f,
+                                        );
 
-                        let prev = vld1q_u8(ptr_buf);
-                        vst1q_u8(ptr_buf, veorq_u8(prev, out));
+                                        neon_madd!(
+                                            vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a, vhhl_a,
+                                            vhhh_a, n02_0, n13_0, ptr_a, mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b, vhhl_b,
+                                            vhhh_b, n02_0, n13_0, ptr_b, mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_a,
+                                            vtlh_a,
+                                            vthl_a,
+                                            vthh_a,
+                                            vhll_a,
+                                            vhlh_a,
+                                            vhhl_a,
+                                            vhhh_a,
+                                            n02_1,
+                                            n13_1,
+                                            ptr_a.add(16),
+                                            mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_b,
+                                            vtlh_b,
+                                            vthl_b,
+                                            vthh_b,
+                                            vhll_b,
+                                            vhlh_b,
+                                            vhhl_b,
+                                            vhhh_b,
+                                            n02_1,
+                                            n13_1,
+                                            ptr_b.add(16),
+                                            mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_a,
+                                            vtlh_a,
+                                            vthl_a,
+                                            vthh_a,
+                                            vhll_a,
+                                            vhlh_a,
+                                            vhhl_a,
+                                            vhhh_a,
+                                            n02_2,
+                                            n13_2,
+                                            ptr_a.add(32),
+                                            mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_b,
+                                            vtlh_b,
+                                            vthl_b,
+                                            vthh_b,
+                                            vhll_b,
+                                            vhlh_b,
+                                            vhhl_b,
+                                            vhhh_b,
+                                            n02_2,
+                                            n13_2,
+                                            ptr_b.add(32),
+                                            mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_a,
+                                            vtlh_a,
+                                            vthl_a,
+                                            vthh_a,
+                                            vhll_a,
+                                            vhlh_a,
+                                            vhhl_a,
+                                            vhhh_a,
+                                            n02_3,
+                                            n13_3,
+                                            ptr_a.add(48),
+                                            mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_b,
+                                            vtlh_b,
+                                            vthl_b,
+                                            vthh_b,
+                                            vhll_b,
+                                            vhlh_b,
+                                            vhhl_b,
+                                            vhhh_b,
+                                            n02_3,
+                                            n13_3,
+                                            ptr_b.add(48),
+                                            mask_even
+                                        );
 
-                        ptr_in = ptr_in.add(16);
-                        ptr_buf = ptr_buf.add(16);
+                                        ptr_in = ptr_in.add(64);
+                                        ptr_a = ptr_a.add(64);
+                                        ptr_b = ptr_b.add(64);
+                                    }
+
+                                    while ptr_in < end {
+                                        let inp = vld1q_u8(ptr_in);
+                                        let n02 = vandq_u8(inp, mask_f);
+                                        let n13 = vandq_u8(
+                                            vreinterpretq_u8_u16(vshrq_n_u16(
+                                                vreinterpretq_u16_u8(inp),
+                                                4,
+                                            )),
+                                            mask_f,
+                                        );
+                                        neon_madd!(
+                                            vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a, vhhl_a,
+                                            vhhh_a, n02, n13, ptr_a, mask_even
+                                        );
+                                        neon_madd!(
+                                            vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b, vhhl_b,
+                                            vhhh_b, n02, n13, ptr_b, mask_even
+                                        );
+                                        ptr_in = ptr_in.add(16);
+                                        ptr_a = ptr_a.add(16);
+                                        ptr_b = ptr_b.add(16);
+                                    }
+
+                                    if remainder > 0 {
+                                        let ow = blocks_16 * 8;
+                                        let mut pw_a = chunk_a[ow..].as_mut_ptr();
+                                        let mut pw_b = chunk_b[ow..].as_mut_ptr();
+                                        let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
+                                        let tail_end = p_in.add(remainder);
+                                        while p_in < tail_end {
+                                            let lo = *p_in as usize;
+                                            let hi = *p_in.add(1) as usize;
+                                            *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
+                                            *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
+                                            pw_a = pw_a.add(1);
+                                            pw_b = pw_b.add(1);
+                                            p_in = p_in.add(2);
+                                        }
+                                    }
+                                }
+                            });
                     }
+                    rest => {
+                        // Fallback for 1 or 3 remaining blocks.
+                        for (j, buf) in rest.iter_mut().enumerate() {
+                            let base = (i + j) * n_queued;
+                            buf.par_chunks_mut(chunk_size).enumerate().for_each(
+                                |(chunk_idx, chunk)| unsafe {
+                                    use std::arch::aarch64::*;
+                                    let mask_f = vdupq_n_u8(0x0F);
+                                    let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
 
-                    if remainder > 0 {
-                        let offset_words = blocks_16 * 8;
-                        let mut ptr_word = buffer_chunk[offset_words..].as_mut_ptr();
-                        let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
-                        let tail_end = p_in.add(remainder);
+                                    let byte_offset = chunk_idx * chunk_size * 2;
+                                    let byte_len = chunk.len() * 2;
+                                    let blocks_16 = byte_len / 16;
+                                    let remainder = byte_len % 16;
 
-                        while p_in < tail_end {
-                            let lo = *p_in as usize;
-                            let hi = *p_in.add(1) as usize;
-                            *ptr_word ^= table_low[lo] ^ table_high[hi];
-                            ptr_word = ptr_word.add(1);
-                            p_in = p_in.add(2);
+                                    for q_idx in 0..n_queued {
+                                        let (
+                                            ref tll,
+                                            ref tlh,
+                                            ref thl,
+                                            ref thh,
+                                            ref hll,
+                                            ref hlh,
+                                            ref hhl,
+                                            ref hhh,
+                                            ref tlow,
+                                            ref thigh,
+                                        ) = all_tables[base + q_idx];
+                                        let vtll = vld1q_u8(tll.as_ptr());
+                                        let vtlh = vld1q_u8(tlh.as_ptr());
+                                        let vthl = vld1q_u8(thl.as_ptr());
+                                        let vthh = vld1q_u8(thh.as_ptr());
+                                        let vhll = vld1q_u8(hll.as_ptr());
+                                        let vhlh = vld1q_u8(hlh.as_ptr());
+                                        let vhhl = vld1q_u8(hhl.as_ptr());
+                                        let vhhh = vld1q_u8(hhh.as_ptr());
+
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                        let mut ptr_buf = chunk.as_mut_ptr() as *mut u8;
+                                        let mut ptr_in = slice_chunk.as_ptr();
+                                        let end = ptr_in.add(blocks_16 * 16);
+
+                                        while ptr_in.add(64) <= end {
+                                            let i0 = vld1q_u8(ptr_in);
+                                            let n02_0 = vandq_u8(i0, mask_f);
+                                            let n13_0 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i0),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            let i1 = vld1q_u8(ptr_in.add(16));
+                                            let n02_1 = vandq_u8(i1, mask_f);
+                                            let n13_1 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i1),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            let i2 = vld1q_u8(ptr_in.add(32));
+                                            let n02_2 = vandq_u8(i2, mask_f);
+                                            let n13_2 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i2),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            let i3 = vld1q_u8(ptr_in.add(48));
+                                            let n02_3 = vandq_u8(i3, mask_f);
+                                            let n13_3 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(i3),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            neon_madd!(
+                                                vtll, vtlh, vthl, vthh, vhll, vhlh, vhhl, vhhh,
+                                                n02_0, n13_0, ptr_buf, mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll,
+                                                vtlh,
+                                                vthl,
+                                                vthh,
+                                                vhll,
+                                                vhlh,
+                                                vhhl,
+                                                vhhh,
+                                                n02_1,
+                                                n13_1,
+                                                ptr_buf.add(16),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll,
+                                                vtlh,
+                                                vthl,
+                                                vthh,
+                                                vhll,
+                                                vhlh,
+                                                vhhl,
+                                                vhhh,
+                                                n02_2,
+                                                n13_2,
+                                                ptr_buf.add(32),
+                                                mask_even
+                                            );
+                                            neon_madd!(
+                                                vtll,
+                                                vtlh,
+                                                vthl,
+                                                vthh,
+                                                vhll,
+                                                vhlh,
+                                                vhhl,
+                                                vhhh,
+                                                n02_3,
+                                                n13_3,
+                                                ptr_buf.add(48),
+                                                mask_even
+                                            );
+                                            ptr_in = ptr_in.add(64);
+                                            ptr_buf = ptr_buf.add(64);
+                                        }
+
+                                        while ptr_in < end {
+                                            let inp = vld1q_u8(ptr_in);
+                                            let n02 = vandq_u8(inp, mask_f);
+                                            let n13 = vandq_u8(
+                                                vreinterpretq_u8_u16(vshrq_n_u16(
+                                                    vreinterpretq_u16_u8(inp),
+                                                    4,
+                                                )),
+                                                mask_f,
+                                            );
+                                            neon_madd!(
+                                                vtll, vtlh, vthl, vthh, vhll, vhlh, vhhl, vhhh,
+                                                n02, n13, ptr_buf, mask_even
+                                            );
+                                            ptr_in = ptr_in.add(16);
+                                            ptr_buf = ptr_buf.add(16);
+                                        }
+
+                                        if remainder > 0 {
+                                            let ow = blocks_16 * 8;
+                                            let mut pw = chunk[ow..].as_mut_ptr();
+                                            let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
+                                            let tail_end = p_in.add(remainder);
+                                            while p_in < tail_end {
+                                                let lo = *p_in as usize;
+                                                let hi = *p_in.add(1) as usize;
+                                                *pw ^= tlow[lo] ^ thigh[hi];
+                                                pw = pw.add(1);
+                                                p_in = p_in.add(2);
+                                            }
+                                        }
+                                    }
+                                },
+                            );
                         }
                     }
                 }
-            }
-        });
+            });
     }
 
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn flush_scalar(&mut self) {
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);

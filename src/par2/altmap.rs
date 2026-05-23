@@ -265,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unreachable_code)]
     fn scalar_and_simd_produce_identical_output() {
         #[cfg(not(target_arch = "x86_64"))]
         return; // Nothing to compare on non-x86.

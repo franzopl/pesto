@@ -23,7 +23,7 @@ PARPAR_SLICES=1000
 if [[ $# -gt 0 ]]; then
     SIZE_LIST=("$@")
 else
-    SIZE_LIST=(1 5 10)
+    SIZE_LIST=(5)
 fi
 
 # ── helpers ──────────────────────────────────────────────────────────────────

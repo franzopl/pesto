@@ -630,6 +630,7 @@ fn detect_par2_simd() -> &'static str {
     {
         return "NEON";
     }
+    #[allow(unreachable_code)]
     "scalar"
 }
 
