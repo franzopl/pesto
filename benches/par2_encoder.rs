@@ -250,7 +250,12 @@ fn main() {
         (BenchPath::Ssse3, has_ssse3, "SSSE3"),
         (BenchPath::Scalar, true, "scalar"),
     ];
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    let paths: &[(BenchPath, bool, &str)] = &[
+        (BenchPath::NeonClmul, true, "NEON-CLMUL"),
+        (BenchPath::Scalar, true, "scalar"),
+    ];
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let paths: &[(BenchPath, bool, &str)] = &[(BenchPath::Scalar, true, "scalar")];
 
     for s in &scenarios {

@@ -14,6 +14,9 @@ use rayon::prelude::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::poly16x8_t;
+
 #[cfg(target_arch = "x86_64")]
 use super::gf16::xor_dep_matrix;
 use super::gf16::{input_logbases, Gf16, ORDER};
@@ -208,6 +211,8 @@ pub enum BenchPath {
     Avx2Altmap,
     #[cfg(target_arch = "x86_64")]
     Avx2Shuffle2x,
+    #[cfg(target_arch = "aarch64")]
+    NeonClmul,
 }
 
 impl RecoveryEncoder {
@@ -515,6 +520,11 @@ impl RecoveryEncoder {
                     self.flush_avx2_shuffle2x();
                     return;
                 },
+                #[cfg(target_arch = "aarch64")]
+                BenchPath::NeonClmul => unsafe {
+                    self.flush_neon_clmul();
+                    return;
+                },
             }
         }
 
@@ -556,10 +566,10 @@ impl RecoveryEncoder {
             return;
         }
 
-        // NEON is mandatory on AArch64; no runtime check required.
+        // NEON is mandatory on AArch64; pmull.8h is part of base NEON (ARMv8-A).
         #[cfg(target_arch = "aarch64")]
         unsafe {
-            self.flush_neon();
+            self.flush_neon_clmul();
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         self.flush_scalar();
@@ -3180,12 +3190,15 @@ impl RecoveryEncoder {
         }
     }
 
-    /// Same 4-nibble shuffle algorithm as `flush_ssse3` for AArch64 targets.
-    /// `vqtbl1q_u8` is the NEON equivalent of `_mm_shuffle_epi8`; NEON is
-    /// mandatory on all AArch64 hardware so no runtime detection is needed.
+    // ── AArch64 CLMUL path (Phase 31) ─────────────────────────────────────────
+    // Uses `pmull.8h` / `pmull2.8h` (base NEON, mandatory on ARMv8-A) instead
+    // of the 8-table nibble-shuffle of `flush_neon_work`.  Each 32-byte output
+    // block is loaded once; up to 8 source slices ("BATCH") are multiplied via
+    // Karatsuba and reduced with Barrett before the result is XORed into the
+    // output.  Reduces instruction count ~2.5× vs the shuffle path.
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
-    unsafe fn flush_neon(&mut self) {
+    unsafe fn flush_neon_clmul(&mut self) {
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
@@ -3197,7 +3210,7 @@ impl RecoveryEncoder {
             let gf = &self.gf;
             let ((), cs) = rayon::join(
                 || unsafe {
-                    Self::flush_neon_work(
+                    Self::flush_neon_clmul_work(
                         buffers,
                         &queued,
                         start_index,
@@ -3211,7 +3224,7 @@ impl RecoveryEncoder {
             cs
         } else {
             unsafe {
-                Self::flush_neon_work(
+                Self::flush_neon_clmul_work(
                     self.buffers.as_normal_mut(),
                     &queued,
                     start_index,
@@ -3227,12 +3240,17 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
-    /// Rewritten in Phase 30a: 2D parallel structure (recovery-block groups ×
-    /// buffer chunks) with 4× unrolling across recovery blocks so one input
-    /// load serves four accumulators simultaneously, matching the x86 AVX2 path.
+    /// Karatsuba multiply + Barrett reduction over GF(2^16)/0x1100B.
+    ///
+    /// Processes all queued input slices in batches of 8 (BATCH), one recovery
+    /// block per rayon task.  For each 32-byte output window the destination is
+    /// loaded once, every batch's contribution is XORed in, then stored once.
+    ///
+    /// Algorithm for the polynomial multiply/reduction ported from ParPar's
+    /// `gf16_clmul_neon_base.h` and `gf16_clmul_neon.h` (MIT, © animetosho).
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "neon")]
-    unsafe fn flush_neon_work(
+    unsafe fn flush_neon_clmul_work(
         buffers: &mut [Vec<u16>],
         queued: &[Vec<u8>],
         start_index: usize,
@@ -3240,949 +3258,172 @@ impl RecoveryEncoder {
         exponent_start: u32,
         gf: &Gf16,
     ) {
-        // Store table entries as plain byte/u16 arrays so they are Send+Sync
-        // and can cross rayon task boundaries. Each element is loaded as a
-        // uint8x16_t via vld1q_u8 inside the closure.
-        type NeonTable = (
-            [u8; 16], // tl_l
-            [u8; 16], // tl_h
-            [u8; 16], // th_l
-            [u8; 16], // th_h
-            [u8; 16], // hl_l
-            [u8; 16], // hl_h
-            [u8; 16], // hh_l
-            [u8; 16], // hh_h
-            [u16; 256],
-            [u16; 256],
-        );
-
-        let n_rec = buffers.len();
         let n_queued = queued.len();
+        let n_rec = buffers.len();
 
-        // Pre-build all (input_slice × recovery_block) tables in one parallel pass.
-        // Layout: all_tables[q_idx * n_rec + i] — the four A/B/C/D entries for a
-        // group at the same q_idx are consecutive in memory, cutting L1D pressure
-        // when the 4-way unrolled arm loads all four coefficient sets at once.
-        let all_tables: Vec<NeonTable> = (0..n_queued * n_rec)
+        // Pre-compute (c_lo, c_hi, c_mid = c_lo^c_hi) for every
+        // (recovery_block × input_slice) pair.  Layout: coeffs[r*n_queued + q].
+        let coeffs: Vec<(u8, u8, u8)> = (0..n_rec * n_queued)
             .into_par_iter()
             .map(|flat| {
-                let q_idx = flat / n_rec;
-                let i = flat % n_rec;
-                let exponent = exponent_start + i as u32;
-                let logbase = logbases[start_index + q_idx] as u64;
-                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-                let coeff = gf.exp(log_coeff);
-
-                let mut tl_l = [0u8; 16];
-                let mut tl_h = [0u8; 16];
-                let mut th_l = [0u8; 16];
-                let mut th_h = [0u8; 16];
-                let mut hl_l = [0u8; 16];
-                let mut hl_h = [0u8; 16];
-                let mut hh_l = [0u8; 16];
-                let mut hh_h = [0u8; 16];
-                for val in 0..16usize {
-                    let r0 = gf.mul(val as u16, coeff);
-                    tl_l[val] = (r0 & 0xFF) as u8;
-                    th_l[val] = (r0 >> 8) as u8;
-                    let r1 = gf.mul((val as u16) << 4, coeff);
-                    tl_h[val] = (r1 & 0xFF) as u8;
-                    th_h[val] = (r1 >> 8) as u8;
-                    let r2 = gf.mul((val as u16) << 8, coeff);
-                    hl_l[val] = (r2 & 0xFF) as u8;
-                    hh_l[val] = (r2 >> 8) as u8;
-                    let r3 = gf.mul((val as u16) << 12, coeff);
-                    hl_h[val] = (r3 & 0xFF) as u8;
-                    hh_h[val] = (r3 >> 8) as u8;
-                }
-                let mut table_low = [0u16; 256];
-                let mut table_high = [0u16; 256];
-                for b in 0..=255usize {
-                    table_low[b] = gf.mul(b as u16, coeff);
-                    table_high[b] = gf.mul((b as u16) << 8, coeff);
-                }
-                (
-                    tl_l, tl_h, th_l, th_h, hl_l, hl_h, hh_l, hh_h, table_low, table_high,
-                )
+                let r = flat / n_queued;
+                let q = flat % n_queued;
+                let exponent = exponent_start + r as u32;
+                let logbase = logbases[start_index + q] as u64;
+                let log_c = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let c = gf.exp(log_c);
+                let lo = (c & 0xFF) as u8;
+                let hi = (c >> 8) as u8;
+                (lo, hi, lo ^ hi)
             })
             .collect();
 
-        // 16384 words = 32 KiB: fits in Neoverse N1's 64 KB L1D per core.
-        let chunk_size = 16384usize;
+        // One rayon task per recovery block: the output buffer (typically ≤ 32 KiB
+        // for a 10% recovery set over a 5 GB file) stays hot in L2 across all
+        // input batches.
+        buffers.par_iter_mut().enumerate().for_each(|(r, buf)| {
+            let n_words = buf.len();
+            let byte_len = n_words * 2;
+            let out_base = buf.as_mut_ptr() as *mut u8;
+            let coeffs_r = &coeffs[r * n_queued..(r + 1) * n_queued];
 
-        // Macro: one GF(2^16) multiply-accumulate into ptr_out for one 16-byte
-        // input vector whose nibbles are already extracted into n02/n13.
-        // Each call: 8 vqtbl1q_u8 + 4 veorq + 2 vshrq + 1 vshlq + 1 vorrq + 1 vandq
-        //            + 1 vld1q + 1 vst1q = 19 instructions for one recovery block.
-        macro_rules! neon_madd {
-            ($tll:expr, $tlh:expr, $thl:expr, $thh:expr,
-             $hll:expr, $hlh:expr, $hhl:expr, $hhh:expr,
-             $n02:expr, $n13:expr, $ptr:expr, $me:expr) => {{
+            // Process input slices in batches of BATCH.  The outer loop is
+            // over batches so that the broadcasted coefficient registers can be
+            // pre-computed once and reused for every output block — matching the
+            // structure of ParPar's gf16_clmul_muladd_x.
+            const BATCH: usize = 8;
+
+            // SIMD path: 32-byte (16-word) output blocks.
+            let n_blocks_32 = byte_len / 32;
+
+            unsafe {
                 use std::arch::aarch64::*;
-                let rle = veorq_u8(vqtbl1q_u8($tll, $n02), vqtbl1q_u8($tlh, $n13));
-                let rhe = veorq_u8(vqtbl1q_u8($thl, $n02), vqtbl1q_u8($thh, $n13));
-                let rlo = veorq_u8(vqtbl1q_u8($hll, $n02), vqtbl1q_u8($hlh, $n13));
-                let rho = veorq_u8(vqtbl1q_u8($hhl, $n02), vqtbl1q_u8($hhh, $n13));
-                let slo = veorq_u8(
-                    rle,
-                    vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo), 8)),
-                );
-                let shi = veorq_u8(
-                    rhe,
-                    vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho), 8)),
-                );
-                let out = vorrq_u8(
-                    vandq_u8(slo, $me),
-                    vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(shi), 8)),
-                );
-                vst1q_u8($ptr, veorq_u8(vld1q_u8($ptr), out));
-            }};
-        }
 
-        buffers
-            .par_chunks_mut(4)
-            .enumerate()
-            .for_each(|(group_idx, buf_group)| {
-                let i = group_idx * 4;
-                match buf_group {
-                    [buf_a, buf_b, buf_c, buf_d] => {
-                        // 4× unrolled across recovery blocks: one input load serves all four.
-                        // Transposed layout: all_tables[q_idx * n_rec + i] — the four
-                        // A/B/C/D entries are consecutive per q_idx for L1D locality.
-                        buf_a
-                            .par_chunks_mut(chunk_size)
-                            .zip(buf_b.par_chunks_mut(chunk_size))
-                            .zip(buf_c.par_chunks_mut(chunk_size))
-                            .zip(buf_d.par_chunks_mut(chunk_size))
-                            .enumerate()
-                            .for_each(
-                                |(chunk_idx, (((chunk_a, chunk_b), chunk_c), chunk_d))| unsafe {
-                                    use std::arch::aarch64::*;
-                                    let mask_f = vdupq_n_u8(0x0F);
-                                    let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
+                // pmull.8h: polynomial multiply lower 8 bytes → 8 × u16 products.
+                macro_rules! pmull_lo {
+                    ($a:expr, $b:expr) => {{
+                        let res: poly16x8_t;
+                        core::arch::asm!(
+                            "pmull {0:v}.8h, {1:v}.8b, {2:v}.8b",
+                            out(vreg) res, in(vreg) $a, in(vreg) $b,
+                            options(nostack, pure, nomem)
+                        );
+                        res
+                    }};
+                }
+                // pmull2.8h: same for upper 8 bytes.
+                macro_rules! pmull_hi {
+                    ($a:expr, $b:expr) => {{
+                        let res: poly16x8_t;
+                        core::arch::asm!(
+                            "pmull2 {0:v}.8h, {1:v}.16b, {2:v}.16b",
+                            out(vreg) res, in(vreg) $a, in(vreg) $b,
+                            options(nostack, pure, nomem)
+                        );
+                        res
+                    }};
+                }
+                macro_rules! xorp16 {
+                    ($a:expr, $b:expr) => {
+                        vreinterpretq_p16_u16(veorq_u16(
+                            vreinterpretq_u16_p16($a),
+                            vreinterpretq_u16_p16($b),
+                        ))
+                    };
+                }
 
-                                    let byte_offset = chunk_idx * chunk_size * 2;
-                                    let byte_len = chunk_a.len() * 2;
-                                    let blocks_16 = byte_len / 16;
-                                    let remainder = byte_len % 16;
+                let mut q = 0usize;
+                while q < n_queued {
+                    let batch_end = (q + BATCH).min(n_queued);
+                    let batch_size = batch_end - q;
 
-                                    for (q_idx, slice_vec) in queued.iter().enumerate() {
-                                        let base = q_idx * n_rec;
-                                        let (
-                                            ref tll_a,
-                                            ref tlh_a,
-                                            ref thl_a,
-                                            ref thh_a,
-                                            ref hll_a,
-                                            ref hlh_a,
-                                            ref hhl_a,
-                                            ref hhh_a,
-                                            ref tlow_a,
-                                            ref thigh_a,
-                                        ) = all_tables[base + i];
-                                        let (
-                                            ref tll_b,
-                                            ref tlh_b,
-                                            ref thl_b,
-                                            ref thh_b,
-                                            ref hll_b,
-                                            ref hlh_b,
-                                            ref hhl_b,
-                                            ref hhh_b,
-                                            ref tlow_b,
-                                            ref thigh_b,
-                                        ) = all_tables[base + i + 1];
-                                        let (
-                                            ref tll_c,
-                                            ref tlh_c,
-                                            ref thl_c,
-                                            ref thh_c,
-                                            ref hll_c,
-                                            ref hlh_c,
-                                            ref hhl_c,
-                                            ref hhh_c,
-                                            ref tlow_c,
-                                            ref thigh_c,
-                                        ) = all_tables[base + i + 2];
-                                        let (
-                                            ref tll_d,
-                                            ref tlh_d,
-                                            ref thl_d,
-                                            ref thh_d,
-                                            ref hll_d,
-                                            ref hlh_d,
-                                            ref hhl_d,
-                                            ref hhh_d,
-                                            ref tlow_d,
-                                            ref thigh_d,
-                                        ) = all_tables[base + i + 3];
-
-                                        // Load 8 NEON table vectors per recovery block (32 total).
-                                        let vtll_a = vld1q_u8(tll_a.as_ptr());
-                                        let vtlh_a = vld1q_u8(tlh_a.as_ptr());
-                                        let vthl_a = vld1q_u8(thl_a.as_ptr());
-                                        let vthh_a = vld1q_u8(thh_a.as_ptr());
-                                        let vhll_a = vld1q_u8(hll_a.as_ptr());
-                                        let vhlh_a = vld1q_u8(hlh_a.as_ptr());
-                                        let vhhl_a = vld1q_u8(hhl_a.as_ptr());
-                                        let vhhh_a = vld1q_u8(hhh_a.as_ptr());
-                                        let vtll_b = vld1q_u8(tll_b.as_ptr());
-                                        let vtlh_b = vld1q_u8(tlh_b.as_ptr());
-                                        let vthl_b = vld1q_u8(thl_b.as_ptr());
-                                        let vthh_b = vld1q_u8(thh_b.as_ptr());
-                                        let vhll_b = vld1q_u8(hll_b.as_ptr());
-                                        let vhlh_b = vld1q_u8(hlh_b.as_ptr());
-                                        let vhhl_b = vld1q_u8(hhl_b.as_ptr());
-                                        let vhhh_b = vld1q_u8(hhh_b.as_ptr());
-                                        let vtll_c = vld1q_u8(tll_c.as_ptr());
-                                        let vtlh_c = vld1q_u8(tlh_c.as_ptr());
-                                        let vthl_c = vld1q_u8(thl_c.as_ptr());
-                                        let vthh_c = vld1q_u8(thh_c.as_ptr());
-                                        let vhll_c = vld1q_u8(hll_c.as_ptr());
-                                        let vhlh_c = vld1q_u8(hlh_c.as_ptr());
-                                        let vhhl_c = vld1q_u8(hhl_c.as_ptr());
-                                        let vhhh_c = vld1q_u8(hhh_c.as_ptr());
-                                        let vtll_d = vld1q_u8(tll_d.as_ptr());
-                                        let vtlh_d = vld1q_u8(tlh_d.as_ptr());
-                                        let vthl_d = vld1q_u8(thl_d.as_ptr());
-                                        let vthh_d = vld1q_u8(thh_d.as_ptr());
-                                        let vhll_d = vld1q_u8(hll_d.as_ptr());
-                                        let vhlh_d = vld1q_u8(hlh_d.as_ptr());
-                                        let vhhl_d = vld1q_u8(hhl_d.as_ptr());
-                                        let vhhh_d = vld1q_u8(hhh_d.as_ptr());
-
-                                        let slice_chunk =
-                                            &slice_vec[byte_offset..byte_offset + byte_len];
-                                        let mut ptr_a = chunk_a.as_mut_ptr() as *mut u8;
-                                        let mut ptr_b = chunk_b.as_mut_ptr() as *mut u8;
-                                        let mut ptr_c = chunk_c.as_mut_ptr() as *mut u8;
-                                        let mut ptr_d = chunk_d.as_mut_ptr() as *mut u8;
-                                        let mut ptr_in = slice_chunk.as_ptr();
-                                        let end = ptr_in.add(blocks_16 * 16);
-
-                                        // 4× input unrolling: 64 input bytes per iteration.
-                                        // Nibbles extracted once per input chunk, reused for A/B/C/D.
-                                        while ptr_in.add(64) <= end {
-                                            // Prefetch 128 bytes ahead for input and all four output
-                                            // buffers; hides L2 latency on Neoverse N1 (Phase 30b).
-                                            // Use inline asm: std::arch::aarch64 has no stable
-                                            // __prefetch / _prefetch at the required signature.
-                                            if ptr_in.add(192) <= end {
-                                                core::arch::asm!(
-                                                    "prfm pldl1keep, [{p0}]",
-                                                    "prfm pldl1keep, [{p1}]",
-                                                    "prfm pldl1keep, [{p2}]",
-                                                    "prfm pldl1keep, [{p3}]",
-                                                    "prfm pldl1keep, [{p4}]",
-                                                    p0 = in(reg) ptr_in.add(128),
-                                                    p1 = in(reg) ptr_a.add(128),
-                                                    p2 = in(reg) ptr_b.add(128),
-                                                    p3 = in(reg) ptr_c.add(128),
-                                                    p4 = in(reg) ptr_d.add(128),
-                                                    options(nostack, preserves_flags)
-                                                );
-                                            }
-                                            let i0 = vld1q_u8(ptr_in);
-                                            let n02_0 = vandq_u8(i0, mask_f);
-                                            let n13_0 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i0),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            let i1 = vld1q_u8(ptr_in.add(16));
-                                            let n02_1 = vandq_u8(i1, mask_f);
-                                            let n13_1 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i1),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            let i2 = vld1q_u8(ptr_in.add(32));
-                                            let n02_2 = vandq_u8(i2, mask_f);
-                                            let n13_2 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i2),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            let i3 = vld1q_u8(ptr_in.add(48));
-                                            let n02_3 = vandq_u8(i3, mask_f);
-                                            let n13_3 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i3),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-
-                                            neon_madd!(
-                                                vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a,
-                                                vhhl_a, vhhh_a, n02_0, n13_0, ptr_a, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b,
-                                                vhhl_b, vhhh_b, n02_0, n13_0, ptr_b, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_c, vtlh_c, vthl_c, vthh_c, vhll_c, vhlh_c,
-                                                vhhl_c, vhhh_c, n02_0, n13_0, ptr_c, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_d, vtlh_d, vthl_d, vthh_d, vhll_d, vhlh_d,
-                                                vhhl_d, vhhh_d, n02_0, n13_0, ptr_d, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_a,
-                                                vtlh_a,
-                                                vthl_a,
-                                                vthh_a,
-                                                vhll_a,
-                                                vhlh_a,
-                                                vhhl_a,
-                                                vhhh_a,
-                                                n02_1,
-                                                n13_1,
-                                                ptr_a.add(16),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_b,
-                                                vtlh_b,
-                                                vthl_b,
-                                                vthh_b,
-                                                vhll_b,
-                                                vhlh_b,
-                                                vhhl_b,
-                                                vhhh_b,
-                                                n02_1,
-                                                n13_1,
-                                                ptr_b.add(16),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_c,
-                                                vtlh_c,
-                                                vthl_c,
-                                                vthh_c,
-                                                vhll_c,
-                                                vhlh_c,
-                                                vhhl_c,
-                                                vhhh_c,
-                                                n02_1,
-                                                n13_1,
-                                                ptr_c.add(16),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_d,
-                                                vtlh_d,
-                                                vthl_d,
-                                                vthh_d,
-                                                vhll_d,
-                                                vhlh_d,
-                                                vhhl_d,
-                                                vhhh_d,
-                                                n02_1,
-                                                n13_1,
-                                                ptr_d.add(16),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_a,
-                                                vtlh_a,
-                                                vthl_a,
-                                                vthh_a,
-                                                vhll_a,
-                                                vhlh_a,
-                                                vhhl_a,
-                                                vhhh_a,
-                                                n02_2,
-                                                n13_2,
-                                                ptr_a.add(32),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_b,
-                                                vtlh_b,
-                                                vthl_b,
-                                                vthh_b,
-                                                vhll_b,
-                                                vhlh_b,
-                                                vhhl_b,
-                                                vhhh_b,
-                                                n02_2,
-                                                n13_2,
-                                                ptr_b.add(32),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_c,
-                                                vtlh_c,
-                                                vthl_c,
-                                                vthh_c,
-                                                vhll_c,
-                                                vhlh_c,
-                                                vhhl_c,
-                                                vhhh_c,
-                                                n02_2,
-                                                n13_2,
-                                                ptr_c.add(32),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_d,
-                                                vtlh_d,
-                                                vthl_d,
-                                                vthh_d,
-                                                vhll_d,
-                                                vhlh_d,
-                                                vhhl_d,
-                                                vhhh_d,
-                                                n02_2,
-                                                n13_2,
-                                                ptr_d.add(32),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_a,
-                                                vtlh_a,
-                                                vthl_a,
-                                                vthh_a,
-                                                vhll_a,
-                                                vhlh_a,
-                                                vhhl_a,
-                                                vhhh_a,
-                                                n02_3,
-                                                n13_3,
-                                                ptr_a.add(48),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_b,
-                                                vtlh_b,
-                                                vthl_b,
-                                                vthh_b,
-                                                vhll_b,
-                                                vhlh_b,
-                                                vhhl_b,
-                                                vhhh_b,
-                                                n02_3,
-                                                n13_3,
-                                                ptr_b.add(48),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_c,
-                                                vtlh_c,
-                                                vthl_c,
-                                                vthh_c,
-                                                vhll_c,
-                                                vhlh_c,
-                                                vhhl_c,
-                                                vhhh_c,
-                                                n02_3,
-                                                n13_3,
-                                                ptr_c.add(48),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_d,
-                                                vtlh_d,
-                                                vthl_d,
-                                                vthh_d,
-                                                vhll_d,
-                                                vhlh_d,
-                                                vhhl_d,
-                                                vhhh_d,
-                                                n02_3,
-                                                n13_3,
-                                                ptr_d.add(48),
-                                                mask_even
-                                            );
-
-                                            ptr_in = ptr_in.add(64);
-                                            ptr_a = ptr_a.add(64);
-                                            ptr_b = ptr_b.add(64);
-                                            ptr_c = ptr_c.add(64);
-                                            ptr_d = ptr_d.add(64);
-                                        }
-
-                                        while ptr_in < end {
-                                            let inp = vld1q_u8(ptr_in);
-                                            let n02 = vandq_u8(inp, mask_f);
-                                            let n13 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(inp),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            neon_madd!(
-                                                vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a,
-                                                vhhl_a, vhhh_a, n02, n13, ptr_a, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b,
-                                                vhhl_b, vhhh_b, n02, n13, ptr_b, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_c, vtlh_c, vthl_c, vthh_c, vhll_c, vhlh_c,
-                                                vhhl_c, vhhh_c, n02, n13, ptr_c, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll_d, vtlh_d, vthl_d, vthh_d, vhll_d, vhlh_d,
-                                                vhhl_d, vhhh_d, n02, n13, ptr_d, mask_even
-                                            );
-                                            ptr_in = ptr_in.add(16);
-                                            ptr_a = ptr_a.add(16);
-                                            ptr_b = ptr_b.add(16);
-                                            ptr_c = ptr_c.add(16);
-                                            ptr_d = ptr_d.add(16);
-                                        }
-
-                                        if remainder > 0 {
-                                            let ow = blocks_16 * 8;
-                                            let mut pw_a = chunk_a[ow..].as_mut_ptr();
-                                            let mut pw_b = chunk_b[ow..].as_mut_ptr();
-                                            let mut pw_c = chunk_c[ow..].as_mut_ptr();
-                                            let mut pw_d = chunk_d[ow..].as_mut_ptr();
-                                            let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
-                                            let tail_end = p_in.add(remainder);
-                                            while p_in < tail_end {
-                                                let lo = *p_in as usize;
-                                                let hi = *p_in.add(1) as usize;
-                                                *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
-                                                *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
-                                                *pw_c ^= tlow_c[lo] ^ thigh_c[hi];
-                                                *pw_d ^= tlow_d[lo] ^ thigh_d[hi];
-                                                pw_a = pw_a.add(1);
-                                                pw_b = pw_b.add(1);
-                                                pw_c = pw_c.add(1);
-                                                pw_d = pw_d.add(1);
-                                                p_in = p_in.add(2);
-                                            }
-                                        }
-                                    }
-                                },
-                            );
+                    // Pre-broadcast coefficients once per batch.
+                    // Kept in NEON registers across all output blocks.
+                    let mut klo = [vdupq_n_p8(0u8); BATCH];
+                    let mut khi = [vdupq_n_p8(0u8); BATCH];
+                    let mut kmid = [vdupq_n_p8(0u8); BATCH];
+                    for s in 0..batch_size {
+                        let (clo, chi, cmid) = coeffs_r[q + s];
+                        klo[s] = vdupq_n_p8(clo);
+                        khi[s] = vdupq_n_p8(chi);
+                        kmid[s] = vdupq_n_p8(cmid);
                     }
-                    [buf_a, buf_b] => {
-                        // 2× unrolled fallback for the trailing pair when n_rec % 4 == 2.
-                        buf_a
-                            .par_chunks_mut(chunk_size)
-                            .zip(buf_b.par_chunks_mut(chunk_size))
-                            .enumerate()
-                            .for_each(|(chunk_idx, (chunk_a, chunk_b))| unsafe {
-                                use std::arch::aarch64::*;
-                                let mask_f = vdupq_n_u8(0x0F);
-                                let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
 
-                                let byte_offset = chunk_idx * chunk_size * 2;
-                                let byte_len = chunk_a.len() * 2;
-                                let blocks_16 = byte_len / 16;
-                                let remainder = byte_len % 16;
+                    // Inner loop: all output blocks for this batch.
+                    for blk in 0..n_blocks_32 {
+                        let out_ptr = out_base.add(blk * 32);
+                        let src_off = blk * 32;
 
-                                for (q_idx, slice_vec) in queued.iter().enumerate() {
-                                    let base = q_idx * n_rec;
-                                    let (
-                                        ref tll_a,
-                                        ref tlh_a,
-                                        ref thl_a,
-                                        ref thh_a,
-                                        ref hll_a,
-                                        ref hlh_a,
-                                        ref hhl_a,
-                                        ref hhh_a,
-                                        ref tlow_a,
-                                        ref thigh_a,
-                                    ) = all_tables[base + i];
-                                    let (
-                                        ref tll_b,
-                                        ref tlh_b,
-                                        ref thl_b,
-                                        ref thh_b,
-                                        ref hll_b,
-                                        ref hlh_b,
-                                        ref hhl_b,
-                                        ref hhh_b,
-                                        ref tlow_b,
-                                        ref thigh_b,
-                                    ) = all_tables[base + i + 1];
+                        // First source: initialise the 6 Karatsuba accumulators.
+                        let d0 = vld2q_u8(queued[q].as_ptr().add(src_off));
+                        let lo0 = vreinterpretq_p8_u8(d0.0);
+                        let hi0 = vreinterpretq_p8_u8(d0.1);
+                        let mid0 = vreinterpretq_p8_u8(veorq_u8(d0.0, d0.1));
+                        let mut acc_l1 = pmull_lo!(lo0, klo[0]);
+                        let mut acc_l2 = pmull_hi!(lo0, klo[0]);
+                        let mut acc_m1 = pmull_lo!(mid0, kmid[0]);
+                        let mut acc_m2 = pmull_hi!(mid0, kmid[0]);
+                        let mut acc_h1 = pmull_lo!(hi0, khi[0]);
+                        let mut acc_h2 = pmull_hi!(hi0, khi[0]);
 
-                                    let vtll_a = vld1q_u8(tll_a.as_ptr());
-                                    let vtlh_a = vld1q_u8(tlh_a.as_ptr());
-                                    let vthl_a = vld1q_u8(thl_a.as_ptr());
-                                    let vthh_a = vld1q_u8(thh_a.as_ptr());
-                                    let vhll_a = vld1q_u8(hll_a.as_ptr());
-                                    let vhlh_a = vld1q_u8(hlh_a.as_ptr());
-                                    let vhhl_a = vld1q_u8(hhl_a.as_ptr());
-                                    let vhhh_a = vld1q_u8(hhh_a.as_ptr());
-                                    let vtll_b = vld1q_u8(tll_b.as_ptr());
-                                    let vtlh_b = vld1q_u8(tlh_b.as_ptr());
-                                    let vthl_b = vld1q_u8(thl_b.as_ptr());
-                                    let vthh_b = vld1q_u8(thh_b.as_ptr());
-                                    let vhll_b = vld1q_u8(hll_b.as_ptr());
-                                    let vhlh_b = vld1q_u8(hlh_b.as_ptr());
-                                    let vhhl_b = vld1q_u8(hhl_b.as_ptr());
-                                    let vhhh_b = vld1q_u8(hhh_b.as_ptr());
-
-                                    let slice_chunk =
-                                        &slice_vec[byte_offset..byte_offset + byte_len];
-                                    let mut ptr_a = chunk_a.as_mut_ptr() as *mut u8;
-                                    let mut ptr_b = chunk_b.as_mut_ptr() as *mut u8;
-                                    let mut ptr_in = slice_chunk.as_ptr();
-                                    let end = ptr_in.add(blocks_16 * 16);
-
-                                    while ptr_in.add(64) <= end {
-                                        let i0 = vld1q_u8(ptr_in);
-                                        let n02_0 = vandq_u8(i0, mask_f);
-                                        let n13_0 = vandq_u8(
-                                            vreinterpretq_u8_u16(vshrq_n_u16(
-                                                vreinterpretq_u16_u8(i0),
-                                                4,
-                                            )),
-                                            mask_f,
-                                        );
-                                        let i1 = vld1q_u8(ptr_in.add(16));
-                                        let n02_1 = vandq_u8(i1, mask_f);
-                                        let n13_1 = vandq_u8(
-                                            vreinterpretq_u8_u16(vshrq_n_u16(
-                                                vreinterpretq_u16_u8(i1),
-                                                4,
-                                            )),
-                                            mask_f,
-                                        );
-                                        let i2 = vld1q_u8(ptr_in.add(32));
-                                        let n02_2 = vandq_u8(i2, mask_f);
-                                        let n13_2 = vandq_u8(
-                                            vreinterpretq_u8_u16(vshrq_n_u16(
-                                                vreinterpretq_u16_u8(i2),
-                                                4,
-                                            )),
-                                            mask_f,
-                                        );
-                                        let i3 = vld1q_u8(ptr_in.add(48));
-                                        let n02_3 = vandq_u8(i3, mask_f);
-                                        let n13_3 = vandq_u8(
-                                            vreinterpretq_u8_u16(vshrq_n_u16(
-                                                vreinterpretq_u16_u8(i3),
-                                                4,
-                                            )),
-                                            mask_f,
-                                        );
-
-                                        neon_madd!(
-                                            vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a, vhhl_a,
-                                            vhhh_a, n02_0, n13_0, ptr_a, mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b, vhhl_b,
-                                            vhhh_b, n02_0, n13_0, ptr_b, mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_a,
-                                            vtlh_a,
-                                            vthl_a,
-                                            vthh_a,
-                                            vhll_a,
-                                            vhlh_a,
-                                            vhhl_a,
-                                            vhhh_a,
-                                            n02_1,
-                                            n13_1,
-                                            ptr_a.add(16),
-                                            mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_b,
-                                            vtlh_b,
-                                            vthl_b,
-                                            vthh_b,
-                                            vhll_b,
-                                            vhlh_b,
-                                            vhhl_b,
-                                            vhhh_b,
-                                            n02_1,
-                                            n13_1,
-                                            ptr_b.add(16),
-                                            mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_a,
-                                            vtlh_a,
-                                            vthl_a,
-                                            vthh_a,
-                                            vhll_a,
-                                            vhlh_a,
-                                            vhhl_a,
-                                            vhhh_a,
-                                            n02_2,
-                                            n13_2,
-                                            ptr_a.add(32),
-                                            mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_b,
-                                            vtlh_b,
-                                            vthl_b,
-                                            vthh_b,
-                                            vhll_b,
-                                            vhlh_b,
-                                            vhhl_b,
-                                            vhhh_b,
-                                            n02_2,
-                                            n13_2,
-                                            ptr_b.add(32),
-                                            mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_a,
-                                            vtlh_a,
-                                            vthl_a,
-                                            vthh_a,
-                                            vhll_a,
-                                            vhlh_a,
-                                            vhhl_a,
-                                            vhhh_a,
-                                            n02_3,
-                                            n13_3,
-                                            ptr_a.add(48),
-                                            mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_b,
-                                            vtlh_b,
-                                            vthl_b,
-                                            vthh_b,
-                                            vhll_b,
-                                            vhlh_b,
-                                            vhhl_b,
-                                            vhhh_b,
-                                            n02_3,
-                                            n13_3,
-                                            ptr_b.add(48),
-                                            mask_even
-                                        );
-
-                                        ptr_in = ptr_in.add(64);
-                                        ptr_a = ptr_a.add(64);
-                                        ptr_b = ptr_b.add(64);
-                                    }
-
-                                    while ptr_in < end {
-                                        let inp = vld1q_u8(ptr_in);
-                                        let n02 = vandq_u8(inp, mask_f);
-                                        let n13 = vandq_u8(
-                                            vreinterpretq_u8_u16(vshrq_n_u16(
-                                                vreinterpretq_u16_u8(inp),
-                                                4,
-                                            )),
-                                            mask_f,
-                                        );
-                                        neon_madd!(
-                                            vtll_a, vtlh_a, vthl_a, vthh_a, vhll_a, vhlh_a, vhhl_a,
-                                            vhhh_a, n02, n13, ptr_a, mask_even
-                                        );
-                                        neon_madd!(
-                                            vtll_b, vtlh_b, vthl_b, vthh_b, vhll_b, vhlh_b, vhhl_b,
-                                            vhhh_b, n02, n13, ptr_b, mask_even
-                                        );
-                                        ptr_in = ptr_in.add(16);
-                                        ptr_a = ptr_a.add(16);
-                                        ptr_b = ptr_b.add(16);
-                                    }
-
-                                    if remainder > 0 {
-                                        let ow = blocks_16 * 8;
-                                        let mut pw_a = chunk_a[ow..].as_mut_ptr();
-                                        let mut pw_b = chunk_b[ow..].as_mut_ptr();
-                                        let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
-                                        let tail_end = p_in.add(remainder);
-                                        while p_in < tail_end {
-                                            let lo = *p_in as usize;
-                                            let hi = *p_in.add(1) as usize;
-                                            *pw_a ^= tlow_a[lo] ^ thigh_a[hi];
-                                            *pw_b ^= tlow_b[lo] ^ thigh_b[hi];
-                                            pw_a = pw_a.add(1);
-                                            pw_b = pw_b.add(1);
-                                            p_in = p_in.add(2);
-                                        }
-                                    }
-                                }
-                            });
-                    }
-                    rest => {
-                        // Fallback for 1 or 3 remaining blocks.
-                        for (j, buf) in rest.iter_mut().enumerate() {
-                            let rec_idx = i + j;
-                            buf.par_chunks_mut(chunk_size).enumerate().for_each(
-                                |(chunk_idx, chunk)| unsafe {
-                                    use std::arch::aarch64::*;
-                                    let mask_f = vdupq_n_u8(0x0F);
-                                    let mask_even = vreinterpretq_u8_u16(vdupq_n_u16(0x00FF));
-
-                                    let byte_offset = chunk_idx * chunk_size * 2;
-                                    let byte_len = chunk.len() * 2;
-                                    let blocks_16 = byte_len / 16;
-                                    let remainder = byte_len % 16;
-
-                                    for (q_idx, slice_vec) in queued.iter().enumerate() {
-                                        let (
-                                            ref tll,
-                                            ref tlh,
-                                            ref thl,
-                                            ref thh,
-                                            ref hll,
-                                            ref hlh,
-                                            ref hhl,
-                                            ref hhh,
-                                            ref tlow,
-                                            ref thigh,
-                                        ) = all_tables[q_idx * n_rec + rec_idx];
-                                        let vtll = vld1q_u8(tll.as_ptr());
-                                        let vtlh = vld1q_u8(tlh.as_ptr());
-                                        let vthl = vld1q_u8(thl.as_ptr());
-                                        let vthh = vld1q_u8(thh.as_ptr());
-                                        let vhll = vld1q_u8(hll.as_ptr());
-                                        let vhlh = vld1q_u8(hlh.as_ptr());
-                                        let vhhl = vld1q_u8(hhl.as_ptr());
-                                        let vhhh = vld1q_u8(hhh.as_ptr());
-
-                                        let slice_chunk =
-                                            &slice_vec[byte_offset..byte_offset + byte_len];
-                                        let mut ptr_buf = chunk.as_mut_ptr() as *mut u8;
-                                        let mut ptr_in = slice_chunk.as_ptr();
-                                        let end = ptr_in.add(blocks_16 * 16);
-
-                                        while ptr_in.add(64) <= end {
-                                            let i0 = vld1q_u8(ptr_in);
-                                            let n02_0 = vandq_u8(i0, mask_f);
-                                            let n13_0 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i0),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            let i1 = vld1q_u8(ptr_in.add(16));
-                                            let n02_1 = vandq_u8(i1, mask_f);
-                                            let n13_1 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i1),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            let i2 = vld1q_u8(ptr_in.add(32));
-                                            let n02_2 = vandq_u8(i2, mask_f);
-                                            let n13_2 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i2),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            let i3 = vld1q_u8(ptr_in.add(48));
-                                            let n02_3 = vandq_u8(i3, mask_f);
-                                            let n13_3 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(i3),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            neon_madd!(
-                                                vtll, vtlh, vthl, vthh, vhll, vhlh, vhhl, vhhh,
-                                                n02_0, n13_0, ptr_buf, mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll,
-                                                vtlh,
-                                                vthl,
-                                                vthh,
-                                                vhll,
-                                                vhlh,
-                                                vhhl,
-                                                vhhh,
-                                                n02_1,
-                                                n13_1,
-                                                ptr_buf.add(16),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll,
-                                                vtlh,
-                                                vthl,
-                                                vthh,
-                                                vhll,
-                                                vhlh,
-                                                vhhl,
-                                                vhhh,
-                                                n02_2,
-                                                n13_2,
-                                                ptr_buf.add(32),
-                                                mask_even
-                                            );
-                                            neon_madd!(
-                                                vtll,
-                                                vtlh,
-                                                vthl,
-                                                vthh,
-                                                vhll,
-                                                vhlh,
-                                                vhhl,
-                                                vhhh,
-                                                n02_3,
-                                                n13_3,
-                                                ptr_buf.add(48),
-                                                mask_even
-                                            );
-                                            ptr_in = ptr_in.add(64);
-                                            ptr_buf = ptr_buf.add(64);
-                                        }
-
-                                        while ptr_in < end {
-                                            let inp = vld1q_u8(ptr_in);
-                                            let n02 = vandq_u8(inp, mask_f);
-                                            let n13 = vandq_u8(
-                                                vreinterpretq_u8_u16(vshrq_n_u16(
-                                                    vreinterpretq_u16_u8(inp),
-                                                    4,
-                                                )),
-                                                mask_f,
-                                            );
-                                            neon_madd!(
-                                                vtll, vtlh, vthl, vthh, vhll, vhlh, vhhl, vhhh,
-                                                n02, n13, ptr_buf, mask_even
-                                            );
-                                            ptr_in = ptr_in.add(16);
-                                            ptr_buf = ptr_buf.add(16);
-                                        }
-
-                                        if remainder > 0 {
-                                            let ow = blocks_16 * 8;
-                                            let mut pw = chunk[ow..].as_mut_ptr();
-                                            let mut p_in = slice_chunk[blocks_16 * 16..].as_ptr();
-                                            let tail_end = p_in.add(remainder);
-                                            while p_in < tail_end {
-                                                let lo = *p_in as usize;
-                                                let hi = *p_in.add(1) as usize;
-                                                *pw ^= tlow[lo] ^ thigh[hi];
-                                                pw = pw.add(1);
-                                                p_in = p_in.add(2);
-                                            }
-                                        }
-                                    }
-                                },
-                            );
+                        // Remaining sources in this batch.
+                        for s in 1..batch_size {
+                            let ds = vld2q_u8(queued[q + s].as_ptr().add(src_off));
+                            let lo_s = vreinterpretq_p8_u8(ds.0);
+                            let hi_s = vreinterpretq_p8_u8(ds.1);
+                            let mid_s = vreinterpretq_p8_u8(veorq_u8(ds.0, ds.1));
+                            acc_l1 = xorp16!(acc_l1, pmull_lo!(lo_s, klo[s]));
+                            acc_l2 = xorp16!(acc_l2, pmull_hi!(lo_s, klo[s]));
+                            acc_m1 = xorp16!(acc_m1, pmull_lo!(mid_s, kmid[s]));
+                            acc_m2 = xorp16!(acc_m2, pmull_hi!(mid_s, kmid[s]));
+                            acc_h1 = xorp16!(acc_h1, pmull_lo!(hi_s, khi[s]));
+                            acc_h2 = xorp16!(acc_h2, pmull_hi!(hi_s, khi[s]));
                         }
+
+                        // Barrett reduction modulo 0x1100B.
+                        gf16_clmul_reduce_neon(
+                            &mut acc_l1,
+                            &mut acc_l2,
+                            acc_m1,
+                            acc_m2,
+                            &mut acc_h1,
+                            &mut acc_h2,
+                        );
+
+                        // Load dst, XOR in batch result, store.
+                        let mut dst = vld2q_u8(out_ptr);
+                        dst.0 = veorq_u8(dst.0, vreinterpretq_u8_p16(xorp16!(acc_l1, acc_l2)));
+                        dst.1 = veorq_u8(dst.1, vreinterpretq_u8_p16(xorp16!(acc_h1, acc_h2)));
+                        vst2q_u8(out_ptr, dst);
+                    }
+
+                    q = batch_end;
+                }
+            }
+
+            // Scalar tail: bytes that don't fill a full 32-byte block.
+            let tail_bytes = byte_len % 32; // always even (multiple of 2)
+            if tail_bytes > 0 {
+                let tail_word_start = n_blocks_32 * 16;
+                let tail_words = tail_bytes / 2;
+                let out_tail = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        buf.as_mut_ptr().add(tail_word_start),
+                        tail_words,
+                    )
+                };
+                for q in 0..n_queued {
+                    let (clo, chi, _) = coeffs_r[q];
+                    let coeff = (clo as u16) | ((chi as u16) << 8);
+                    let src = &queued[q];
+                    for (w, dst_word) in out_tail.iter_mut().enumerate() {
+                        let bp = (tail_word_start + w) * 2;
+                        let word = (src[bp] as u16) | ((src[bp + 1] as u16) << 8);
+                        *dst_word ^= gf.mul(word, coeff);
                     }
                 }
-            });
+            }
+        });
     }
 
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
@@ -4384,6 +3625,81 @@ impl Default for FileHasher {
     }
 }
 
+/// Barrett polynomial reduction for GF(2^16)/0x1100B.
+///
+/// On entry the six `poly16x8_t` arguments hold the XOR-accumulated outputs of
+/// `pmull_lo`/`pmull_hi` for a Karatsuba product:
+///   `low1, low2`  — lo_byte(input) × lo_byte(coeff)  (lower and upper 8 lanes)
+///   `mid1, mid2`  — (lo^hi)(input) × (lo^hi)(coeff)
+///   `high1, high2`— hi_byte(input) × hi_byte(coeff)
+///
+/// On return the result lives in "split" format:
+///   lo_bytes_of_result = `vreinterpretq_u8_p16(*low1 ^ *low2)`
+///   hi_bytes_of_result = `vreinterpretq_u8_p16(*high1 ^ *high2)`
+///
+/// Ported from ParPar `gf16_clmul_neon.h` (MIT licence, © animetosho).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+#[inline]
+unsafe fn gf16_clmul_reduce_neon(
+    low1: &mut poly16x8_t,
+    low2: &mut poly16x8_t,
+    mid1: poly16x8_t,
+    mid2: poly16x8_t,
+    high1: &mut poly16x8_t,
+    high2: &mut poly16x8_t,
+) {
+    use std::arch::aarch64::*;
+
+    // Deinterleave the 16-bit poly results into even/odd byte planes.
+    // After vuzpq_u8(a16, b16):  val[0] = even bytes of a16 ++ even bytes of b16
+    //                             val[1] = odd  bytes of a16 ++ odd  bytes of b16
+    let hib = vuzpq_u8(vreinterpretq_u8_p16(*high1), vreinterpretq_u8_p16(*high2));
+    let lob = vuzpq_u8(vreinterpretq_u8_p16(*low1), vreinterpretq_u8_p16(*low2));
+    let mib = vuzpq_u8(vreinterpretq_u8_p16(mid1), vreinterpretq_u8_p16(mid2));
+    // hib.val[0] = bits 16-23 of unreduced product (per element)
+    // hib.val[1] = bits 24-30 of unreduced product
+    // lob.val[0] = bits  0- 7
+    // lob.val[1] = bits  8-14 (bit 15 is always 0: 8b×8b → 15-bit product)
+    // mib.val[0/1] = low/high bytes of Karatsuba middle
+
+    // Merge the middle Karatsuba term to assemble the 31-bit product bytes.
+    let lib = veorq_u8(hib.0, lob.1); // cross-overlap
+    let lob1 = veorq_u8(veorq_u8(lib, lob.0), mib.0); // bits  8-15
+    let hib0 = veorq_u8(veorq_u8(lib, hib.1), mib.1); // bits 16-23
+
+    // Barrett reduction.  Polynomial: 0x1100B = x^16 + x^12 + x^3 + x + 1.
+    // The high word (15 bits) lives in (hib0 | hib.val[1]<<8).
+    // Step 1: quotient approximation th0 = bits 20-27 of the product.
+    let th0_a = vsriq_n_u8::<4>(vshlq_n_u8::<4>(hib.1), hib0);
+    let th1_a = veorq_u8(hib.1, vshrq_n_u8::<4>(hib.1));
+    let mut th0 = veorq_u8(veorq_u8(th0_a, th1_a), hib0);
+
+    // Step 2: extract top 3 bits of th0, then XOR-fold (th0_hi3 ^= th0_hi3 >> 2).
+    // Implemented via vqtbl1q_u8 lookup (no SHA3 EOR3 needed).
+    // Table encodes n ^ (n >> 2) for n ∈ 0..8; indices 8-15 are unused (→ 0).
+    let th0_hi3 = vshrq_n_u8::<5>(th0);
+    const TBL: [u8; 16] = [0, 1, 2, 3, 5, 4, 7, 6, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tbl_v = vld1q_u8(TBL.as_ptr());
+    let th0_hi3r = vqtbl1q_u8(tbl_v, th0_hi3);
+
+    // Fold the high-byte contribution (shift-5 term).
+    th0 = veorq_u8(th0, vshrq_n_u8::<5>(hib.1));
+
+    // Step 3: multiply by 0x0b = x^3 + x + 1 (low coefficient of 0x100B).
+    // vmulq_p8: polynomial multiply truncated to 8 bits (PMUL.16B instruction).
+    let red_l = vdupq_n_p8(0x0b);
+    let hib1_new = vsliq_n_u8::<4>(th0_hi3r, th0);
+    let th1_new = vreinterpretq_u8_p8(vmulq_p8(vreinterpretq_p8_u8(th1_a), red_l));
+    let hib0_new = vreinterpretq_u8_p8(vmulq_p8(vreinterpretq_p8_u8(th0), red_l));
+
+    // Pack into split format (caller XORs low1^low2 → lo lane, high1^high2 → hi lane).
+    *low1 = vreinterpretq_p16_u8(lob.0);
+    *low2 = vreinterpretq_p16_u8(hib0_new);
+    *high1 = vreinterpretq_p16_u8(veorq_u8(hib1_new, th1_new));
+    *high2 = vreinterpretq_p16_u8(lob1);
+}
+
 /// MD5 + CRC32 checksum of one zero-padded input slice (for the IFSC packet).
 pub fn slice_checksum(padded_slice: &[u8]) -> SliceChecksum {
     SliceChecksum {
@@ -4478,7 +3794,7 @@ mod tests {
     //
     // Run with:
     //   cargo test --features bench-internals -- gfni_recovery_matches_scalar
-    #[cfg(feature = "bench-internals")]
+    #[cfg(all(feature = "bench-internals", target_arch = "x86_64"))]
     #[test]
     fn gfni_recovery_matches_scalar() {
         if !std::is_x86_feature_detected!("avx512f")
