@@ -1671,6 +1671,130 @@ across tenants; numbers are not reproducible and cannot guide optimization.
 
 ---
 
+## Phase 30 — Close AArch64/NEON gap vs parpar
+
+**Goal:** match or surpass parpar on ARM server processors (tested on Neoverse N1, 4 cores).
+Baseline after Phase 29: pesto 113 MB/s vs parpar 235 MB/s (−52%) on a Neoverse N1 (Cortex-A72
+class, 4 logical cores, 64 KB L1D, ~256 KB L2 per core).
+
+### Hardware context
+
+```
+Architecture : AArch64 (ARM v8-A)
+CPU part     : 0xD0C (Neoverse N1)
+Cores        : 4 logical (no HT on ARM)
+SIMD         : NEON (128-bit), vqtbl1q_u8 = _mm_shuffle_epi8 equivalent
+GFNI         : absent (no GF2P8AFFINEQB)
+L1D          : 64 KB per core
+L2           : ~256 KB per core
+```
+
+The gap vs x86 is structural: Intel has GFNI (`GF2P8AFFINEQB`) which reduces GF(2^16)
+multiply-accumulate to 2 register operations; AVX2 Shuffle2x uses 4 VPSHUFB by packing two
+16-entry sub-tables per 256-bit lane. Neither trick translates directly to 128-bit NEON.
+Parpar at 235 MB/s implies ~2 ops/byte/recovery-block; pesto's 8 `vqtbl1q_u8` per madd
+implies ~4 ops/byte/recovery-block — the 2× ratio is the primary target.
+
+### 30a — 2D parallel + 4× recovery-block unrolling ✅
+
+**Result: 113 → 121.8 MB/s (+7.8%).**
+
+Root cause of previous gap: `flush_neon_work` used `par_iter_mut` (1D, one task per recovery
+block) and built coefficient tables serially inside each task. The x86 AVX2 path used a 2D
+structure and pre-built all tables in a global parallel pass.
+
+- [x] Pre-build all `(recovery × input)` coefficient tables in one `into_par_iter()` pass.
+      Tables stored as `([u8; 16], …, [u16; 256], [u16; 256])` — `Send+Sync`, safe across rayon.
+- [x] Replace `par_iter_mut()` with 2D parallel loop: `par_chunks_mut(4)` (groups of 4
+      recovery blocks) × `par_chunks_mut(chunk_size)` (32 KiB buffer chunks).
+      On a 5 GB / 4-core run: ~100 tasks → ~8 000 tasks, better load balance.
+- [x] 4× unrolling across recovery blocks: one `vld1q_u8` + one nibble extraction serves
+      four `neon_madd!` calls simultaneously, reducing effective input reads by 4×.
+- [x] `neon_madd!` macro encapsulates the 8-lookup + 4-XOR + pack + RMW kernel cleanly.
+- [x] Fix pre-existing AArch64 clippy warnings (unreachable code in altmap/shuffle2x tests,
+      unused import, `flush_scalar` dead_code annotation).
+- [x] Bench script temporarily defaults to 5 GB only (this slow machine).
+- [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
+
+### 30b — Software prefetch for input data (small, 1 h)
+
+**Hypothesis:** the inner loop loads 51 × 32 KiB input chunks sequentially; hardware
+prefetch on Neoverse N1 handles straight-line streams well but the 4-block interleaving
+(A+B+C+D → advance ptr_in) may confuse it. Explicit `prfm pldl1keep` 128–256 bytes ahead
+of `ptr_in` should hide load-to-use latency.
+
+- [ ] Add `std::arch::aarch64::__prefetch(ptr_in.add(8) as *const i8)` inside the 4×-unrolled
+      loop body, prefetching 8 NEON vectors (128 bytes) ahead.
+- [ ] Also prefetch output buffers (ptr_a/b/c/d) one stride ahead to warm L2 for the
+      read-modify-write.
+- [ ] Benchmark before/after on the 5 GB sparse file; keep only if ≥ 3% gain.
+
+Note: `__prefetch` is `#[doc(hidden)]` but stable since Rust 1.59; it lowers to `prfm
+PLDL1KEEP, [Xn]`. No unsafe risk beyond what the NEON path already carries.
+
+### 30c — Transposed table layout for cache-friendly 4-block access (small, 2 h)
+
+**Hypothesis:** `all_tables[(i × n_queued) + q_idx]` means the 4 entries for one group's
+A/B/C/D blocks are `n_queued × 1152 ≈ 59 KB` apart in memory — a cache miss per block on
+every `q_idx` iteration. Transposing to `[(q_idx × n_rec) + i]` makes the four entries
+consecutive (4.6 KB), fitting in one L2 fetch stream.
+
+- [ ] Change `all_tables` build index from `flat = i * n_queued + q_idx` to
+      `flat = q_idx * n_rec + i`.
+- [ ] Update all access sites: `base_x + q_idx` → `q_idx * n_rec + (i + x)`.
+- [ ] Micro-benchmark on 5 GB; expected +3–5% on cache-pressure workloads.
+
+### 30d — NEON polynomial-multiply GF kernel (large, 4–8 h)
+
+**Hypothesis:** AArch64 `vmull_p64` / `pmull` performs carry-less (polynomial) 64-bit
+multiplication. GF(2^16) multiplication by a constant can be expressed as two 16-bit
+polynomial mults + reduction mod `0x1100B`. A SIMD kernel using 8× `vmull_p8` (8-bit
+polynomial mult, 8-element parallel) to compute GF(2^8) partial products might eliminate
+the table-lookup bottleneck entirely.
+
+Algorithm sketch (Karatsuba-style over GF(2^8)):
+```
+input  = [a1, a0]  (hi/lo bytes of each GF(2^16) word)
+coeff  = [c1, c0]
+prod_lo = vmull_p8(a0, c0) XOR (reduction of vmull_p8(a0, c1) XOR vmull_p8(a1, c0) by x^8)
+prod_hi = vmull_p8(a1, c1) XOR ...  -- depends on poly reduction details
+```
+
+- [ ] Prototype `flush_neon_poly()` using `vmull_p8` for GF(2^16) madd.
+- [ ] Verify output matches scalar reference via `simd_recovery_matches_scalar` test.
+- [ ] Benchmark; target ≥ 180 MB/s (closing gap to ≤ 1.3× parpar).
+- [ ] If faster, integrate into runtime dispatch as the preferred NEON path.
+
+### 30e — Reduce ops-per-byte with vqtbl2q_u8 (medium, 2–3 h)
+
+**Hypothesis:** `vqtbl2q_u8(uint8x16x2_t, uint8x16_t)` does a 32-byte table lookup.
+By packing `tl_l | tl_h` into one `uint8x16x2_t` and using shifted indices (`n1_3 + 16`),
+we can replace two `vqtbl1q_u8 + veor` with one `vqtbl2q_u8 + vqtbl2q_u8 + veor`. This
+saves one instruction per nibble-pair per recovery block.
+
+Each `neon_madd!` currently: 8 `vqtbl1q` + 4 `veor` = 12 lookup/xor ops.
+With `vqtbl2q`: 4 `vqtbl2q` (2 lookup per call) + 4 `veor` = potentially lower latency
+due to fewer dispatch slots occupied, despite same instruction count.
+
+- [ ] Build a combined `uint8x16x2_t` per sub-table pair: `{tl_l, th_l}`, `{tl_h, th_h}`,
+      `{hl_l, hh_l}`, `{hl_h, hh_h}` — 4 structs per recovery block instead of 8 vectors.
+- [ ] Rewrite `neon_madd!` using `vqtbl2q_u8` with `n0_2` for the first half and
+      `n1_3 | 0x10` (= `n1_3 + 16`) for the second half.
+- [ ] Benchmark vs baseline; keep only if throughput measurably improves.
+
+### 30f — Restore bench script defaults
+
+- [ ] Revert `SIZE_LIST=(5)` → `SIZE_LIST=(1 5 10)` once optimization work is complete.
+
+### Definition of done
+
+- [ ] `bench_pesto_vs_parpar.sh` (5 GB) reports pesto ≥ 180 MB/s on Neoverse N1
+      (target: close to within 1.3× of parpar at 235 MB/s).
+- [ ] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
+- [ ] No regression on x86 paths (run `bench_pesto_vs_parpar.sh` on i5 before merging).
+
+---
+
 ## Phase 26 — Verbose Mode & Diagnostics
 
 Essential for public beta: allow users to provide detailed logs when reporting issues, without leaking sensitive credentials.
