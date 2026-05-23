@@ -1876,20 +1876,54 @@ Essential for public beta: allow users to provide detailed logs when reporting i
 
 ---
 
-## Phase 20 — PAR2 Library Separation
+## Phase 20 — Codebase Modularization
+
+Reduce the size of monolithic files by splitting them into logical sub-modules. This
+improves maintainability, reduces merge conflicts, and clarifies internal APIs.
+
+### 20a — Split Setup Wizard from `main.rs` (Complexity: Low)
+
+- [ ] Create `src/ui/wizard.rs` (or `src/config/wizard.rs`).
+- [ ] Move the interactive configuration wizard logic out of `main.rs`.
+- [ ] Clean up `main.rs` to focus strictly on CLI entry and orchestration.
+
+### 20b — Separate TUI Rendering from `progress.rs` (Complexity: Medium)
+
+- [ ] Create `src/ui/terminal.rs` for all ANSI/terminal rendering logic.
+- [ ] Keep `src/progress.rs` focused on the `ProgressEvent` definitions and
+      event-bus logic.
+- [ ] Prepare the architecture for the future `ratatui` integration (Phase 21j).
+
+### 20c — Isolate PAR2 Pipeline Worker from `poster.rs` (Complexity: Medium)
+
+- [ ] Create `src/poster/par2_worker.rs`.
+- [ ] Move the `Par2Worker` struct and its complex multi-threaded pipeline logic
+      (MD5 hashing + RS encoding coordination) out of the main poster module.
+- [ ] Simplify `src/poster.rs` to focus on the high-level upload loop.
+
+### 20d — Modularize `config.rs` (Complexity: Medium)
+
+- [ ] Convert `src/config.rs` into a module directory `src/config/`.
+- [ ] Split into `types.rs` (struct definitions), `parse.rs` (TOML/CLI merging),
+      and `validation.rs`.
+- [ ] Reduce the 1300+ line count of the current single file.
+
+---
+
+## Phase 21 — PAR2 Library Separation
 
 Decouple the high-performance PAR2 encoder from the Usenet-specific logic. This
 turns the core of `pesto` into a standalone asset that can be used by other
 projects (like `upapasta` directly) and improves build times.
 
-### 20a — Cargo Workspace setup (Complexity: Low)
+### 21a — Cargo Workspace setup (Complexity: Low)
 
 - [ ] Convert the repository into a Cargo Workspace.
 - [ ] Move `src/par2` to its own crate directory (e.g., `crates/pesto-par2`).
 - [ ] Update `Cargo.toml` in the root to manage both the binary and the new crate.
 - [ ] Ensure `cargo test` and `cargo build` still work across the workspace.
 
-### 20b — API Decoupling and Cleanup (Complexity: Medium)
+### 21b — API Decoupling and Cleanup (Complexity: Medium)
 
 - [ ] Remove all Usenet/NNTP/NZB specific terminology from the PAR2 crate.
 - [ ] Redesign the `RecoveryEncoder` API to be generic over any source of bytes
@@ -1898,14 +1932,14 @@ projects (like `upapasta` directly) and improves build times.
       standalone.
 - [ ] Provide a clean `prelude` or high-level API for third-party consumers.
 
-### 20c — Performance Isolation and Benchmarking (Complexity: Medium)
+### 21c — Performance Isolation and Benchmarking (Complexity: Medium)
 
 - [ ] Move internal micro-benchmarks (`bench-internals`) into the library crate.
 - [ ] Ensure that moving the code doesn't introduce performance regressions due
       to cross-crate optimization boundaries (use `#[inline]` where necessary).
 - [ ] Add library-specific documentation and examples for standalone usage.
 
-### 20d — Independent Publication (Complexity: High)
+### 21d — Independent Publication (Complexity: High)
 
 - [ ] Version the library independently from the `pesto` binary.
 - [ ] Publish `pesto-par2` to crates.io.
