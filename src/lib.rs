@@ -38,6 +38,7 @@ pub use pesto_par2 as par2;
 pub mod poster;
 pub mod progress;
 pub mod resume;
+pub mod ui;
 pub mod walk;
 pub mod yenc;
 

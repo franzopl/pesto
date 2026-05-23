@@ -17,8 +17,6 @@ use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
 use tracing::info;
 
-mod ui;
-
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
 
@@ -470,7 +468,7 @@ async fn run_single_upload(
     let (progress_tx, renderer) = if params.json_mode {
         pesto::progress::spawn_json_emitter()
     } else {
-        pesto::progress::spawn_terminal_renderer_with(params.renderer_opts.clone())
+        pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
     };
 
     // ── Compression ──────────────────────────────────────────────────────────
@@ -655,7 +653,7 @@ async fn run_single_upload(
         let (check_tx, check_renderer) = if params.json_mode {
             pesto::progress::spawn_json_emitter()
         } else {
-            pesto::progress::spawn_terminal_renderer_with(params.renderer_opts.clone())
+            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
         };
         let t_check = std::time::Instant::now();
         let missing = pesto::poster::check_articles(config, &outcome.segments, Some(&check_tx))
@@ -1270,7 +1268,7 @@ async fn main() -> Result<()> {
 
     // `pesto --config` with no value: launch the interactive setup wizard.
     if matches!(cli.config, Some(None)) {
-        return ui::wizard::run();
+        return pesto::ui::wizard::run();
     }
 
     // Handle `-` (stdin) in the file list.
