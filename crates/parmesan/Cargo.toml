@@ -5,6 +5,13 @@ edition = "2021"
 rust-version = "1.89"
 description = "Fast, standalone PAR2 (Reed-Solomon) creation tool"
 license = "MIT"
+repository = "https://github.com/franzopl/pesto"
+homepage = "https://github.com/franzopl/pesto/tree/main/crates/parmesan"
+documentation = "https://docs.rs/parmesan"
+readme = "README.md"
+keywords = ["par2", "reed-solomon", "usenet", "repair", "parity"]
+categories = ["command-line-utilities", "encoding"]
+exclude = ["/benches", "/tests"]
 
 [lib]
 name = "parmesan"
