@@ -16,6 +16,8 @@ pub const DEFAULT_LINE_LENGTH: usize = 128;
 pub const DEFAULT_RETRIES: u32 = 3;
 /// Default pause between failed post attempts, in seconds.
 pub const DEFAULT_RETRY_DELAY: u64 = 1;
+/// Default number of articles to pipeline per connection (1 = sequential).
+pub const DEFAULT_PIPELINE_DEPTH: usize = 1;
 /// Default percentage of PAR2 recovery data to generate.
 pub const DEFAULT_PAR2: u8 = 10;
 
@@ -107,6 +109,10 @@ pub struct PostingSection {
     pub check_delay: Option<u64>,
     /// Number of STAT attempts per article during post-check. Default: 2.
     pub check_retries: Option<u32>,
+    /// Number of articles to send per connection before reading responses.
+    /// Values > 1 enable NNTP pipelining, which cuts per-article RTT cost.
+    /// Incompatible with `verify = true`. Default: 1.
+    pub pipeline_depth: Option<usize>,
     /// Maximum RAM for PAR2 recovery buffers as a human-readable string,
     /// e.g. `"512 MiB"`. When the total buffer size would exceed this limit
     /// the encoder splits recovery blocks into multiple passes, re-reading
@@ -233,6 +239,7 @@ pub struct Overrides {
     pub check: Option<bool>,
     pub check_delay_secs: Option<u64>,
     pub check_retries: Option<u32>,
+    pub pipeline_depth: Option<usize>,
 }
 
 /// Fully resolved, validated configuration.
@@ -290,6 +297,7 @@ pub struct Config {
     pub check: bool,
     pub check_delay_secs: u64,
     pub check_retries: u32,
+    pub pipeline_depth: usize,
 }
 
 impl Config {

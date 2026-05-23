@@ -117,6 +117,12 @@ struct Cli {
     #[arg(long, value_name = "N")]
     retries: Option<u32>,
 
+    /// Articles to pipeline per connection before reading responses.
+    /// Higher values reduce per-article RTT cost on high-latency links.
+    /// Incompatible with --verify [config: posting.pipeline_depth, default 1].
+    #[arg(long, value_name = "N")]
+    pipeline_depth: Option<usize>,
+
     /// Seconds to wait between failed post attempts
     /// [config: server.retry_delay, default 1].
     #[arg(long, value_name = "SECS")]
@@ -453,6 +459,7 @@ impl Cli {
             check: if self.check { Some(true) } else { None },
             check_delay_secs: self.check_delay,
             check_retries: self.check_retries,
+            pipeline_depth: self.pipeline_depth,
         }
     }
 }

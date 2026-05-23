@@ -111,10 +111,10 @@ pub struct Article {
 }
 
 impl Article {
-    /// Serialize the article for posting: header lines, a blank line, then the
-    /// already-encoded `body`.
-    pub fn serialize(&self, body: &[u8]) -> Vec<u8> {
-        let mut header = format!(
+    /// Build the RFC 2822 header block (including the trailing blank line).
+    /// The returned bytes are ready to be written directly to the NNTP stream.
+    pub fn build_headers(&self) -> Vec<u8> {
+        let mut h = format!(
             "From: {}\r\nNewsgroups: {}\r\nSubject: {}\r\nMessage-ID: {}\r\n",
             self.from,
             self.newsgroups.join(","),
@@ -122,16 +122,23 @@ impl Article {
             self.message_id,
         );
         if let Some(date) = &self.date {
-            header.push_str("Date: ");
-            header.push_str(date);
-            header.push_str("\r\n");
+            h.push_str("Date: ");
+            h.push_str(date);
+            h.push_str("\r\n");
         }
         if self.no_archive {
-            header.push_str("X-No-Archive: yes\r\n");
+            h.push_str("X-No-Archive: yes\r\n");
         }
-        header.push_str("\r\n");
-        let mut out = Vec::with_capacity(header.len() + body.len());
-        out.extend_from_slice(header.as_bytes());
+        h.push_str("\r\n");
+        h.into_bytes()
+    }
+
+    /// Serialize the article for posting: header lines, a blank line, then the
+    /// already-encoded `body`. Kept for tests; production code calls
+    /// [`build_headers`] and posts headers + body separately to avoid copying
+    /// the body.
+    pub fn serialize(&self, body: &[u8]) -> Vec<u8> {
+        let mut out = self.build_headers();
         out.extend_from_slice(body);
         out
     }
