@@ -3259,12 +3259,15 @@ impl RecoveryEncoder {
         let n_rec = buffers.len();
         let n_queued = queued.len();
 
-        // Pre-build all (recovery_block × input_slice) tables in one parallel pass.
-        let all_tables: Vec<NeonTable> = (0..n_rec * n_queued)
+        // Pre-build all (input_slice × recovery_block) tables in one parallel pass.
+        // Layout: all_tables[q_idx * n_rec + i] — the four A/B/C/D entries for a
+        // group at the same q_idx are consecutive in memory, cutting L1D pressure
+        // when the 4-way unrolled arm loads all four coefficient sets at once.
+        let all_tables: Vec<NeonTable> = (0..n_queued * n_rec)
             .into_par_iter()
             .map(|flat| {
-                let i = flat / n_queued;
-                let q_idx = flat % n_queued;
+                let q_idx = flat / n_rec;
+                let i = flat % n_rec;
                 let exponent = exponent_start + i as u32;
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
@@ -3344,10 +3347,8 @@ impl RecoveryEncoder {
                 match buf_group {
                     [buf_a, buf_b, buf_c, buf_d] => {
                         // 4× unrolled across recovery blocks: one input load serves all four.
-                        let base_a = i * n_queued;
-                        let base_b = (i + 1) * n_queued;
-                        let base_c = (i + 2) * n_queued;
-                        let base_d = (i + 3) * n_queued;
+                        // Transposed layout: all_tables[q_idx * n_rec + i] — the four
+                        // A/B/C/D entries are consecutive per q_idx for L1D locality.
                         buf_a
                             .par_chunks_mut(chunk_size)
                             .zip(buf_b.par_chunks_mut(chunk_size))
@@ -3365,7 +3366,8 @@ impl RecoveryEncoder {
                                     let blocks_16 = byte_len / 16;
                                     let remainder = byte_len % 16;
 
-                                    for q_idx in 0..n_queued {
+                                    for (q_idx, slice_vec) in queued.iter().enumerate() {
+                                        let base = q_idx * n_rec;
                                         let (
                                             ref tll_a,
                                             ref tlh_a,
@@ -3377,7 +3379,7 @@ impl RecoveryEncoder {
                                             ref hhh_a,
                                             ref tlow_a,
                                             ref thigh_a,
-                                        ) = all_tables[base_a + q_idx];
+                                        ) = all_tables[base + i];
                                         let (
                                             ref tll_b,
                                             ref tlh_b,
@@ -3389,7 +3391,7 @@ impl RecoveryEncoder {
                                             ref hhh_b,
                                             ref tlow_b,
                                             ref thigh_b,
-                                        ) = all_tables[base_b + q_idx];
+                                        ) = all_tables[base + i + 1];
                                         let (
                                             ref tll_c,
                                             ref tlh_c,
@@ -3401,7 +3403,7 @@ impl RecoveryEncoder {
                                             ref hhh_c,
                                             ref tlow_c,
                                             ref thigh_c,
-                                        ) = all_tables[base_c + q_idx];
+                                        ) = all_tables[base + i + 2];
                                         let (
                                             ref tll_d,
                                             ref tlh_d,
@@ -3413,7 +3415,7 @@ impl RecoveryEncoder {
                                             ref hhh_d,
                                             ref tlow_d,
                                             ref thigh_d,
-                                        ) = all_tables[base_d + q_idx];
+                                        ) = all_tables[base + i + 3];
 
                                         // Load 8 NEON table vectors per recovery block (32 total).
                                         let vtll_a = vld1q_u8(tll_a.as_ptr());
@@ -3450,7 +3452,7 @@ impl RecoveryEncoder {
                                         let vhhh_d = vld1q_u8(hhh_d.as_ptr());
 
                                         let slice_chunk =
-                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                            &slice_vec[byte_offset..byte_offset + byte_len];
                                         let mut ptr_a = chunk_a.as_mut_ptr() as *mut u8;
                                         let mut ptr_b = chunk_b.as_mut_ptr() as *mut u8;
                                         let mut ptr_c = chunk_c.as_mut_ptr() as *mut u8;
@@ -3461,6 +3463,25 @@ impl RecoveryEncoder {
                                         // 4× input unrolling: 64 input bytes per iteration.
                                         // Nibbles extracted once per input chunk, reused for A/B/C/D.
                                         while ptr_in.add(64) <= end {
+                                            // Prefetch 128 bytes ahead for input and all four output
+                                            // buffers; hides L2 latency on Neoverse N1 (Phase 30b).
+                                            // Use inline asm: std::arch::aarch64 has no stable
+                                            // __prefetch / _prefetch at the required signature.
+                                            if ptr_in.add(192) <= end {
+                                                core::arch::asm!(
+                                                    "prfm pldl1keep, [{p0}]",
+                                                    "prfm pldl1keep, [{p1}]",
+                                                    "prfm pldl1keep, [{p2}]",
+                                                    "prfm pldl1keep, [{p3}]",
+                                                    "prfm pldl1keep, [{p4}]",
+                                                    p0 = in(reg) ptr_in.add(128),
+                                                    p1 = in(reg) ptr_a.add(128),
+                                                    p2 = in(reg) ptr_b.add(128),
+                                                    p3 = in(reg) ptr_c.add(128),
+                                                    p4 = in(reg) ptr_d.add(128),
+                                                    options(nostack, preserves_flags)
+                                                );
+                                            }
                                             let i0 = vld1q_u8(ptr_in);
                                             let n02_0 = vandq_u8(i0, mask_f);
                                             let n13_0 = vandq_u8(
@@ -3751,8 +3772,6 @@ impl RecoveryEncoder {
                     }
                     [buf_a, buf_b] => {
                         // 2× unrolled fallback for the trailing pair when n_rec % 4 == 2.
-                        let base_a = i * n_queued;
-                        let base_b = (i + 1) * n_queued;
                         buf_a
                             .par_chunks_mut(chunk_size)
                             .zip(buf_b.par_chunks_mut(chunk_size))
@@ -3767,7 +3786,8 @@ impl RecoveryEncoder {
                                 let blocks_16 = byte_len / 16;
                                 let remainder = byte_len % 16;
 
-                                for q_idx in 0..n_queued {
+                                for (q_idx, slice_vec) in queued.iter().enumerate() {
+                                    let base = q_idx * n_rec;
                                     let (
                                         ref tll_a,
                                         ref tlh_a,
@@ -3779,7 +3799,7 @@ impl RecoveryEncoder {
                                         ref hhh_a,
                                         ref tlow_a,
                                         ref thigh_a,
-                                    ) = all_tables[base_a + q_idx];
+                                    ) = all_tables[base + i];
                                     let (
                                         ref tll_b,
                                         ref tlh_b,
@@ -3791,7 +3811,7 @@ impl RecoveryEncoder {
                                         ref hhh_b,
                                         ref tlow_b,
                                         ref thigh_b,
-                                    ) = all_tables[base_b + q_idx];
+                                    ) = all_tables[base + i + 1];
 
                                     let vtll_a = vld1q_u8(tll_a.as_ptr());
                                     let vtlh_a = vld1q_u8(tlh_a.as_ptr());
@@ -3811,7 +3831,7 @@ impl RecoveryEncoder {
                                     let vhhh_b = vld1q_u8(hhh_b.as_ptr());
 
                                     let slice_chunk =
-                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                        &slice_vec[byte_offset..byte_offset + byte_len];
                                     let mut ptr_a = chunk_a.as_mut_ptr() as *mut u8;
                                     let mut ptr_b = chunk_b.as_mut_ptr() as *mut u8;
                                     let mut ptr_in = slice_chunk.as_ptr();
@@ -3998,7 +4018,7 @@ impl RecoveryEncoder {
                     rest => {
                         // Fallback for 1 or 3 remaining blocks.
                         for (j, buf) in rest.iter_mut().enumerate() {
-                            let base = (i + j) * n_queued;
+                            let rec_idx = i + j;
                             buf.par_chunks_mut(chunk_size).enumerate().for_each(
                                 |(chunk_idx, chunk)| unsafe {
                                     use std::arch::aarch64::*;
@@ -4010,7 +4030,7 @@ impl RecoveryEncoder {
                                     let blocks_16 = byte_len / 16;
                                     let remainder = byte_len % 16;
 
-                                    for q_idx in 0..n_queued {
+                                    for (q_idx, slice_vec) in queued.iter().enumerate() {
                                         let (
                                             ref tll,
                                             ref tlh,
@@ -4022,7 +4042,7 @@ impl RecoveryEncoder {
                                             ref hhh,
                                             ref tlow,
                                             ref thigh,
-                                        ) = all_tables[base + q_idx];
+                                        ) = all_tables[q_idx * n_rec + rec_idx];
                                         let vtll = vld1q_u8(tll.as_ptr());
                                         let vtlh = vld1q_u8(tlh.as_ptr());
                                         let vthl = vld1q_u8(thl.as_ptr());
@@ -4033,7 +4053,7 @@ impl RecoveryEncoder {
                                         let vhhh = vld1q_u8(hhh.as_ptr());
 
                                         let slice_chunk =
-                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                            &slice_vec[byte_offset..byte_offset + byte_len];
                                         let mut ptr_buf = chunk.as_mut_ptr() as *mut u8;
                                         let mut ptr_in = slice_chunk.as_ptr();
                                         let end = ptr_in.add(blocks_16 * 16);
