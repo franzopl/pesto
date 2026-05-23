@@ -210,6 +210,23 @@ PAR2 creation tool, matching the flexibility of `parpar`.
       dependencies.
 - [ ] Use `parmesan` for direct performance comparisons with `parpar` and `par2cmdline`.
 
+### 22e — parpar Feature Parity for `parmesan` (Complexity: Medium)
+
+Bring `parmesan`'s CLI flags to feature parity with the important options offered
+by `parpar`, making it a drop-in replacement for common workflows.
+
+- [ ] Add `--quiet / -q`: suppress all progress and geometry output (useful in scripts).
+- [ ] Add `--overwrite / -O`: overwrite existing PAR2 files instead of aborting.
+- [ ] Add `--no-index`: skip generation of the `.par2` index file.
+- [ ] Add `--base-name / -b`: override the base name used for output files (default:
+      first input file name).
+- [ ] Add `--recurse / -R`: recursively expand directories passed as positional
+      arguments into their constituent files.
+- [ ] Add `--comment / -c` (repeatable): embed one or more comment strings in the
+      PAR2 Creator packet body (format: `"parmesan | c1 | c2"`).
+- [ ] Add `--recovery-offset / -e`: set the exponent of the first recovery block
+      (default 0); allows generating non-overlapping recovery sets for the same data.
+
 ---
 
 ## Phase 23 — Interactive Visuals & UX (Ratatui)
