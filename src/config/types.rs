@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
-use pesto_par2::SimdPath;
+use parmesan_core::SimdPath;
 use serde::Deserialize;
 use std::path::PathBuf;
 

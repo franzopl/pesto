@@ -7,7 +7,7 @@ description = "Fast, standalone PAR2 (Reed-Solomon) creation tool"
 license = "MIT"
 
 [dependencies]
-pesto-par2 = { path = "../pesto-par2" }
+parmesan-core = { path = "../parmesan-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "macros"] }

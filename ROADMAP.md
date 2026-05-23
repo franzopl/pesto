@@ -145,7 +145,7 @@ projects (like `upapasta` directly) and improves build times.
 ### 21a — Cargo Workspace setup (Complexity: Low) ✅
 
 - [x] Convert the repository into a Cargo Workspace.
-- [x] Move `src/par2` to its own crate directory (e.g., `crates/pesto-par2`).
+- [x] Move `src/par2` to its own crate directory (e.g., `crates/parmesan-core`).
 - [x] Update `Cargo.toml` in the root to manage both the binary and the new crate.
 - [x] Ensure `cargo test` and `cargo build` still work across the workspace.
 
@@ -168,7 +168,7 @@ projects (like `upapasta` directly) and improves build times.
 ### 21d — Independent Publication (Complexity: High)
 
 - [ ] Version the library independently from the `pesto` binary.
-- [ ] Publish `pesto-par2` to crates.io.
+- [ ] Publish `parmesan-core` to crates.io.
 - [ ] Update `pesto` (the binary) to depend on the published crate (or workspace
       path) instead of local modules.
 
@@ -176,7 +176,7 @@ projects (like `upapasta` directly) and improves build times.
 
 ## Phase 22 — Generic PAR2 Tooling Expansion
 
-Transform `pesto-par2` and the `pesto` CLI into a general-purpose high-performance
+Transform `parmesan-core` and the `pesto` CLI into a general-purpose high-performance
 PAR2 creation tool, matching the flexibility of `parpar`.
 
 ### 22a — Manual Resource Control (Complexity: Low)

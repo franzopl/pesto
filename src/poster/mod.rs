@@ -22,15 +22,15 @@ use crate::article::{
 };
 use crate::config::{Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
-use pesto_par2::encoder::{FileHasher, RecoveryEncoder};
-use pesto_par2::layout;
-use pesto_par2::packet::{self, SliceChecksum};
+use parmesan_core::encoder::{FileHasher, RecoveryEncoder};
+use parmesan_core::layout;
+use parmesan_core::packet::{self, SliceChecksum};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::ResumeState;
 use crate::walk::InputFile;
 use crate::yenc;
 
-use pesto_par2::worker::Par2Worker;
+use parmesan_core::worker::Par2Worker;
 
 /// Returns `(slice_size_bytes, total_input_slices)`.
 /// `file_size² / par2_slice_size`, so tying the PAR2 slice to the (small)
@@ -446,7 +446,7 @@ pub async fn post_files_with_progress(
 /// Per-process temp directory holding the intermediate PAR2 files written
 /// during a normal posting run. Removed once posting finishes.
 fn par2_temp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id()))
+    std::env::temp_dir().join(format!("parmesan_core_{}", std::process::id()))
 }
 
 /// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure
@@ -460,7 +460,7 @@ fn configure_rayon(threads: usize) {
         let n = if threads > 0 {
             threads
         } else {
-            pesto_par2::performance_core_count()
+            parmesan_core::performance_core_count()
         };
         let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
     });
@@ -733,15 +733,15 @@ async fn producer(
     let mut all_checksums: Vec<Vec<SliceChecksum>> = vec![Vec::new(); metas.len()];
 
     if recovery_count > 0 {
-        let simd_method = if shared.config.simd != pesto_par2::SimdPath::Auto {
+        let simd_method = if shared.config.simd != parmesan_core::SimdPath::Auto {
             shared.config.simd.to_string()
         } else {
-            pesto_par2::detect_simd().to_string()
+            parmesan_core::detect_simd().to_string()
         };
         let effective_threads = if shared.config.threads > 0 {
             shared.config.threads
         } else {
-            pesto_par2::performance_core_count()
+            parmesan_core::performance_core_count()
         };
         info!(
             simd = simd_method,
@@ -760,7 +760,7 @@ async fn producer(
             passes: passes.len(),
             chunk_size: chunk_size_bytes,
             simd_method: simd_method.to_string(),
-            threads: pesto_par2::performance_core_count(),
+            threads: parmesan_core::performance_core_count(),
             memory_limit,
         });
         shared.emit(crate::progress::ProgressEvent::Par2WriteStarted {
@@ -1730,7 +1730,7 @@ mod tests {
 
     #[test]
     fn physical_core_count_is_at_least_one() {
-        assert!(pesto_par2::physical_core_count() >= 1);
+        assert!(parmesan_core::physical_core_count() >= 1);
     }
 
     // ── Shared buffer pool ────────────────────────────────────────────────────

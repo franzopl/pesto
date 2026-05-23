@@ -10,7 +10,7 @@ use std::process::Command;
 
 #[test]
 fn generates_valid_par2_repaired_by_par2cmdline() {
-    let dir = std::env::temp_dir().join(format!("pesto_par2_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("parmesan_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let file_name = "test_file.bin";
@@ -172,7 +172,7 @@ fn altmap_path_generates_valid_par2_repaired_by_par2cmdline() {
         return;
     }
 
-    let dir = std::env::temp_dir().join(format!("pesto_par2_altmap_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("parmesan_altmap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let file_name = "test_altmap.bin";

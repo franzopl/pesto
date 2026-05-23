@@ -1,7 +1,7 @@
 [workspace]
 members = [
     ".",
-    "crates/pesto-par2",
+    "crates/parmesan-core",
     "crates/parmesan",
 ]
 
@@ -29,7 +29,7 @@ name = "pesto"
 path = "src/lib.rs"
 
 [dependencies]
-pesto-par2 = { path = "crates/pesto-par2" }
+parmesan-core = { path = "crates/parmesan-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 md-5 = { version = "0.10", features = ["asm"] }
@@ -51,9 +51,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [features]
 # Exposes internal per-path flush functions for micro-benchmarking individual SIMD paths.
 # Never enable this in production builds.
-bench-internals = ["pesto-par2/bench-internals"]
+bench-internals = ["parmesan-core/bench-internals"]
 # Exposes the AVX2+GFNI and AVX-512+GFNI flush paths for testing/benchmarking.
-par2-avx2-gfni-unsafe = ["pesto-par2/par2-avx2-gfni-unsafe"]
+par2-avx2-gfni-unsafe = ["parmesan-core/par2-avx2-gfni-unsafe"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }

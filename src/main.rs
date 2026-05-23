@@ -15,7 +15,7 @@ use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, 
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
-use pesto_par2::SimdPath;
+use parmesan_core::SimdPath;
 use tracing::info;
 
 /// One-line summary shown at the top of `--help`.

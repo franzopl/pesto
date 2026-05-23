@@ -1,9 +1,9 @@
 [package]
-name = "pesto-par2"
+name = "parmesan-core"
 version = "0.2.21"
 edition = "2021"
 rust-version = "1.89"
-description = "High-performance PAR2 (Reed-Solomon) encoder for pesto"
+description = "High-performance PAR2 (Reed-Solomon) encoder — core library for parmesan"
 license = "MIT"
 
 [dependencies]
