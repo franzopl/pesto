@@ -31,7 +31,7 @@ path = "src/lib.rs"
 parmesan = { package = "parmesan-par2", version = "0.1.0", path = "crates/parmesan", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-md-5 = { version = "0.10", features = ["asm"] }
+md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
