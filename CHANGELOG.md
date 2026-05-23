@@ -7,6 +7,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.22] — 2026-05-23
+
+### Changed
+- **`parmesan` extracted as a versioned crate (`parmesan-par2 v0.1.0`)**: the
+  PAR2 sub-crate now has its own `CHANGELOG.md`, `README.md`, and full
+  crates.io metadata. Published independently as `parmesan-par2` (the name
+  `parmesan` was already taken on crates.io).
+
+## [0.2.21] — 2026-05-23
+
+### Fixed
+- Silenced `dead_code` warnings in `par2/encoder.rs` that appeared after the
+  workspace restructure.
+
+### Added
+- `GEMINI.md`: Gemini-specific agent guide for contributors using the Gemini
+  CLI.
+
+## [0.2.20] — 2026-05-22
+
+### Performance
+- **Shuffle2x AVX2 path (`flush_avx2_shuffle2x_work`)**: new default AVX2
+  dispatch replaces the plain nibble-shuffle kernel; measured improvement on
+  i5-10400 and Intel Ice Lake.
+- **8-way unroll for AVX2+GFNI / 4-way for AVX-512+GFNI** (Phase 25e):
+  reduces loop overhead on wide SIMD paths.
+- **Background flush worker** (Phase 25f): PAR2 I/O no longer blocks the
+  encoder pipeline.
+- **`--par2-only` bypass** (Phase 25g): article pipeline is skipped entirely
+  when only PAR2 generation is requested, cutting startup latency.
+- Fixed 210 ms fixed delay on startup caused by `sysinfo::System::new_all()`
+  — replaced with a scoped, lazy call.
+
 ## [0.2.19] — 2026-05-22
 
 ### Changed

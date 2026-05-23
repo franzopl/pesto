@@ -6,7 +6,7 @@ members = [
 
 [package]
 name = "pesto-poster"
-version = "0.2.21"
+version = "0.2.22"
 edition = "2021"
 rust-version = "1.89"
 description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation"
@@ -28,7 +28,7 @@ name = "pesto"
 path = "src/lib.rs"
 
 [dependencies]
-parmesan = { package = "parmesan-par2", path = "crates/parmesan", default-features = false }
+parmesan = { package = "parmesan-par2", version = "0.1.0", path = "crates/parmesan", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 md-5 = { version = "0.10", features = ["asm"] }
