@@ -165,6 +165,9 @@ impl Config {
                     None
                 }
             },
+            par2_slice_size: cli.par2_slice_size.map(|s| s as usize),
+            par2_slice_count: cli.par2_slice_count,
+            par2_recovery_count: cli.par2_recovery_count,
             par2_only,
             threads: cli.threads.unwrap_or(0), // 0 means auto
             simd: cli.simd.unwrap_or_default(),

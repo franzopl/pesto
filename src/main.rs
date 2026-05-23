@@ -142,6 +142,18 @@ struct Cli {
     #[arg(long, value_name = "PERCENT")]
     par2: Option<u8>,
 
+    /// Manual PAR2 slice size, e.g. "1 MiB" [default: auto].
+    #[arg(long, value_name = "SIZE")]
+    slice_size: Option<String>,
+
+    /// Target number of PAR2 input slices [default: auto].
+    #[arg(long, value_name = "N")]
+    slice_count: Option<usize>,
+
+    /// Exact number of PAR2 recovery blocks to generate [default: auto].
+    #[arg(long, value_name = "N")]
+    recovery_count: Option<usize>,
+
     /// Maximum RAM for PAR2 recovery buffers, e.g. "512 MiB"
     /// [config: posting.par2_memory_limit, default "1 GiB"].
     #[arg(long, value_name = "SIZE")]
@@ -390,6 +402,12 @@ impl Cli {
                 .memory_limit
                 .as_ref()
                 .and_then(|s| parse_upload_rate(s).ok()),
+            par2_slice_size: self
+                .slice_size
+                .as_ref()
+                .and_then(|s| parse_upload_rate(s).ok()),
+            par2_slice_count: self.slice_count,
+            par2_recovery_count: self.recovery_count,
             threads: self.threads,
             simd: Some(self.simd),
             resume: if self.resume { Some(true) } else { Some(false) },

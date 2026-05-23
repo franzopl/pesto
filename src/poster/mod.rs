@@ -482,21 +482,34 @@ fn configure_rayon(threads: usize) {
 /// count when that information is unavailable.
 
 /// Pad the accumulated real bytes to the full PAR2 slice size and forward
-/// the slice to the background [`Par2Worker`]. Leaves `accum` empty (and
-/// pre-loaded with a recycled buffer) for the next slice.
+/// the slice to the background [`Par2Worker`]. Leaves `accum` empty (or
+/// containing the leftover bytes if a split occurred).
 fn feed_par2_slice(
     accum: &mut Vec<u8>,
     par2_slice_size: usize,
     worker: &Par2Worker,
-    actual_len: usize,
     is_last_of_file: bool,
 ) {
-    let next = worker.take_buffer(par2_slice_size);
-    let mut padded = std::mem::replace(accum, next);
-    padded.resize(par2_slice_size, 0);
-    // send_slice blocks only when the channel is full (worker mid-flush).
-    // block_in_place keeps the tokio scheduler aware that this thread may stall.
-    tokio::task::block_in_place(|| worker.send_slice(padded, actual_len, is_last_of_file));
+    if accum.len() == par2_slice_size {
+        // Zero-copy optimization for the common case (slice size matches accumulation).
+        let next = worker.take_buffer(par2_slice_size);
+        let padded = std::mem::replace(accum, next);
+        tokio::task::block_in_place(|| worker.send_slice(padded, par2_slice_size, is_last_of_file));
+    } else if accum.len() > par2_slice_size {
+        // Splitting case (manual slice size < article size): take exactly one slice.
+        let mut slice_buf = worker.take_buffer(par2_slice_size);
+        slice_buf.extend_from_slice(&accum[..par2_slice_size]);
+        accum.drain(..par2_slice_size);
+        tokio::task::block_in_place(|| {
+            worker.send_slice(slice_buf, par2_slice_size, is_last_of_file)
+        });
+    } else {
+        // Final slice of a file: pad with zeros.
+        let actual_len = accum.len();
+        let mut padded = std::mem::take(accum);
+        padded.resize(par2_slice_size, 0);
+        tokio::task::block_in_place(|| worker.send_slice(padded, actual_len, is_last_of_file));
+    }
 }
 
 /// Base name for the PAR2 set's on-disk files. A published name may be a
@@ -574,9 +587,8 @@ async fn par2_only_ingest(
             }
 
             if slice_buf.len() >= par2_slice_size {
-                let actual_len = slice_buf.len();
                 let is_last = remaining == 0;
-                feed_par2_slice(&mut slice_buf, par2_slice_size, worker, actual_len, is_last);
+                feed_par2_slice(&mut slice_buf, par2_slice_size, worker, is_last);
                 *par2_slices_fed += 1;
                 shared.emit(ProgressEvent::Par2InputProgress {
                     done: *par2_slices_fed,
@@ -598,8 +610,7 @@ async fn par2_only_ingest(
         // Flush the final partial slice for this file (zero-padded inside
         // feed_par2_slice). No Par2InputProgress here, matching the standard path.
         if !slice_buf.is_empty() {
-            let actual_len = slice_buf.len();
-            feed_par2_slice(&mut slice_buf, par2_slice_size, worker, actual_len, true);
+            feed_par2_slice(&mut slice_buf, par2_slice_size, worker, true);
         }
     }
 
@@ -659,10 +670,34 @@ async fn producer(
     // Choose the PAR2 slice size: groups consecutive articles into larger slices
     // to keep input-block count near TARGET_PAR2_SLICES while satisfying both
     // PAR2 spec limits (32 768 input blocks, 65 535 recovery blocks).
-    let (par2_slice_size, total_slices) =
-        optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2);
+    let (par2_slice_size, total_slices) = if let Some(size) = shared.config.par2_slice_size {
+        // Manual slice size. SNAP to multiple of 4 as per spec requirements.
+        let s = (size / 4 * 4).max(4);
+        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
+        (s, n)
+    } else if let Some(count) = shared.config.par2_slice_count {
+        // Target a specific number of input slices.
+        let total_bytes: u64 = metas.iter().map(|m| m.size).sum();
+        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 4 * 4).max(4);
+        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
+        (s, n)
+    } else {
+        optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2)
+    };
 
-    let recovery_count = (total_slices * shared.config.par2 as usize) / 100;
+    let recovery_count = if let Some(n) = shared.config.par2_recovery_count {
+        n
+    } else {
+        (total_slices * shared.config.par2 as usize) / 100
+    };
+
+    // Validate PAR2 spec limits.
+    if total_slices > 32768 {
+        anyhow::bail!("too many input slices: {total_slices} (max 32768). Increase --slice-size or decrease --slice-count.");
+    }
+    if recovery_count > 65535 {
+        anyhow::bail!("too many recovery blocks: {recovery_count} (max 65535). Increase --slice-size or decrease --par2/--recovery-count.");
+    }
 
     info!(
         input_slices = total_slices,
@@ -852,21 +887,10 @@ async fn producer(
 
                     // PAR2 work is gated on the worker being active.
                     if let Some(worker) = &worker_opt {
-                        // Append the article to the current PAR2 slice. Every
-                        // article but a file's last is exactly `article_size`, so
-                        // the accumulator reaches `par2_slice_size` precisely on
-                        // the K-th article; a short final article falls through to
-                        // the partial-slice flush after the loop.
+                        // Append the article to the current PAR2 slice.
                         par2_accum.extend_from_slice(&buf);
-                        if par2_accum.len() >= par2_slice_size {
-                            let actual_len = par2_accum.len();
-                            feed_par2_slice(
-                                &mut par2_accum,
-                                par2_slice_size,
-                                worker,
-                                actual_len,
-                                false,
-                            );
+                        while par2_accum.len() >= par2_slice_size {
+                            feed_par2_slice(&mut par2_accum, par2_slice_size, worker, false);
                             par2_slices_fed += 1;
                             shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
                                 done: par2_slices_fed,
@@ -917,8 +941,7 @@ async fn producer(
                 // Flush the file's final, partial PAR2 slice (zero-padded).
                 if let Some(worker) = &worker_opt {
                     if !par2_accum.is_empty() {
-                        let actual_len = par2_accum.len();
-                        feed_par2_slice(&mut par2_accum, par2_slice_size, worker, actual_len, true);
+                        feed_par2_slice(&mut par2_accum, par2_slice_size, worker, true);
                     }
                 }
             }
