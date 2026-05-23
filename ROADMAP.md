@@ -1000,10 +1000,10 @@ instructions — halves or quarters the load/store ratio.
 
 The current implementation reads each input file twice: once in `par2_only_ingest` (or the producer loop) to feed the Reed-Solomon encoder, and once in parallel `file_hash_tasks` to compute the full-file MD5. On small files (1G), the MD5 compute (~1.9s) is the bottleneck, and the double-read competes for cache/RAM bandwidth.
 
-- [ ] Integrate a `FileHasher` into the reading loop (`par2_only_ingest` and `reader_handle`).
-- [ ] Update MD5 state as bytes are read for the encoder.
-- [ ] Eliminate the redundant background `file_hash_tasks`.
-- [ ] Benefit: reduce I/O volume by 50% and eliminate the MD5-bound startup delay on small files.
+- [x] Integrate a `FileHasher` into the reading loop (`par2_only_ingest` and `reader_handle`).
+- [x] Update MD5 state as bytes are read for the encoder.
+- [x] Eliminate the redundant background `file_hash_tasks`.
+- [x] Benefit: reduce I/O volume by 50% and eliminate the MD5-bound startup delay on small files.
 
 ---
 
