@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use pesto::config;
+use crate::config;
 use std::io::{self, Write};
 
 /// Run the interactive setup wizard.
