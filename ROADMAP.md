@@ -67,6 +67,92 @@ Details live in [`crates/parmesan/ROADMAP.md`](crates/parmesan/ROADMAP.md).
 
 ---
 
+## Phase 24 — Hot-Path Serialization: Scatter-Gather POST
+
+Eliminate the redundant full-article copy that `Article::serialize()` currently
+produces before every NNTP `POST`.
+
+### Background
+
+`serialize()` allocates a new `Vec<u8>` (~768 KB) per article by concatenating
+headers and the yEnc body. This copy is unnecessary: the socket can receive two
+disjoint buffers in a single syscall via scatter-gather I/O.
+
+### 24a — Vectored writes on the NNTP connection
+
+- [x] Replace `Connection::post(&[u8])` with `Connection::post_parts(&[u8], &[u8])`.
+- [x] Use sequential `write_all` calls (coalesced by the `BufWriter` from 24b)
+  to send headers + yEnc body without copying the body.
+- [x] Keep `Article::serialize()` for tests; production path uses `build_headers()`.
+- [x] The body is written without dot-stuffing because yEnc encoding already
+  escapes `'.'` at line start (yEnc spec §4).
+
+### 24b — TLS write buffering
+
+- [x] Wrap the TLS stream in a `BufWriter` sized to ≥ 1 article to allow the
+  TLS layer to coalesce small header writes with the body in one record,
+  reducing syscall count and TLS fragmentation overhead.
+
+---
+
+## Phase 25 — NNTP Pipelining
+
+Post multiple articles without waiting for the `240 Article received` response
+of the previous one. This halves round-trip latency cost per article on
+high-latency links (>50 ms RTT).
+
+### 25a — Pipeline depth N
+
+- [x] Send up to N `POST` commands and bodies back-to-back on the same
+  connection before reading any responses.
+- [x] Collect responses in order (NNTP responses arrive in command order).
+- [x] On failure mid-pipeline, mark remaining articles as failed and retry the
+  batch on the next attempt with `slot.invalidate()`.
+- [x] Expose `--pipeline-depth` CLI flag and `posting.pipeline_depth` config
+  option (default: 1; recommended 4–8 for high-latency servers).
+- [x] Pipelining is automatically disabled when `--verify` is active (STAT
+  after each article is incompatible with batched response reads).
+
+### 25b — Adaptive pipeline depth
+
+- [ ] Measure per-article RTT during warm-up phase.
+- [ ] Automatically compute optimal pipeline depth:
+  `depth = ceil(RTT / article_encode_time)`.
+- [ ] Cap at server-side queue limit (detect `441 Too many articles` responses).
+
+---
+
+## Phase 26 — yEnc SIMD Encoder
+
+Replace the byte-at-a-time yEnc loop with a SIMD-accelerated implementation
+that processes 16–32 bytes per cycle.
+
+### 26a — SSSE3 baseline (x86-64)
+
+- [ ] Add a `yenc_ssse3` feature gate (enabled on `x86_64` targets by default).
+- [ ] Implement the 16-byte-wide inner loop:
+  - `_mm_add_epi8(chunk, splat(42))` — shift all bytes by 42.
+  - Compute escape mask: identify `0x00`, `0x0A`, `0x0D`, `0x3D` lanes.
+  - Handle positional escapes (space/tab at line boundaries) as scalar epilogue.
+  - Emit escaped bytes and advance output pointer.
+- [ ] Scalar fallback for the tail (< 16 bytes) and line-boundary regions.
+- [ ] Add micro-benchmark to `benches/` comparing scalar vs SSSE3 throughput.
+
+### 26b — AVX2 (256-bit) path
+
+- [ ] Extend to 32-byte-wide loop using AVX2 intrinsics.
+- [ ] Runtime dispatch: detect `avx2` CPU feature via `std::is_x86_feature_detected!`.
+- [ ] Update `SimdPath` enum in `parmesan` to share the dispatch pattern if
+  applicable.
+
+### 26c — Line-length pre-computation
+
+- [ ] Pre-compute exact output size per input chunk (accounting for escapes and
+  `\r\n` insertions) to reserve the output buffer precisely, avoiding `push`
+  reallocations inside the SIMD loop.
+
+---
+
 ## Phase 32 — Future Ideas (Unscheduled)
 
 Concepts to evaluate later. Not committed to any timeline.
@@ -81,3 +167,6 @@ Concepts to evaluate later. Not committed to any timeline.
 | `O_DIRECT` reads | Bypass page cache on Linux for huge files |
 | `mmap` fast-path | `mmap` + `MADV_SEQUENTIAL` for massive file reads |
 | Adaptive buffering | Grow/shrink buffer pool based on upload/read speed delta |
+| Lock-free buffer pool | Replace `Mutex<Vec<_>>` pool with `SegQueue` to eliminate contention at high connection counts |
+| Connection health scoring | Track per-server error rates passively; prefer healthy servers without hard failover |
+| Warm reconnection | Pre-connect to the next failover server in background so TLS handshake cost is not paid on the hot path |

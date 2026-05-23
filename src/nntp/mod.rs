@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
@@ -48,7 +48,7 @@ impl Response {
 
 /// A single NNTP session.
 pub struct Connection {
-    stream: BufReader<Box<dyn Stream>>,
+    stream: BufReader<BufWriter<Box<dyn Stream>>>,
 }
 
 impl Connection {
@@ -76,7 +76,7 @@ impl Connection {
         };
 
         let mut conn = Connection {
-            stream: BufReader::new(stream),
+            stream: BufReader::new(BufWriter::new(stream)),
         };
 
         // 200 = posting allowed, 201 = posting prohibited.
@@ -120,9 +120,95 @@ impl Connection {
         Ok(())
     }
 
+    /// Post an article whose headers and yEnc body are held in separate buffers.
+    ///
+    /// This avoids copying the body (typically ~768 KB) into a combined buffer.
+    /// The headers are dot-stuffed for RFC 3977 compliance. The body is written
+    /// directly without dot-stuffing because the yEnc encoder already escapes
+    /// any `'.'` that would appear at a line start (yEnc spec §4).
+    pub async fn post_parts(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+        let resp = self.command("POST").await?;
+        if resp.code != 340 {
+            bail!("POST not permitted: {} {}", resp.code, resp.text);
+        }
+
+        let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
+        dot_stuff(headers, &mut stuffed_headers);
+        self.stream.write_all(&stuffed_headers).await?;
+
+        // Write body directly; the BufWriter coalesces this with the headers
+        // before the TLS flush.
+        self.stream.write_all(body).await?;
+        if !body.ends_with(b"\r\n") {
+            self.stream.write_all(b"\r\n").await?;
+        }
+        self.stream.write_all(b".\r\n").await?;
+        self.stream.flush().await?;
+
+        let resp = self.read_response().await?;
+        match resp.code {
+            240 => Ok(()),
+            441 => bail!("article rejected by server (441): {}", resp.text),
+            _ => bail!("unexpected POST response: {} {}", resp.code, resp.text),
+        }
+    }
+
+    /// Queue one article on the wire for NNTP pipelining without flushing or
+    /// reading any response. After enqueueing all articles in a batch, call
+    /// [`flush_pipeline`] once and then [`read_post_response`] once per article.
+    ///
+    /// The optimistic assumption is that the server will always respond 340 to
+    /// POST, which holds for every server that allows posting. If the server
+    /// rejects POST with a non-340 code, [`read_post_response`] returns an
+    /// error and the caller must invalidate the connection.
+    pub async fn enqueue_post(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+        self.stream.write_all(b"POST\r\n").await?;
+        let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
+        dot_stuff(headers, &mut stuffed_headers);
+        self.stream.write_all(&stuffed_headers).await?;
+        self.stream.write_all(body).await?;
+        if !body.ends_with(b"\r\n") {
+            self.stream.write_all(b"\r\n").await?;
+        }
+        self.stream.write_all(b".\r\n").await?;
+        Ok(())
+    }
+
+    /// Flush all enqueued articles to the server. Call once after all
+    /// [`enqueue_post`] calls for a batch, before reading responses.
+    pub async fn flush_pipeline(&mut self) -> Result<()> {
+        self.stream.flush().await.map_err(Into::into)
+    }
+
+    /// Read one `(340, 240)` response pair for a pipelined POST.
+    ///
+    /// Returns `Ok(())` on 240, or an error describing the rejection. On any
+    /// error the caller should invalidate the connection.
+    pub async fn read_post_response(&mut self) -> Result<()> {
+        let r340 = self.read_response().await?;
+        if r340.code != 340 {
+            bail!(
+                "POST not permitted (pipelined): {} {}",
+                r340.code,
+                r340.text
+            );
+        }
+        let r240 = self.read_response().await?;
+        match r240.code {
+            240 => Ok(()),
+            441 => bail!("article rejected by server (441): {}", r240.text),
+            _ => bail!(
+                "unexpected POST response (pipelined): {} {}",
+                r240.code,
+                r240.text
+            ),
+        }
+    }
+
     /// Post a complete article (headers, a blank line, then the yEnc body).
     ///
     /// The payload is dot-stuffed and terminated per RFC 3977.
+    /// Production code uses [`post_parts`] to avoid copying the body buffer.
     pub async fn post(&mut self, article: &[u8]) -> Result<()> {
         let resp = self.command("POST").await?;
         if resp.code != 340 {
@@ -244,7 +330,7 @@ impl Connection {
         s: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     ) -> Self {
         Connection {
-            stream: BufReader::new(Box::new(s)),
+            stream: BufReader::new(BufWriter::new(Box::new(s))),
         }
     }
 }

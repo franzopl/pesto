@@ -1169,188 +1169,318 @@ async fn worker(
         },
     );
 
+    // Use pipelining only when depth > 1 and verify mode is off (STAT after
+    // each article is incompatible with out-of-order response reads).
+    let pipeline_depth = if shared.config.verify {
+        1
+    } else {
+        shared.config.pipeline_depth.max(1)
+    };
+
     loop {
         if shared.cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let task = {
+
+        // Blocking receive for the first task.
+        let first = {
             let mut rx = rx.lock().await;
             match rx.recv().await {
                 Some(t) => t,
                 None => break,
             }
         };
+        let mut batch = vec![first];
 
-        shared.emit(ProgressEvent::ConnectionBusy {
-            conn: conn_id,
-            file: task.meta.real_name.clone(),
-        });
-
-        // Check resume state: if this segment was already posted, reuse
-        // the stored Message-ID and skip network posting entirely.
-        if let Some(resume) = &shared.resume {
-            if let Some(existing_id) = resume
-                .lock()
-                .unwrap()
-                .get(&task.meta.real_name, task.part)
-                .map(str::to_string)
-            {
-                shared.results.lock().unwrap().push(PostedSegment {
-                    file_name: task.meta.real_name.clone(),
-                    subject_name: task.meta.subject_name.clone(),
-                    file_size: task.meta.size,
-                    part: task.part,
-                    total: task.total,
-                    message_id: existing_id,
-                    bytes: 0,
-                });
-                let bytes = task.data.len() as u64;
-                shared.release_buffer(task.data); // Phase 12b
-                shared.emit(ProgressEvent::SegmentDone {
-                    file: task.meta.real_name.clone(),
-                    bytes,
-                    ok: true,
-                });
-                continue;
+        // Non-blocking: try to fill the rest of the pipeline slot.
+        if pipeline_depth > 1 {
+            let mut rx = rx.lock().await;
+            while batch.len() < pipeline_depth {
+                match rx.try_recv() {
+                    Ok(t) => batch.push(t),
+                    Err(_) => break,
+                }
             }
         }
 
-        let encoded = yenc::encode_part(
-            &task.meta.yenc_name,
-            task.meta.size,
-            yenc::PartSpec {
-                number: task.part,
-                total: task.total,
-                offset: task.offset,
-            },
-            &task.data,
-            shared.config.line_length,
-            None,
-        );
-        let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
-        let article = Article {
-            message_id: message_id.clone(),
-            from: shared.config.from.clone(),
-            newsgroups: shared.config.groups.clone(),
-            subject: default_subject(&task.meta.subject_name, task.part, task.total),
-            date: resolve_date(shared.config.date.as_deref()),
-            no_archive: shared.config.no_archive,
-        };
-        let payload = article.serialize(&encoded.body);
+        // Process each task in the batch. Tasks already in resume state are
+        // resolved immediately without touching the network.
+        //
+        // `pending` collects tasks that still need to be posted, along with
+        // their pre-computed headers and encoded bodies.
+        struct Pending {
+            task: PostTask,
+            message_id: String,
+            headers: Vec<u8>,
+            encoded: yenc::EncodedPart,
+        }
+        let mut pending: Vec<Pending> = Vec::with_capacity(batch.len());
 
-        let mut posted = false;
-        let mut last_err = String::from("unknown error");
+        for task in batch {
+            shared.emit(ProgressEvent::ConnectionBusy {
+                conn: conn_id,
+                file: task.meta.real_name.clone(),
+            });
+
+            if let Some(resume) = &shared.resume {
+                if let Some(existing_id) = resume
+                    .lock()
+                    .unwrap()
+                    .get(&task.meta.real_name, task.part)
+                    .map(str::to_string)
+                {
+                    shared.results.lock().unwrap().push(PostedSegment {
+                        file_name: task.meta.real_name.clone(),
+                        subject_name: task.meta.subject_name.clone(),
+                        file_size: task.meta.size,
+                        part: task.part,
+                        total: task.total,
+                        message_id: existing_id,
+                        bytes: 0,
+                    });
+                    let bytes = task.data.len() as u64;
+                    shared.release_buffer(task.data);
+                    shared.emit(ProgressEvent::SegmentDone {
+                        file: task.meta.real_name.clone(),
+                        bytes,
+                        ok: true,
+                    });
+                    continue;
+                }
+            }
+
+            let encoded = yenc::encode_part(
+                &task.meta.yenc_name,
+                task.meta.size,
+                yenc::PartSpec {
+                    number: task.part,
+                    total: task.total,
+                    offset: task.offset,
+                },
+                &task.data,
+                shared.config.line_length,
+                None,
+            );
+            let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
+            let article = Article {
+                message_id: message_id.clone(),
+                from: shared.config.from.clone(),
+                newsgroups: shared.config.groups.clone(),
+                subject: default_subject(&task.meta.subject_name, task.part, task.total),
+                date: resolve_date(shared.config.date.as_deref()),
+                no_archive: shared.config.no_archive,
+            };
+            let headers = article.build_headers();
+            pending.push(Pending {
+                task,
+                message_id,
+                headers,
+                encoded,
+            });
+        }
+
+        if pending.is_empty() {
+            continue;
+        }
 
         if shared.config.dry_run {
-            posted = true;
-        } else {
-            // Apply rate limiting before sending.
-            rate_limiter.acquire(payload.len()).await;
+            for p in pending {
+                shared.results.lock().unwrap().push(PostedSegment {
+                    file_name: p.task.meta.real_name.clone(),
+                    subject_name: p.task.meta.subject_name.clone(),
+                    file_size: p.task.meta.size,
+                    part: p.task.part,
+                    total: p.task.total,
+                    message_id: p.message_id,
+                    bytes: (p.headers.len() + p.encoded.body.len()) as u64,
+                });
+                let bytes = p.task.data.len() as u64;
+                shared.release_buffer(p.task.data);
+                shared.emit(ProgressEvent::SegmentDone {
+                    file: p.task.meta.real_name.clone(),
+                    bytes,
+                    ok: true,
+                });
+            }
+            continue;
+        }
 
-            let max_attempts = shared.config.retries;
-            // Try up to `max_attempts` times; on any failure `slot.invalidate()`
-            // drops the bad connection and rotates to the next server so the
-            // next attempt targets a different one.
+        // Rate-limit on total bytes for the whole batch.
+        let total_bytes: usize = pending
+            .iter()
+            .map(|p| p.headers.len() + p.encoded.body.len())
+            .sum();
+        rate_limiter.acquire(total_bytes).await;
+
+        let max_attempts = shared.config.retries;
+
+        if pending.len() == 1 {
+            // ── Sequential path (depth 1 or only one task left) ──────────────
+            let p = pending.remove(0);
+            let mut posted = false;
+            let mut last_err = String::from("unknown error");
+
             for attempt in 1..=max_attempts {
                 let conn = match slot.ensure_connected().await {
                     Ok(c) => c,
                     Err(e) => {
                         last_err = format!("{e:#}");
-                        warn!(
-                            segment = %message_id,
-                            attempt,
-                            max_attempts,
-                            error = %last_err,
-                            "connection failed; will retry"
-                        );
+                        warn!(segment = %p.message_id, attempt, max_attempts,
+                              error = %last_err, "connection failed; will retry");
                         shared.total_retries.fetch_add(1, Ordering::Relaxed);
-                        let backoff = slot.retry_delay();
                         if attempt < max_attempts {
-                            tokio::time::sleep(backoff).await;
+                            tokio::time::sleep(slot.retry_delay()).await;
                         }
                         continue;
                     }
                 };
-                match conn.post(&payload).await {
+                match conn.post_parts(&p.headers, &p.encoded.body).await {
                     Ok(()) => {
-                        // Optionally verify the article was accepted by STAT.
                         if shared.config.verify {
-                            match conn.stat(&message_id).await {
+                            match conn.stat(&p.message_id).await {
                                 Ok(true) => {
-                                    debug!(segment = %message_id, "posted and verified via STAT");
+                                    debug!(segment = %p.message_id, "posted and verified via STAT");
                                     posted = true;
                                     break;
                                 }
                                 Ok(false) => {
                                     last_err = format!(
-                                        "STAT: article {message_id} not found after posting"
+                                        "STAT: article {} not found after posting",
+                                        p.message_id
                                     );
-                                    warn!(segment = %message_id, attempt, "STAT not found; retrying");
+                                    warn!(segment = %p.message_id, attempt, "STAT not found; retrying");
                                     slot.invalidate();
                                 }
                                 Err(e) => {
                                     last_err = format!("STAT: {e:#}");
-                                    warn!(segment = %message_id, error = %e, "STAT error; retrying");
+                                    warn!(segment = %p.message_id, error = %e, "STAT error; retrying");
                                     slot.invalidate();
                                 }
                             }
                         } else {
-                            debug!(segment = %message_id, "posted");
+                            debug!(segment = %p.message_id, "posted");
                             posted = true;
                             break;
                         }
                     }
                     Err(e) => {
                         last_err = format!("{e:#}");
-                        warn!(
-                            segment = %message_id,
-                            attempt,
-                            max_attempts,
-                            error = %last_err,
-                            "post failed; rotating server"
-                        );
+                        warn!(segment = %p.message_id, attempt, max_attempts,
+                              error = %last_err, "post failed; rotating server");
                         shared.total_retries.fetch_add(1, Ordering::Relaxed);
                         slot.invalidate();
                     }
                 }
-                let backoff = slot.retry_delay();
                 if attempt < max_attempts {
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(slot.retry_delay()).await;
                 }
             }
-        }
 
-        if posted {
-            // Persist the segment to the resume state before adding to results,
-            // so a crash after this point still skips it on the next run.
-            if let Some(resume) = &shared.resume {
-                let mut state = resume.lock().unwrap();
-                state.record(&task.meta.real_name, task.part, &message_id);
-                if let Some(rp) = &shared.resume_path {
-                    let _ = state.save(rp);
-                }
-            }
-            shared.results.lock().unwrap().push(PostedSegment {
-                file_name: task.meta.real_name.clone(),
-                subject_name: task.meta.subject_name.clone(),
-                file_size: task.meta.size,
-                part: task.part,
-                total: task.total,
-                message_id,
-                bytes: payload.len() as u64,
-            });
+            commit_result(
+                &shared,
+                p.task,
+                p.message_id,
+                p.headers.len() + p.encoded.body.len(),
+                posted,
+                &last_err,
+            );
         } else {
-            record_failure(&shared, &task.meta, &task, &last_err);
+            // ── Pipelined path ───────────────────────────────────────────────
+            // Send all articles back-to-back, flush once, then read all
+            // responses. On any connection error the entire batch is retried.
+            //
+            // All conn usage is confined to the labeled block `'use_conn` so
+            // that `slot.invalidate()` can be called after the block ends,
+            // satisfying the borrow checker (conn borrows slot mutably).
+            let n = pending.len();
+            let mut pipeline_ok = false;
+            let mut pipe_results: Vec<Result<(), String>> = (0..n).map(|_| Ok(())).collect();
+
+            'pipeline: for attempt in 1..=max_attempts {
+                // `(needs_invalidate, error_message)` — conn is dropped when
+                // the labeled block expression completes.
+                let (needs_invalidate, pipe_err) = 'use_conn: {
+                    let conn = match slot.ensure_connected().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(attempt, max_attempts, error = %e,
+                                  "connection failed during pipeline; will retry");
+                            shared.total_retries.fetch_add(1, Ordering::Relaxed);
+                            if attempt < max_attempts {
+                                tokio::time::sleep(slot.retry_delay()).await;
+                            }
+                            continue 'pipeline;
+                        }
+                    };
+
+                    // Enqueue all articles without flushing.
+                    for p in &pending {
+                        if let Err(e) = conn.enqueue_post(&p.headers, &p.encoded.body).await {
+                            break 'use_conn (true, format!("{e:#}"));
+                        }
+                    }
+
+                    // One flush covers all enqueued articles.
+                    if let Err(e) = conn.flush_pipeline().await {
+                        break 'use_conn (true, format!("{e:#}"));
+                    }
+
+                    // Read one (340, 240) pair per article. On error: record the
+                    // failure index, break out of the for loop (dropping the
+                    // iter_mut borrow), then mark remaining entries as failed.
+                    let mut fail_at: Option<(usize, String)> = None;
+                    for (i, result) in pipe_results.iter_mut().enumerate() {
+                        match conn.read_post_response().await {
+                            Ok(()) => {
+                                debug!(segment = %pending[i].message_id, "posted (pipelined)");
+                                *result = Ok(());
+                            }
+                            Err(e) => {
+                                *result = Err(format!("{e:#}"));
+                                fail_at = Some((i + 1, format!("{e:#}")));
+                                break;
+                            }
+                        }
+                    }
+                    // iter_mut borrow is dropped here; safe to index pipe_results.
+                    if let Some((from, msg)) = fail_at {
+                        for r in pipe_results[from..].iter_mut() {
+                            *r = Err(msg.clone());
+                        }
+                        break 'use_conn (true, msg);
+                    }
+
+                    (false, String::new())
+                }; // conn dropped; slot methods are safe to call again.
+
+                if needs_invalidate {
+                    warn!(attempt, max_attempts, error = %pipe_err,
+                          "pipeline failed; rotating server");
+                    shared.total_retries.fetch_add(1, Ordering::Relaxed);
+                    slot.invalidate();
+                    if attempt < max_attempts {
+                        tokio::time::sleep(slot.retry_delay()).await;
+                    }
+                    continue;
+                }
+
+                pipeline_ok = true;
+                break;
+            }
+
+            for (p, result) in pending.into_iter().zip(pipe_results) {
+                let posted = pipeline_ok && result.is_ok();
+                let last_err = result.err().unwrap_or_else(|| "pipeline failed".into());
+                commit_result(
+                    &shared,
+                    p.task,
+                    p.message_id,
+                    p.headers.len() + p.encoded.body.len(),
+                    posted,
+                    &last_err,
+                );
+            }
         }
-        let article_bytes = task.data.len() as u64;
-        // Phase 12b: return the article buffer to the shared pool so the
-        // producer's reader task can reuse it without allocating.
-        shared.release_buffer(task.data);
-        shared.emit(ProgressEvent::SegmentDone {
-            file: task.meta.real_name.clone(),
-            bytes: article_bytes,
-            ok: posted,
-        });
     }
 
     shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
@@ -1379,6 +1509,45 @@ fn resolve_date(mode: Option<&str>) -> Option<String> {
         }
         Some(fixed) => Some(fixed.to_string()),
     }
+}
+
+/// Persist a successfully posted segment or record a failure, then emit the
+/// corresponding progress event and release the article buffer back to the pool.
+fn commit_result(
+    shared: &Shared,
+    task: PostTask,
+    message_id: String,
+    wire_bytes: usize,
+    posted: bool,
+    last_err: &str,
+) {
+    if posted {
+        if let Some(resume) = &shared.resume {
+            let mut state = resume.lock().unwrap();
+            state.record(&task.meta.real_name, task.part, &message_id);
+            if let Some(rp) = &shared.resume_path {
+                let _ = state.save(rp);
+            }
+        }
+        shared.results.lock().unwrap().push(PostedSegment {
+            file_name: task.meta.real_name.clone(),
+            subject_name: task.meta.subject_name.clone(),
+            file_size: task.meta.size,
+            part: task.part,
+            total: task.total,
+            message_id,
+            bytes: wire_bytes as u64,
+        });
+    } else {
+        record_failure(shared, &task.meta, &task, last_err);
+    }
+    let article_bytes = task.data.len() as u64;
+    shared.release_buffer(task.data);
+    shared.emit(ProgressEvent::SegmentDone {
+        file: task.meta.real_name.clone(),
+        bytes: article_bytes,
+        ok: posted,
+    });
 }
 
 fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str) {
