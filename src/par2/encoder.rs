@@ -3330,6 +3330,122 @@ impl RecoveryEncoder {
                     let mut ptr_in = slice_chunk.as_ptr();
                     let end = ptr_in.add(blocks_16 * 16);
 
+                    while ptr_in.add(64) <= end {
+                        let input0 = vld1q_u8(ptr_in);
+                        let input1 = vld1q_u8(ptr_in.add(16));
+                        let input2 = vld1q_u8(ptr_in.add(32));
+                        let input3 = vld1q_u8(ptr_in.add(48));
+
+                        // Nibble extraction
+                        let n0_2_0 = vandq_u8(input0, mask_f);
+                        let n1_3_0 = vandq_u8(
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input0), 4)),
+                            mask_f,
+                        );
+                        let n0_2_1 = vandq_u8(input1, mask_f);
+                        let n1_3_1 = vandq_u8(
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input1), 4)),
+                            mask_f,
+                        );
+                        let n0_2_2 = vandq_u8(input2, mask_f);
+                        let n1_3_2 = vandq_u8(
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input2), 4)),
+                            mask_f,
+                        );
+                        let n0_2_3 = vandq_u8(input3, mask_f);
+                        let n1_3_3 = vandq_u8(
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(input3), 4)),
+                            mask_f,
+                        );
+
+                        // Lookup lo-bytes even
+                        let rle0 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_0), vqtbl1q_u8(v_tl_h, n1_3_0));
+                        let rle1 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_1), vqtbl1q_u8(v_tl_h, n1_3_1));
+                        let rle2 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_2), vqtbl1q_u8(v_tl_h, n1_3_2));
+                        let rle3 = veorq_u8(vqtbl1q_u8(v_tl_l, n0_2_3), vqtbl1q_u8(v_tl_h, n1_3_3));
+
+                        // Lookup hi-bytes even
+                        let rhe0 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_0), vqtbl1q_u8(v_th_h, n1_3_0));
+                        let rhe1 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_1), vqtbl1q_u8(v_th_h, n1_3_1));
+                        let rhe2 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_2), vqtbl1q_u8(v_th_h, n1_3_2));
+                        let rhe3 = veorq_u8(vqtbl1q_u8(v_th_l, n0_2_3), vqtbl1q_u8(v_th_h, n1_3_3));
+
+                        // Lookup lo-bytes odd
+                        let rlo0 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_0), vqtbl1q_u8(v_hl_h, n1_3_0));
+                        let rlo1 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_1), vqtbl1q_u8(v_hl_h, n1_3_1));
+                        let rlo2 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_2), vqtbl1q_u8(v_hl_h, n1_3_2));
+                        let rlo3 = veorq_u8(vqtbl1q_u8(v_hl_l, n0_2_3), vqtbl1q_u8(v_hl_h, n1_3_3));
+
+                        // Lookup hi-bytes odd
+                        let rho0 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_0), vqtbl1q_u8(v_hh_h, n1_3_0));
+                        let rho1 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_1), vqtbl1q_u8(v_hh_h, n1_3_1));
+                        let rho2 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_2), vqtbl1q_u8(v_hh_h, n1_3_2));
+                        let rho3 = veorq_u8(vqtbl1q_u8(v_hh_l, n0_2_3), vqtbl1q_u8(v_hh_h, n1_3_3));
+
+                        // Final Summing & Packing 0
+                        let sum_lo0 = veorq_u8(
+                            rle0,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo0), 8)),
+                        );
+                        let sum_hi0 = veorq_u8(
+                            rhe0,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho0), 8)),
+                        );
+                        let out0 = vorrq_u8(
+                            vandq_u8(sum_lo0, mask_even),
+                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi0), 8)),
+                        );
+                        vst1q_u8(ptr_buf, veorq_u8(vld1q_u8(ptr_buf), out0));
+
+                        // Final Summing & Packing 1
+                        let sum_lo1 = veorq_u8(
+                            rle1,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo1), 8)),
+                        );
+                        let sum_hi1 = veorq_u8(
+                            rhe1,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho1), 8)),
+                        );
+                        let out1 = vorrq_u8(
+                            vandq_u8(sum_lo1, mask_even),
+                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi1), 8)),
+                        );
+                        vst1q_u8(ptr_buf.add(16), veorq_u8(vld1q_u8(ptr_buf.add(16)), out1));
+
+                        // Final Summing & Packing 2
+                        let sum_lo2 = veorq_u8(
+                            rle2,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo2), 8)),
+                        );
+                        let sum_hi2 = veorq_u8(
+                            rhe2,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho2), 8)),
+                        );
+                        let out2 = vorrq_u8(
+                            vandq_u8(sum_lo2, mask_even),
+                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi2), 8)),
+                        );
+                        vst1q_u8(ptr_buf.add(32), veorq_u8(vld1q_u8(ptr_buf.add(32)), out2));
+
+                        // Final Summing & Packing 3
+                        let sum_lo3 = veorq_u8(
+                            rle3,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rlo3), 8)),
+                        );
+                        let sum_hi3 = veorq_u8(
+                            rhe3,
+                            vreinterpretq_u8_u16(vshrq_n_u16(vreinterpretq_u16_u8(rho3), 8)),
+                        );
+                        let out3 = vorrq_u8(
+                            vandq_u8(sum_lo3, mask_even),
+                            vreinterpretq_u8_u16(vshlq_n_u16(vreinterpretq_u16_u8(sum_hi3), 8)),
+                        );
+                        vst1q_u8(ptr_buf.add(48), veorq_u8(vld1q_u8(ptr_buf.add(48)), out3));
+
+                        ptr_in = ptr_in.add(64);
+                        ptr_buf = ptr_buf.add(64);
+                    }
+
                     while ptr_in < end {
                         let input = vld1q_u8(ptr_in);
 
