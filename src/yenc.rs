@@ -213,6 +213,155 @@ pub fn encode_scalar(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     }
 }
 
+// --- SSSE3 path (x86-64 only) ---
+
+/// SSSE3-accelerated yEnc encoder. Falls back to [`encode_scalar`] when the
+/// CPU does not support SSSE3 (detected at runtime via `is_x86_feature_detected!`).
+///
+/// Produces identical output to [`encode_scalar`] for all inputs.
+#[cfg(target_arch = "x86_64")]
+pub fn encode_ssse3(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    if is_x86_feature_detected!("ssse3") {
+        // SAFETY: we just confirmed the CPU supports SSSE3.
+        unsafe { encode_ssse3_impl(out, data, line_len) }
+    } else {
+        encode_scalar(out, data, line_len)
+    }
+}
+
+/// Encode one byte using full positional-escape rules and append to `out`.
+/// `col` is advanced; if it reaches `line_len` a CRLF is emitted and `col`
+/// is reset to 0.
+#[inline(always)]
+fn emit_scalar(out: &mut Vec<u8>, b: u8, col: &mut usize, line_len: usize, at_line_end: bool) {
+    let e = b.wrapping_add(42);
+    let at_line_start = *col == 0;
+    let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+    let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
+        || (e == 0x2E && at_line_start);
+    if critical || positional {
+        out.push(b'=');
+        out.push(e.wrapping_add(64));
+    } else {
+        out.push(e);
+    }
+    *col += 1;
+    if *col == line_len {
+        out.extend_from_slice(b"\r\n");
+        *col = 0;
+    }
+}
+
+/// Encode one shifted byte (already `b+42`) that is guaranteed to be in the
+/// middle of a line — no positional escapes apply, only critical ones.
+#[inline(always)]
+fn emit_critical_only(out: &mut Vec<u8>, e: u8) {
+    if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
+        out.push(b'=');
+        out.push(e.wrapping_add(64));
+    } else {
+        out.push(e);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    use std::arch::x86_64::*;
+
+    let line_len = line_len.max(1);
+    if data.is_empty() {
+        return;
+    }
+
+    let last = data.len() - 1;
+    let add42 = _mm_set1_epi8(42i8);
+    let v_nul = _mm_setzero_si128();
+    let v_lf = _mm_set1_epi8(0x0Au8 as i8);
+    let v_cr = _mm_set1_epi8(0x0Du8 as i8);
+    let v_eq = _mm_set1_epi8(0x3Du8 as i8);
+
+    let mut i = 0usize;
+    let mut col = 0usize;
+
+    while i < data.len() {
+        // -- Line-start byte: always scalar (dot/space/tab positional escapes) --
+        if col == 0 {
+            let at_line_end = line_len == 1 || i == last;
+            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            i += 1;
+            continue;
+        }
+
+        // -- Middle zone: col in [1, line_len-2] and not the last data byte --
+        // No positional escapes apply here; only critical bytes need escaping.
+        let safe = if line_len > 1 {
+            // bytes until we'd hit the last position of this line
+            let till_line_end = line_len - 1 - col;
+            // bytes until we'd hit the last byte of the data (needs scalar)
+            let till_data_end = last.saturating_sub(i);
+            till_line_end.min(till_data_end)
+        } else {
+            0
+        };
+
+        // SIMD: 16-byte chunks
+        let mut safe_rem = safe;
+        while safe_rem >= 16 {
+            let chunk = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
+            let shifted = _mm_add_epi8(chunk, add42);
+
+            // Build escape mask for the four critical values.
+            let m0 = _mm_cmpeq_epi8(shifted, v_nul);
+            let m1 = _mm_cmpeq_epi8(shifted, v_lf);
+            let m2 = _mm_cmpeq_epi8(shifted, v_cr);
+            let m3 = _mm_cmpeq_epi8(shifted, v_eq);
+            let any = _mm_or_si128(_mm_or_si128(m0, m1), _mm_or_si128(m2, m3));
+            let needs_escape = _mm_movemask_epi8(any);
+
+            if needs_escape == 0 {
+                // Fast path: write 16 shifted bytes directly.
+                let old_len = out.len();
+                out.reserve(16);
+                _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted);
+                out.set_len(old_len + 16);
+            } else {
+                // Slow path: one or more critical bytes in this chunk.
+                let mut tmp = [0u8; 16];
+                _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted);
+                for &e in &tmp {
+                    emit_critical_only(out, e);
+                }
+            }
+
+            i += 16;
+            col += 16;
+            safe_rem -= 16;
+        }
+
+        // Scalar tail of the safe zone (< 16 bytes, no positional escapes).
+        while safe_rem > 0 {
+            emit_critical_only(out, data[i].wrapping_add(42));
+            i += 1;
+            col += 1;
+            safe_rem -= 1;
+        }
+
+        // -- Line-end byte OR last data byte: scalar --
+        // (positional escapes for space/tab at line end; also handles i==last)
+        if i < data.len() {
+            let at_line_end = col + 1 == line_len || i == last;
+            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            i += 1;
+        }
+    }
+
+    // Trailing CRLF for a partial line.
+    if col != 0 {
+        out.extend_from_slice(b"\r\n");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +707,105 @@ mod tests {
     fn full_256_byte_round_trip() {
         let data: Vec<u8> = (0u8..=255).collect();
         assert_eq!(decode(&encode(&data, 128)), data);
+    }
+
+    // --- 26b: SSSE3 path produces identical output to scalar ---
+
+    #[cfg(target_arch = "x86_64")]
+    fn encode_ssse3_vec(data: &[u8], line_len: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_ssse3(&mut out, data, line_len);
+        out
+    }
+
+    /// Macro: assert SSSE3 output equals scalar output for `data` and `line_len`.
+    macro_rules! assert_ssse3_eq {
+        ($data:expr, $line_len:expr) => {{
+            #[cfg(target_arch = "x86_64")]
+            {
+                let scalar = encode($data, $line_len);
+                let simd = encode_ssse3_vec($data, $line_len);
+                assert_eq!(
+                    simd, scalar,
+                    "SSSE3 diverges from scalar (line_len={})",
+                    $line_len
+                );
+            }
+        }};
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_all_256_byte_values() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        assert_ssse3_eq!(&data, 128);
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_all_critical_bytes() {
+        // All four critical raw inputs, repeated to span many lines.
+        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
+            .iter()
+            .cycle()
+            .copied()
+            .take(512)
+            .collect();
+        assert_ssse3_eq!(&data, 128);
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_positional_bytes_at_boundaries() {
+        // Dot/space/tab at line start and end with line_len=4.
+        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
+            .iter()
+            .cycle()
+            .copied()
+            .take(256)
+            .collect();
+        assert_ssse3_eq!(&data, 4);
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_large_random_like_payload() {
+        // 750 KB of pseudo-random data (covers the typical article size).
+        let data: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+            .take(750 * 1024)
+            .collect();
+        assert_ssse3_eq!(&data, 128);
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_empty() {
+        assert_ssse3_eq!(&[], 128);
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_single_byte() {
+        for b in 0u8..=255 {
+            let data = [b];
+            assert_ssse3_eq!(&data, 128);
+        }
+    }
+
+    #[test]
+    fn ssse3_matches_scalar_short_line_len() {
+        // Stress the boundary logic with very short lines.
+        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+        for ll in [1, 2, 3, 4, 7, 16, 17] {
+            assert_ssse3_eq!(&data, ll);
+        }
+    }
+
+    #[test]
+    fn ssse3_round_trip() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
+            let mut encoded = Vec::new();
+            encode_ssse3(&mut encoded, &data, 128);
+            assert_eq!(decode(&encoded), data);
+        }
     }
 }
