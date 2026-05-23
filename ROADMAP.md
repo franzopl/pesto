@@ -1716,33 +1716,35 @@ structure and pre-built all tables in a global parallel pass.
 - [x] Bench script temporarily defaults to 5 GB only (this slow machine).
 - [x] `cargo fmt --check && cargo clippy --all-targets -- -D warnings` clean.
 
-### 30b — Software prefetch for input data (small, 1 h)
+### 30b — Software prefetch for input data (small, 1 h) ✅
 
 **Hypothesis:** the inner loop loads 51 × 32 KiB input chunks sequentially; hardware
 prefetch on Neoverse N1 handles straight-line streams well but the 4-block interleaving
 (A+B+C+D → advance ptr_in) may confuse it. Explicit `prfm pldl1keep` 128–256 bytes ahead
 of `ptr_in` should hide load-to-use latency.
 
-- [ ] Add `std::arch::aarch64::__prefetch(ptr_in.add(8) as *const i8)` inside the 4×-unrolled
-      loop body, prefetching 8 NEON vectors (128 bytes) ahead.
-- [ ] Also prefetch output buffers (ptr_a/b/c/d) one stride ahead to warm L2 for the
-      read-modify-write.
+- [x] Added `core::arch::asm!("prfm pldl1keep, [{pN}]", ...)` inside the 4×-unrolled
+      loop body, prefetching 128 bytes ahead for both input (`ptr_in`) and all four output
+      buffers (`ptr_a/b/c/d`). Guard: only fires when ≥ 192 bytes remain to avoid
+      out-of-bounds speculation.
 - [ ] Benchmark before/after on the 5 GB sparse file; keep only if ≥ 3% gain.
 
-Note: `__prefetch` is `#[doc(hidden)]` but stable since Rust 1.59; it lowers to `prfm
-PLDL1KEEP, [Xn]`. No unsafe risk beyond what the NEON path already carries.
+Note: `std::arch::aarch64` does not expose a stable `__prefetch` / `_prefetch`; inline
+`asm!` with the `prfm pldl1keep` instruction is the correct stable approach.
 
-### 30c — Transposed table layout for cache-friendly 4-block access (small, 2 h)
+### 30c — Transposed table layout for cache-friendly 4-block access (small, 2 h) ✅
 
 **Hypothesis:** `all_tables[(i × n_queued) + q_idx]` means the 4 entries for one group's
 A/B/C/D blocks are `n_queued × 1152 ≈ 59 KB` apart in memory — a cache miss per block on
 every `q_idx` iteration. Transposing to `[(q_idx × n_rec) + i]` makes the four entries
 consecutive (4.6 KB), fitting in one L2 fetch stream.
 
-- [ ] Change `all_tables` build index from `flat = i * n_queued + q_idx` to
-      `flat = q_idx * n_rec + i`.
-- [ ] Update all access sites: `base_x + q_idx` → `q_idx * n_rec + (i + x)`.
-- [ ] Micro-benchmark on 5 GB; expected +3–5% on cache-pressure workloads.
+- [x] Changed `all_tables` build index from `flat = i * n_queued + q_idx` to
+      `flat = q_idx * n_rec + i` (layout: `all_tables[q_idx * n_rec + i]`).
+- [x] Updated all access sites in the 4-way, 2-way, and fallback arms: `base_x + q_idx`
+      → `q_idx * n_rec + (i + x)`. Loop variables converted to `.iter().enumerate()` to
+      satisfy clippy.
+- [ ] Benchmark on 5 GB; expected +3–5% on cache-pressure workloads.
 
 ### 30d — NEON polynomial-multiply GF kernel (large, 4–8 h)
 
