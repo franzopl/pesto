@@ -1626,30 +1626,28 @@ recovery-buffer load/store cost — significantly more complex (register pressur
 
 ---
 
-## Phase 29 — Close i5-14400 gap (~15% remaining)
+## Phase 29 — Close i5-14400 gap (~15% remaining) ✅
 
 **Goal:** bring pesto to ≥ parpar on the i5-14400 (Raptor Lake hybrid, 6 P-cores + 4 E-cores,
 16 logical CPUs). Current state after Phase 28: pesto ~500 MB/s vs parpar ~587 MB/s at 10G
 (−14.6%). **Resolved by 29a: pesto 660 MB/s vs parpar 590 MB/s (+11.9%) at 10G.**
 
-### Diagnosis
+### Root cause
 
-Three candidates, ordered by expected impact:
+`performance_core_count()` was returning only the 6 P-cores on hybrid CPUs, leaving 4
+Gracemont E-cores idle. The encoder is compute-bound; adding those 4 cores (all with full
+AVX2) was the entire fix.
 
-1. **Thread count** — `performance_core_count()` returns 6 (P-cores only) on a hybrid CPU.
-   Parpar likely uses all 10 physical cores (6 P + 4 E). With the encoder compute-bound at 6
-   workers, adding 4 E-cores (Gracemont, full AVX2) can close a large fraction of the gap
-   directly. The original E-core exclusion was measured on a non-hybrid i5-10400 (+2.4% there);
-   on a hybrid CPU the calculus is different.
+The original P-core-only logic was validated on an i5-10400 (non-hybrid, no E-cores) where
+it measured +2.4%. On hybrid hardware the calculus is different: E-cores are slow at
+single-thread work but contribute well to a rayon parallel pool.
 
-2. **Dual-slice inner loop** — the hot kernel loads each recovery buffer once per input slice
-   (`load dst → XOR → store`). Processing 2 input slices per iteration halves that load/store
-   traffic at the cost of higher register pressure. Documented as "28c proper approach" but
-   deferred because of complexity with the 4-way recovery-block unroll.
-   Pre-transformation (28c) was already tried and regressed due to memory pressure.
+Candidates 29b (dual-slice loop) and 29c (prefetch tuning) are deferred — the goal is met
+and the benefit on already-leading hardware is marginal.
 
-3. **Prefetch distance** — `_mm_prefetch(ptr_in.add(4))` = 128 bytes ahead. Raptor Lake has
-   deeper pipelines; a larger distance (256–512 bytes) may hide load latency better.
+**Note on VM benchmark (AMD EPYC 4-vCPU, KVM):** results showed ±50% variance between
+consecutive runs (e.g. parpar 5G: 119 → 141 → 174 MB/s). The host shares physical cores
+across tenants; numbers are not reproducible and cannot guide optimization.
 
 ### 29a — E-core inclusion on hybrid CPUs ✅ (small, 1–2 h)
 
@@ -1662,24 +1660,6 @@ Three candidates, ordered by expected impact:
 - [x] Benchmark i5-14400 before/after: 10G went from −14.6% to **+11.9%** vs parpar.
       i5-10400 10G: −3.0% (within benchmark noise; code path unchanged on non-hybrid).
 - [x] No regression on non-hybrid hardware (code path not reached).
-
-### 29b — Dual-slice inner loop in `flush_avx2_shuffle2x_work` ☐ (medium, 4–8 h)
-
-- [ ] Restructure the `for q_idx in 0..n_queued` loop to process `q_idx` and `q_idx+1`
-      simultaneously: load recovery buffer once, XOR contributions from two input slices,
-      store once. Halves load/store count per unit of RS work.
-- [ ] Register budget with 4-way block unroll: 4 blocks × 4 tables = 16 regs is already
-      tight; with 2 slices × 4 tables = 8 table regs per block, reduce block unroll to 2×
-      to stay within 16 YMM registers.
-- [ ] Handle odd `n_queued` with a scalar tail (single-slice last iteration).
-- [ ] Correctness: compare byte-for-byte vs normal encoder (existing test harness).
-- [ ] Benchmark: internal `bench-internals` before/after.
-
-### 29c — Prefetch distance tuning ☐ (tiny, 30 min)
-
-- [ ] Try `ptr_in.add(8)` (256 bytes) and `ptr_in.add(16)` (512 bytes) in the
-      `flush_avx2_shuffle2x_work` inner loop.
-- [ ] Measure with `bench-internals` on i5-14400; keep the best value.
 
 ### Definition of done ✅
 
