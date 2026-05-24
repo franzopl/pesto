@@ -1,5 +1,17 @@
 /target
 Cargo.lock
+/bench/results/
+/bench/par2_out/
+/node_modules/
+/bench_out/
+/bench_par2_out/
+/bench_yenc_out/
+/bench_pesto_results/
+/GEMINI.md
+/bench_par2.sh
+/bench_pesto_vs_parpar.sh
+/bench_pesto_yenc_vs_node.sh
+/bench_yencode.js
 config.toml
 *.nzb
 *.mkv

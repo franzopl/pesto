@@ -27,16 +27,66 @@ Each phase must leave the program in a working, testable state.
 | 21a | Cargo workspace — `parmesan` extracted to `crates/parmesan` |
 | 21b | API decoupling — removed NNTP terminology, generic `Read`-based API |
 | 21c | Benchmarking — micro-benchmarks in library, `#[inline]` tuning, docs |
+| 21d | Publish — `parmesan-par2` v0.1.0 published to crates.io |
 
 ---
 
-## In Progress
+## Completed ✅ (continued)
 
-### Phase 21d — Publish `parmesan` to crates.io
+### Phase 29 — Public Release Readiness
 
-- [ ] Version the library independently from `pesto`.
-- [ ] Publish `parmesan-par2` to crates.io.
-- [ ] Switch `pesto` to depend on the published crate (or keep workspace path).
+Pre-requisites before announcing `pesto` in Usenet forums (Reddit r/usenet,
+Usenet-Info, NZBForum, etc.).
+
+#### 29a — Repository cleanup ✅
+
+- [x] Move ad-hoc benchmark shell scripts from root to `bench/` directory.
+- [x] Add `bench/results/`, `bench/par2_out/`, `node_modules/` to `.gitignore`.
+- [x] Remove `GEMINI.md` and `node_modules/` from git tracking.
+- [x] Legacy `bench_*.sh` removed from tracking; superseded by `bench/`.
+
+#### 29b — Benchmark suite *(medium complexity)*
+
+A reproducible, portable benchmark suite that anyone can run to compare
+`pesto`/`parmesan` against established tools (`nyuu`, `parpar`, `par2`).
+
+- [x] Create `bench/README.md` explaining how to run each benchmark.
+- [x] `bench/yenc.sh` — yEnc throughput: pesto SIMD paths vs `node-yencode`.
+  - Auto-generates sparse test files; sizes configurable via CLI args.
+  - Prints CPU model, core count, SIMD feature flags detected.
+  - Emits a Markdown-formatted comparison table to stdout (copy-paste ready).
+  - Saves raw results to `bench/results/yenc-<hostname>-<date>.csv`.
+- [x] `bench/par2.sh` — PAR2 creation: parmesan vs `parpar` vs `par2cmdline`.
+  - Same structure as `yenc.sh`; compares throughput and output file sizes.
+  - Detects which comparison tools are installed; skips missing ones gracefully.
+  - Saves raw results to `bench/results/par2-<hostname>-<date>.csv`.
+- [x] `bench/posting.sh` — End-to-end post throughput (dry-run / loopback mode).
+  - Uses `--dry-run`; no real server needed.
+  - Measures: file read → yEnc encode → article assembly → (simulated) send.
+- [x] Common library (`bench/lib.sh`): color helpers, `hr`, `speedup_pct`,
+      `throughput_mbps`, CPU detection, sparse file creation — shared by all scripts.
+- [x] Old root-level `bench_*.sh` scripts removed from tracking.
+
+#### 29b — Benchmark suite ✅ *(completed above)*
+
+#### 29c — README benchmark table ✅
+
+- [x] "Performance" section added to `README.md` with yEnc and PAR2 tables.
+- [x] Link to `bench/README.md` so readers know how to reproduce the numbers.
+
+#### 29d — Release tag v0.3.1 *(pending)*
+
+- [x] `CHANGELOG.md` promoted to `[0.3.1]` (2026-05-24).
+- [ ] Push tag `v0.3.1` to trigger CI release workflow (Linux glibc/musl + Windows).
+- [ ] Confirm GitHub Release page shows all three binary archives.
+
+---
+
+### Phase 21d — Publish `parmesan` to crates.io ✅
+
+- [x] Version the library independently from `pesto`.
+- [x] Publish `parmesan-par2` v0.1.0 to crates.io (2026-05-23).
+- [x] `pesto` depends on the crate via workspace path (retained for monorepo convenience).
 
 See [`crates/parmesan/ROADMAP.md`](crates/parmesan/ROADMAP.md) for the full
 `parmesan` roadmap.
@@ -198,13 +248,18 @@ useful SIMD work per line at these standard line lengths.
 
 ### 27b — Dispatcher: always prefer SSSE3 *(low complexity)* ✅
 
-Benchmarks showed SSSE3 beats AVX2 at both ll=128 and ll=256 under the
-current line-by-line boundary strategy. AVX2 would only win with a multi-line
-approach that amortises the per-line boundary overhead.
+Benchmarks showed SSSE3 beats AVX2 at ll=128 on hybrid CPUs (Intel 12th gen+).
+Root cause: E-cores execute AVX2 ~5% slower than SSSE3 at this line length;
+P-cores are within noise (<0.3%). SSSE3 is the safe default across all core
+types with no P-core penalty. AVX2 would only win with a multi-line strategy
+that amortises the per-line boundary cost on P-cores exclusively.
 
-- [x] `pub fn encode()` now dispatches SSSE3 > scalar, skipping AVX2.
+Note: the dispatcher was accidentally reverted to AVX2 > SSSE3 during the
+Phase 33 module split and restored in 0.3.1.
+
+- [x] `pub fn encode()` dispatches SSSE3 > scalar, skipping AVX2.
 - [x] `encode_avx2` remains public for benchmarking and future phases.
-- [x] Dispatcher docstring explains the trade-off.
+- [x] Dispatcher comment explains the hybrid-CPU rationale.
 
 Results after 27b:
   ll=128  encode (disp): **1797 MB/s** (1.50× nyuu) ✓

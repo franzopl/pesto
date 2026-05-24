@@ -32,16 +32,9 @@ Used internally by [`pesto`](../../ROADMAP.md) and published as an independent c
 | `--recurse` | Expand directories into their constituent files |
 | `--comment` | Embed comment strings in the Creator packet (repeatable) |
 | `--recovery-offset` | Set the exponent of the first recovery block |
+| Published to crates.io | `parmesan-par2` v0.1.0 released 2026-05-23 |
 
 ---
-
-## In Progress
-
-### Phase 21d — Publish to crates.io
-
-- [ ] Settle on the final crate name (`parmesan-par2` or `parmesan`).
-- [ ] Write crate-level documentation and a usage example in `lib.rs`.
-- [ ] Publish to crates.io; update `pesto` to reference the published version.
 
 ---
 

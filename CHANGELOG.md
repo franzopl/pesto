@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-24
+
+### Added
+- `bench/` benchmark suite: `yenc.sh`, `par2.sh`, `posting.sh` with shared
+  `lib.sh`; produces copy-paste–ready Markdown tables and CSV results per host.
+- `bench/yencode.js` moved from root into `bench/` (was `bench_yencode.js`).
+- Performance section in `README.md` with yEnc and PAR2 throughput tables vs
+  `node-yencode` and `parpar`.
+
+### Changed
+- `node_modules/`, `bench_*.sh`, `GEMINI.md` removed from git tracking.
+- `.gitignore` updated to cover `node_modules/`, `bench/results/`,
+  `bench/par2_out/`, and legacy `bench_*_out/` directories.
+
 ## [0.2.24] — 2026-05-23
 
 ### Fixed
