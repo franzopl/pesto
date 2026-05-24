@@ -1002,9 +1002,7 @@ async fn run_batch(
     }
 
     let effective_jobs = if jobs == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        parmesan::performance_core_count()
     } else {
         jobs
     };
@@ -1219,13 +1217,12 @@ async fn run_watch(
         }
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(if jobs == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+    let effective_jobs = if jobs == 0 {
+        parmesan::performance_core_count()
     } else {
         jobs
-    }));
+    };
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
 
     loop {
         // Check for shutdown between polls.
@@ -1294,9 +1291,7 @@ async fn run_watch(
 
     // Wait for all in-progress uploads (drain the semaphore).
     let effective_jobs = if jobs == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        parmesan::performance_core_count()
     } else {
         jobs
     };
