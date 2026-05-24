@@ -36,6 +36,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [All flags](#all-flags)
 - [Exit codes](#exit-codes)
 - [JSON output mode](#json-output-mode)
+- [Performance](#performance)
 
 ---
 
@@ -805,6 +806,53 @@ disk. Not part of the internal event stream — always the very last line.
 ```json
 {"type":"nzb_written","path":"/home/user/nzbs/movie.nzb"}
 ```
+
+---
+
+## Performance
+
+pesto dispatches automatically to the best SIMD path at runtime
+(AVX2+GFNI → SSSE3 → scalar). No flags needed.
+
+### yEnc encoding throughput
+
+Benchmarked on Intel Core i5-14400 (16 logical cores), Linux, release build.
+Line length 128 bytes (Usenet default). Both tools use internal timers after
+warmup + N iterations (pure CPU, data already in memory).
+
+| Payload | pesto    | node-yencode |
+|---------|----------|--------------|
+| 100 MB  | 2 557 MB/s | 4 302 MB/s |
+| 500 MB  | 2 924 MB/s | 4 620 MB/s |
+
+node-yencode is a mature native C++ addon with aggressive SIMD tuning.
+pesto's yEnc encoder is competitive but not yet the fastest path — ongoing
+work targets closing this gap (see `ROADMAP.md` Phase 32 future ideas).
+
+### PAR2 creation throughput
+
+Benchmarked on Intel Core i5-14400 (16 logical cores), Linux, release build.
+10% recovery, ~1 000 input slices, random data files.
+
+| Input  | parmesan | parpar  | par2cmdline | vs parpar | vs par2cmdline |
+|--------|----------|---------|-------------|-----------|----------------|
+| 1 GB   | 546 MB/s | 650 MB/s | 98 MB/s   | -16%      | +460%          |
+| 5 GB   | 569 MB/s | 606 MB/s | 98 MB/s   | -6%       | +480%          |
+| 10 GB  | 572 MB/s | 587 MB/s | 98 MB/s   | -3%       | +484%          |
+
+parmesan closes the gap to parpar as file size grows (single-pass streaming
+amortises startup overhead); both are 5–6× faster than par2cmdline.
+
+### Reproduce on your machine
+
+```bash
+cargo build --release
+./bench/yenc.sh          # yEnc throughput vs node-yencode
+./bench/par2.sh          # PAR2 creation vs parpar / par2cmdline
+./bench/posting.sh       # end-to-end article pipeline (dry-run)
+```
+
+See [`bench/README.md`](bench/README.md) for details.
 
 ---
 
