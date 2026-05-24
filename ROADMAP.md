@@ -252,6 +252,36 @@ reaches 1865 MB/s (1.55× nyuu), so the default is already comfortably ahead.
 
 ---
 
+## Phase 33 — `yenc.rs` Module Split ✅
+
+`src/yenc.rs` is 2 362 lines and contains four independent encoding backends
+plus shared types, the public API, and the test suite — all in one file.
+Split it into a `src/yenc/` module so each backend lives in its own file.
+
+Proposed layout:
+
+```
+src/yenc/
+  mod.rs        # public API (encode_part, segments, Crc32, PartSpec,
+                #   EncodedPart), dispatch logic, encoded_size
+  scalar.rs     # encode_scalar — portable fallback (~60 lines)
+  x86.rs        # SSSE3 + AVX2 impls + encode() dispatcher for x86_64
+  aarch64.rs    # NEON impl + encode() dispatcher for aarch64
+  tables.rs     # SHUFFLE_TABLE, ADD_TABLE, LEN_TABLE (shared by x86 + NEON)
+  tests.rs      # all #[cfg(test)] content (currently ~660 lines)
+```
+
+Acceptance criteria:
+- [x] Convert `src/yenc.rs` → `src/yenc/mod.rs` and extract backends into
+      `scalar.rs`, `x86.rs`, `aarch64.rs`.
+- [x] Move `mod tests { … }` to `tests.rs` and reference it with
+      `#[cfg(test)] mod tests;`.
+- [x] No change to the public API surface (`pub use` in `mod.rs` if needed).
+- [x] `cargo test` passes unchanged (same 243 tests).
+- [x] `cargo clippy --all-targets -D warnings` clean.
+
+---
+
 ## Phase 32 — Future Ideas (Unscheduled)
 
 Concepts to evaluate later. Not committed to any timeline.
