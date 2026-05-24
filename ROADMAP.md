@@ -371,9 +371,10 @@ Concepts to evaluate later. Not committed to any timeline.
 - [x] Basic navigation and keyboard shortcuts (`q`, `j/k`, `Enter`, `Tab`, `u`, `h`, Backspace, etc.)
 - [ ] Scrollable & navigable LogPanel (↑/↓, PgUp/PgDn, auto-scroll toggle, search/filter)
 - [x] Live visual progress: accurate segment/byte tracking + speed + ETA from structured ProgressUpdate
-- [ ] Throughput graph/sparkline and per-file progress bars
+- [x] Throughput sparkline (ratatui Sparkline widget) showing recent speed history
+- [ ] Per-file progress bars and connection-level details
 - [x] Upload controls: cancel current upload (`x` key) using `CancellationToken`
-- [ ] Pause/resume upload
+- [x] Pause/resume upload (`p` key) - UI + stats freeze (full worker pause pending pesto API)
 - [ ] Queue management: remove items (Del), clear queue, basic reordering
 - [ ] Graceful error display and recovery during long uploads (connection loss, auth failures, etc.)
 - [ ] Responsive layout and graceful degradation on small terminals
@@ -390,7 +391,9 @@ Concepts to evaluate later. Not committed to any timeline.
 
 - [ ] Watch mode with smart rules and move-to-done logic
 - [ ] Metadata enrichment (TMDb, improved NFO generation)
-- [ ] Configuration system with profile support (compatible with old `.env`)
+- [x] Basic real config loading on startup (from default pesto path)
+- [x] Clear visibility of effective upload settings before upload: obfuscation mode, compression+password, PAR2 %, groups, From, article size, verify — shown in Dashboard when queue has files + logged on upload start
+- [ ] Full configuration UI / editing + profile support (override obfuscation, PAR2, compression etc. from TUI)
 - [ ] Post-upload hooks (shell + native Rust)
 - [ ] Wizard for first-time setup
 

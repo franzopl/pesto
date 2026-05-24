@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Tabs},
+    widgets::{Block, Borders, Gauge, Paragraph, Sparkline, Tabs},
     Frame,
 };
 
@@ -102,7 +102,7 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     let mut constraints = vec![
-        Constraint::Length(4), // Progress bar area (only when uploading)
+        Constraint::Length(7), // Progress bar + sparkline (only when uploading)
         Constraint::Min(8),    // Main split (Queue + Logs)
     ];
 
@@ -129,12 +129,29 @@ fn draw_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(content_area);
 
-    app.upload_queue.render(f, chunks[0]);
+    if app.upload_in_progress && !app.progress.files.is_empty() {
+        draw_per_file_progress(f, app, chunks[0]);
+    } else if !app.upload_queue.items.is_empty() {
+        draw_upload_settings_summary(f, app, chunks[0]);
+    } else {
+        app.upload_queue.render(f, chunks[0]);
+    }
+
     app.log_panel.render(f, chunks[1]);
 }
 
 fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
     let p = &app.progress;
+
+    // Split the progress area: Gauge on top, Sparkline below
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Gauge
+            Constraint::Length(3), // Sparkline + stats
+        ])
+        .split(area);
+
     let pct = p.progress_pct() as u16;
 
     let speed = if p.last_speed > 0.1 {
@@ -160,19 +177,139 @@ fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
         eta
     );
 
+    let is_paused = app.upload_paused;
+
     let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(if is_paused {
+            " Upload Progress — PAUSED "
+        } else {
+            " Upload Progress "
+        }))
+        .gauge_style(if is_paused {
+            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Green).bg(Color::DarkGray)
+        })
+        .percent(pct)
+        .label(if is_paused {
+            "PAUSED — Press 'p' to resume".to_string()
+        } else {
+            label
+        });
+
+    f.render_widget(gauge, chunks[0]);
+
+    // Sparkline of recent throughput
+    let spark_data: Vec<u64> = p
+        .speed_history
+        .iter()
+        .map(|&s| (s * 10.0) as u64) // scale for visibility
+        .collect();
+
+    let spark_style = if is_paused {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let sparkline = Sparkline::default()
         .block(
             Block::default()
-                .borders(Borders::ALL)
-                .title(" Upload Progress "),
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .title(format!(
+                    " Throughput History ({} samples) ",
+                    spark_data.len()
+                )),
         )
-        .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
-        .percent(pct)
-        .label(label);
+        .data(&spark_data)
+        .style(spark_style);
 
-    f.render_widget(gauge, area);
+    f.render_widget(sparkline, chunks[1]);
+}
+
+fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
+    use ratatui::text::Line;
+
+    let mut lines: Vec<Line> = vec![Line::from(" Per-file Progress:")];
+
+    for fp in &app.progress.files {
+        let pct = if fp.total_segments > 0 {
+            (fp.done_segments as f64 / fp.total_segments as f64 * 100.0) as u16
+        } else {
+            0
+        };
+
+        let status_icon = match fp.status {
+            crate::app::FileStatus::Done => "✓",
+            crate::app::FileStatus::Failed => "✗",
+            crate::app::FileStatus::Active => "▶",
+            _ => " ",
+        };
+
+        let short_name = if fp.name.len() > 28 {
+            format!("{}...", &fp.name[..25])
+        } else {
+            fp.name.clone()
+        };
+
+        lines.push(Line::from(format!(
+            " {} {} {:3}% ({}/{})",
+            status_icon, short_name, pct, fp.done_segments, fp.total_segments
+        )));
+    }
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Upload Files "),
+    );
+
+    f.render_widget(para, area);
+}
+
+fn draw_upload_settings_summary(f: &mut Frame, app: &App, area: Rect) {
+    let s = app.effective_upload_settings();
+
+    let lines = vec![
+        Line::from(" Obfuscation : ".to_string() + &s.obfuscate),
+        Line::from(" Compression : ".to_string() + &s.compression),
+        Line::from(" PAR2        : ".to_string() + &s.par2),
+        Line::from(" Groups      : ".to_string() + &s.groups),
+        Line::from(" From        : ".to_string() + &s.from),
+        Line::from(" Article     : ".to_string() + &s.article_size),
+        Line::from(" Verify      : ".to_string() + &s.verify),
+    ];
+
+    let title = if app.pesto_config.is_some() {
+        " Effective Upload Settings (from config) "
+    } else {
+        " Effective Upload Settings (dry-run defaults) "
+    };
+
+    let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
+
+    f.render_widget(para, area);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    // Dynamic help when upload is active
+    if app.upload_in_progress {
+        let pause_resume = if app.upload_paused {
+            "p: resume"
+        } else {
+            "p: pause"
+        };
+        let help = format!(
+            "{}  •  {}  •  x: cancel  •  Tab: switch  •  q: quit",
+            app.status_bar.message, pause_resume
+        );
+
+        let status = Paragraph::new(help)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::TOP).title(" Status "));
+        f.render_widget(status, area);
+        return;
+    }
+
     app.status_bar.render(f, area);
 }

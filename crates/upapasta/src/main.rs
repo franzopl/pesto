@@ -19,7 +19,7 @@ mod events;
 mod ui;
 
 use app::App;
-use events::{AppEvent, ProgressUpdate};
+use events::{AppEvent, FileProgressUpdate, ProgressUpdate};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -190,6 +190,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                     {
                         app.cancel_upload();
                     }
+                    // Pause / Resume
+                    KeyCode::Char('p')
+                        if app.state == app::AppState::Dashboard && app.upload_in_progress =>
+                    {
+                        app.toggle_pause();
+                        // Send event so the upload task can react (for now UI-only pause)
+                        let _ = tx.send(AppEvent::PauseUpload); // will be improved
+                    }
                     // Navigate queue with Shift or dedicated keys when on Dashboard
                     KeyCode::Char('J') if app.state == app::AppState::Dashboard => {
                         app.upload_queue.select_next();
@@ -202,9 +210,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::Progress(msg) => {
                     app.handle_progress(msg);
                 }
-                AppEvent::ProgressUpdate(update) => {
+                AppEvent::ProgressUpdate(update) if !app.upload_paused => {
                     app.handle_progress_update(update);
                 }
+                AppEvent::PauseUpload => {
+                    // Currently pause is UI-driven; in future we can throttle the worker here
+                }
+                AppEvent::ResumeUpload => {}
                 AppEvent::UploadFinished { success, cancelled } => {
                     app.upload_finished(success, cancelled);
                 }
@@ -232,8 +244,16 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         return;
     }
 
-    // Build a minimal safe dry-run config (no network, full yEnc + PAR2 path exercised)
-    let config = build_dry_run_config();
+    // Use real config if loaded, otherwise fall back to dry-run
+    let config = if let Some(cfg) = &app.pesto_config {
+        // Clone because we may want to force dry_run in future UI options
+        let mut real_cfg = cfg.clone();
+        // For now, always do real upload when config exists
+        real_cfg.dry_run = false;
+        real_cfg
+    } else {
+        build_dry_run_config()
+    };
 
     // Convert to pesto InputFile
     let input_files: Vec<InputFile> = files
@@ -345,6 +365,7 @@ async fn run_real_upload(
         total_bytes: 0,
         current_speed_mbps: 0.0,
         message: None,
+        file_update: None,
     };
 
     loop {
@@ -467,7 +488,7 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
     }
 }
 
-/// Extract accurate numbers from ProgressEvent for the progress bar
+/// Extract accurate numbers from ProgressEvent for the progress bar + per-file updates
 fn extract_progress_update(
     ev: &pesto::progress::ProgressEvent,
     previous: &ProgressUpdate,
@@ -485,18 +506,33 @@ fn extract_progress_update(
                 total_bytes,
                 current_speed_mbps: 0.0,
                 message: None,
+                file_update: None,
             })
         }
-        E::SegmentDone {
-            bytes, ok: true, ..
-        } => Some(ProgressUpdate {
-            done_segments: previous.done_segments + 1,
-            total_segments: previous.total_segments,
-            done_bytes: previous.done_bytes + bytes,
-            total_bytes: previous.total_bytes,
-            current_speed_mbps: previous.current_speed_mbps,
-            message: None,
-        }),
+        E::SegmentDone { file, bytes, ok } => {
+            let file_update = FileProgressUpdate {
+                name: file.clone(),
+                done_segments: 1, // incremental
+                total_segments: 0,
+                done_bytes: *bytes,
+                total_bytes: 0,
+                ok: *ok,
+            };
+
+            Some(ProgressUpdate {
+                done_segments: previous.done_segments + 1,
+                total_segments: previous.total_segments,
+                done_bytes: previous.done_bytes + bytes,
+                total_bytes: previous.total_bytes,
+                current_speed_mbps: previous.current_speed_mbps,
+                message: Some(format!(
+                    "Segment {} — {}",
+                    if *ok { "ok" } else { "FAIL" },
+                    file
+                )),
+                file_update: Some(file_update),
+            })
+        }
         E::QueueExtended {
             segments, bytes, ..
         } => Some(ProgressUpdate {
@@ -506,6 +542,7 @@ fn extract_progress_update(
             total_bytes: previous.total_bytes + bytes,
             current_speed_mbps: previous.current_speed_mbps,
             message: None,
+            file_update: None,
         }),
         E::Par2InputProgress { done, total } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -514,6 +551,7 @@ fn extract_progress_update(
             total_bytes: previous.total_bytes,
             current_speed_mbps: previous.current_speed_mbps,
             message: Some(format!("PAR2 input: {}/{}", done, total)),
+            file_update: None,
         }),
         _ => None,
     }

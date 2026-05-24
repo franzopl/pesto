@@ -12,6 +12,19 @@ pub struct ProgressUpdate {
     pub total_bytes: u64,
     pub current_speed_mbps: f64,
     pub message: Option<String>,
+
+    /// Optional per-file update (when a specific file advanced)
+    pub file_update: Option<FileProgressUpdate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileProgressUpdate {
+    pub name: String,
+    pub done_segments: u64,
+    pub total_segments: u64,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    pub ok: bool, // for SegmentDone
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +45,9 @@ pub enum AppEvent {
     Tick,
     // Internal: upload task finished
     UploadFinished { success: bool, cancelled: bool },
+    // Upload control
+    PauseUpload,
+    ResumeUpload,
     Quit,
 }
 
