@@ -346,22 +346,68 @@ Concepts to evaluate later. Not committed to any timeline.
 | yEnc SIMD Escaping | Use PSHUFB to insert '=' escapes in-place without falling back to scalar. |
 | yEnc Multi-line | Process multiple lines in parallel using AVX2 or AVX-512. |
 
-## Phase 32 — yEnc Performance Parity ✅
-Target: Match or exceed `node-yencode` throughput (> 2 GB/s on modern CPUs).
-- [x] Identify performance gap vs `node-yencode` (~700 MB/s vs ~2000 MB/s).
-- [x] Optimize the "slow path" (escaping) to avoid scalar fallbacks.
-- [x] Implement SIMD expansion using shuffle tables (PSHUFB) for inserting '=' escapes.
-- [x] Pointer-based implementation to eliminate Vec bounds checks.
-- [x] Benchmarking and validation: **2.2 GB/s** achieved (exceeding `node-yencode`).
+---
 
-| RAM auto-cap | Cap buffer pools based on available system memory to prevent OOM |
-| Dynamic connection scaling | Reduce connections under memory or TCP pressure |
-| CPU topology awareness | Tune `rayon` pool to physical vs logical core count |
-| Disk pre-flight | Verify free space before compression/PAR2 starts |
-| In-memory mode | Skip temp files for small payloads that fit in RAM |
-| `O_DIRECT` reads | Bypass page cache on Linux for huge files |
-| `mmap` fast-path | `mmap` + `MADV_SEQUENTIAL` for massive file reads |
-| Adaptive buffering | Grow/shrink buffer pool based on upload/read speed delta |
-| Lock-free buffer pool | Replace `Mutex<Vec<_>>` pool with `SegQueue` to eliminate contention at high connection counts |
-| Connection health scoring | Track per-server error rates passively; prefer healthy servers without hard failover |
-| Warm reconnection | Pre-connect to the next failover server in background so TLS handshake cost is not paid on the hot path |
+## Phase 40 — UpaPasta v2 (Rust Rewrite)
+
+**Goal:** Replace the legacy Python version of UpaPasta with a pure Rust implementation using the `pesto` library directly. Focus on excellent UX while leveraging the performance of the Rust engine.
+
+### 40a — Monorepo & Foundation ✅
+
+- [x] Convert repository to Cargo workspace (`crates/pesto`, `crates/parmesan`, `crates/upapasta`)
+- [x] Move existing `pesto` code into `crates/pesto/`
+- [x] Create `crates/upapasta` with initial TUI skeleton (`ratatui` + `crossterm`)
+- [x] Update `CLAUDE.md` with new architecture and development practices
+- [ ] Refine public API in `pesto` (make `pesto::post()` more ergonomic for TUI use)
+
+### 40b — TUI Core (In Progress)
+
+**Current focus.** Build a clean, responsive, keyboard-driven interface.
+
+- [x] Implement main `App` state machine with multiple screens (Dashboard, Browser, History, Config)
+- [x] Create reusable components: `FileTree`, `UploadQueue`, `StatusBar`, `LogPanel`
+- [x] Event-driven architecture using `crossterm` event stream + `tokio::sync::mpsc`
+- [x] Real-time progress rendering from `pesto::post()` events (full `ProgressEvent` stream)
+- [x] Basic navigation and keyboard shortcuts (`q`, `j/k`, `Enter`, `Tab`, `u`, `h`, Backspace, etc.)
+- [ ] Scrollable & navigable LogPanel (↑/↓, PgUp/PgDn, auto-scroll toggle, search/filter)
+- [x] Live visual progress: accurate segment/byte tracking + speed + ETA from structured ProgressUpdate
+- [ ] Throughput graph/sparkline and per-file progress bars
+- [x] Upload controls: cancel current upload (`x` key) using `CancellationToken`
+- [ ] Pause/resume upload
+- [ ] Queue management: remove items (Del), clear queue, basic reordering
+- [ ] Graceful error display and recovery during long uploads (connection loss, auth failures, etc.)
+- [ ] Responsive layout and graceful degradation on small terminals
+- [ ] Theme support (dark/light + user-configurable colors) and responsive layout
+
+### 40c — Catalog & Persistence
+
+- [ ] Persistent catalog (using `sled` or `rusqlite`)
+- [ ] Import history from legacy Python JSONL
+- [ ] Search, filtering and statistics views
+- [ ] NZB archive viewer
+
+### 40d — Orchestration & Feature Parity
+
+- [ ] Watch mode with smart rules and move-to-done logic
+- [ ] Metadata enrichment (TMDb, improved NFO generation)
+- [ ] Configuration system with profile support (compatible with old `.env`)
+- [ ] Post-upload hooks (shell + native Rust)
+- [ ] Wizard for first-time setup
+
+### 40e — Polish, Testing & Release
+
+- [ ] Comprehensive error handling and user feedback
+- [ ] Migration path from Python version
+- [ ] Performance tuning of TUI during long uploads
+- [ ] Build portable binaries
+- [ ] Update documentation, man pages and README
+- [ ] Retire or archive the old Python codebase
+
+**Pre-commit checklist for upapasta:**
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo check -p upapasta
+cargo test -p upapasta
+```
