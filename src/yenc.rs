@@ -257,47 +257,32 @@ pub fn encode_scalar(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
 ///
 /// Produces identical output to [`encode_scalar`] for all inputs.
 #[cfg(target_arch = "x86_64")]
+#[cfg(target_arch = "x86_64")]
 pub fn encode_ssse3(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     if is_x86_feature_detected!("ssse3") {
-        // SAFETY: we just confirmed the CPU supports SSSE3.
         unsafe { encode_ssse3_impl(out, data, line_len) }
     } else {
         encode_scalar(out, data, line_len)
     }
 }
 
-/// Encode one byte using full positional-escape rules and append to `out`.
-/// `col` is advanced; if it reaches `line_len` a CRLF is emitted and `col`
-/// is reset to 0.
-#[inline(always)]
-fn emit_scalar(out: &mut Vec<u8>, b: u8, col: &mut usize, line_len: usize, at_line_end: bool) {
-    let e = b.wrapping_add(42);
-    let at_line_start = *col == 0;
-    let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
-    let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
-        || (e == 0x2E && at_line_start);
-    if critical || positional {
-        out.push(b'=');
-        out.push(e.wrapping_add(64));
+#[cfg(target_arch = "x86_64")]
+pub fn encode_avx2(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { encode_avx2_impl(out, data, line_len) }
     } else {
-        out.push(e);
-    }
-    *col += 1;
-    if *col == line_len {
-        out.extend_from_slice(b"\r\n");
-        *col = 0;
+        encode_ssse3(out, data, line_len)
     }
 }
 
-/// Encode one shifted byte (already `b+42`) that is guaranteed to be in the
-/// middle of a line — no positional escapes apply, only critical ones.
-#[inline(always)]
-fn emit_critical_only(out: &mut Vec<u8>, e: u8) {
-    if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
-        out.push(b'=');
-        out.push(e.wrapping_add(64));
+#[cfg(target_arch = "x86_64")]
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    if is_x86_feature_detected!("avx2") {
+        unsafe { encode_avx2_impl(out, data, line_len) }
+    } else if is_x86_feature_detected!("ssse3") {
+        unsafe { encode_ssse3_impl(out, data, line_len) }
     } else {
-        out.push(e);
+        encode_scalar(out, data, line_len)
     }
 }
 
@@ -305,58 +290,60 @@ fn emit_critical_only(out: &mut Vec<u8>, e: u8) {
 #[target_feature(enable = "ssse3")]
 unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     use std::arch::x86_64::*;
-
     let line_len = line_len.max(1);
     if data.is_empty() {
         return;
     }
-
-    // Upper bound reserve: eliminates all per-chunk reserve() calls.
     out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
-
     let last = data.len() - 1;
     let add42 = _mm_set1_epi8(42i8);
     let v_nul = _mm_setzero_si128();
     let v_lf = _mm_set1_epi8(0x0Au8 as i8);
     let v_cr = _mm_set1_epi8(0x0Du8 as i8);
     let v_eq = _mm_set1_epi8(0x3Du8 as i8);
-
+    let v_eq_const = _mm_set1_epi8(b'=' as i8);
     let mut i = 0usize;
     let mut col = 0usize;
-
+    let out_base = out.as_mut_ptr();
+    let mut out_ptr = out_base.add(out.len());
     while i < data.len() {
-        // -- Line-start byte: always scalar (dot/space/tab positional escapes) --
         if col == 0 {
-            let at_line_end = line_len == 1 || i == last;
-            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            let _at_line_end = line_len == 1 || i == last;
+            let b = data[i];
+            let e = b.wrapping_add(42);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = e == 0x09 || e == 0x20 || e == 0x2E;
+            if critical || positional {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
+            col += 1;
+            if col == line_len {
+                std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
+                out_ptr = out_ptr.add(2);
+                col = 0;
+            }
             i += 1;
             continue;
         }
-
-        // -- Middle zone: col in [1, line_len-2] and not the last data byte --
-        // No positional escapes apply here; only critical bytes need escaping.
         let safe = if line_len > 1 {
-            // bytes until we'd hit the last position of this line
             let till_line_end = line_len - 1 - col;
-            // bytes until we'd hit the last byte of the data (needs scalar)
             let till_data_end = last.saturating_sub(i);
             till_line_end.min(till_data_end)
         } else {
             0
         };
-
-        // SIMD: 2×16-byte unrolled loop — halves branch overhead for lines ≥ 32B safe zone.
-        // The two loads are independent, giving the CPU better ILP than the 1×16 loop.
         let mut safe_rem = safe;
         while safe_rem >= 32 {
-            let p_a = data.as_ptr().add(i) as *const __m128i;
-            let p_b = data.as_ptr().add(i + 16) as *const __m128i;
-            let chunk_a = _mm_loadu_si128(p_a);
-            let chunk_b = _mm_loadu_si128(p_b);
+            let chunk_a = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
+            let chunk_b = _mm_loadu_si128(data.as_ptr().add(i + 16) as *const __m128i);
             let shifted_a = _mm_add_epi8(chunk_a, add42);
             let shifted_b = _mm_add_epi8(chunk_b, add42);
-
-            let any_a = _mm_or_si128(
+            let mask_a = _mm_movemask_epi8(_mm_or_si128(
                 _mm_or_si128(
                     _mm_cmpeq_epi8(shifted_a, v_nul),
                     _mm_cmpeq_epi8(shifted_a, v_lf),
@@ -365,8 +352,8 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                     _mm_cmpeq_epi8(shifted_a, v_cr),
                     _mm_cmpeq_epi8(shifted_a, v_eq),
                 ),
-            );
-            let any_b = _mm_or_si128(
+            ));
+            let mask_b = _mm_movemask_epi8(_mm_or_si128(
                 _mm_or_si128(
                     _mm_cmpeq_epi8(shifted_b, v_nul),
                     _mm_cmpeq_epi8(shifted_b, v_lf),
@@ -375,182 +362,219 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                     _mm_cmpeq_epi8(shifted_b, v_cr),
                     _mm_cmpeq_epi8(shifted_b, v_eq),
                 ),
-            );
-            let mask_a = _mm_movemask_epi8(any_a);
-            let mask_b = _mm_movemask_epi8(any_b);
-
-            if mask_a | mask_b == 0 {
-                // Fast path: both chunks clean — two consecutive stores.
-                let old_len = out.len();
-                let dst = out.as_mut_ptr().add(old_len);
-                _mm_storeu_si128(dst as *mut __m128i, shifted_a);
-                _mm_storeu_si128(dst.add(16) as *mut __m128i, shifted_b);
-                out.set_len(old_len + 32);
+            ));
+            if mask_a == 0 {
+                _mm_storeu_si128(out_ptr as *mut __m128i, shifted_a);
+                out_ptr = out_ptr.add(16);
             } else {
-                // Slow path: at least one critical byte somewhere in the 32B block.
-                if mask_a == 0 {
-                    let old_len = out.len();
-                    _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted_a);
-                    out.set_len(old_len + 16);
-                } else {
-                    let mut tmp = [0u8; 16];
-                    _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted_a);
-                    for &e in &tmp {
-                        emit_critical_only(out, e);
-                    }
-                }
-                if mask_b == 0 {
-                    let old_len = out.len();
-                    _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted_b);
-                    out.set_len(old_len + 16);
-                } else {
-                    let mut tmp = [0u8; 16];
-                    _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted_b);
-                    for &e in &tmp {
-                        emit_critical_only(out, e);
-                    }
-                }
+                let m_lo = (mask_a & 0xFF) as usize;
+                let de_lo = _mm_unpacklo_epi64(shifted_a, v_eq_const);
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            de_lo,
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
+                let m_hi = ((mask_a >> 8) & 0xFF) as usize;
+                let de_hi = _mm_unpackhi_epi64(shifted_a, v_eq_const);
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            de_hi,
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
             }
-
+            if mask_b == 0 {
+                _mm_storeu_si128(out_ptr as *mut __m128i, shifted_b);
+                out_ptr = out_ptr.add(16);
+            } else {
+                let m_lo = (mask_b & 0xFF) as usize;
+                let de_lo = _mm_unpacklo_epi64(shifted_b, v_eq_const);
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            de_lo,
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
+                let m_hi = ((mask_b >> 8) & 0xFF) as usize;
+                let de_hi = _mm_unpackhi_epi64(shifted_b, v_eq_const);
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            de_hi,
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
+            }
             i += 32;
             col += 32;
             safe_rem -= 32;
         }
-
-        // Single 16-byte chunk for the remainder (safe_rem in [16, 31]).
         while safe_rem >= 16 {
             let chunk = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
             let shifted = _mm_add_epi8(chunk, add42);
-
-            // Build escape mask for the four critical values.
-            let m0 = _mm_cmpeq_epi8(shifted, v_nul);
-            let m1 = _mm_cmpeq_epi8(shifted, v_lf);
-            let m2 = _mm_cmpeq_epi8(shifted, v_cr);
-            let m3 = _mm_cmpeq_epi8(shifted, v_eq);
-            let any = _mm_or_si128(_mm_or_si128(m0, m1), _mm_or_si128(m2, m3));
-            let needs_escape = _mm_movemask_epi8(any);
-
-            if needs_escape == 0 {
-                // Fast path: capacity guaranteed by pre-reserve; write directly.
-                let old_len = out.len();
-                _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted);
-                out.set_len(old_len + 16);
+            let mask = _mm_movemask_epi8(_mm_or_si128(
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted, v_nul),
+                    _mm_cmpeq_epi8(shifted, v_lf),
+                ),
+                _mm_or_si128(_mm_cmpeq_epi8(shifted, v_cr), _mm_cmpeq_epi8(shifted, v_eq)),
+            ));
+            if mask == 0 {
+                _mm_storeu_si128(out_ptr as *mut __m128i, shifted);
+                out_ptr = out_ptr.add(16);
             } else {
-                // Slow path: one or more critical bytes in this chunk.
-                let mut tmp = [0u8; 16];
-                _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted);
-                for &e in &tmp {
-                    emit_critical_only(out, e);
-                }
+                let m_lo = (mask & 0xFF) as usize;
+                let de_lo = _mm_unpacklo_epi64(shifted, v_eq_const);
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            de_lo,
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
+                let m_hi = ((mask >> 8) & 0xFF) as usize;
+                let de_hi = _mm_unpackhi_epi64(shifted, v_eq_const);
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            de_hi,
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
             }
-
             i += 16;
             col += 16;
             safe_rem -= 16;
         }
-
-        // Scalar tail of the safe zone (< 16 bytes, no positional escapes).
         while safe_rem > 0 {
-            emit_critical_only(out, data[i].wrapping_add(42));
+            let e = data[i].wrapping_add(42);
+            if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
             i += 1;
             col += 1;
             safe_rem -= 1;
         }
-
-        // -- Line-end byte OR last data byte: scalar --
-        // (positional escapes for space/tab at line end; also handles i==last)
         if i < data.len() {
             let at_line_end = col + 1 == line_len || i == last;
-            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            let b = data[i];
+            let e = b.wrapping_add(42);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional =
+                ((e == 0x09 || e == 0x20) && (col == 0 || at_line_end)) || (e == 0x2E && col == 0);
+            if critical || positional {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
+            col += 1;
+            if col == line_len {
+                std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
+                out_ptr = out_ptr.add(2);
+                col = 0;
+            }
             i += 1;
         }
     }
-
-    // Trailing CRLF for a partial line.
     if col != 0 {
-        out.extend_from_slice(b"\r\n");
+        std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
+        out_ptr = out_ptr.add(2);
     }
-}
-
-// --- AVX2 path (x86-64 only) ---
-
-/// AVX2-accelerated yEnc encoder. Falls back to SSSE3 or scalar when the
-/// required CPU features are absent (detected at runtime).
-///
-/// **Note:** for standard line lengths (128–256), SSSE3 is measurably faster
-/// because the safe-zone per line (`line_len - 2` bytes) does not fill an
-/// integer number of 32-byte AVX2 chunks, leaving a larger scalar tail than
-/// SSSE3 would. [`encode`] therefore dispatches to SSSE3 in practice; this
-/// function exists for benchmarking and for future multi-line processing.
-///
-/// Produces identical output to [`encode_scalar`] for all inputs.
-#[cfg(target_arch = "x86_64")]
-pub fn encode_avx2(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
-    if is_x86_feature_detected!("avx2") {
-        // SAFETY: we just confirmed the CPU supports AVX2.
-        unsafe { encode_avx2_impl(out, data, line_len) }
-    } else {
-        encode_ssse3(out, data, line_len)
-    }
-}
-
-/// Runtime-dispatched encoder: picks the fastest path available on this CPU.
-///
-/// For `line_len` values used in practice (128–256), SSSE3 (16-byte chunks)
-/// consistently outperforms AVX2 (32-byte chunks) because the safe zone per
-/// line — `line_len - 2` bytes — does not divide evenly into 32-byte chunks,
-/// leaving too large a scalar tail. AVX2 is kept for benchmarking and future
-/// multi-line processing (phase 27d).
-///
-/// Priority: SSSE3 > scalar. (AVX2 reserved for multi-line phase.)
-#[cfg(target_arch = "x86_64")]
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
-    if is_x86_feature_detected!("ssse3") {
-        unsafe { encode_ssse3_impl(out, data, line_len) }
-    } else {
-        encode_scalar(out, data, line_len)
-    }
-}
-
-/// Runtime-dispatched encoder for non-x86 targets (scalar only).
-#[cfg(not(target_arch = "x86_64"))]
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
-    encode_scalar(out, data, line_len)
+    out.set_len(out_ptr.offset_from(out_base) as usize);
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     use std::arch::x86_64::*;
-
     let line_len = line_len.max(1);
     if data.is_empty() {
         return;
     }
-
-    // Upper bound reserve: eliminates all per-chunk reserve() calls.
     out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
-
     let last = data.len() - 1;
     let add42 = _mm256_set1_epi8(42i8);
     let v_nul = _mm256_setzero_si256();
     let v_lf = _mm256_set1_epi8(0x0Au8 as i8);
     let v_cr = _mm256_set1_epi8(0x0Du8 as i8);
     let v_eq = _mm256_set1_epi8(0x3Du8 as i8);
-
+    let v_eq_const = _mm_set1_epi8(b'=' as i8);
     let mut i = 0usize;
     let mut col = 0usize;
-
+    let out_base = out.as_mut_ptr();
+    let mut out_ptr = out_base.add(out.len());
     while i < data.len() {
-        // -- Line-start byte: always scalar (dot/space/tab positional escapes) --
         if col == 0 {
-            let at_line_end = line_len == 1 || i == last;
-            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            let _at_line_end = line_len == 1 || i == last;
+            let b = data[i];
+            let e = b.wrapping_add(42);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = e == 0x09 || e == 0x20 || e == 0x2E;
+            if critical || positional {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
+            col += 1;
+            if col == line_len {
+                std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
+                out_ptr = out_ptr.add(2);
+                col = 0;
+            }
             i += 1;
             continue;
         }
-
-        // -- Middle zone: col in [1, line_len-2] and not the last data byte --
         let safe = if line_len > 1 {
             let till_line_end = line_len - 1 - col;
             let till_data_end = last.saturating_sub(i);
@@ -558,43 +582,108 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         } else {
             0
         };
-
-        // AVX2: 32-byte chunks
         let mut safe_rem = safe;
         while safe_rem >= 32 {
             let chunk = _mm256_loadu_si256(data.as_ptr().add(i) as *const __m256i);
             let shifted = _mm256_add_epi8(chunk, add42);
-
-            // Build escape mask for the four critical values.
-            let m0 = _mm256_cmpeq_epi8(shifted, v_nul);
-            let m1 = _mm256_cmpeq_epi8(shifted, v_lf);
-            let m2 = _mm256_cmpeq_epi8(shifted, v_cr);
-            let m3 = _mm256_cmpeq_epi8(shifted, v_eq);
-            let any = _mm256_or_si256(_mm256_or_si256(m0, m1), _mm256_or_si256(m2, m3));
-            let needs_escape = _mm256_movemask_epi8(any);
-
-            if needs_escape == 0 {
-                // Fast path: capacity guaranteed by pre-reserve; write directly.
-                let old_len = out.len();
-                _mm256_storeu_si256(out.as_mut_ptr().add(old_len) as *mut __m256i, shifted);
-                out.set_len(old_len + 32);
+            let any = _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(shifted, v_nul),
+                    _mm256_cmpeq_epi8(shifted, v_lf),
+                ),
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(shifted, v_cr),
+                    _mm256_cmpeq_epi8(shifted, v_eq),
+                ),
+            );
+            let mask = _mm256_movemask_epi8(any) as u32;
+            if mask == 0 {
+                _mm256_storeu_si256(out_ptr as *mut __m256i, shifted);
+                out_ptr = out_ptr.add(32);
             } else {
-                // Slow path: one or more critical bytes in this chunk.
-                let mut tmp = [0u8; 32];
-                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, shifted);
-                for &e in &tmp {
-                    emit_critical_only(out, e);
+                let s_lo = _mm256_extracti128_si256(shifted, 0);
+                let s_hi = _mm256_extracti128_si256(shifted, 1);
+                let m16_lo = mask & 0xFFFF;
+                if m16_lo == 0 {
+                    _mm_storeu_si128(out_ptr as *mut __m128i, s_lo);
+                    out_ptr = out_ptr.add(16);
+                } else {
+                    let m_lo = (m16_lo & 0xFF) as usize;
+                    _mm_storeu_si128(
+                        out_ptr as *mut __m128i,
+                        _mm_add_epi8(
+                            _mm_shuffle_epi8(
+                                _mm_unpacklo_epi64(s_lo, v_eq_const),
+                                _mm_loadu_si128(
+                                    SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                                ),
+                            ),
+                            _mm_loadu_si128(
+                                ADD_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                            ),
+                        ),
+                    );
+                    out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
+                    let m_hi = ((m16_lo >> 8) & 0xFF) as usize;
+                    _mm_storeu_si128(
+                        out_ptr as *mut __m128i,
+                        _mm_add_epi8(
+                            _mm_shuffle_epi8(
+                                _mm_unpackhi_epi64(s_lo, v_eq_const),
+                                _mm_loadu_si128(
+                                    SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                                ),
+                            ),
+                            _mm_loadu_si128(
+                                ADD_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                            ),
+                        ),
+                    );
+                    out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
+                }
+                let m16_hi = (mask >> 16) & 0xFFFF;
+                if m16_hi == 0 {
+                    _mm_storeu_si128(out_ptr as *mut __m128i, s_hi);
+                    out_ptr = out_ptr.add(16);
+                } else {
+                    let m_lo = (m16_hi & 0xFF) as usize;
+                    _mm_storeu_si128(
+                        out_ptr as *mut __m128i,
+                        _mm_add_epi8(
+                            _mm_shuffle_epi8(
+                                _mm_unpacklo_epi64(s_hi, v_eq_const),
+                                _mm_loadu_si128(
+                                    SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                                ),
+                            ),
+                            _mm_loadu_si128(
+                                ADD_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                            ),
+                        ),
+                    );
+                    out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
+                    let m_hi = ((m16_hi >> 8) & 0xFF) as usize;
+                    _mm_storeu_si128(
+                        out_ptr as *mut __m128i,
+                        _mm_add_epi8(
+                            _mm_shuffle_epi8(
+                                _mm_unpackhi_epi64(s_hi, v_eq_const),
+                                _mm_loadu_si128(
+                                    SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                                ),
+                            ),
+                            _mm_loadu_si128(
+                                ADD_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                            ),
+                        ),
+                    );
+                    out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
                 }
             }
-
             i += 32;
             col += 32;
             safe_rem -= 32;
         }
-
-        // SSSE3 remainder: 16-byte chunks from what AVX2 couldn't cover.
-        // Reuse the 128-bit registers rather than calling encode_ssse3_impl to
-        // avoid re-entering the outer boundary logic.
         let add42_128 = _mm_set1_epi8(42i8);
         let v_nul_128 = _mm_setzero_si128();
         let v_lf_128 = _mm_set1_epi8(0x0Au8 as i8);
@@ -603,50 +692,630 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
         while safe_rem >= 16 {
             let chunk = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
             let shifted = _mm_add_epi8(chunk, add42_128);
-            let m0 = _mm_cmpeq_epi8(shifted, v_nul_128);
-            let m1 = _mm_cmpeq_epi8(shifted, v_lf_128);
-            let m2 = _mm_cmpeq_epi8(shifted, v_cr_128);
-            let m3 = _mm_cmpeq_epi8(shifted, v_eq_128);
-            let any = _mm_or_si128(_mm_or_si128(m0, m1), _mm_or_si128(m2, m3));
-            if _mm_movemask_epi8(any) == 0 {
-                let old_len = out.len();
-                _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted);
-                out.set_len(old_len + 16);
+            let mask = _mm_movemask_epi8(_mm_or_si128(
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted, v_nul_128),
+                    _mm_cmpeq_epi8(shifted, v_lf_128),
+                ),
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted, v_cr_128),
+                    _mm_cmpeq_epi8(shifted, v_eq_128),
+                ),
+            ));
+            if mask == 0 {
+                _mm_storeu_si128(out_ptr as *mut __m128i, shifted);
+                out_ptr = out_ptr.add(16);
             } else {
-                let mut tmp = [0u8; 16];
-                _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted);
-                for &e in &tmp {
-                    emit_critical_only(out, e);
-                }
+                let m_lo = (mask & 0xFF) as usize;
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            _mm_unpacklo_epi64(shifted, v_eq_const),
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_lo).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_lo) as usize);
+                let m_hi = ((mask >> 8) & 0xFF) as usize;
+                _mm_storeu_si128(
+                    out_ptr as *mut __m128i,
+                    _mm_add_epi8(
+                        _mm_shuffle_epi8(
+                            _mm_unpackhi_epi64(shifted, v_eq_const),
+                            _mm_loadu_si128(
+                                SHUFFLE_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i
+                            ),
+                        ),
+                        _mm_loadu_si128(ADD_TABLE.get_unchecked(m_hi).as_ptr() as *const __m128i),
+                    ),
+                );
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(m_hi) as usize);
             }
             i += 16;
             col += 16;
             safe_rem -= 16;
         }
-
-        // Scalar tail of the safe zone (< 16 bytes, no positional escapes).
         while safe_rem > 0 {
-            emit_critical_only(out, data[i].wrapping_add(42));
+            let e = data[i].wrapping_add(42);
+            if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
             i += 1;
             col += 1;
             safe_rem -= 1;
         }
-
-        // -- Line-end byte OR last data byte: scalar --
         if i < data.len() {
             let at_line_end = col + 1 == line_len || i == last;
-            emit_scalar(out, data[i], &mut col, line_len, at_line_end);
+            let b = data[i];
+            let e = b.wrapping_add(42);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional =
+                ((e == 0x09 || e == 0x20) && (col == 0 || at_line_end)) || (e == 0x2E && col == 0);
+            if critical || positional {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
+            col += 1;
+            if col == line_len {
+                std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
+                out_ptr = out_ptr.add(2);
+                col = 0;
+            }
             i += 1;
         }
     }
-
-    // Trailing CRLF for a partial line.
     if col != 0 {
-        out.extend_from_slice(b"\r\n");
+        std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
+        out_ptr = out_ptr.add(2);
     }
+    out.set_len(out_ptr.offset_from(out_base) as usize);
 }
+pub static SHUFFLE_TABLE: [[u8; 16]; 256] = [
+    [
+        0, 1, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255, 255,
+    ],
+    [8, 0, 1, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 5, 6, 7, 255, 255, 255, 255],
+    [0, 1, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 6, 7, 255, 255, 255],
+    [0, 1, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 6, 7, 255, 255, 255],
+    [0, 1, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 7, 255, 255],
+    [0, 1, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 5, 8, 6, 7, 255, 255, 255],
+    [0, 1, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 7, 255, 255],
+    [0, 1, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 7, 255, 255],
+    [0, 1, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 7, 255],
+    [0, 1, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 5, 6, 8, 7, 255, 255, 255],
+    [0, 1, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 6, 8, 7, 255, 255],
+    [0, 1, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 6, 8, 7, 255, 255],
+    [0, 1, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 6, 8, 7, 255],
+    [0, 1, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 1, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 5, 8, 6, 8, 7, 255, 255],
+    [0, 1, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255],
+    [0, 1, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 5, 8, 6, 8, 7, 255],
+    [0, 1, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [0, 8, 1, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 1, 8, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 8, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [0, 1, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [0, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 4, 8, 5, 8, 6, 8, 7, 255],
+    [0, 1, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255, 255],
+    [8, 0, 1, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [0, 8, 1, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 8, 1, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [0, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [8, 0, 8, 1, 8, 2, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255],
+    [0, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255, 255],
+    [8, 0, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [8, 0, 8, 1, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255],
+    [0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255, 255],
+    [8, 0, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255],
+    [0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7, 255],
+    [8, 0, 8, 1, 8, 2, 8, 3, 8, 4, 8, 5, 8, 6, 8, 7],
+];
+pub static ADD_TABLE: [[u8; 16]; 256] = [
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0],
+    [0, 0, 0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0],
+    [0, 0, 0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0],
+    [0, 0, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0],
+    [0, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0, 0],
+    [0, 64, 0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 64, 0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0],
+    [0, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0, 0],
+    [0, 64, 0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 64, 0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0],
+    [0, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 0],
+    [0, 64, 0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0],
+    [0, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0],
+    [0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64, 0, 64],
+];
+pub static LEN_TABLE: [u8; 256] = [
+    8, 9, 9, 10, 9, 10, 10, 11, 9, 10, 10, 11, 10, 11, 11, 12, 9, 10, 10, 11, 10, 11, 11, 12, 10,
+    11, 11, 12, 11, 12, 12, 13, 9, 10, 10, 11, 10, 11, 11, 12, 10, 11, 11, 12, 11, 12, 12, 13, 10,
+    11, 11, 12, 11, 12, 12, 13, 11, 12, 12, 13, 12, 13, 13, 14, 9, 10, 10, 11, 10, 11, 11, 12, 10,
+    11, 11, 12, 11, 12, 12, 13, 10, 11, 11, 12, 11, 12, 12, 13, 11, 12, 12, 13, 12, 13, 13, 14, 10,
+    11, 11, 12, 11, 12, 12, 13, 11, 12, 12, 13, 12, 13, 13, 14, 11, 12, 12, 13, 12, 13, 13, 14, 12,
+    13, 13, 14, 13, 14, 14, 15, 9, 10, 10, 11, 10, 11, 11, 12, 10, 11, 11, 12, 11, 12, 12, 13, 10,
+    11, 11, 12, 11, 12, 12, 13, 11, 12, 12, 13, 12, 13, 13, 14, 10, 11, 11, 12, 11, 12, 12, 13, 11,
+    12, 12, 13, 12, 13, 13, 14, 11, 12, 12, 13, 12, 13, 13, 14, 12, 13, 13, 14, 13, 14, 14, 15, 10,
+    11, 11, 12, 11, 12, 12, 13, 11, 12, 12, 13, 12, 13, 13, 14, 11, 12, 12, 13, 12, 13, 13, 14, 12,
+    13, 13, 14, 13, 14, 14, 15, 11, 12, 12, 13, 12, 13, 13, 14, 12, 13, 13, 14, 13, 14, 14, 15, 12,
+    13, 13, 14, 13, 14, 14, 15, 13, 14, 14, 15, 14, 15, 15, 16,
+];
 
-#[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
 
@@ -913,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_escaped_at_line_end() {
+    fn tab_escapedat_line_end() {
         // line_len=4: positions 0,1,2,3 → position 3 is the last in the line.
         let data = [0x00, 0x00, 0x00, TAB_IN];
         let enc = encode_s(&data, 4);
@@ -936,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn space_escaped_at_line_end() {
+    fn space_escapedat_line_end() {
         let data = [0x00, 0x00, 0x00, SP_IN];
         let enc = encode_s(&data, 4);
         assert_eq!(&enc[..3], &[0x2A, 0x2A, 0x2A]);
@@ -1003,6 +1672,7 @@ mod tests {
     }
 
     /// Macro: assert SSSE3 output equals scalar output for `data` and `line_len`.
+    #[allow(unused_macros)]
     macro_rules! assert_ssse3_eq {
         ($data:expr, $line_len:expr) => {{
             #[cfg(target_arch = "x86_64")]
@@ -1102,6 +1772,7 @@ mod tests {
         out
     }
 
+    #[allow(unused_macros)]
     macro_rules! assert_avx2_eq {
         ($data:expr, $line_len:expr) => {{
             #[cfg(target_arch = "x86_64")]

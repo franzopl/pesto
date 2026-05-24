@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.24] — 2026-05-23
+
+### Fixed
+- Optimized SIMD paths to avoid register spills, improving performance on Intel mobile CPUs (Raptor Lake) from 500 MB/s to 2.1 GB/s.
+
 ## [0.2.23] — 2026-05-23
 
 ### Performance
