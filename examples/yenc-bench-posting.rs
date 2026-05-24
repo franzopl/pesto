@@ -2,15 +2,14 @@
 /// - Multiple file segments being encoded in parallel (like posting multiple articles)
 /// - Uses rayon thread pool (matches pesto's real posting architecture)
 /// - Compares against node-yencode single-threaded
-
 use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use pesto::yenc::encode_part;
+use rayon::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
