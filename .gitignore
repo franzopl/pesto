@@ -13,4 +13,5 @@ bench_*.bin
 *.par2
 /bench_par2_out/
 /bench_out/
+/bench_yenc_out/
 /file10M.bin
