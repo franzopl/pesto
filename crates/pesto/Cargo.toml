@@ -1,32 +1,26 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/parmesan",
-    "crates/pesto",
-    "crates/upapasta",
-]
-
-[workspace.package]
-version = "0.4.0"
-edition = "2021"
-rust-version = "1.89"
-license = "MIT"
-repository = "https://github.com/franzopl/pesto"
-homepage = "https://github.com/franzopl/pesto"
-
 [package]
-name = "pesto-root"
+name = "pesto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Monorepo root for pesto + upapasta"
+description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation. Also provides the core library used by upapasta."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-publish = false
+readme = "README.md"
+keywords = ["usenet", "nntp", "yenc", "nzb", "par2"]
+categories = ["command-line-utilities", "network-programming"]
+
+[lib]
+name = "pesto"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pesto"
+path = "src/bin/pesto.rs"
 
 [dependencies]
-parmesan = { package = "parmesan-par2", version = "0.1.0", path = "crates/parmesan", default-features = false }
+parmesan = { package = "parmesan-par2", version = "0.1.0", path = "../parmesan", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 md-5 = "0.10"
@@ -46,26 +40,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-# Exposes internal per-path flush functions for micro-benchmarking individual SIMD paths.
-# Never enable this in production builds.
 bench-internals = ["parmesan/bench-internals"]
-# Exposes the AVX2+GFNI and AVX-512+GFNI flush paths for testing/benchmarking.
 par2-avx2-gfni-unsafe = ["parmesan/par2-avx2-gfni-unsafe"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
-
-[[bench]]
-name = "par2_encoder"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "yenc"
-harness = false
-
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
