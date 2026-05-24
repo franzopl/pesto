@@ -207,6 +207,31 @@ Results after 27b:
 - [x] nyuu reference (~1200 MB/s / ~2400 MB/s) printed after each section.
 - [x] SSSE3 at ll=256 reaches 2294 MB/s — 96% of nyuu's documented target.
 
+---
+
+## Phase 28 — SSSE3 Loop Unrolling
+
+### 28a — 2×16-byte unrolled inner loop *(low complexity)* ✅
+
+At ll=128 the SSSE3 safe zone is 126 B → 7 single-chunk iterations per line.
+At ll=256 the safe zone is 254 B → 15 iterations. Processing one 16-byte chunk
+per iteration means 15 branch checks and 15 pointer/counter updates per line —
+overhead that accounts for the ~4% gap to nyuu at ll=256.
+
+Fix: add a `while safe_rem >= 32` unrolled loop before the existing
+`while safe_rem >= 16`. Each iteration loads two independent `__m128i` chunks,
+computes their escape masks in parallel (ILP), and takes a single combined
+fast-path store when both masks are zero.
+
+- [x] Add 2×16-byte unrolled loop in `encode_ssse3_impl` (inside safe zone).
+- [x] Combined `mask_a | mask_b == 0` fast path: two consecutive `_mm_storeu_si128` writes without extra branching.
+- [x] Slow path: handle each chunk individually (same logic as before).
+- [x] All 243 tests pass (golden-reference suite unchanged).
+
+Results after 28a:
+  ll=128  encode (disp): **1865 MB/s** (1.55× nyuu) ✓
+  ll=256  encode (disp): **2365 MB/s** (0.99× nyuu) — 1% gap remaining
+
 ### 27d — DEFAULT_LINE_LENGTH: evaluate raising to 256 *(medium complexity)*
 
 `line_len=128` is historical (yEnc draft spec, 2001). Many modern servers

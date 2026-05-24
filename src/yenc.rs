@@ -345,8 +345,79 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             0
         };
 
-        // SIMD: 16-byte chunks
+        // SIMD: 2×16-byte unrolled loop — halves branch overhead for lines ≥ 32B safe zone.
+        // The two loads are independent, giving the CPU better ILP than the 1×16 loop.
         let mut safe_rem = safe;
+        while safe_rem >= 32 {
+            let p_a = data.as_ptr().add(i) as *const __m128i;
+            let p_b = data.as_ptr().add(i + 16) as *const __m128i;
+            let chunk_a = _mm_loadu_si128(p_a);
+            let chunk_b = _mm_loadu_si128(p_b);
+            let shifted_a = _mm_add_epi8(chunk_a, add42);
+            let shifted_b = _mm_add_epi8(chunk_b, add42);
+
+            let any_a = _mm_or_si128(
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted_a, v_nul),
+                    _mm_cmpeq_epi8(shifted_a, v_lf),
+                ),
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted_a, v_cr),
+                    _mm_cmpeq_epi8(shifted_a, v_eq),
+                ),
+            );
+            let any_b = _mm_or_si128(
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted_b, v_nul),
+                    _mm_cmpeq_epi8(shifted_b, v_lf),
+                ),
+                _mm_or_si128(
+                    _mm_cmpeq_epi8(shifted_b, v_cr),
+                    _mm_cmpeq_epi8(shifted_b, v_eq),
+                ),
+            );
+            let mask_a = _mm_movemask_epi8(any_a);
+            let mask_b = _mm_movemask_epi8(any_b);
+
+            if mask_a | mask_b == 0 {
+                // Fast path: both chunks clean — two consecutive stores.
+                let old_len = out.len();
+                let dst = out.as_mut_ptr().add(old_len);
+                _mm_storeu_si128(dst as *mut __m128i, shifted_a);
+                _mm_storeu_si128(dst.add(16) as *mut __m128i, shifted_b);
+                out.set_len(old_len + 32);
+            } else {
+                // Slow path: at least one critical byte somewhere in the 32B block.
+                if mask_a == 0 {
+                    let old_len = out.len();
+                    _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted_a);
+                    out.set_len(old_len + 16);
+                } else {
+                    let mut tmp = [0u8; 16];
+                    _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted_a);
+                    for &e in &tmp {
+                        emit_critical_only(out, e);
+                    }
+                }
+                if mask_b == 0 {
+                    let old_len = out.len();
+                    _mm_storeu_si128(out.as_mut_ptr().add(old_len) as *mut __m128i, shifted_b);
+                    out.set_len(old_len + 16);
+                } else {
+                    let mut tmp = [0u8; 16];
+                    _mm_storeu_si128(tmp.as_mut_ptr() as *mut __m128i, shifted_b);
+                    for &e in &tmp {
+                        emit_critical_only(out, e);
+                    }
+                }
+            }
+
+            i += 32;
+            col += 32;
+            safe_rem -= 32;
+        }
+
+        // Single 16-byte chunk for the remainder (safe_rem in [16, 31]).
         while safe_rem >= 16 {
             let chunk = _mm_loadu_si128(data.as_ptr().add(i) as *const __m128i);
             let shifted = _mm_add_epi8(chunk, add42);
