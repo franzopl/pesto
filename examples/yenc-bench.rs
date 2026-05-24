@@ -4,7 +4,12 @@ use std::io::Read;
 use std::time::Instant;
 
 // We use the yenc module from the pesto crate.
+#[cfg(target_arch = "x86_64")]
 use pesto::yenc::{encode, encode_avx2, encode_scalar, encode_ssse3};
+#[cfg(target_arch = "aarch64")]
+use pesto::yenc::{encode, encode_neon, encode_scalar};
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+use pesto::yenc::{encode, encode_scalar};
 
 type BenchFn = fn(&mut Vec<u8>, &[u8], usize);
 
@@ -12,7 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: yenc-bench <file> [line_len] [path]");
+        #[cfg(target_arch = "x86_64")]
         eprintln!("Paths: auto (default), scalar, ssse3, avx2");
+        #[cfg(target_arch = "aarch64")]
+        eprintln!("Paths: auto (default), scalar, neon");
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        eprintln!("Paths: auto (default), scalar");
         std::process::exit(1);
     }
 
@@ -31,8 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bench_fn: BenchFn = match path_select {
         "scalar" => encode_scalar,
+        #[cfg(target_arch = "x86_64")]
         "ssse3" => encode_ssse3,
+        #[cfg(target_arch = "x86_64")]
         "avx2" => encode_avx2,
+        #[cfg(target_arch = "aarch64")]
+        "neon" => encode_neon,
         _ => encode,
     };
 

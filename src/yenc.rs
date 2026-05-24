@@ -117,50 +117,52 @@ pub fn encode_part(
     let begin = spec.offset + 1;
     let end = spec.offset + data.len() as u64;
 
-    // Encoded data is roughly the same size as the input, plus escapes and
-    // line endings; reserve generously to avoid reallocations on the hot path.
-    let mut body = Vec::with_capacity(data.len() + data.len() / 32 + 128);
-
-    if multipart {
-        body.extend_from_slice(
-            format!(
-                "=ybegin part={} total={} line={} size={} name={}\r\n",
-                spec.number, spec.total, line_len, file_size, name
-            )
-            .as_bytes(),
-        );
-        body.extend_from_slice(format!("=ypart begin={} end={}\r\n", begin, end).as_bytes());
+    let ybegin = if multipart {
+        format!(
+            "=ybegin part={} total={} line={} size={} name={}\r\n",
+            spec.number, spec.total, line_len, file_size, name
+        )
     } else {
-        body.extend_from_slice(
-            format!(
-                "=ybegin line={} size={} name={}\r\n",
-                line_len, file_size, name
-            )
-            .as_bytes(),
+        format!(
+            "=ybegin line={} size={} name={}\r\n",
+            line_len, file_size, name
+        )
+    };
+
+    let ypart = if multipart {
+        Some(format!("=ypart begin={} end={}\r\n", begin, end))
+    } else {
+        None
+    };
+
+    let yend = if multipart {
+        let mut s = format!(
+            "=yend size={} part={} pcrc32={:08x}",
+            data.len(),
+            spec.number,
+            part_crc
         );
+        if let Some(file_crc) = file_crc32 {
+            s.push_str(&format!(" crc32={:08x}", file_crc));
+        }
+        s.push_str("\r\n");
+        s
+    } else {
+        format!("=yend size={} crc32={:08x}\r\n", data.len(), part_crc)
+    };
+
+    let data_encoded_size = encoded_size(data, line_len);
+    let total_capacity = ybegin.len() + ypart.as_ref().map_or(0, |p| p.len()) + data_encoded_size + yend.len();
+
+    let mut body = Vec::with_capacity(total_capacity);
+
+    body.extend_from_slice(ybegin.as_bytes());
+    if let Some(p) = ypart {
+        body.extend_from_slice(p.as_bytes());
     }
 
     encode(&mut body, data, line_len);
-
-    if multipart {
-        body.extend_from_slice(
-            format!(
-                "=yend size={} part={} pcrc32={:08x}",
-                data.len(),
-                spec.number,
-                part_crc
-            )
-            .as_bytes(),
-        );
-        if let Some(file_crc) = file_crc32 {
-            body.extend_from_slice(format!(" crc32={:08x}", file_crc).as_bytes());
-        }
-        body.extend_from_slice(b"\r\n");
-    } else {
-        body.extend_from_slice(
-            format!("=yend size={} crc32={:08x}\r\n", data.len(), part_crc).as_bytes(),
-        );
-    }
+    body.extend_from_slice(yend.as_bytes());
 
     EncodedPart {
         number: spec.number,
@@ -182,27 +184,101 @@ pub fn encoded_size(data: &[u8], line_len: usize) -> usize {
     if data.is_empty() {
         return 0;
     }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { encoded_size_neon(data, line_len) };
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let last = data.len() - 1;
+        let mut escapes = 0usize;
+        let mut col = 0usize;
+
+        for (i, &b) in data.iter().enumerate() {
+            let e = b.wrapping_add(42);
+            let at_line_start = col == 0;
+            let at_line_end = col + 1 == line_len || i == last;
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
+                || (e == 0x2E && at_line_start);
+            if critical || positional {
+                escapes += 1;
+            }
+            col += 1;
+            if col == line_len {
+                col = 0;
+            }
+        }
+
+        // One CRLF per complete line, plus one trailing CRLF for a partial final line.
+        let lines = data.len().div_ceil(line_len);
+        data.len() + escapes + lines * 2
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn encoded_size_neon(data: &[u8], line_len: usize) -> usize {
+    use std::arch::aarch64::*;
     let last = data.len() - 1;
     let mut escapes = 0usize;
+    let mut i = 0usize;
     let mut col = 0usize;
 
-    for (i, &b) in data.iter().enumerate() {
-        let e = b.wrapping_add(42);
-        let at_line_start = col == 0;
-        let at_line_end = col + 1 == line_len || i == last;
-        let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
-        let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
-            || (e == 0x2E && at_line_start);
-        if critical || positional {
-            escapes += 1;
+    let v_add42 = vdupq_n_u8(42);
+    let v_nul = vdupq_n_u8(0x00);
+    let v_lf = vdupq_n_u8(0x0A);
+    let v_cr = vdupq_n_u8(0x0D);
+    let v_eq = vdupq_n_u8(0x3D);
+
+    while i < data.len() {
+        if col == 0 || col + 16 >= line_len || i + 16 >= data.len() {
+            let e = data[i].wrapping_add(42);
+            let at_line_start = col == 0;
+            let at_line_end = col + 1 == line_len || i == last;
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
+                || (e == 0x2E && at_line_start);
+            if critical || positional {
+                escapes += 1;
+            }
+            col += 1;
+            if col == line_len {
+                col = 0;
+            }
+            i += 1;
+            continue;
         }
-        col += 1;
-        if col == line_len {
-            col = 0;
+
+        let till_line_end = line_len - 1 - col;
+        let till_data_end = last.saturating_sub(i);
+        let mut safe_rem = till_line_end.min(till_data_end);
+
+        while safe_rem >= 16 {
+            let chunk = vld1q_u8(data.as_ptr().add(i));
+            let shifted = vaddq_u8(chunk, v_add42);
+            let mask = vorrq_u8(
+                vorrq_u8(vceqq_u8(shifted, v_nul), vceqq_u8(shifted, v_lf)),
+                vorrq_u8(vceqq_u8(shifted, v_cr), vceqq_u8(shifted, v_eq)),
+            );
+
+            let bits = vcntq_u8(mask);
+            let sum = vaddvq_u8(bits) as usize;
+            escapes += sum / 8;
+
+            i += 16; col += 16; safe_rem -= 16;
+        }
+
+        while safe_rem > 0 {
+            let e = data[i].wrapping_add(42);
+            if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
+                escapes += 1;
+            }
+            i += 1; col += 1; safe_rem -= 1;
         }
     }
 
-    // One CRLF per complete line, plus one trailing CRLF for a partial final line.
     let lines = data.len().div_ceil(line_len);
     data.len() + escapes + lines * 2
 }
@@ -222,31 +298,44 @@ pub fn encode_scalar(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     let last = data.len().saturating_sub(1);
     let mut col = 0usize;
 
-    for (i, &b) in data.iter().enumerate() {
-        let at_line_start = col == 0;
-        let at_line_end = col + 1 == line_len || i == last;
-        let e = b.wrapping_add(42);
+    unsafe {
+        let out_base = out.as_mut_ptr();
+        let mut out_ptr = out_base.add(out.len());
 
-        let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
-        let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
-            || (e == 0x2E && at_line_start);
+        for (i, &b) in data.iter().enumerate() {
+            let e = b.wrapping_add(42);
+            let at_line_start = col == 0;
+            let at_line_end = col + 1 == line_len || i == last;
 
-        if critical || positional {
-            out.push(b'=');
-            out.push(e.wrapping_add(64));
-        } else {
-            out.push(e);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = ((e == 0x09 || e == 0x20) && (at_line_start || at_line_end))
+                || (e == 0x2E && at_line_start);
+
+            if critical || positional {
+                *out_ptr = b'=';
+                *out_ptr.add(1) = e.wrapping_add(64);
+                out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e;
+                out_ptr = out_ptr.add(1);
+            }
+
+            col += 1;
+            if col == line_len {
+                *out_ptr = b'\r';
+                *out_ptr.add(1) = b'\n';
+                out_ptr = out_ptr.add(2);
+                col = 0;
+            }
         }
 
-        col += 1;
-        if col == line_len {
-            out.extend_from_slice(b"\r\n");
-            col = 0;
+        if col != 0 {
+            *out_ptr = b'\r';
+            *out_ptr.add(1) = b'\n';
+            out_ptr = out_ptr.add(2);
         }
-    }
 
-    if col != 0 {
-        out.extend_from_slice(b"\r\n");
+        out.set_len(out_ptr.offset_from(out_base) as usize);
     }
 }
 
@@ -284,6 +373,22 @@ pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     } else {
         encode_scalar(out, data, line_len)
     }
+}
+
+/// NEON-accelerated yEnc encoder for ARM.
+#[cfg(target_arch = "aarch64")]
+pub fn encode_neon(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    unsafe { encode_neon_impl(out, data, line_len) }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    unsafe { encode_neon_impl(out, data, line_len) }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    encode_scalar(out, data, line_len)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -780,6 +885,204 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     if col != 0 {
         std::ptr::copy_nonoverlapping(b"\r\n".as_ptr(), out_ptr, 2);
         out_ptr = out_ptr.add(2);
+    }
+    out.set_len(out_ptr.offset_from(out_base) as usize);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn encode_neon_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    use std::arch::aarch64::*;
+    let line_len = line_len.max(1);
+    if data.is_empty() { return; }
+    // Reservation is now handled by encode_part, but we keep a local
+    // reserve for direct calls.
+    out.reserve(data.len() * 2 + (data.len() / line_len + 1) * 2);
+    let last = data.len() - 1;
+    let v_add42 = vdupq_n_u8(42);
+    let v_nul = vdupq_n_u8(0x00);
+    let v_lf = vdupq_n_u8(0x0A);
+    let v_cr = vdupq_n_u8(0x0D);
+    let v_eq = vdupq_n_u8(0x3D);
+    let v_eq_const = vdupq_n_u8(b'=');
+    let v_weights = vld1q_u8([1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128].as_ptr());
+
+    let mut i = 0usize;
+    let mut col = 0usize;
+    let out_base = out.as_mut_ptr();
+    let mut out_ptr = out_base.add(out.len());
+
+    while i < data.len() {
+        if col == 0 {
+            let b = data[i];
+            let e = b.wrapping_add(42);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = e == 0x09 || e == 0x20 || e == 0x2E;
+            if critical || positional {
+                *out_ptr = b'='; *out_ptr.add(1) = e.wrapping_add(64); out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e; out_ptr = out_ptr.add(1);
+            }
+            col += 1;
+            if col == line_len {
+                *out_ptr = b'\r'; *out_ptr.add(1) = b'\n'; out_ptr = out_ptr.add(2);
+                col = 0;
+            }
+            i += 1;
+            continue;
+        }
+
+        let till_line_end = line_len - 1 - col;
+        let till_data_end = last.saturating_sub(i);
+        let mut safe_rem = till_line_end.min(till_data_end);
+
+        while safe_rem >= 64 {
+            let chunk0 = vld1q_u8(data.as_ptr().add(i));
+            let chunk1 = vld1q_u8(data.as_ptr().add(i + 16));
+            let chunk2 = vld1q_u8(data.as_ptr().add(i + 32));
+            let chunk3 = vld1q_u8(data.as_ptr().add(i + 48));
+            let s0 = vaddq_u8(chunk0, v_add42);
+            let s1 = vaddq_u8(chunk1, v_add42);
+            let s2 = vaddq_u8(chunk2, v_add42);
+            let s3 = vaddq_u8(chunk3, v_add42);
+            let m0 = vorrq_u8(vorrq_u8(vceqq_u8(s0, v_nul), vceqq_u8(s0, v_lf)), vorrq_u8(vceqq_u8(s0, v_cr), vceqq_u8(s0, v_eq)));
+            let m1 = vorrq_u8(vorrq_u8(vceqq_u8(s1, v_nul), vceqq_u8(s1, v_lf)), vorrq_u8(vceqq_u8(s1, v_cr), vceqq_u8(s1, v_eq)));
+            let m2 = vorrq_u8(vorrq_u8(vceqq_u8(s2, v_nul), vceqq_u8(s2, v_lf)), vorrq_u8(vceqq_u8(s2, v_cr), vceqq_u8(s2, v_eq)));
+            let m3 = vorrq_u8(vorrq_u8(vceqq_u8(s3, v_nul), vceqq_u8(s3, v_lf)), vorrq_u8(vceqq_u8(s3, v_cr), vceqq_u8(s3, v_eq)));
+
+            if vmaxvq_u8(vorrq_u8(vorrq_u8(m0, m1), vorrq_u8(m2, m3))) == 0 {
+                vst1q_u8(out_ptr, s0);
+                vst1q_u8(out_ptr.add(16), s1);
+                vst1q_u8(out_ptr.add(32), s2);
+                vst1q_u8(out_ptr.add(48), s3);
+                out_ptr = out_ptr.add(64);
+                i += 64; col += 64; safe_rem -= 64;
+            } else {
+                for (chunk_s, chunk_m) in [(s0, m0), (s1, m1), (s2, m2), (s3, m3)] {
+                    if vmaxvq_u8(chunk_m) == 0 {
+                        vst1q_u8(out_ptr, chunk_s);
+                        out_ptr = out_ptr.add(16);
+                    } else {
+                        let weighted = vandq_u8(chunk_m, v_weights);
+                        let sum_lo = vaddv_u8(vget_low_u8(weighted)) as usize;
+                        let sum_hi = vaddv_u8(vget_high_u8(weighted)) as usize;
+                        let de_lo = vcombine_u8(vget_low_u8(chunk_s), vget_low_u8(v_eq_const));
+                        let de_hi = vcombine_u8(vget_high_u8(chunk_s), vget_low_u8(v_eq_const));
+                        let res_lo = vaddq_u8(vqtbl1q_u8(de_lo, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_lo).as_ptr()));
+                        vst1q_u8(out_ptr, res_lo);
+                        out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_lo) as usize);
+                        let res_hi = vaddq_u8(vqtbl1q_u8(de_hi, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_hi).as_ptr()));
+                        vst1q_u8(out_ptr, res_hi);
+                        out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_hi) as usize);
+                    }
+                    i += 16; col += 16;
+                }
+                safe_rem -= 64;
+            }
+        }
+
+        while safe_rem >= 32 {
+            let chunk0 = vld1q_u8(data.as_ptr().add(i));
+            let chunk1 = vld1q_u8(data.as_ptr().add(i + 16));
+            let s0 = vaddq_u8(chunk0, v_add42);
+            let s1 = vaddq_u8(chunk1, v_add42);
+            let m0 = vorrq_u8(
+                vorrq_u8(vceqq_u8(s0, v_nul), vceqq_u8(s0, v_lf)),
+                vorrq_u8(vceqq_u8(s0, v_cr), vceqq_u8(s0, v_eq)),
+            );
+            let m1 = vorrq_u8(
+                vorrq_u8(vceqq_u8(s1, v_nul), vceqq_u8(s1, v_lf)),
+                vorrq_u8(vceqq_u8(s1, v_cr), vceqq_u8(s1, v_eq)),
+            );
+
+            if vmaxvq_u8(vorrq_u8(m0, m1)) == 0 {
+                vst1q_u8(out_ptr, s0);
+                vst1q_u8(out_ptr.add(16), s1);
+                out_ptr = out_ptr.add(32);
+                i += 32; col += 32; safe_rem -= 32;
+            } else {
+                // If any escapes in 32B, handle 16B chunks individually with shuffle expansion
+                for (chunk_s, chunk_m) in [(s0, m0), (s1, m1)] {
+                    if vmaxvq_u8(chunk_m) == 0 {
+                        vst1q_u8(out_ptr, chunk_s);
+                        out_ptr = out_ptr.add(16);
+                    } else {
+                        let weighted = vandq_u8(chunk_m, v_weights);
+                        let sum_lo = vaddv_u8(vget_low_u8(weighted)) as usize;
+                        let sum_hi = vaddv_u8(vget_high_u8(weighted)) as usize;
+                        let de_lo = vcombine_u8(vget_low_u8(chunk_s), vget_low_u8(v_eq_const));
+                        let de_hi = vcombine_u8(vget_high_u8(chunk_s), vget_low_u8(v_eq_const));
+                        let res_lo = vaddq_u8(vqtbl1q_u8(de_lo, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_lo).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_lo).as_ptr()));
+                        vst1q_u8(out_ptr, res_lo);
+                        out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_lo) as usize);
+                        let res_hi = vaddq_u8(vqtbl1q_u8(de_hi, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_hi).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_hi).as_ptr()));
+                        vst1q_u8(out_ptr, res_hi);
+                        out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_hi) as usize);
+                    }
+                    i += 16; col += 16;
+                }
+                safe_rem -= 32;
+            }
+        }
+
+        while safe_rem >= 16 {
+            let chunk = vld1q_u8(data.as_ptr().add(i));
+            let shifted = vaddq_u8(chunk, v_add42);
+            let mask = vorrq_u8(
+                vorrq_u8(vceqq_u8(shifted, v_nul), vceqq_u8(shifted, v_lf)),
+                vorrq_u8(vceqq_u8(shifted, v_cr), vceqq_u8(shifted, v_eq)),
+            );
+
+            if vmaxvq_u8(mask) == 0 {
+                vst1q_u8(out_ptr, shifted);
+                out_ptr = out_ptr.add(16);
+            } else {
+                let weighted = vandq_u8(mask, v_weights);
+                let sum_low = vaddv_u8(vget_low_u8(weighted)) as usize;
+                let sum_high = vaddv_u8(vget_high_u8(weighted)) as usize;
+                let de_lo = vcombine_u8(vget_low_u8(shifted), vget_low_u8(v_eq_const));
+                let de_hi = vcombine_u8(vget_high_u8(shifted), vget_low_u8(v_eq_const));
+                let res_lo = vaddq_u8(vqtbl1q_u8(de_lo, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_low).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_low).as_ptr()));
+                vst1q_u8(out_ptr, res_lo);
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_low) as usize);
+                let res_hi = vaddq_u8(vqtbl1q_u8(de_hi, vld1q_u8(SHUFFLE_TABLE.get_unchecked(sum_high).as_ptr())), vld1q_u8(ADD_TABLE.get_unchecked(sum_high).as_ptr()));
+                vst1q_u8(out_ptr, res_hi);
+                out_ptr = out_ptr.add(*LEN_TABLE.get_unchecked(sum_high) as usize);
+            }
+            i += 16; col += 16; safe_rem -= 16;
+        }
+
+        while safe_rem > 0 {
+            let e = data[i].wrapping_add(42);
+            if matches!(e, 0x00 | 0x0A | 0x0D | 0x3D) {
+                *out_ptr = b'='; *out_ptr.add(1) = e.wrapping_add(64); out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e; out_ptr = out_ptr.add(1);
+            }
+            i += 1; col += 1; safe_rem -= 1;
+        }
+
+        if i < data.len() {
+            let at_line_end = col + 1 == line_len || i == last;
+            let b = data[i];
+            let e = b.wrapping_add(42);
+            let critical = matches!(e, 0x00 | 0x0A | 0x0D | 0x3D);
+            let positional = (e == 0x09 || e == 0x20) && at_line_end;
+            if critical || positional {
+                *out_ptr = b'='; *out_ptr.add(1) = e.wrapping_add(64); out_ptr = out_ptr.add(2);
+            } else {
+                *out_ptr = e; out_ptr = out_ptr.add(1);
+            }
+            col += 1;
+            if col == line_len {
+                *out_ptr = b'\r'; *out_ptr.add(1) = b'\n'; out_ptr = out_ptr.add(2);
+                col = 0;
+            }
+            i += 1;
+        }
+    }
+
+    if col != 0 {
+        *out_ptr = b'\r'; *out_ptr.add(1) = b'\n'; out_ptr = out_ptr.add(2);
     }
     out.set_len(out_ptr.offset_from(out_base) as usize);
 }
@@ -1690,53 +1993,67 @@ mod tests {
 
     #[test]
     fn ssse3_matches_scalar_all_256_byte_values() {
-        let data: Vec<u8> = (0u8..=255).collect();
-        assert_ssse3_eq!(&data, 128);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = (0u8..=255).collect();
+            assert_ssse3_eq!(&data, 128);
+        }
     }
 
     #[test]
     fn ssse3_matches_scalar_all_critical_bytes() {
-        // All four critical raw inputs, repeated to span many lines.
-        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
-            .iter()
-            .cycle()
-            .copied()
-            .take(512)
-            .collect();
-        assert_ssse3_eq!(&data, 128);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // All four critical raw inputs, repeated to span many lines.
+            let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
+                .iter()
+                .cycle()
+                .copied()
+                .take(512)
+                .collect();
+            assert_ssse3_eq!(&data, 128);
+        }
     }
 
     #[test]
     fn ssse3_matches_scalar_positional_bytes_at_boundaries() {
-        // Dot/space/tab at line start and end with line_len=4.
-        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
-            .iter()
-            .cycle()
-            .copied()
-            .take(256)
-            .collect();
-        assert_ssse3_eq!(&data, 4);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Dot/space/tab at line start and end with line_len=4.
+            let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
+                .iter()
+                .cycle()
+                .copied()
+                .take(256)
+                .collect();
+            assert_ssse3_eq!(&data, 4);
+        }
     }
 
     #[test]
     fn ssse3_matches_scalar_large_random_like_payload() {
-        // 750 KB of pseudo-random data (covers the typical article size).
-        let data: Vec<u8> = (0u8..=255)
-            .cycle()
-            .enumerate()
-            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
-            .take(750 * 1024)
-            .collect();
-        assert_ssse3_eq!(&data, 128);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // 750 KB of pseudo-random data (covers the typical article size).
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .enumerate()
+                .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+                .take(750 * 1024)
+                .collect();
+            assert_ssse3_eq!(&data, 128);
+        }
     }
 
     #[test]
     fn ssse3_matches_scalar_empty() {
+        #[cfg(target_arch = "x86_64")]
         assert_ssse3_eq!(&[], 128);
     }
 
     #[test]
     fn ssse3_matches_scalar_single_byte() {
+        #[cfg(target_arch = "x86_64")]
         for b in 0u8..=255 {
             let data = [b];
             assert_ssse3_eq!(&data, 128);
@@ -1745,10 +2062,13 @@ mod tests {
 
     #[test]
     fn ssse3_matches_scalar_short_line_len() {
-        // Stress the boundary logic with very short lines.
-        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
-        for ll in [1, 2, 3, 4, 7, 16, 17] {
-            assert_ssse3_eq!(&data, ll);
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Stress the boundary logic with very short lines.
+            let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+            for ll in [1, 2, 3, 4, 7, 16, 17] {
+                assert_ssse3_eq!(&data, ll);
+            }
         }
     }
 
@@ -1790,50 +2110,64 @@ mod tests {
 
     #[test]
     fn avx2_matches_scalar_all_256_byte_values() {
-        let data: Vec<u8> = (0u8..=255).collect();
-        assert_avx2_eq!(&data, 128);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = (0u8..=255).collect();
+            assert_avx2_eq!(&data, 128);
+        }
     }
 
     #[test]
     fn avx2_matches_scalar_all_critical_bytes() {
-        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
-            .iter()
-            .cycle()
-            .copied()
-            .take(512)
-            .collect();
-        assert_avx2_eq!(&data, 128);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
+                .iter()
+                .cycle()
+                .copied()
+                .take(512)
+                .collect();
+            assert_avx2_eq!(&data, 128);
+        }
     }
 
     #[test]
     fn avx2_matches_scalar_positional_bytes_at_boundaries() {
-        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
-            .iter()
-            .cycle()
-            .copied()
-            .take(256)
-            .collect();
-        assert_avx2_eq!(&data, 4);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
+                .iter()
+                .cycle()
+                .copied()
+                .take(256)
+                .collect();
+            assert_avx2_eq!(&data, 4);
+        }
     }
 
     #[test]
     fn avx2_matches_scalar_large_random_like_payload() {
-        let data: Vec<u8> = (0u8..=255)
-            .cycle()
-            .enumerate()
-            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
-            .take(750 * 1024)
-            .collect();
-        assert_avx2_eq!(&data, 128);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .enumerate()
+                .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+                .take(750 * 1024)
+                .collect();
+            assert_avx2_eq!(&data, 128);
+        }
     }
 
     #[test]
     fn avx2_matches_scalar_empty() {
+        #[cfg(target_arch = "x86_64")]
         assert_avx2_eq!(&[], 128);
     }
 
     #[test]
     fn avx2_matches_scalar_single_byte() {
+        #[cfg(target_arch = "x86_64")]
         for b in 0u8..=255 {
             let data = [b];
             assert_avx2_eq!(&data, 128);
@@ -1842,9 +2176,12 @@ mod tests {
 
     #[test]
     fn avx2_matches_scalar_short_line_len() {
-        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
-        for ll in [1, 2, 3, 4, 7, 16, 17, 32, 33] {
-            assert_avx2_eq!(&data, ll);
+        #[cfg(target_arch = "x86_64")]
+        {
+            let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+            for ll in [1, 2, 3, 4, 7, 16, 17, 32, 33] {
+                assert_avx2_eq!(&data, ll);
+            }
         }
     }
 

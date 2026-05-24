@@ -1,6 +1,9 @@
 use std::hint::black_box;
 
+#[cfg(target_arch = "x86_64")]
 use pesto::yenc::{encode, encode_avx2, encode_scalar, encode_ssse3};
+#[cfg(not(target_arch = "x86_64"))]
+use pesto::yenc::{encode, encode_scalar};
 
 // nyuu 0.4.2 (node-yencode C++ addon, AVX2) — documented throughput used as
 // reference target. Source: https://github.com/animetosho/node-yencode
@@ -70,22 +73,25 @@ fn main() {
         |d, o| encode_scalar(o, d, 128),
         "encode_scalar  ll=128",
     );
-    section(
-        "encode_ssse3 ",
-        128,
-        NYUU_MBPS_128,
-        &sizes,
-        |d, o| encode_ssse3(o, d, 128),
-        "encode_ssse3   ll=128",
-    );
-    section(
-        "encode_avx2  ",
-        128,
-        NYUU_MBPS_128,
-        &sizes,
-        |d, o| encode_avx2(o, d, 128),
-        "encode_avx2    ll=128",
-    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        section(
+            "encode_ssse3 ",
+            128,
+            NYUU_MBPS_128,
+            &sizes,
+            |d, o| encode_ssse3(o, d, 128),
+            "encode_ssse3   ll=128",
+        );
+        section(
+            "encode_avx2  ",
+            128,
+            NYUU_MBPS_128,
+            &sizes,
+            |d, o| encode_avx2(o, d, 128),
+            "encode_avx2    ll=128",
+        );
+    }
     section(
         "encode (disp)",
         128,
@@ -104,22 +110,25 @@ fn main() {
         |d, o| encode_scalar(o, d, 256),
         "encode_scalar  ll=256",
     );
-    section(
-        "encode_ssse3 ",
-        256,
-        NYUU_MBPS_256,
-        &sizes,
-        |d, o| encode_ssse3(o, d, 256),
-        "encode_ssse3   ll=256",
-    );
-    section(
-        "encode_avx2  ",
-        256,
-        NYUU_MBPS_256,
-        &sizes,
-        |d, o| encode_avx2(o, d, 256),
-        "encode_avx2    ll=256",
-    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        section(
+            "encode_ssse3 ",
+            256,
+            NYUU_MBPS_256,
+            &sizes,
+            |d, o| encode_ssse3(o, d, 256),
+            "encode_ssse3   ll=256",
+        );
+        section(
+            "encode_avx2  ",
+            256,
+            NYUU_MBPS_256,
+            &sizes,
+            |d, o| encode_avx2(o, d, 256),
+            "encode_avx2    ll=256",
+        );
+    }
     section(
         "encode (disp)",
         256,
