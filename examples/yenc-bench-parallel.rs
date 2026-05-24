@@ -4,8 +4,8 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use pesto::yenc::encode;
+use rayon::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
