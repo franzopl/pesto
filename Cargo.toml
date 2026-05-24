@@ -17,7 +17,7 @@ documentation = "https://github.com/franzopl/pesto#readme"
 readme = "README.md"
 keywords = ["usenet", "nntp", "yenc", "nzb", "par2"]
 categories = ["command-line-utilities", "network-programming"]
-exclude = ["test_results/", "screenshot-*.png", "Terapia atraves da Escrita*/"]
+exclude = ["test_results/", "screenshot-*.png", "Terapia atraves da Escrita*/", "node_modules/"]
 
 [[bin]]
 name = "pesto"
