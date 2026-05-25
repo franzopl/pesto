@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use ratatui::{
@@ -9,16 +9,33 @@ use ratatui::{
     Frame,
 };
 
+use crate::catalog::NzbStatusEntry;
+
+/// How a file appears in the browser based on its catalog/queue state.
+#[derive(Debug, Clone)]
+pub enum NzbBadge {
+    /// Not in catalog, not marked.
+    None,
+    /// Marked for queuing (Space key).
+    Marked,
+    /// Currently being uploaded.
+    Uploading,
+    /// In catalog — carries the status entry.
+    Uploaded(NzbStatusEntry),
+}
+
 #[derive(Debug)]
 pub struct FileTree {
     pub items: Vec<PathBuf>,
     pub current_dir: PathBuf,
     pub selected: usize,
     pub show_hidden: bool,
-    /// Absolute paths that have been marked for queuing (Space key)
+    /// Absolute paths that have been marked for queuing (Space key).
     pub marked: HashSet<PathBuf>,
-    /// Full path strings recorded in the catalog (used to show upload indicator)
-    pub uploaded_names: HashSet<String>,
+    /// NZB status from the catalog, keyed by original_name (filename or full path).
+    pub nzb_status: HashMap<String, NzbStatusEntry>,
+    /// Names of files currently being uploaded (basename).
+    pub uploading: HashSet<String>,
 }
 
 impl FileTree {
@@ -29,15 +46,21 @@ impl FileTree {
             selected: 0,
             show_hidden: false,
             marked: HashSet::new(),
-            uploaded_names: HashSet::new(),
+            nzb_status: HashMap::new(),
+            uploading: HashSet::new(),
         };
         tree.refresh();
         tree
     }
 
-    /// Update the set of already-uploaded names (absolute paths or basenames from catalog).
-    pub fn set_uploaded_names(&mut self, names: HashSet<String>) {
-        self.uploaded_names = names;
+    /// Replace the NZB status map (called after catalog refresh).
+    pub fn set_nzb_status(&mut self, status: HashMap<String, NzbStatusEntry>) {
+        self.nzb_status = status;
+    }
+
+    /// Mark names that are currently being uploaded.
+    pub fn set_uploading(&mut self, names: HashSet<String>) {
+        self.uploading = names;
     }
 
     pub fn select_next(&mut self) {
@@ -58,6 +81,36 @@ impl FileTree {
 
     pub fn get_selected(&self) -> Option<&PathBuf> {
         self.items.get(self.selected)
+    }
+
+    /// Return the NZB badge for the currently selected item.
+    pub fn selected_badge(&self) -> Option<NzbBadge> {
+        let path = self.items.get(self.selected)?;
+        Some(self.badge_for(path))
+    }
+
+    /// Return the NZB badge for a given path.
+    pub fn badge_for(&self, path: &PathBuf) -> NzbBadge {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let full = path.to_string_lossy();
+
+        if self.marked.contains(path) {
+            return NzbBadge::Marked;
+        }
+        if self.uploading.contains(name) {
+            return NzbBadge::Uploading;
+        }
+        if let Some(entry) = self
+            .nzb_status
+            .get(full.as_ref())
+            .or_else(|| self.nzb_status.get(name))
+        {
+            return NzbBadge::Uploaded(entry.clone());
+        }
+        NzbBadge::None
     }
 
     /// Toggle the mark on the currently selected item and advance cursor.
@@ -137,47 +190,57 @@ impl FileTree {
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                let is_marked = self.marked.contains(path);
-                let path_str = path.to_string_lossy();
-                let is_uploaded = self.uploaded_names.contains(path_str.as_ref())
-                    || path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|name| self.uploaded_names.contains(name))
-                        .unwrap_or(false);
-
+                let badge = self.badge_for(path);
                 let icon = if path.is_dir() { "📁" } else { "📄" };
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-
                 let is_selected = i == self.selected;
 
-                // Mark checkbox: [x] marked for queue, [✓] already uploaded, [ ] none
-                let (check, check_style) = if is_marked {
-                    (
+                let (check, check_style, name_style) = match &badge {
+                    NzbBadge::Marked => (
                         "[x] ",
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::BOLD),
-                    )
-                } else if is_uploaded {
-                    (
-                        "[✓] ",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-                    )
-                } else {
-                    ("[ ] ", Style::default().fg(Color::DarkGray))
-                };
-
-                let name_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else if is_marked {
-                    Style::default().fg(Color::Green)
-                } else if is_uploaded {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
-                } else {
-                    Style::default()
+                        if is_selected {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Green)
+                        },
+                    ),
+                    NzbBadge::Uploading => (
+                        "[▶] ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    NzbBadge::Uploaded(entry) => {
+                        let (sym, color) = badge_symbol(entry);
+                        (
+                            sym,
+                            Style::default().fg(color).add_modifier(Modifier::DIM),
+                            if is_selected {
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(color).add_modifier(Modifier::DIM)
+                            },
+                        )
+                    }
+                    NzbBadge::None => (
+                        "[ ] ",
+                        Style::default().fg(Color::DarkGray),
+                        if is_selected {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        },
+                    ),
                 };
 
                 ListItem::new(Line::from(vec![
@@ -226,5 +289,16 @@ impl FileTree {
         state.select(Some(self.selected));
 
         f.render_stateful_widget(list, area, &mut state);
+    }
+}
+
+/// Returns `(badge_string, color)` for a catalog entry.
+/// Badge is always 4 chars wide so the list stays aligned.
+fn badge_symbol(entry: &NzbStatusEntry) -> (&'static str, Color) {
+    match (entry.obfuscated, entry.has_password) {
+        (false, false) => ("[✓] ", Color::Green),
+        (true, false) => ("[~] ", Color::Yellow),
+        (false, true) => ("[P] ", Color::Magenta),
+        (true, true) => ("[*] ", Color::Cyan),
     }
 }

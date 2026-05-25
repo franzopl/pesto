@@ -343,6 +343,20 @@ impl App {
         self.upload_queue.active = self.upload_queue.items.len();
         self.upload_started_at = Some(Instant::now());
 
+        // Mark uploading files in the browser for live [▶] badge
+        let uploading_names: std::collections::HashSet<String> = self
+            .upload_queue
+            .items
+            .iter()
+            .filter_map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        self.file_tree.set_uploading(uploading_names);
+
         let token = CancellationToken::new();
         self.current_cancel_token = Some(token.clone());
 
@@ -435,6 +449,8 @@ impl App {
         }
 
         self.progress.files.clear();
+        self.file_tree
+            .set_uploading(std::collections::HashSet::new());
 
         if cancelled {
             self.status_bar.set("Upload cancelled by user");
@@ -616,11 +632,6 @@ impl App {
         };
         match cat.list(filter, 500) {
             Ok(rows) => {
-                // Build set of uploaded names for the browser indicator
-                let uploaded: std::collections::HashSet<String> =
-                    rows.iter().map(|r| r.original_name.clone()).collect();
-                self.file_tree.set_uploaded_names(uploaded);
-
                 self.history.rows = rows;
                 if self.history.selected >= self.history.rows.len() {
                     self.history.selected = self.history.rows.len().saturating_sub(1);
@@ -629,6 +640,13 @@ impl App {
             Err(e) => {
                 self.log_panel.push(format!("catalog list error: {}", e));
             }
+        }
+        // Refresh the per-file NZB status map used by the file browser.
+        match cat.status_map() {
+            Ok(map) => self.file_tree.set_nzb_status(map),
+            Err(e) => self
+                .log_panel
+                .push(format!("catalog status_map error: {}", e)),
         }
         if self.history.show_stats {
             self.refresh_stats();

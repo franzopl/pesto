@@ -139,25 +139,253 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
-    // Split: file tree (left ~65%) | queue panel (right ~35%)
     let has_queue = !app.upload_queue.items.is_empty();
-    let chunks = if has_queue {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(area)
+
+    // Always show file tree (left 60%) + right panel (40%).
+    // Right panel: NZB detail on top, queue below (when queue non-empty).
+    let hchunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(area);
+
+    app.file_tree.render(f, hchunks[0], true);
+
+    let right = hchunks[1];
+    if has_queue {
+        // Split right panel: NZB detail (top ~60%) + queue (bottom ~40%)
+        let vchunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(right);
+        draw_nzb_detail_panel(f, app, vchunks[0]);
+        draw_browser_queue(f, app, vchunks[1]);
     } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(100)])
-            .split(area)
+        draw_nzb_detail_panel(f, app, right);
+    }
+}
+
+fn draw_nzb_detail_panel(f: &mut Frame, app: &App, area: Rect) {
+    use crate::ui::components::file_tree::NzbBadge;
+
+    let selected_path = app.file_tree.get_selected();
+    let badge = app.file_tree.selected_badge();
+
+    let (title, lines) = match (&badge, selected_path) {
+        (Some(NzbBadge::Uploaded(entry)), Some(path)) => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+
+            let date = entry.uploaded_at.format("%Y-%m-%d %H:%M UTC").to_string();
+
+            let mode = match (entry.obfuscated, entry.has_password) {
+                (false, false) => ("Public", Color::Green),
+                (true, false) => ("Obfuscated", Color::Yellow),
+                (false, true) => ("Password protected", Color::Magenta),
+                (true, true) => ("Obfuscated + password", Color::Cyan),
+            };
+
+            let nzb_line = if let Some(ref p) = entry.nzb_path {
+                let exists = std::path::Path::new(p).exists();
+                let label = std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(p);
+                let indicator = if exists {
+                    " [✓ on disk]"
+                } else {
+                    " [! missing]"
+                };
+                let color = if exists { Color::Green } else { Color::Red };
+                (label.to_string(), color, indicator)
+            } else {
+                ("—".to_string(), Color::DarkGray, "")
+            };
+
+            let size_str = entry
+                .size_bytes
+                .map(|b| format_bytes(b as u64))
+                .unwrap_or_else(|| "—".to_string());
+
+            let group = entry.usenet_group.as_deref().unwrap_or("—");
+
+            let mut lines: Vec<Line> = vec![
+                Line::from(vec![
+                    Span::styled(" File    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(name.to_string()),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Status  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("✓ Uploaded", Style::default().fg(Color::Green)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Date    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(date),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Mode    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(mode.0, Style::default().fg(mode.1)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Pass    ", Style::default().fg(Color::DarkGray)),
+                    if entry.has_password {
+                        Span::styled("Set", Style::default().fg(Color::Magenta))
+                    } else {
+                        Span::styled("None", Style::default().fg(Color::DarkGray))
+                    },
+                ]),
+                Line::from(vec![
+                    Span::styled(" Group   ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(group.to_string()),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Size    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(size_str),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Category", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!(" {}", entry.category),
+                        Style::default().fg(category_color(&entry.category)),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(" NZB     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(nzb_line.0, Style::default().fg(nzb_line.1)),
+                    Span::styled(nzb_line.2, Style::default().fg(nzb_line.1)),
+                ]),
+            ];
+
+            // Legend row
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                " [✓] pub  [~] obf  [P] pass  [*] obf+pass",
+                Style::default().fg(Color::DarkGray),
+            )]));
+
+            (" NZB Status ".to_string(), lines)
+        }
+
+        (Some(NzbBadge::Marked), Some(path)) => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(" File    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(name.to_string()),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Marked for upload",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Press u to open the upload panel",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    " Press Space to unmark",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            (" NZB Status ".to_string(), lines)
+        }
+
+        (Some(NzbBadge::Uploading), Some(path)) => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(" File    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(name.to_string()),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " ▶ Uploading now...",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " See Dashboard tab for progress",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            (" NZB Status ".to_string(), lines)
+        }
+
+        (Some(NzbBadge::None), Some(path)) | (None, Some(path)) => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let is_dir = path.is_dir();
+            let lines = if is_dir {
+                vec![
+                    Line::from(vec![
+                        Span::styled(" Dir     ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(name.to_string()),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Enter to navigate into directory",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(Span::styled(
+                        " Space to mark the whole directory",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]
+            } else {
+                vec![
+                    Line::from(vec![
+                        Span::styled(" File    ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(name.to_string()),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " No NZB record found",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Space  mark for upload",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(Span::styled(
+                        " u      upload queue",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]
+            };
+            (" NZB Status ".to_string(), lines)
+        }
+
+        _ => {
+            let lines = vec![Line::from(Span::styled(
+                " Navigate to a file to see its NZB status.",
+                Style::default().fg(Color::DarkGray),
+            ))];
+            (" NZB Status ".to_string(), lines)
+        }
     };
 
-    app.file_tree.render(f, chunks[0], true);
+    let border_color = match &badge {
+        Some(NzbBadge::Uploaded(e)) => match (e.obfuscated, e.has_password) {
+            (false, false) => Color::Green,
+            (true, false) => Color::Yellow,
+            (false, true) => Color::Magenta,
+            (true, true) => Color::Cyan,
+        },
+        Some(NzbBadge::Marked) => Color::Green,
+        Some(NzbBadge::Uploading) => Color::Cyan,
+        _ => Color::DarkGray,
+    };
 
-    if has_queue {
-        draw_browser_queue(f, app, chunks[1]);
-    }
+    let para = ratatui::widgets::Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(border_color)),
+    );
+    f.render_widget(para, area);
 }
 
 fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
