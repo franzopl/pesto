@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// One upload record stored in the catalog.
@@ -37,6 +38,21 @@ pub struct UploadSummary {
     pub upload_duration_s: Option<f64>,
     pub usenet_group: Option<String>,
     pub nzb_path: Option<String>,
+}
+
+/// Minimal NZB status info used by the file browser for per-file indicators.
+#[derive(Debug, Clone)]
+pub struct NzbStatusEntry {
+    pub uploaded_at: DateTime<Utc>,
+    /// True when the upload used any obfuscation (obfuscated_name IS NOT NULL).
+    pub obfuscated: bool,
+    /// True when the upload included a RAR password.
+    pub has_password: bool,
+    /// Path to the generated NZB file on disk (may or may not still exist).
+    pub nzb_path: Option<String>,
+    pub category: String,
+    pub size_bytes: Option<i64>,
+    pub usenet_group: Option<String>,
 }
 
 /// Aggregate stats over the whole catalog.
@@ -213,6 +229,41 @@ impl Catalog {
             by_category,
             bytes_by_month,
         })
+    }
+
+    /// Build a map from `original_name` → `NzbStatusEntry` for the file browser.
+    /// Only the most recent record per filename is kept (ORDER BY uploaded_at DESC).
+    pub fn status_map(&self) -> Result<HashMap<String, NzbStatusEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT original_name, uploaded_at, obfuscated_name, rar_password,
+                    nzb_path, category, size_bytes, usenet_group
+             FROM uploads
+             ORDER BY uploaded_at DESC",
+        )?;
+        let mut map: HashMap<String, NzbStatusEntry> = HashMap::new();
+        let rows = stmt.query_map([], |r| {
+            let name: String = r.get(0)?;
+            let dt_str: String = r.get(1)?;
+            let obfuscated_name: Option<String> = r.get(2)?;
+            let rar_password: Option<String> = r.get(3)?;
+            Ok((
+                name,
+                NzbStatusEntry {
+                    uploaded_at: parse_dt(&dt_str),
+                    obfuscated: obfuscated_name.is_some(),
+                    has_password: rar_password.is_some(),
+                    nzb_path: r.get(4)?,
+                    category: r.get(5)?,
+                    size_bytes: r.get(6)?,
+                    usenet_group: r.get(7)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (name, entry) = row?;
+            map.entry(name).or_insert(entry);
+        }
+        Ok(map)
     }
 
     /// Returns true if at least one record exists (to skip re-import).
