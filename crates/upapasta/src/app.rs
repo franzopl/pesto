@@ -275,6 +275,9 @@ impl App {
             }
         }
 
+        // Populate history list + browser upload indicators on startup
+        app.refresh_history();
+
         // Do NOT add example files on startup anymore (was confusing users)
         app.log_panel
             .push("UpaPasta v2 started — event-driven TUI ready".to_string());
@@ -430,7 +433,13 @@ impl App {
             self.status_bar.set("Upload finished successfully");
             self.log_panel.push("=== Upload finished ===".to_string());
         } else {
-            self.status_bar.set("Upload finished with errors");
+            // Keep the UploadError message in the status bar if it was set;
+            // only fall back to this generic message if nothing else set it.
+            self.log_panel
+                .push("=== Upload failed — check logs above ===".to_string());
+            if !self.status_bar.message.contains("error") {
+                self.status_bar.set("Upload failed — see Dashboard logs");
+            }
         }
 
         // Refresh the history list if it's currently visible
@@ -597,6 +606,11 @@ impl App {
         };
         match cat.list(filter, 500) {
             Ok(rows) => {
+                // Build set of uploaded names for the browser indicator
+                let uploaded: std::collections::HashSet<String> =
+                    rows.iter().map(|r| r.original_name.clone()).collect();
+                self.file_tree.set_uploaded_names(uploaded);
+
                 self.history.rows = rows;
                 if self.history.selected >= self.history.rows.len() {
                     self.history.selected = self.history.rows.len().saturating_sub(1);

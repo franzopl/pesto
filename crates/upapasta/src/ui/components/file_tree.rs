@@ -17,6 +17,8 @@ pub struct FileTree {
     pub show_hidden: bool,
     /// Absolute paths that have been marked for queuing (Space key)
     pub marked: HashSet<PathBuf>,
+    /// Full path strings recorded in the catalog (used to show upload indicator)
+    pub uploaded_names: HashSet<String>,
 }
 
 impl FileTree {
@@ -27,9 +29,15 @@ impl FileTree {
             selected: 0,
             show_hidden: false,
             marked: HashSet::new(),
+            uploaded_names: HashSet::new(),
         };
         tree.refresh();
         tree
+    }
+
+    /// Update the set of already-uploaded names (absolute paths or basenames from catalog).
+    pub fn set_uploaded_names(&mut self, names: HashSet<String>) {
+        self.uploaded_names = names;
     }
 
     pub fn select_next(&mut self) {
@@ -130,24 +138,44 @@ impl FileTree {
             .enumerate()
             .map(|(i, path)| {
                 let is_marked = self.marked.contains(path);
+                let path_str = path.to_string_lossy();
+                let is_uploaded = self.uploaded_names.contains(path_str.as_ref())
+                    || path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|name| self.uploaded_names.contains(name))
+                        .unwrap_or(false);
+
                 let icon = if path.is_dir() { "📁" } else { "📄" };
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                let check = if is_marked { "[x] " } else { "[ ] " };
 
                 let is_selected = i == self.selected;
-                let check_style = if is_marked {
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD)
+
+                // Mark checkbox: [x] marked for queue, [✓] already uploaded, [ ] none
+                let (check, check_style) = if is_marked {
+                    (
+                        "[x] ",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else if is_uploaded {
+                    (
+                        "[✓] ",
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+                    )
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    ("[ ] ", Style::default().fg(Color::DarkGray))
                 };
+
                 let name_style = if is_selected {
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
                 } else if is_marked {
                     Style::default().fg(Color::Green)
+                } else if is_uploaded {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
                 } else {
                     Style::default()
                 };

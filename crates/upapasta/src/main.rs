@@ -124,6 +124,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                     _ if app.show_upload_confirm => match key.code {
                         KeyCode::Enter | KeyCode::Char('y') => {
                             app.show_upload_confirm = false;
+                            app.state = app::AppState::Dashboard;
                             handle_upload_trigger(app, tx.clone());
                         }
                         KeyCode::Esc | KeyCode::Char('n') => {
@@ -432,17 +433,17 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         .map(|n| n.to_string_lossy().into_owned())
         .collect();
 
-    // Convert to pesto InputFile
-    let input_files: Vec<InputFile> = files
-        .into_iter()
-        .map(|p| InputFile {
-            path: p.clone(),
-            name: p
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| p.to_string_lossy().into_owned()),
-        })
-        .collect();
+    // Expand directories recursively into individual InputFiles
+    let input_files = match pesto::walk::expand_inputs(&files) {
+        Ok(v) => v,
+        Err(e) => {
+            app.log_panel
+                .push_error(format!("ERROR expanding inputs: {}", e));
+            app.status_bar.set("Input error — see logs");
+            app.upload_in_progress = false;
+            return;
+        }
+    };
 
     // Token is already created and stored in app.current_cancel_token by trigger_upload
     let cancel_token = app.current_cancel_token.clone().unwrap_or_default();
