@@ -496,25 +496,68 @@ fn draw_progress_section(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(phase_line)), chunks[0]);
 
     // ── Main upload gauge ────────────────────────────────────────────────────
-    let pct = p.progress_pct() as u16;
-    let speed = if p.last_speed > 0.1 {
-        format!("{:.1} MB/s", p.last_speed)
-    } else {
-        "calculating...".to_string()
+    // During PAR2/compress phases, show phase progress instead of upload bytes
+    let (pct, label) = match &p.phase {
+        UploadPhase::GeneratingPar2 {
+            done_slices,
+            total_slices,
+        } if *total_slices > 0 => {
+            let phase_pct = (*done_slices as f64 / *total_slices as f64 * 100.0) as u16;
+            let lbl = format!(
+                "PAR2  {:.1}%  {}/{} slices",
+                *done_slices as f64 / *total_slices as f64 * 100.0,
+                done_slices,
+                total_slices,
+            );
+            (phase_pct, lbl)
+        }
+        UploadPhase::WritingPar2 { written, total } if *total > 0 => {
+            let phase_pct = (*written as f64 / *total as f64 * 100.0) as u16;
+            let lbl = format!("PAR2 write  {:.1}%  {}/{}", phase_pct, written, total);
+            (phase_pct, lbl)
+        }
+        UploadPhase::Compressing {
+            done_bytes: db,
+            total_bytes: tb,
+        } if *tb > 0 => {
+            let phase_pct = (*db as f64 / *tb as f64 * 100.0) as u16;
+            let lbl = format!(
+                "Compress  {:.1}%  {}/{}",
+                phase_pct,
+                pesto::progress::format_size(*db),
+                pesto::progress::format_size(*tb),
+            );
+            (phase_pct, lbl)
+        }
+        UploadPhase::Verifying { checked, total } if *total > 0 => {
+            let phase_pct = (*checked as f64 / *total as f64 * 100.0) as u16;
+            let lbl = format!("Verify  {:.1}%  {}/{} articles", phase_pct, checked, total);
+            (phase_pct, lbl)
+        }
+        _ => {
+            // Uploading or Preparing: show segment/byte progress
+            let upload_pct = p.progress_pct() as u16;
+            let speed = if p.last_speed > 0.1 {
+                format!("{:.1} MB/s", p.last_speed)
+            } else {
+                "calculating...".to_string()
+            };
+            let eta = if let Some(secs) = p.eta_seconds() {
+                format!("ETA {}:{:02}", secs / 60, secs % 60)
+            } else {
+                "ETA --:--".to_string()
+            };
+            let lbl = format!(
+                "{:.1}%  {}/{}  {}  {}",
+                p.progress_pct(),
+                pesto::progress::format_size(p.done_bytes),
+                pesto::progress::format_size(p.total_bytes),
+                speed,
+                eta,
+            );
+            (upload_pct, lbl)
+        }
     };
-    let eta = if let Some(secs) = p.eta_seconds() {
-        format!("ETA {}:{:02}", secs / 60, secs % 60)
-    } else {
-        "ETA --:--".to_string()
-    };
-    let label = format!(
-        "{:.1}%  {}/{}  {}  {}",
-        p.progress_pct(),
-        pesto::progress::format_size(p.done_bytes),
-        pesto::progress::format_size(p.total_bytes),
-        speed,
-        eta,
-    );
 
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(if is_paused {
