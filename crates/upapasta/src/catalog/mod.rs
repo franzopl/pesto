@@ -36,6 +36,7 @@ pub struct UploadSummary {
     pub size_bytes: Option<i64>,
     pub upload_duration_s: Option<f64>,
     pub usenet_group: Option<String>,
+    pub nzb_path: Option<String>,
 }
 
 /// Aggregate stats over the whole catalog.
@@ -133,13 +134,13 @@ impl Catalog {
     pub fn list(&self, filter: Option<&str>, limit: usize) -> Result<Vec<UploadSummary>> {
         let sql = if filter.is_some() {
             "SELECT id, uploaded_at, original_name, category, size_bytes,
-                    upload_duration_s, usenet_group
+                    upload_duration_s, usenet_group, nzb_path
              FROM uploads
              WHERE lower(original_name) LIKE lower(?1)
              ORDER BY uploaded_at DESC LIMIT ?2"
         } else {
             "SELECT id, uploaded_at, original_name, category, size_bytes,
-                    upload_duration_s, usenet_group
+                    upload_duration_s, usenet_group, nzb_path
              FROM uploads
              ORDER BY uploaded_at DESC LIMIT ?2"
         };
@@ -271,6 +272,7 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadSummary> {
         size_bytes: r.get(4)?,
         upload_duration_s: r.get(5)?,
         usenet_group: r.get(6)?,
+        nzb_path: r.get(7)?,
     })
 }
 
