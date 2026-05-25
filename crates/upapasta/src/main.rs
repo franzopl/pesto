@@ -540,7 +540,7 @@ fn build_dry_run_config() -> Config {
     }
 }
 
-/// The actual async upload worker. Forwards every ProgressEvent into the UI.
+/// The actual async upload worker. Forwards every ProgressEvent into the UI in real time.
 /// Supports cancellation via CancellationToken (bridged to pesto's AtomicBool).
 async fn run_real_upload(
     config: Config,
@@ -559,10 +559,26 @@ async fn run_real_upload(
         });
     }
 
-    let (outcome, mut rx) = match pesto::post_cancelable(config, files, cancel_flag).await {
-        Ok(v) => v,
-        Err(e) => return Err(UploadError::Pesto(e.to_string())),
-    };
+    // Create our own progress channel so we can drain events in real time
+    // while the poster runs concurrently (pesto::post_cancelable awaits completion
+    // before returning, so all events would arrive only after the upload finishes).
+    let (prog_tx, mut prog_rx) =
+        tokio::sync::mpsc::unbounded_channel::<pesto::progress::ProgressEvent>();
+
+    // Spawn the poster as a concurrent task
+    let cfg2 = config.clone();
+    let files2 = files.clone();
+    let cf2 = cancel_flag.clone();
+    let upload_handle = tokio::spawn(async move {
+        pesto::poster::post_files_with_progress_and_cancel(
+            &cfg2,
+            &files2,
+            Some(prog_tx),
+            None,
+            Some(cf2),
+        )
+        .await
+    });
 
     let mut last_update = ProgressUpdate {
         done_segments: 0,
@@ -575,7 +591,8 @@ async fn run_real_upload(
         phase: None,
     };
 
-    while let Some(event) = rx.recv().await {
+    // Drain progress events as they arrive (real-time, not post-hoc)
+    while let Some(event) = prog_rx.recv().await {
         let msg = format_progress_event(&event);
         if !msg.is_empty() {
             let _ = tx.send(AppEvent::Progress(msg));
@@ -594,7 +611,13 @@ async fn run_real_upload(
         }
     }
 
-    // Final outcome summary
+    // Collect the outcome from the upload task
+    let outcome = match upload_handle.await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(UploadError::Pesto(e.to_string())),
+        Err(e) => return Err(UploadError::Pesto(format!("upload task panicked: {e}"))),
+    };
+
     let _ = tx.send(AppEvent::Progress(format!(
         "PostOutcome: {} segments, {} failures",
         outcome.segments.len(),
@@ -652,14 +675,10 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
                 connections
             )
         }
-        E::SegmentDone { file, bytes, ok } => {
-            format!(
-                "Segment {} — {} ({})",
-                if *ok { "ok" } else { "FAIL" },
-                file,
-                bytes
-            )
+        E::SegmentDone { file, ok, .. } if !ok => {
+            format!("Segment FAILED — {}", file)
         }
+        E::SegmentDone { .. } => String::new(), // shown in gauge, not logs
         E::Status { text } if !text.is_empty() => format!("Status: {}", text),
         E::QueueExtended { file, segments, .. } => {
             format!("PAR2 extended queue: {} (+{} segments)", file, segments)
@@ -674,10 +693,8 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
                 input_files, recovery_slices
             )
         }
-        E::Par2InputProgress { done, total } => {
-            format!("PAR2 input pass: {}/{}", done, total)
-        }
-        E::Par2SliceWritten => "PAR2 slice written".into(),
+        E::Par2InputProgress { .. } => String::new(), // shown in gauge, not logs
+        E::Par2SliceWritten => String::new(),         // too noisy
         E::Finished => "=== Pesto run finished ===".into(),
         E::Failed { description } => format!("FAILED: {}", description),
         E::Interrupted => "Interrupted by user".into(),
@@ -768,7 +785,7 @@ fn extract_progress_update(
             done_bytes: previous.done_bytes,
             total_bytes: previous.total_bytes,
             current_speed_mbps: previous.current_speed_mbps,
-            message: Some(format!("PAR2 encoding: {}/{} slices", done, total)),
+            message: None, // shown in gauge, not logs
             file_update: None,
             phase: Some(UploadPhase::GeneratingPar2 {
                 done_slices: *done,
