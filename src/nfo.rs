@@ -175,8 +175,9 @@ fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn run_mediainfo(path: &Path) -> std::io::Result<String> {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let output = std::process::Command::new("mediainfo")
-        .arg(path)
+        .arg(&abs)
         .output()
         .map_err(|e| {
             std::io::Error::new(

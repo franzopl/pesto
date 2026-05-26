@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-05-26
+
+### Fixed
+- `mediainfo` now receives the absolute path to the media file (via
+  `canonicalize`), so the **Complete name** field in the NFO no longer shows
+  a relative-path prefix (`.\` on Windows, `./` on Linux).
+
 ## [0.3.2] — 2026-05-25
 
 ### Fixed
