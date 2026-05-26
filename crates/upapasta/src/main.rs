@@ -888,6 +888,7 @@ async fn run_real_upload(
             }
             event = prog_rx.recv(), if !events_done => {
                 let Some(event) = event else {
+                    // Channel closed — run_upload() has returned.
                     events_done = true;
                     continue;
                 };
@@ -895,14 +896,32 @@ async fn run_real_upload(
                 if !msg.is_empty() {
                     let _ = tx.send(AppEvent::Progress(msg));
                 }
-                if let Some(update) = extract_progress_update(&event, &last_update) {
+                // When the poster finishes, clamp the bar to 100% so the UI
+                // shows completion while NZB writing and hooks are still running.
+                if matches!(event, pesto::progress::ProgressEvent::Finished) {
+                    let done = ProgressUpdate {
+                        done_segments: last_update.total_segments,
+                        total_segments: last_update.total_segments,
+                        done_bytes: last_update.total_bytes,
+                        total_bytes: last_update.total_bytes,
+                        current_speed_mbps: 0.0,
+                        message: None,
+                        file_update: None,
+                        phase: last_update.phase.clone(),
+                        par2_slices: None,
+                    };
+                    last_update = done.clone();
+                    let _ = tx.send(AppEvent::ProgressUpdate(done));
+                } else if let Some(update) = extract_progress_update(&event, &last_update) {
                     last_update = update.clone();
                     let _ = tx.send(AppEvent::ProgressUpdate(update));
                 }
+                // Do NOT set events_done on Finished — run_upload() continues
+                // after posting (NZB, hooks) and sends more Status events.
+                // The channel closes naturally when run_upload() returns.
                 if matches!(
                     event,
-                    pesto::progress::ProgressEvent::Finished
-                        | pesto::progress::ProgressEvent::Interrupted
+                    pesto::progress::ProgressEvent::Interrupted
                         | pesto::progress::ProgressEvent::Failed { .. }
                 ) {
                     events_done = true;
