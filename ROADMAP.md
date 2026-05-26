@@ -403,6 +403,7 @@ Concepts to evaluate later. Not committed to any timeline.
 - [x] Clear visibility of effective upload settings before upload: obfuscation mode, compression+password, PAR2 %, groups, From, article size, verify — shown in Dashboard when queue has files + logged on upload start
 - [x] Full configuration UI / editing + profile support (override obfuscation, PAR2, compression etc. from TUI — Config tab with per-session overrides for from, groups, obfuscate, PAR2, article size, verify, passwords; applied at upload time)
 - [x] Post-upload hooks (shell + native Rust) — runs config.post_hook via sh -c + executables in ~/.config/pesto/hooks/; same PESTO_* env vars as pesto CLI; output streamed to log panel
+- [x] **Persistent upload preferences** — session overrides (obfuscation, PAR2 %, password, groups) saved to `~/.config/pesto/upapasta-prefs.json` on every confirmed upload; reloaded at startup so the confirm panel is pre-filled with last-used settings
 - [ ] Wizard for first-time setup
 
 ### 40e — Polish, Testing & Release
@@ -422,3 +423,33 @@ cargo clippy --all-targets -- -D warnings
 cargo check -p upapasta
 cargo test -p upapasta
 ```
+
+---
+
+### Phase 44 — Full pipeline delegation to `pesto::upload::run_upload` ✅
+
+Previously upapasta called `pesto::poster::post_files_with_progress_and_cancel`
+directly and reimplemented post-upload steps incompletely (broken NZB write,
+no compression, no history, no NFO, broken hooks). This phase centralised
+everything in a new `pesto::upload::run_upload()` public API.
+
+- [x] Created `crates/pesto/src/upload.rs` with `run_upload()` — canonical full pipeline: compress → PAR2 → post → NZB write (versioned) → history → indexer → notifications → NFO → hooks → cleanup temp dir
+- [x] Moved `upapasta/src/hooks.rs` to `pesto/src/hooks.rs` (now public in pesto lib)
+- [x] Added `pesto::upload::UploadOutcome` return type with segments, cancelled, had_failures, nzb_path, total_bytes
+- [x] Fixed progress bar frozen at 99%: send 100% on `Finished` event without setting `events_done`; post-upload `Status` events (NZB path, hook output) continue to stream to log panel
+- [x] Fixed PESTO_NZB always empty: NZB path now falls back to `./stem.nzb` when no `nzb_dir` configured
+- [x] Added NFO generation in pipeline (was absent from upapasta path)
+- [x] Added post-check STAT pass (`config.check`) after posting — matches pesto CLI behaviour
+- [x] `ObfuscateMode` gains `Serialize` for JSON round-trip
+
+---
+
+### Phase 45 — NZB Vault UX improvements ✅
+
+- [x] **Browser scroll fix** — cursor now moves within the visible area before scrolling; pressing ↑ from the last item moves the highlight up the screen without scrolling, fixing the counter-intuitive bounce effect
+- [x] **NFO privacy** — `mediainfo` output now has the full filesystem path replaced with just the basename before writing the `.nfo` file
+- [x] **NZB vault segregation** — three origin categories with automatic subdirectory creation:
+  - `nzb_dir/uploaded/`   — NZBs created by upapasta uploads (badge `↑` cyan)
+  - `nzb_dir/downloaded/` — NZBs fetched from Prowlarr/indexers (badge `↓` yellow)
+  - `nzb_dir/` and any other subdirectory — manually placed NZBs (badge `m` gray)
+- [x] **Fully recursive vault scan** — `collect_nzbs_recursive()` walks all subdirectories at any depth; origin derived from immediate parent folder name
