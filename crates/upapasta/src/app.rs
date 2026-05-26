@@ -549,10 +549,9 @@ impl App {
 
     /// Load (or reload) the NZB Vault from the configured nzb_dir.
     ///
-    /// Scans three locations within `nzb_dir`:
-    /// - `uploaded/`   — NZBs created by upapasta uploads
-    /// - `downloaded/` — NZBs fetched from Prowlarr/indexers
-    /// - root          — NZBs added manually by the user
+    /// Recursively scans all subdirectories. Origin is determined by the
+    /// immediate parent folder name: `uploaded/` → Uploaded, `downloaded/` →
+    /// Downloaded, anything else (including the root) → Manual.
     pub fn load_vault(&mut self) {
         let nzb_dir = self
             .pesto_config
@@ -584,53 +583,8 @@ impl App {
             std::collections::HashSet::new()
         };
 
-        let uploaded_dir = dir.join("uploaded");
-        let downloaded_dir = dir.join("downloaded");
-        let scan_dirs: &[(&std::path::Path, NzbOrigin)] = &[
-            (&dir, NzbOrigin::Manual),
-            (&uploaded_dir, NzbOrigin::Uploaded),
-            (&downloaded_dir, NzbOrigin::Downloaded),
-        ];
-
         let mut entries: Vec<VaultEntry> = Vec::new();
-
-        for (scan_dir, origin) in scan_dirs {
-            let Ok(read_dir) = std::fs::read_dir(scan_dir) else {
-                continue;
-            };
-            for entry in read_dir.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if !path
-                    .extension()
-                    .map(|x| x.eq_ignore_ascii_case("nzb"))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                let meta = entry.metadata().ok();
-                let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let modified = meta
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let in_catalog = catalog_paths.contains(&path.to_string_lossy().to_string());
-                entries.push(VaultEntry {
-                    path,
-                    name,
-                    file_size,
-                    modified,
-                    contents: None,
-                    in_catalog,
-                    origin: *origin,
-                });
-            }
-        }
+        collect_nzbs_recursive(&dir, &catalog_paths, &mut entries);
 
         // Apply current sort
         match self.vault.sort {
@@ -1471,6 +1425,67 @@ impl App {
                 o.compress_password = prefs.compress_password;
             }
         }
+    }
+}
+
+/// Recursively collect all `.nzb` files under `dir` into `out`.
+///
+/// Origin is derived from the immediate parent directory name relative to the
+/// scan root: `uploaded` → Uploaded, `downloaded` → Downloaded, all others
+/// (including the root itself) → Manual.
+fn collect_nzbs_recursive(
+    dir: &std::path::Path,
+    catalog_paths: &std::collections::HashSet<String>,
+    out: &mut Vec<VaultEntry>,
+) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_nzbs_recursive(&path, catalog_paths, out);
+            continue;
+        }
+        if !path
+            .extension()
+            .map(|x| x.eq_ignore_ascii_case("nzb"))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let origin = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|n| match n {
+                "uploaded" => NzbOrigin::Uploaded,
+                "downloaded" => NzbOrigin::Downloaded,
+                _ => NzbOrigin::Manual,
+            })
+            .unwrap_or(NzbOrigin::Manual);
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let meta = entry.metadata().ok();
+        let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let in_catalog = catalog_paths.contains(&path.to_string_lossy().to_string());
+        out.push(VaultEntry {
+            path,
+            name,
+            file_size,
+            modified,
+            contents: None,
+            in_catalog,
+            origin,
+        });
     }
 }
 
