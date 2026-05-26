@@ -83,6 +83,8 @@ pub enum AppEvent {
     PauseUpload,
     ResumeUpload,
     Quit,
+    // Prowlarr connection check result
+    ProwlarrStatus(crate::prowlarr::ConnectionStatus),
 }
 
 pub struct EventHandler {

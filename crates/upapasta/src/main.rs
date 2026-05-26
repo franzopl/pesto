@@ -21,6 +21,7 @@ mod catalog;
 mod events;
 mod hooks;
 mod nzb_viewer;
+mod prowlarr;
 mod ui;
 
 use app::App;
@@ -451,6 +452,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Enter | KeyCode::Char('e') => app.config_start_edit(),
                         KeyCode::Char('r') => app.config_reset_field(),
                         KeyCode::Char('R') => app.config_reset_all(),
+                        KeyCode::Char('C') => {
+                            trigger_prowlarr_check(app, tx.clone());
+                        }
                         _ => {}
                     },
                     _ => {}
@@ -481,6 +485,18 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::UploadFinished { success, cancelled } => {
                     app.upload_finished(success, cancelled);
                 }
+                AppEvent::ProwlarrStatus(status) => {
+                    match &status {
+                        prowlarr::ConnectionStatus::Ok(ver) => {
+                            app.status_bar.set(format!("Prowlarr connected — v{}", ver));
+                        }
+                        prowlarr::ConnectionStatus::Failed(err) => {
+                            app.status_bar.set(format!("Prowlarr error: {}", err));
+                        }
+                        _ => {}
+                    }
+                    app.prowlarr.status = status;
+                }
                 AppEvent::Tick => {
                     // could do animations, throughput calc, etc. here later
                 }
@@ -491,6 +507,34 @@ async fn run_app<B: ratatui::backend::Backend>(
         // Small sleep to avoid busy-looping the draw thread
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
+}
+
+/// Called when the user presses 'C' on the Config screen.
+/// Spawns an async task that tests the Prowlarr connection and sends the result back.
+fn trigger_prowlarr_check(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    use prowlarr::ConnectionStatus;
+
+    let cfg = app.prowlarr.resolve(app.pesto_config.as_ref());
+    let Some(cfg) = cfg else {
+        app.status_bar
+            .set("Prowlarr not configured — set URL and API key first");
+        app.prowlarr.status = ConnectionStatus::Failed("not configured".into());
+        return;
+    };
+
+    app.prowlarr.status = ConnectionStatus::Checking;
+    app.status_bar.set("Checking Prowlarr connection…");
+
+    tokio::spawn(async move {
+        let status = match prowlarr::build_client() {
+            Ok(client) => match prowlarr::check_connection(&cfg, &client).await {
+                Ok(ver) => ConnectionStatus::Ok(ver),
+                Err(e) => ConnectionStatus::Failed(e.to_string()),
+            },
+            Err(e) => ConnectionStatus::Failed(e.to_string()),
+        };
+        let _ = tx.send(AppEvent::ProwlarrStatus(status));
+    });
 }
 
 /// Called when the user presses 'u' on the Dashboard.

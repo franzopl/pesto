@@ -3,6 +3,7 @@ use std::cmp::Reverse;
 use crate::catalog::{Catalog, CatalogStats, NewUpload, UploadSummary};
 use crate::events::{ProgressUpdate, UploadPhase};
 use crate::nzb_viewer::{NzbContents, NzbViewerState};
+use crate::prowlarr::{ConnectionStatus, ProwlarrConfig};
 use crate::ui::components::{FileTree, LogPanel, StatusBar, UploadQueue};
 use pesto::config::{self, Config as PestoConfig, FileConfig, ObfuscateMode};
 use std::path::PathBuf;
@@ -200,6 +201,9 @@ pub struct App {
 
     /// NZB Vault screen state
     pub vault: VaultState,
+
+    /// Prowlarr integration state
+    pub prowlarr: ProwlarrState,
 }
 
 /// One entry in the NZB Vault list.
@@ -278,6 +282,31 @@ impl VaultState {
         if !self.entries.is_empty() && self.selected < self.entries.len() - 1 {
             self.selected += 1;
         }
+    }
+}
+
+/// Prowlarr integration state.
+#[derive(Debug, Default)]
+pub struct ProwlarrState {
+    /// Result of the last connection test.
+    pub status: ConnectionStatus,
+    /// Session overrides for URL and API key (edited in Config screen).
+    pub url_override: Option<String>,
+    pub api_key_override: Option<String>,
+}
+
+impl ProwlarrState {
+    /// Resolve the effective Prowlarr config from session overrides + pesto config.
+    pub fn resolve(&self, pesto_cfg: Option<&pesto::config::Config>) -> Option<ProwlarrConfig> {
+        let url = self
+            .url_override
+            .as_deref()
+            .or_else(|| pesto_cfg?.indexer_url.as_deref());
+        let key = self
+            .api_key_override
+            .as_deref()
+            .or_else(|| pesto_cfg?.indexer_api_key.as_deref());
+        ProwlarrConfig::from_opt(url, key)
     }
 }
 
@@ -385,6 +414,7 @@ impl App {
             confirm_edit_buf: String::new(),
             confirm_show_password: false,
             vault: VaultState::default(),
+            prowlarr: ProwlarrState::default(),
         };
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {
@@ -958,7 +988,7 @@ impl App {
     // ── Config screen helpers ─────────────────────────────────────────────
 
     /// Total number of editable fields in the Config screen.
-    pub const CONFIG_FIELD_COUNT: usize = 9;
+    pub const CONFIG_FIELD_COUNT: usize = 12;
 
     pub fn config_select_next(&mut self) {
         self.config_state.selected =
@@ -1019,6 +1049,20 @@ impl App {
                 .clone()
                 .or_else(|| cfg.and_then(|c| c.compress_password.clone()))
                 .unwrap_or_default(),
+            // 9 = separator "── Prowlarr ──" (not editable)
+            9 => return,
+            10 => self
+                .prowlarr
+                .url_override
+                .clone()
+                .or_else(|| cfg?.indexer_url.clone())
+                .unwrap_or_default(),
+            11 => self
+                .prowlarr
+                .api_key_override
+                .clone()
+                .or_else(|| cfg?.indexer_api_key.clone())
+                .unwrap_or_default(),
             _ => return,
         };
         self.config_state.edit_buf = buf;
@@ -1041,6 +1085,15 @@ impl App {
             6 => ov.nzb_password = if buf.is_empty() { None } else { Some(buf) },
             7 => ov.nzb_category = if buf.is_empty() { None } else { Some(buf) },
             8 => ov.compress_password = if buf.is_empty() { None } else { Some(buf) },
+            10 => {
+                self.prowlarr.url_override = if buf.is_empty() { None } else { Some(buf) };
+                // Reset connection status so user can re-test with new URL
+                self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
+            }
+            11 => {
+                self.prowlarr.api_key_override = if buf.is_empty() { None } else { Some(buf) };
+                self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
+            }
             _ => {}
         }
         self.config_state.editing = false;
@@ -1066,6 +1119,14 @@ impl App {
             6 => ov.nzb_password = None,
             7 => ov.nzb_category = None,
             8 => ov.compress_password = None,
+            10 => {
+                self.prowlarr.url_override = None;
+                self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
+            }
+            11 => {
+                self.prowlarr.api_key_override = None;
+                self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
+            }
             _ => {}
         }
         self.status_bar.set("Field reset to config default");

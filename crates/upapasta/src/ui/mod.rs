@@ -1507,19 +1507,50 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
             hint: "Password for RAR/ZIP compression",
             has_override: ov.compress_password.is_some(),
         },
+        ConfigField {
+            label: "── Prowlarr ──",
+            value: String::new(),
+            hint: "",
+            has_override: false,
+        },
+        ConfigField {
+            label: "Prowlarr URL",
+            value: app
+                .prowlarr
+                .url_override
+                .clone()
+                .or_else(|| cfg?.indexer_url.clone())
+                .unwrap_or_else(|| "—".into()),
+            hint: "Base URL, e.g. http://localhost:9696",
+            has_override: app.prowlarr.url_override.is_some(),
+        },
+        ConfigField {
+            label: "Prowlarr API key",
+            value: app
+                .prowlarr
+                .api_key_override
+                .as_deref()
+                .map(masked)
+                .or_else(|| cfg?.indexer_api_key.as_deref().map(masked))
+                .unwrap_or_else(|| "—".into()),
+            hint: "API key from Prowlarr Settings > General",
+            has_override: app.prowlarr.api_key_override.is_some(),
+        },
     ]
 }
 
 fn draw_config(f: &mut Frame, app: &App, area: Rect) {
+    use crate::prowlarr::ConnectionStatus;
+
     // Split: server info (top) + editable overrides (bottom)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(5)])
+        .constraints([Constraint::Length(10), Constraint::Min(5)])
         .split(area);
 
-    // ── Server info (read-only) ──────────────────────────────────────────
+    // ── Server + Prowlarr info (read-only) ──────────────────────────────
     let cfg = app.pesto_config.as_ref();
-    let server_lines: Vec<Line> = if let Some(c) = cfg {
+    let mut server_lines: Vec<Line> = if let Some(c) = cfg {
         vec![
             Line::from(vec![
                 Span::styled(" Host       ", Style::default().fg(Color::DarkGray)),
@@ -1553,10 +1584,32 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
         ))]
     };
 
+    // Prowlarr status line
+    server_lines.push(Line::raw(""));
+    let (prowlarr_label, prowlarr_style) = match &app.prowlarr.status {
+        ConnectionStatus::Unknown => (
+            " Prowlarr   not tested  [C to check connection]".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        ConnectionStatus::Checking => (
+            " Prowlarr   checking…".to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
+        ConnectionStatus::Ok(ver) => (
+            format!(" Prowlarr   ✓ connected  v{}", ver),
+            Style::default().fg(Color::Green),
+        ),
+        ConnectionStatus::Failed(err) => (
+            format!(" Prowlarr   ✗ {}  [C to retry]", err),
+            Style::default().fg(Color::Red),
+        ),
+    };
+    server_lines.push(Line::styled(prowlarr_label, prowlarr_style));
+
     let server_block = Paragraph::new(server_lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Server (read-only) ")
+            .title(" Server & Integrations (read-only) ")
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(server_block, chunks[0]);

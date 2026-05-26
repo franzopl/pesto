@@ -26,6 +26,7 @@ tokio-util = "0.7"
 futures = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 quick-xml = "0.37"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dev-dependencies]
 tempfile = "3"
