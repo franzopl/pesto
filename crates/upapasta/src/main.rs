@@ -175,6 +175,27 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Left | KeyCode::Char('h') => app.confirm_field_decrement(),
                         _ => {}
                     },
+                    // ── Prowlarr search overlay (takes priority over all screens) ──
+                    _ if app.prowlarr.search.is_some() => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            app.prowlarr.search = None;
+                            app.status_bar.set("Search closed");
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if let Some(ref mut s) = app.prowlarr.search {
+                                s.move_down();
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if let Some(ref mut s) = app.prowlarr.search {
+                                s.move_up();
+                            }
+                        }
+                        KeyCode::Char('d') => {
+                            trigger_prowlarr_download(app, tx.clone());
+                        }
+                        _ => {}
+                    },
                     KeyCode::Char('h') if app.state == app::AppState::Browser => {
                         app.file_tree.toggle_hidden();
                     }
@@ -221,6 +242,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                             } else {
                                 app.show_upload_confirm = true;
                             }
+                        }
+                        KeyCode::Char('P') => {
+                            trigger_prowlarr_search(app, tx.clone());
                         }
                         _ => {}
                     },
@@ -431,6 +455,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
+                        KeyCode::Char('P') => {
+                            trigger_prowlarr_search(app, tx.clone());
+                        }
                         _ => {}
                     },
                     _ if app.state == app::AppState::Config && app.config_state.editing => {
@@ -497,6 +524,50 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     app.prowlarr.status = status;
                 }
+                AppEvent::ProwlarrSearchDone(result) => {
+                    if let Some(ref mut s) = app.prowlarr.search {
+                        s.searching = false;
+                        match result {
+                            Ok(results) => {
+                                let n = results.len();
+                                s.results = results;
+                                s.selected = 0;
+                                app.status_bar.set(format!(
+                                    "Prowlarr: {} result{} for \"{}\"",
+                                    n,
+                                    if n == 1 { "" } else { "s" },
+                                    s.query
+                                ));
+                            }
+                            Err(e) => {
+                                s.error = Some(e.clone());
+                                app.status_bar.set(format!("Prowlarr search error: {}", e));
+                            }
+                        }
+                    }
+                }
+                AppEvent::ProwlarrDownloadDone(result) => {
+                    if let Some(ref mut s) = app.prowlarr.search {
+                        s.downloading = false;
+                    }
+                    match result {
+                        Ok(dest) => {
+                            let name = dest
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned();
+                            app.status_bar.set(format!("Downloaded: {}", name));
+                            app.prowlarr.search = None;
+                            if app.state == app::AppState::NzbVault {
+                                app.load_vault();
+                            }
+                        }
+                        Err(e) => {
+                            app.status_bar.set(format!("Download failed: {}", e));
+                        }
+                    }
+                }
                 AppEvent::Tick => {
                     // could do animations, throughput calc, etc. here later
                 }
@@ -534,6 +605,102 @@ fn trigger_prowlarr_check(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             Err(e) => ConnectionStatus::Failed(e.to_string()),
         };
         let _ = tx.send(AppEvent::ProwlarrStatus(status));
+    });
+}
+
+/// Called when the user presses 'P' in Browser or NZB Vault.
+///
+/// Derives the release name from the selected filename, opens the search
+/// overlay, and spawns an async search task.
+fn trigger_prowlarr_search(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    use app::ProwlarrSearchState;
+
+    let cfg = app.prowlarr.resolve(app.pesto_config.as_ref());
+    let Some(cfg) = cfg else {
+        app.status_bar
+            .set("Prowlarr not configured — set URL and API key in Config (F5)");
+        return;
+    };
+
+    // Derive the release name from the selected path (Browser or Vault).
+    let filename: Option<String> = match app.state {
+        app::AppState::Browser => app
+            .file_tree
+            .get_selected()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned()),
+        app::AppState::NzbVault => app.vault.selected_entry().map(|e| e.name.clone()),
+        _ => None,
+    };
+
+    let Some(filename) = filename else {
+        app.status_bar.set("Nothing selected to search");
+        return;
+    };
+
+    // Strip the file extension to get the release name.
+    let release_name = prowlarr::release_name_from_filename(&filename).to_string();
+
+    app.status_bar
+        .set(format!("Searching Prowlarr for \"{}\"…", release_name));
+    app.prowlarr.search = Some(ProwlarrSearchState::new(release_name.clone()));
+
+    tokio::spawn(async move {
+        let result = match prowlarr::build_client() {
+            Ok(client) => prowlarr::search_by_release(&cfg, &client, &release_name)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = tx.send(AppEvent::ProwlarrSearchDone(result));
+    });
+}
+
+/// Called when the user presses 'd' on a search result to download its NZB.
+fn trigger_prowlarr_download(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    let cfg = app.prowlarr.resolve(app.pesto_config.as_ref());
+    let Some(cfg) = cfg else {
+        app.status_bar.set("Prowlarr not configured");
+        return;
+    };
+
+    let nzb_dir = app
+        .pesto_config
+        .as_ref()
+        .and_then(|c| c.nzb_dir.as_deref())
+        .map(PathBuf::from);
+    let Some(nzb_dir) = nzb_dir else {
+        app.status_bar
+            .set("nzb_dir not configured — set it in pesto.toml");
+        return;
+    };
+
+    let search = match app.prowlarr.search.as_mut() {
+        Some(s) => s,
+        None => return,
+    };
+
+    let result = match search.selected_result() {
+        Some(r) => r.clone(),
+        None => return,
+    };
+
+    let dest = prowlarr::dest_path_in(&nzb_dir, &result);
+    search.downloading = true;
+    app.status_bar.set(format!(
+        "Downloading {}…",
+        prowlarr::nzb_filename_for(&result)
+    ));
+
+    tokio::spawn(async move {
+        let outcome = match prowlarr::build_client() {
+            Ok(client) => prowlarr::download_nzb(&cfg, &client, &result, &dest)
+                .await
+                .map(|()| dest)
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = tx.send(AppEvent::ProwlarrDownloadDone(outcome));
     });
 }
 

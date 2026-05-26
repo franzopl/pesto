@@ -85,6 +85,10 @@ pub enum AppEvent {
     Quit,
     // Prowlarr connection check result
     ProwlarrStatus(crate::prowlarr::ConnectionStatus),
+    // Prowlarr search results (Ok) or error (Err)
+    ProwlarrSearchDone(Result<Vec<crate::prowlarr::SearchResult>, String>),
+    // NZB download finished: Ok(dest_path) or Err(msg)
+    ProwlarrDownloadDone(Result<std::path::PathBuf, String>),
 }
 
 pub struct EventHandler {

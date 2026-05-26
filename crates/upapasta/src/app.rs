@@ -293,6 +293,52 @@ pub struct ProwlarrState {
     /// Session overrides for URL and API key (edited in Config screen).
     pub url_override: Option<String>,
     pub api_key_override: Option<String>,
+    /// Active search overlay (Some while open).
+    pub search: Option<ProwlarrSearchState>,
+}
+
+/// State for the Prowlarr search results overlay.
+#[derive(Debug)]
+pub struct ProwlarrSearchState {
+    /// The release name used as the search query.
+    pub query: String,
+    /// Search is in progress (spinner shown).
+    pub searching: bool,
+    /// Results returned by Prowlarr.
+    pub results: Vec<crate::prowlarr::SearchResult>,
+    /// Index of the highlighted result.
+    pub selected: usize,
+    /// Error from the last search attempt, if any.
+    pub error: Option<String>,
+    /// A download is in progress for the selected result.
+    pub downloading: bool,
+}
+
+impl ProwlarrSearchState {
+    pub fn new(query: String) -> Self {
+        Self {
+            query,
+            searching: true,
+            results: Vec::new(),
+            selected: 0,
+            error: None,
+            downloading: false,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if !self.results.is_empty() && self.selected < self.results.len() - 1 {
+            self.selected += 1;
+        }
+    }
+
+    pub fn selected_result(&self) -> Option<&crate::prowlarr::SearchResult> {
+        self.results.get(self.selected)
+    }
 }
 
 impl ProwlarrState {
