@@ -346,22 +346,110 @@ Concepts to evaluate later. Not committed to any timeline.
 | yEnc SIMD Escaping | Use PSHUFB to insert '=' escapes in-place without falling back to scalar. |
 | yEnc Multi-line | Process multiple lines in parallel using AVX2 or AVX-512. |
 
-## Phase 32 — yEnc Performance Parity ✅
-Target: Match or exceed `node-yencode` throughput (> 2 GB/s on modern CPUs).
-- [x] Identify performance gap vs `node-yencode` (~700 MB/s vs ~2000 MB/s).
-- [x] Optimize the "slow path" (escaping) to avoid scalar fallbacks.
-- [x] Implement SIMD expansion using shuffle tables (PSHUFB) for inserting '=' escapes.
-- [x] Pointer-based implementation to eliminate Vec bounds checks.
-- [x] Benchmarking and validation: **2.2 GB/s** achieved (exceeding `node-yencode`).
+---
 
-| RAM auto-cap | Cap buffer pools based on available system memory to prevent OOM |
-| Dynamic connection scaling | Reduce connections under memory or TCP pressure |
-| CPU topology awareness | Tune `rayon` pool to physical vs logical core count |
-| Disk pre-flight | Verify free space before compression/PAR2 starts |
-| In-memory mode | Skip temp files for small payloads that fit in RAM |
-| `O_DIRECT` reads | Bypass page cache on Linux for huge files |
-| `mmap` fast-path | `mmap` + `MADV_SEQUENTIAL` for massive file reads |
-| Adaptive buffering | Grow/shrink buffer pool based on upload/read speed delta |
-| Lock-free buffer pool | Replace `Mutex<Vec<_>>` pool with `SegQueue` to eliminate contention at high connection counts |
-| Connection health scoring | Track per-server error rates passively; prefer healthy servers without hard failover |
-| Warm reconnection | Pre-connect to the next failover server in background so TLS handshake cost is not paid on the hot path |
+## Phase 40 — UpaPasta v2 (Rust Rewrite)
+
+**Goal:** Replace the legacy Python version of UpaPasta with a pure Rust implementation using the `pesto` library directly. Focus on excellent UX while leveraging the performance of the Rust engine.
+
+### 40a — Monorepo & Foundation ✅
+
+- [x] Convert repository to Cargo workspace (`crates/pesto`, `crates/parmesan`, `crates/upapasta`)
+- [x] Move existing `pesto` code into `crates/pesto/`
+- [x] Create `crates/upapasta` with initial TUI skeleton (`ratatui` + `crossterm`)
+- [x] Update `CLAUDE.md` with new architecture and development practices
+- [x] Refine public API in `pesto`: `post_cancelable(config, files, Arc<AtomicBool>)` — cancellation properly propagates into pesto workers instead of only watching Ctrl-C
+
+### 40b — TUI Core (In Progress)
+
+**Current focus.** Build a clean, responsive, keyboard-driven interface.
+
+- [x] Implement main `App` state machine with multiple screens (Dashboard, Browser, History, Config)
+- [x] Create reusable components: `FileTree`, `UploadQueue`, `StatusBar`, `LogPanel`
+- [x] Event-driven architecture using `crossterm` event stream + `tokio::sync::mpsc`
+- [x] Real-time progress rendering from `pesto::post()` events (full `ProgressEvent` stream)
+- [x] Basic navigation and keyboard shortcuts (`q`, `j/k`, `Enter`, `Tab`, `u`, `h`, Backspace, etc.)
+- [x] Scrollable & navigable LogPanel (↑/↓, PgUp/PgDn, auto-scroll toggle, search/filter with `/`)
+- [x] Live visual progress: accurate segment/byte tracking + speed + ETA from structured ProgressUpdate
+- [x] Throughput sparkline (ratatui Sparkline widget) showing recent speed history
+- [x] Per-file Gauge progress bars (color-coded by status: pending/active/done/failed)
+- [x] Upload controls: cancel current upload (`x` key) using `CancellationToken` — now fully propagated to pesto workers
+- [x] Pause/resume upload (`p` key) - UI + stats freeze (full worker pause pending pesto API)
+- [x] Queue management: remove items (`d`/Del), clear queue (`c`), reordering (Shift+J/K)
+- [x] Graceful error display: ERROR/WARN lines in red/yellow, UploadError event to status bar
+- [x] Responsive layout: compact mode < 20 lines, "too small" guard < 40×10
+- [x] **Bulk multi-select in Browser**: Space marks/unmarks items with `[x]`/`[ ]` checkboxes; cursor advances; count shown in title and status bar
+- [x] **Browser split layout**: queue panel sidebar (35%) appears alongside file tree when queue is non-empty
+- [x] **Upload confirmation modal**: `u` opens overlay with files + effective settings (server, groups, from, PAR2, obfuscate, compress, verify); Enter/y confirms, Esc/n cancels
+- [x] **Pipeline phase indicator**: progress section shows `Compress → PAR2 Gen → Upload → Verify` tracker with per-phase detail driven by real pesto ProgressEvents
+- [ ] Theme support (dark/light + user-configurable colors)
+- [ ] Directory-level queuing: Space on a directory marks all files inside recursively
+- [ ] Auto-switch to Dashboard when upload starts so user sees progress without pressing Tab
+- [ ] Pause support: real worker suspension (requires pesto API — currently only freezes UI stats)
+
+### 40c — Catalog & Persistence
+
+- [x] Persistent catalog (SQLite via `rusqlite` bundled, `~/.local/share/upapasta/catalog.db`)
+- [x] Import history from legacy Python JSONL (auto-import on first run, 3914 records)
+- [x] Search, filtering and statistics views (History tab: `/` to filter, `s` for stats panel)
+- [x] Record each upload to catalog on completion (name, size, duration, group, server, category)
+- [x] NZB archive viewer (Enter on History item → overlay popup with file list, segments, bytes; Esc to close)
+
+### 40d — Orchestration & Feature Parity
+
+- [ ] Watch mode with smart rules and move-to-done logic
+- [ ] Metadata enrichment (TMDb, improved NFO generation)
+- [x] Basic real config loading on startup (from default pesto path)
+- [x] Clear visibility of effective upload settings before upload: obfuscation mode, compression+password, PAR2 %, groups, From, article size, verify — shown in Dashboard when queue has files + logged on upload start
+- [x] Full configuration UI / editing + profile support (override obfuscation, PAR2, compression etc. from TUI — Config tab with per-session overrides for from, groups, obfuscate, PAR2, article size, verify, passwords; applied at upload time)
+- [x] Post-upload hooks (shell + native Rust) — runs config.post_hook via sh -c + executables in ~/.config/pesto/hooks/; same PESTO_* env vars as pesto CLI; output streamed to log panel
+- [x] **Persistent upload preferences** — session overrides (obfuscation, PAR2 %, password, groups) saved to `~/.config/pesto/upapasta-prefs.json` on every confirmed upload; reloaded at startup so the confirm panel is pre-filled with last-used settings
+- [ ] Wizard for first-time setup
+
+### 40e — Polish, Testing & Release
+
+- [ ] Comprehensive error handling and user feedback
+- [ ] Migration path from Python version
+- [ ] Performance tuning of TUI during long uploads
+- [ ] Build portable binaries
+- [ ] Update documentation, man pages and README
+- [ ] Retire or archive the old Python codebase
+
+**Pre-commit checklist for upapasta:**
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo check -p upapasta
+cargo test -p upapasta
+```
+
+---
+
+### Phase 44 — Full pipeline delegation to `pesto::upload::run_upload` ✅
+
+Previously upapasta called `pesto::poster::post_files_with_progress_and_cancel`
+directly and reimplemented post-upload steps incompletely (broken NZB write,
+no compression, no history, no NFO, broken hooks). This phase centralised
+everything in a new `pesto::upload::run_upload()` public API.
+
+- [x] Created `crates/pesto/src/upload.rs` with `run_upload()` — canonical full pipeline: compress → PAR2 → post → NZB write (versioned) → history → indexer → notifications → NFO → hooks → cleanup temp dir
+- [x] Moved `upapasta/src/hooks.rs` to `pesto/src/hooks.rs` (now public in pesto lib)
+- [x] Added `pesto::upload::UploadOutcome` return type with segments, cancelled, had_failures, nzb_path, total_bytes
+- [x] Fixed progress bar frozen at 99%: send 100% on `Finished` event without setting `events_done`; post-upload `Status` events (NZB path, hook output) continue to stream to log panel
+- [x] Fixed PESTO_NZB always empty: NZB path now falls back to `./stem.nzb` when no `nzb_dir` configured
+- [x] Added NFO generation in pipeline (was absent from upapasta path)
+- [x] Added post-check STAT pass (`config.check`) after posting — matches pesto CLI behaviour
+- [x] `ObfuscateMode` gains `Serialize` for JSON round-trip
+
+---
+
+### Phase 45 — NZB Vault UX improvements ✅
+
+- [x] **Browser scroll fix** — cursor now moves within the visible area before scrolling; pressing ↑ from the last item moves the highlight up the screen without scrolling, fixing the counter-intuitive bounce effect
+- [x] **NFO privacy** — `mediainfo` output now has the full filesystem path replaced with just the basename before writing the `.nfo` file
+- [x] **NZB vault segregation** — three origin categories with automatic subdirectory creation:
+  - `nzb_dir/uploaded/`   — NZBs created by upapasta uploads (badge `↑` cyan)
+  - `nzb_dir/downloaded/` — NZBs fetched from Prowlarr/indexers (badge `↓` yellow)
+  - `nzb_dir/` and any other subdirectory — manually placed NZBs (badge `m` gray)
+- [x] **Fully recursive vault scan** — `collect_nzbs_recursive()` walks all subdirectories at any depth; origin derived from immediate parent folder name

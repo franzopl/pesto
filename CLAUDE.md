@@ -1,23 +1,73 @@
 # CLAUDE.md
 
-Guide for agents working in this repository.
+**This is the canonical guide for all agents working in this monorepo.**
 
 > The official language of this project is **English**. All code, comments,
 > documentation, commit messages and identifiers must be written in English.
 
-## What `pesto` is
+## Project Overview (2026)
 
-`pesto` is a Usenet poster written in Rust. It takes a list of files, encodes
-them with yEnc, posts the resulting articles to Usenet groups over NNTP, and
-generates an `.nzb` file describing what was posted.
+This repository is now a **Cargo Workspace** containing three main crates:
 
-It is inspired by [`nyuu`](https://github.com/animetosho/Nyuu), but with a
-deliberately smaller scope: **just the basics, executed extremely fast**. No
-superfluous flags. Performance and simplicity over feature coverage.
+- **`pesto`** — Core library + lightweight high-performance CLI (`pesto`)
+- **`upapasta`** — Full-featured Rust application with rich TUI, catalog, watch mode, metadata, and orchestration (replaces the old Python version)
+- **`parmesan`** — High-performance PAR2 library (create, verify, repair)
 
-End goal: `pesto` will be integrated into the posting flow of the `upapasta`
-program. Design decisions must keep the tool usable both as a standalone CLI
-binary and as an embeddable library (`lib.rs` + `main.rs`).
+`upapasta` uses the `pesto` library **directly** via Rust API (no subprocess calls or JSON parsing).
+
+### Current Focus (Phase 40b+)
+
+We are now developing **UpaPasta v2 in Rust**. The Python version in `/home/francisco/dev/franzopl/upapasta` is considered legacy and will be retired once feature parity is reached.
+
+## Architecture Principles
+
+- **`pesto`** remains minimal, extremely fast, and focused on the hot path (yEnc → article → NNTP pipeline).
+- **`upapasta`** is responsible for UX, business logic, catalog, watch mode, metadata enrichment (TMDb, NFO), and orchestration.
+- All shared types, config, and progress events live in `pesto` (as public API).
+- Prefer **direct library integration** over CLI spawning in `upapasta`.
+- TUI must be responsive, keyboard-driven, and pleasant to use daily.
+
+## Design Principles (Updated)
+
+- **Performance first** in `pesto`, **excellent UX** in `upapasta`.
+- Keep `pesto` CLI minimal. Complex features belong in `upapasta`.
+- Use `ratatui` + `crossterm` for the TUI.
+- All new code in `upapasta` must be async-friendly and integrate cleanly with `pesto::post()`.
+- Maintain compatibility with existing user configuration where possible.
+
+## Current Directory Structure
+
+```
+crates/
+├── parmesan/          # PAR2 engine
+├── pesto/             # Core library + CLI binary (crates/pesto/src/bin/pesto.rs)
+└── upapasta/          # Main TUI application (our current focus)
+```
+
+## Development Workflow (UpaPasta v2)
+
+When working on `upapasta`:
+
+1. Always check neighboring files for style, component patterns, and naming.
+2. Use existing `pesto` public API instead of reimplementing upload logic.
+3. Prefer `ratatui` widgets and state management patterns already established.
+4. Run `cargo check -p upapasta` and `cargo clippy -p upapasta` frequently.
+5. Keep the TUI responsive even during long uploads (use channels for progress).
+
+**Pre-commit checklist for upapasta:**
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo check -p upapasta
+cargo test -p upapasta
+```
+
+---
+
+## Legacy Notes
+
+The old Python implementation (`/home/francisco/dev/franzopl/upapasta`) should only be referenced for understanding desired UX and feature list. Do not port code directly — reimplement idiomatically in Rust.
 
 ## Design principles
 
@@ -32,34 +82,28 @@ binary and as an embeddable library (`lib.rs` + `main.rs`).
 - **Fail clearly.** Network, authentication and I/O errors must produce
   actionable messages, not panics.
 
-## Intended architecture
+## Current Focus (Phase 40b)
 
-```
-src/
-  main.rs        # CLI parsing, loads config, kicks off the post
-  lib.rs         # public API for use by upapasta
-  config.rs      # TOML loading + merge with flags
-  yenc.rs        # yEnc encoder (hot path — keep it lean)
-  nntp/
-    mod.rs       # NNTP client, POST command
-    pool.rs      # pool of concurrent TLS connections
-  article.rs     # article assembly (headers + yEnc body, segmentation)
-  nzb.rs         # .nzb file generation (XML)
-```
+We are implementing a clean, responsive TUI in `upapasta` using `ratatui`.
 
-This tree is a target, not the current state — see `ROADMAP.md` for what has
-already been delivered.
+**Preferred patterns in upapasta:**
+- Use `App` struct with `State` for screens (Dashboard, FileBrowser, History, etc.)
+- Prefer event-driven architecture with `crossterm` event stream
+- Use `tokio::sync::mpsc` to receive progress events from `pesto::post()`
+- Keep components small and composable (see `ratatui` examples)
+- All business logic should live in services, not in UI widgets
 
-## Stack and suggested dependencies
+## Stack (UpaPasta v2)
 
-- Async runtime: `tokio`
-- TLS: `rustls` + `tokio-rustls` (avoids depending on the system OpenSSL)
-- CLI: `clap` (derive)
-- Config: `serde` + `toml`
-- `.nzb` XML: manual string generation or `quick-xml`
-- Errors: `anyhow` in the binary, dedicated error types in the library
+**pesto:**
+- `tokio`, `rustls` + `tokio-rustls`, `clap`, `serde` + `toml`, `tracing`
 
-Keep the dependency tree small. Every new crate must justify itself.
+**upapasta:**
+- `ratatui` + `crossterm` (TUI)
+- `pesto` (as library)
+- `directories`, `chrono`, `serde_json`, `tokio-util`, `sled` or `rusqlite` (catalog)
+
+Keep dependency tree small. New crates in `upapasta` must be justified by UX or orchestration value.
 
 ## Configuration
 

@@ -221,6 +221,21 @@ pub async fn post_files_with_progress(
     events: Option<ProgressSender>,
     resume_state_path: Option<&Path>,
 ) -> Result<PostOutcome> {
+    post_files_with_progress_and_cancel(config, files, events, resume_state_path, None).await
+}
+
+/// Like [`post_files_with_progress`] but accepts an external cancel flag.
+///
+/// Setting `external_cancel` to `true` causes the run to stop at the next
+/// segment boundary, exactly as if the user had pressed Ctrl-C. This is the
+/// integration point for embedding applications such as `upapasta`.
+pub async fn post_files_with_progress_and_cancel(
+    config: &Config,
+    files: &[InputFile],
+    events: Option<ProgressSender>,
+    resume_state_path: Option<&Path>,
+    external_cancel: Option<Arc<AtomicBool>>,
+) -> Result<PostOutcome> {
     configure_rayon(config.threads);
 
     let mut metas = Vec::with_capacity(files.len());
@@ -377,9 +392,25 @@ pub async fn post_files_with_progress(
     let cancel_handle = {
         let shared = shared.clone();
         tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                shared.cancelled.store(true, Ordering::Relaxed);
-                shared.emit(ProgressEvent::Interrupted);
+            tokio::select! {
+                biased;
+                _ = async {
+                    if let Some(ref flag) = external_cancel {
+                        loop {
+                            if flag.load(Ordering::Relaxed) { break; }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        }
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    shared.cancelled.store(true, Ordering::Relaxed);
+                    shared.emit(ProgressEvent::Interrupted);
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    shared.cancelled.store(true, Ordering::Relaxed);
+                    shared.emit(ProgressEvent::Interrupted);
+                }
             }
         })
     };

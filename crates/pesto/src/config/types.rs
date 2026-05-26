@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use parmesan::SimdPath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Default NNTP-over-TLS port.
@@ -36,7 +36,7 @@ pub struct ServerEntry {
 }
 
 /// How much of a post to obfuscate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ObfuscateMode {
     /// No obfuscation: the real file name appears in the subject and the

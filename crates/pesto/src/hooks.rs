@@ -1,0 +1,160 @@
+//! Post-upload hook execution.
+//!
+//! Runs `config.post_hook` via `sh -c` (if set and `no_hooks` is false), then
+//! runs every executable file in `~/.config/pesto/hooks/` (sorted by name).
+//!
+//! Each hook receives the same environment variables:
+//! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_SERVER`, `PESTO_GROUP`,
+//! `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::config::Config;
+
+/// Information passed to each hook via environment variables.
+#[derive(Debug, Clone)]
+pub struct HookContext {
+    pub name: String,
+    pub total_bytes: u64,
+    pub server: String,
+    pub group: String,
+    pub password: String,
+    pub nzb_path: String,
+    pub nfo_path: String,
+}
+
+/// Run all configured post-upload hooks.
+///
+/// Returns a list of log lines describing what ran and any errors.
+/// This function is synchronous — wrap in `spawn_blocking` when calling
+/// from async code.
+pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
+    if config.no_hooks {
+        return vec!["Hooks disabled (no_hooks=true)".to_string()];
+    }
+
+    let mut logs: Vec<String> = Vec::new();
+
+    if let Some(ref cmd) = config.post_hook {
+        logs.push(format!("Running post-hook: {}", cmd));
+        match run_shell(cmd, ctx) {
+            Ok(output) => {
+                for line in output.lines() {
+                    logs.push(format!("  hook> {}", line));
+                }
+                logs.push("post-hook exited ok".to_string());
+            }
+            Err(e) => logs.push(format!("post-hook error: {}", e)),
+        }
+    }
+
+    if let Some(hooks_dir) = crate::config::config_dir().map(|d| d.join("hooks")) {
+        if hooks_dir.is_dir() {
+            for script in sorted_executables(&hooks_dir) {
+                let label = script.display().to_string();
+                logs.push(format!("Running hook script: {}", label));
+                match run_script(&script, ctx) {
+                    Ok(output) => {
+                        for line in output.lines() {
+                            logs.push(format!("  hook> {}", line));
+                        }
+                        logs.push(format!("{}: exited ok", label));
+                    }
+                    Err(e) => logs.push(format!("{}: error: {}", label, e)),
+                }
+            }
+        }
+    }
+
+    if logs.is_empty() {
+        logs.push("No post-upload hooks configured".to_string());
+    }
+
+    logs
+}
+
+fn apply_env(cmd: &mut Command, ctx: &HookContext) {
+    cmd.env("PESTO_NAME", &ctx.name)
+        .env("PESTO_BYTES", ctx.total_bytes.to_string())
+        .env("PESTO_SERVER", &ctx.server)
+        .env("PESTO_GROUP", &ctx.group)
+        .env("PESTO_PASSWORD", &ctx.password)
+        .env("PESTO_NZB", &ctx.nzb_path)
+        .env("PESTO_NFO", &ctx.nfo_path);
+}
+
+#[cfg(unix)]
+fn run_shell(cmd: &str, ctx: &HookContext) -> Result<String, String> {
+    let mut c = Command::new("sh");
+    c.args(["-c", cmd]);
+    apply_env(&mut c, ctx);
+    run_command(c)
+}
+
+#[cfg(windows)]
+fn run_shell(cmd: &str, ctx: &HookContext) -> Result<String, String> {
+    let mut c = Command::new("cmd");
+    c.args(["/c", cmd]);
+    apply_env(&mut c, ctx);
+    run_command(c)
+}
+
+fn run_script(path: &Path, ctx: &HookContext) -> Result<String, String> {
+    let mut c = Command::new(path);
+    apply_env(&mut c, ctx);
+    run_command(c)
+}
+
+fn run_command(mut cmd: Command) -> Result<String, String> {
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to start: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let combined = if stderr.is_empty() {
+        stdout
+    } else if stdout.is_empty() {
+        stderr
+    } else {
+        format!("{}{}", stdout, stderr)
+    };
+    if output.status.success() {
+        Ok(combined)
+    } else {
+        Err(format!(
+            "exited with {}: {}",
+            output.status,
+            combined.trim()
+        ))
+    }
+}
+
+fn sorted_executables(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut scripts: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_executable(p))
+        .collect();
+    scripts.sort();
+    scripts
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("exe" | "cmd" | "bat" | "ps1")
+    )
+}
