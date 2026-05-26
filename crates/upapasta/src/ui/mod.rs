@@ -839,7 +839,8 @@ fn draw_compress_bar(f: &mut Frame, app: &App, area: Rect) {
 fn draw_par2_bar(f: &mut Frame, app: &App, area: Rect) {
     let p = &app.progress;
 
-    let par2_done = p.par2_total_slices > 0 && p.par2_done_slices >= p.par2_total_slices;
+    let par2_done =
+        p.par2_finished || (p.par2_total_slices > 0 && p.par2_done_slices >= p.par2_total_slices);
     let par2_active = p.par2_total_slices > 0 && !par2_done;
 
     const SPINNER: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -1913,18 +1914,9 @@ fn draw_nzb_vault(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(Color::DarkGray)
                 };
                 let (origin_sym, origin_style) = match e.origin {
-                    NzbOrigin::Uploaded => (
-                        "↑",
-                        Style::default().fg(Color::Cyan),
-                    ),
-                    NzbOrigin::Downloaded => (
-                        "↓",
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    NzbOrigin::Manual => (
-                        "m",
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    NzbOrigin::Uploaded => ("↑", Style::default().fg(Color::Cyan)),
+                    NzbOrigin::Downloaded => ("↓", Style::default().fg(Color::Yellow)),
+                    NzbOrigin::Manual => ("m", Style::default().fg(Color::DarkGray)),
                 };
                 let size_str = format_bytes(e.file_size);
                 // Reserve space for: " ✓ ↑ " (5) + "  123.4 KB" (11) = 16 cols

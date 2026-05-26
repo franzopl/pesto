@@ -49,6 +49,17 @@ pub struct ProgressUpdate {
 
     /// PAR2 encoding progress (concurrent with NNTP posting); None = no change
     pub par2_slices: Option<(usize, usize)>, // (done, total)
+
+    /// When set, this update extends the queue by the given bytes/segments.
+    /// apply() absorbs it against par2_hint_remaining instead of blindly adding.
+    pub queue_extended: Option<(u64, u64)>, // (segments, bytes)
+
+    /// PAR2 bytes pre-seeded into total_bytes from par2_bytes_hint (Started event only).
+    /// apply() stores it so QueueExtended can absorb against it.
+    pub par2_hint_bytes: u64,
+
+    /// When true, PAR2 encode+write is fully complete. apply() marks par2_finished.
+    pub par2_complete: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -44,6 +44,12 @@ pub struct UploadProgress {
     /// PAR2 encoding progress (runs concurrently with NNTP posting)
     pub par2_done_slices: usize,
     pub par2_total_slices: usize,
+    /// Whether PAR2 encode + write phases are fully complete.
+    pub par2_finished: bool,
+
+    /// Bytes pre-seeded from par2_bytes_hint; consumed as QueueExtended arrives
+    /// so total_bytes never jumps backwards.
+    pub par2_hint_remaining: u64,
 
     /// Compression progress (tracked separately for the three-bar display)
     pub compress_total_bytes: u64,
@@ -112,6 +118,19 @@ impl UploadProgress {
     }
 
     pub fn apply(&mut self, update: &ProgressUpdate) {
+        if let Some((seg, bytes)) = update.queue_extended {
+            self.total_segments += seg;
+            // Absorb real PAR2 bytes against the pre-seeded hint so the bar
+            // never goes backwards (same logic as pesto's terminal renderer).
+            if bytes <= self.par2_hint_remaining {
+                self.par2_hint_remaining -= bytes;
+            } else {
+                let excess = bytes - self.par2_hint_remaining;
+                self.par2_hint_remaining = 0;
+                self.total_bytes += excess;
+            }
+            return;
+        }
         if update.total_segments > 0 {
             self.total_segments = update.total_segments;
         }
@@ -153,6 +172,16 @@ impl UploadProgress {
             self.par2_done_slices = done;
             if total > 0 {
                 self.par2_total_slices = total;
+            }
+        }
+        if update.par2_hint_bytes > 0 {
+            self.par2_hint_remaining = update.par2_hint_bytes;
+        }
+        if update.par2_complete {
+            self.par2_finished = true;
+            // Ensure slices show as complete even if counts were imprecise.
+            if self.par2_total_slices > 0 {
+                self.par2_done_slices = self.par2_total_slices;
             }
         }
     }

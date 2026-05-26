@@ -725,12 +725,6 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         build_dry_run_config()
     };
 
-    let label = entry_paths
-        .first()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "upload".to_string());
-
     let cancel_token = app.current_cancel_token.clone().unwrap_or_default();
 
     // Direct uploads into nzb_dir/uploaded/ so the vault can distinguish them
@@ -744,16 +738,51 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         let _ = std::fs::create_dir_all(d);
     }
 
+    // Each queue item is uploaded individually so each file gets its own NZB.
     tokio::spawn(async move {
-        let result = run_real_upload(config, entry_paths, label, nzb_out_dir, tx.clone(), cancel_token).await;
-        let success = result.is_ok();
-        let cancelled = result.as_ref().map(|o| o.cancelled).unwrap_or(false);
-        if let Err(ref e) = result {
-            let _ = tx.send(AppEvent::UploadError(e.to_string()));
+        let total = entry_paths.len();
+        let mut any_cancelled = false;
+        let mut all_ok = true;
+        for (i, path) in entry_paths.iter().enumerate() {
+            let label = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("file-{}", i + 1));
+            if total > 1 {
+                let _ = tx.send(AppEvent::Progress(format!(
+                    "=== Upload {}/{}: {} ===",
+                    i + 1,
+                    total,
+                    label
+                )));
+            }
+            let result = run_real_upload(
+                config.clone(),
+                vec![path.clone()],
+                label,
+                nzb_out_dir.clone(),
+                tx.clone(),
+                cancel_token.clone(),
+            )
+            .await;
+            match result {
+                Err(ref e) => {
+                    let _ = tx.send(AppEvent::UploadError(e.to_string()));
+                    all_ok = false;
+                }
+                Ok(ref o) if o.cancelled => {
+                    any_cancelled = true;
+                    break;
+                }
+                Ok(ref o) if o.had_failures => {
+                    all_ok = false;
+                }
+                Ok(_) => {}
+            }
         }
         let _ = tx.send(AppEvent::UploadFinished {
-            success: success && !cancelled,
-            cancelled,
+            success: all_ok && !any_cancelled,
+            cancelled: any_cancelled,
         });
     });
 }
@@ -883,6 +912,9 @@ async fn run_real_upload(
         file_update: None,
         phase: None,
         par2_slices: None,
+        queue_extended: None,
+        par2_hint_bytes: 0,
+        par2_complete: false,
     };
 
     // select! races the pipeline task against the progress channel.
@@ -935,6 +967,9 @@ async fn run_real_upload(
                         file_update: None,
                         phase: last_update.phase.clone(),
                         par2_slices: None,
+                        queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
                     };
                     last_update = done.clone();
                     let _ = tx.send(AppEvent::ProgressUpdate(done));
@@ -1036,6 +1071,9 @@ fn extract_progress_update(
                 file_update: None,
                 phase: Some(UploadPhase::Uploading),
                 par2_slices: None,
+                queue_extended: None,
+                par2_hint_bytes: *par2_bytes_hint,
+                par2_complete: false,
             })
         }
         E::CompressStarted { total_bytes } => Some(ProgressUpdate {
@@ -1051,6 +1089,9 @@ fn extract_progress_update(
                 total_bytes: *total_bytes,
             }),
             par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         E::CompressProgress { bytes_written } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -1068,6 +1109,9 @@ fn extract_progress_update(
                 },
             }),
             par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         E::CompressDone => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -1079,6 +1123,9 @@ fn extract_progress_update(
             file_update: None,
             phase: Some(UploadPhase::Preparing),
             par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         // Par2EncodeStarted is a config announcement, NOT a sequential phase.
         // PAR2 encoding runs concurrently with NNTP posting. Store total slices
@@ -1095,6 +1142,9 @@ fn extract_progress_update(
             file_update: None,
             phase: Some(UploadPhase::Uploading),
             par2_slices: Some((0, *recovery_slices)),
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         E::Par2InputProgress { done, total } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -1106,6 +1156,9 @@ fn extract_progress_update(
             file_update: None,
             phase: None, // phase stays Uploading
             par2_slices: Some((*done, *total)),
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         // PAR2 volumes are written to disk after encoding completes (sequential).
         E::Par2WriteStarted { total } => Some(ProgressUpdate {
@@ -1121,12 +1174,16 @@ fn extract_progress_update(
                 total: *total,
             }),
             par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         E::Par2SliceWritten => {
             let (written, total) = match &previous.phase {
                 Some(UploadPhase::WritingPar2 { written, total }) => (written + 1, *total),
                 _ => (1, 1),
             };
+            let all_written = total > 0 && written >= total;
             Some(ProgressUpdate {
                 done_segments: previous.done_segments,
                 total_segments: previous.total_segments,
@@ -1137,6 +1194,9 @@ fn extract_progress_update(
                 file_update: None,
                 phase: Some(UploadPhase::WritingPar2 { written, total }),
                 par2_slices: None,
+                queue_extended: None,
+                par2_hint_bytes: 0,
+                par2_complete: all_written,
             })
         }
         E::CheckStarted { total } => Some(ProgressUpdate {
@@ -1152,6 +1212,9 @@ fn extract_progress_update(
                 total: *total,
             }),
             par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         E::CheckProgress { checked, .. } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
@@ -1169,6 +1232,9 @@ fn extract_progress_update(
                 },
             }),
             par2_slices: None,
+            queue_extended: None,
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         E::SegmentDone { file, bytes, ok } => {
             let file_update = FileProgressUpdate {
@@ -1189,20 +1255,26 @@ fn extract_progress_update(
                 file_update: Some(file_update),
                 phase: None,
                 par2_slices: None,
+                queue_extended: None,
+                par2_hint_bytes: 0,
+                par2_complete: false,
             })
         }
         E::QueueExtended {
             segments, bytes, ..
         } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
-            total_segments: previous.total_segments + segments,
+            total_segments: previous.total_segments,
             done_bytes: previous.done_bytes,
-            total_bytes: previous.total_bytes + bytes,
+            total_bytes: previous.total_bytes,
             current_speed_mbps: previous.current_speed_mbps,
             message: None,
             file_update: None,
             phase: None,
             par2_slices: None,
+            queue_extended: Some((*segments, *bytes)),
+            par2_hint_bytes: 0,
+            par2_complete: false,
         }),
         _ => None,
     }
