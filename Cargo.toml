@@ -14,56 +14,6 @@ license = "MIT"
 repository = "https://github.com/franzopl/pesto"
 homepage = "https://github.com/franzopl/pesto"
 
-[package]
-name = "pesto-root"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-description = "Monorepo root for pesto + upapasta"
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-publish = false
-
-[dependencies]
-parmesan = { package = "parmesan-par2", version = "0.1.0", path = "crates/parmesan", default-features = false }
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-md-5 = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "fs", "signal", "sync"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-webpki-roots = "0.26"
-rayon = "1.12.0"
-crc32fast = "1.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart"] }
-sha2 = "0.10"
-tempfile = "3"
-sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[features]
-# Exposes internal per-path flush functions for micro-benchmarking individual SIMD paths.
-# Never enable this in production builds.
-bench-internals = ["parmesan/bench-internals"]
-# Exposes the AVX2+GFNI and AVX-512+GFNI flush paths for testing/benchmarking.
-par2-avx2-gfni-unsafe = ["parmesan/par2-avx2-gfni-unsafe"]
-
-[dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
-
-[[bench]]
-name = "par2_encoder"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "yenc"
-harness = false
-
 [profile.release]
 lto = true
 codegen-units = 1

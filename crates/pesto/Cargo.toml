@@ -45,3 +45,13 @@ par2-avx2-gfni-unsafe = ["parmesan/par2-avx2-gfni-unsafe"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
+tempfile = "3"
+
+[[bench]]
+name = "par2_encoder"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "yenc"
+harness = false
