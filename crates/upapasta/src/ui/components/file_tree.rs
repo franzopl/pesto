@@ -94,10 +94,7 @@ impl FileTree {
         if self.selected == 0 {
             // Wrap to bottom.
             self.selected = self.items.len() - 1;
-            self.scroll_offset = self
-                .items
-                .len()
-                .saturating_sub(self.visible_height);
+            self.scroll_offset = self.items.len().saturating_sub(self.visible_height);
         } else {
             self.selected -= 1;
             // Scroll only when cursor leaves the visible area.
