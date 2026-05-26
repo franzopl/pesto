@@ -91,12 +91,19 @@ fn draw_header(f: &mut Frame, area: Rect) {
 }
 
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let titles = vec![" Dashboard ", " Browser ", " History ", " Config "];
+    let titles = vec![
+        " Dashboard ",
+        " Browser ",
+        " History ",
+        " NZB Vault ",
+        " Config ",
+    ];
     let selected = match app.state {
         AppState::Dashboard => 0,
         AppState::Browser => 1,
         AppState::History => 2,
-        AppState::Config => 3,
+        AppState::NzbVault => 3,
+        AppState::Config => 4,
     };
 
     let tabs = Tabs::new(titles)
@@ -126,7 +133,13 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
                 draw_nzb_viewer_overlay(f, app, area);
             }
         }
-        _ => {
+        AppState::NzbVault => {
+            draw_nzb_vault(f, app, area);
+            if app.vault.viewer.is_some() {
+                draw_vault_viewer_overlay(f, app, area);
+            }
+        }
+        AppState::Config => {
             draw_config(f, app, area);
         }
     }
@@ -1784,4 +1797,290 @@ fn category_color(cat: &str) -> Color {
         "Anime" => Color::Yellow,
         _ => Color::DarkGray,
     }
+}
+
+// ── NZB Vault ─────────────────────────────────────────────────────────────────
+
+fn draw_nzb_vault(f: &mut Frame, app: &App, area: Rect) {
+    use crate::app::VaultSort;
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(area);
+
+    // ── Left: file list ──────────────────────────────────────────────────────
+    let sort_label = match app.vault.sort {
+        VaultSort::Date => "date",
+        VaultSort::Name => "name",
+        VaultSort::Size => "size",
+    };
+
+    let count = app.vault.entries.len();
+    let list_title = format!(
+        " NZB Vault  {} file{}  [sort: {}]  [r reload · s sort · v view · d delete] ",
+        count,
+        if count == 1 { "" } else { "s" },
+        sort_label,
+    );
+
+    let items: Vec<ListItem> = if let Some(ref err) = app.vault.load_error {
+        vec![ListItem::new(Span::styled(
+            format!(" {}", err),
+            Style::default().fg(Color::Red),
+        ))]
+    } else if app.vault.entries.is_empty() {
+        vec![ListItem::new(Span::styled(
+            " No .nzb files found",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        app.vault
+            .entries
+            .iter()
+            .map(|e| {
+                let catalog_marker = if e.in_catalog { "✓" } else { "·" };
+                let catalog_style = if e.in_catalog {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let size_str = format_bytes(e.file_size);
+                let name_width = chunks[0].width.saturating_sub(16) as usize;
+                let name = if e.name.len() > name_width {
+                    format!("{}…", &e.name[..name_width.saturating_sub(1)])
+                } else {
+                    e.name.clone()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", catalog_marker), catalog_style),
+                    Span::raw(name),
+                    Span::styled(
+                        format!("  {:>9}", size_str),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(list_title)
+                .border_style(Style::default().fg(Color::Blue)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut list_state = ListState::default();
+    list_state.select(if app.vault.entries.is_empty() {
+        None
+    } else {
+        Some(app.vault.selected)
+    });
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    // ── Right: detail panel ──────────────────────────────────────────────────
+    draw_vault_detail(f, app, chunks[1]);
+}
+
+fn draw_vault_detail(f: &mut Frame, app: &App, area: Rect) {
+    let entry = app.vault.selected_entry();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Detail ")
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let Some(entry) = entry else {
+        let p = Paragraph::new("No file selected").block(block);
+        f.render_widget(p, area);
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled(" File  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            entry.name.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Size  ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format_bytes(entry.file_size)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Path  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            entry.path.to_string_lossy().into_owned(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    let catalog_text = if entry.in_catalog {
+        Span::styled("✓ in catalog", Style::default().fg(Color::Green))
+    } else {
+        Span::styled("· not in catalog", Style::default().fg(Color::DarkGray))
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Catalog ", Style::default().fg(Color::DarkGray)),
+        catalog_text,
+    ]));
+
+    lines.push(Line::raw(""));
+
+    if let Some(ref contents) = entry.contents {
+        if let Some(ref name) = contents.meta_name {
+            lines.push(Line::from(vec![
+                Span::styled(" Name  ", Style::default().fg(Color::DarkGray)),
+                Span::raw(name.clone()),
+            ]));
+        }
+        if let Some(ref cat) = contents.meta_category {
+            lines.push(Line::from(vec![
+                Span::styled(" Cat   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(cat.clone(), Style::default().fg(category_color(cat))),
+            ]));
+        }
+        if let Some(ref pw) = contents.meta_password {
+            lines.push(Line::from(vec![
+                Span::styled(" Pass  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("🔒 {}", pw), Style::default().fg(Color::Yellow)),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(" Files    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(contents.files.len().to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Segments ", Style::default().fg(Color::DarkGray)),
+            Span::raw(contents.total_segments().to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Total    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format_bytes(contents.total_bytes())),
+        ]));
+        lines.push(Line::raw(""));
+
+        // Groups from the first file
+        if let Some(first) = contents.files.first() {
+            for g in &first.groups {
+                lines.push(Line::from(vec![
+                    Span::styled(" Group ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(g.clone(), Style::default().fg(Color::Cyan)),
+                ]));
+            }
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            " [v] open viewer",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        lines.push(Line::styled(
+            " Press Enter to parse",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn draw_vault_viewer_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let Some(ref viewer) = app.vault.viewer else {
+        return;
+    };
+
+    let popup = centered_rect(80, 80, area);
+    f.render_widget(Clear, popup);
+
+    let c = &viewer.contents;
+
+    let mut meta_lines: Vec<Line> = Vec::new();
+    if let Some(ref name) = c.meta_name {
+        meta_lines.push(Line::from(vec![
+            Span::styled(" Name     ", Style::default().fg(Color::DarkGray)),
+            Span::raw(name.clone()),
+        ]));
+    }
+    if let Some(ref cat) = c.meta_category {
+        meta_lines.push(Line::from(vec![
+            Span::styled(" Category ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cat.clone(), Style::default().fg(category_color(cat))),
+        ]));
+    }
+    if let Some(ref pw) = c.meta_password {
+        meta_lines.push(Line::from(vec![
+            Span::styled(" Password ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("🔒 {}", pw), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+
+    let total_bytes = c.total_bytes();
+    let total_segments = c.total_segments();
+    meta_lines.push(Line::from(vec![
+        Span::styled(" Total    ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!(
+            "{}  ({} segments)",
+            format_bytes(total_bytes),
+            total_segments
+        )),
+    ]));
+    meta_lines.push(Line::raw(""));
+
+    // File list
+    let header = Line::from(vec![Span::styled(
+        format!(" {:<40}  {:>9}  {:>6}", "Filename", "Size", "Segs"),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )]);
+    meta_lines.push(header);
+
+    for nf in &c.files {
+        let name = if nf.name.len() > 40 {
+            format!("{}…", &nf.name[..39])
+        } else {
+            nf.name.clone()
+        };
+        meta_lines.push(Line::from(Span::raw(format!(
+            " {:<40}  {:>9}  {:>6}",
+            name,
+            format_bytes(nf.total_bytes),
+            nf.segment_count
+        ))));
+    }
+
+    let scrollable_count = meta_lines.len();
+    let visible = popup.height.saturating_sub(4) as usize;
+    let scroll = viewer.scroll.min(scrollable_count.saturating_sub(visible));
+
+    let title = format!(
+        " NZB Vault — {} files  [j/k scroll · Esc close] ",
+        c.files.len()
+    );
+
+    let p = Paragraph::new(meta_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .scroll((scroll as u16, 0));
+    f.render_widget(p, popup);
 }

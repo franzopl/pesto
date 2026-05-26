@@ -120,6 +120,24 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.refresh_history();
                         }
                     }
+                    // F1–F5: direct tab jump
+                    KeyCode::F(1) => {
+                        app.state = app::AppState::Dashboard;
+                    }
+                    KeyCode::F(2) => {
+                        app.state = app::AppState::Browser;
+                    }
+                    KeyCode::F(3) => {
+                        app.state = app::AppState::History;
+                        app.refresh_history();
+                    }
+                    KeyCode::F(4) => {
+                        app.state = app::AppState::NzbVault;
+                        app.load_vault();
+                    }
+                    KeyCode::F(5) => {
+                        app.state = app::AppState::Config;
+                    }
                     // ── Upload config panel (text-edit mode takes priority) ──
                     _ if app.show_upload_confirm && app.confirm_editing => match key.code {
                         KeyCode::Esc => app.confirm_cancel_edit(),
@@ -359,6 +377,61 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                     }
                     // ── Config screen keys ────────────────────────────────
+                    // ── NZB Vault viewer overlay ─────────────────────────────
+                    _ if app.state == app::AppState::NzbVault && app.vault.viewer.is_some() => {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                app.vault.viewer = None;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                if let Some(ref mut v) = app.vault.viewer {
+                                    v.scroll = v.scroll.saturating_add(1);
+                                }
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                if let Some(ref mut v) = app.vault.viewer {
+                                    v.scroll = v.scroll.saturating_sub(1);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // ── NZB Vault list ────────────────────────────────────────
+                    _ if app.state == app::AppState::NzbVault => match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => app.vault.move_down(),
+                        KeyCode::Char('k') | KeyCode::Up => app.vault.move_up(),
+                        KeyCode::Enter => {
+                            app.vault_parse_selected();
+                        }
+                        KeyCode::Char('v') => {
+                            app.vault_open_viewer();
+                        }
+                        KeyCode::Char('s') => {
+                            app.vault.cycle_sort();
+                            app.status_bar.set(format!("Sort: {:?}", app.vault.sort));
+                        }
+                        KeyCode::Char('r') => {
+                            app.load_vault();
+                        }
+                        KeyCode::Char('d') => {
+                            if let Some(entry) = app.vault.selected_entry() {
+                                let path = entry.path.clone();
+                                match std::fs::remove_file(&path) {
+                                    Ok(()) => {
+                                        app.status_bar.set(format!(
+                                            "Deleted {}",
+                                            path.file_name().unwrap_or_default().to_string_lossy()
+                                        ));
+                                        app.load_vault();
+                                    }
+                                    Err(e) => {
+                                        app.status_bar.set(format!("Delete failed: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                     _ if app.state == app::AppState::Config && app.config_state.editing => {
                         match key.code {
                             KeyCode::Esc => app.config_cancel_edit(),
@@ -606,31 +679,62 @@ async fn run_real_upload(
         par2_slices: None,
     };
 
-    // Drain progress events as they arrive (real-time, not post-hoc)
-    while let Some(event) = prog_rx.recv().await {
-        let msg = format_progress_event(&event);
-        if !msg.is_empty() {
-            let _ = tx.send(AppEvent::Progress(msg));
-        }
+    // Drain progress events as they arrive (real-time, not post-hoc).
+    //
+    // select! races the upload task against the event channel so that if the
+    // task exits without emitting Finished (panic, early return) we still
+    // unblock. When a terminal event (Finished/Interrupted/Failed) arrives on
+    // the channel we disable the event arm; the task arm fires on the next
+    // iteration and we collect the PostOutcome.
+    tokio::pin!(upload_handle);
+    let mut events_done = false;
 
-        if let Some(update) = extract_progress_update(&event, &last_update) {
-            last_update = update.clone();
-            let _ = tx.send(AppEvent::ProgressUpdate(update));
+    let outcome = loop {
+        tokio::select! {
+            // Upload task completed — drain any buffered events then stop.
+            result = &mut upload_handle => {
+                while let Ok(event) = prog_rx.try_recv() {
+                    let msg = format_progress_event(&event);
+                    if !msg.is_empty() {
+                        let _ = tx.send(AppEvent::Progress(msg));
+                    }
+                    if let Some(update) = extract_progress_update(&event, &last_update) {
+                        last_update = update.clone();
+                        let _ = tx.send(AppEvent::ProgressUpdate(update));
+                    }
+                }
+                break match result {
+                    Ok(Ok(o)) => o,
+                    Ok(Err(e)) => return Err(UploadError::Pesto(e.to_string())),
+                    Err(e) => return Err(UploadError::Pesto(format!("upload task panicked: {e}"))),
+                };
+            }
+            // Progress event — forward to UI (disabled once terminal event seen).
+            event = prog_rx.recv(), if !events_done => {
+                let Some(event) = event else {
+                    // Channel closed without Finished — let the task arm resolve.
+                    events_done = true;
+                    continue;
+                };
+                let msg = format_progress_event(&event);
+                if !msg.is_empty() {
+                    let _ = tx.send(AppEvent::Progress(msg));
+                }
+                if let Some(update) = extract_progress_update(&event, &last_update) {
+                    last_update = update.clone();
+                    let _ = tx.send(AppEvent::ProgressUpdate(update));
+                }
+                // On any terminal event, disable this arm so the task arm fires next.
+                if matches!(
+                    event,
+                    pesto::progress::ProgressEvent::Finished
+                        | pesto::progress::ProgressEvent::Interrupted
+                        | pesto::progress::ProgressEvent::Failed { .. }
+                ) {
+                    events_done = true;
+                }
+            }
         }
-
-        if matches!(
-            event,
-            pesto::progress::ProgressEvent::Finished | pesto::progress::ProgressEvent::Interrupted
-        ) {
-            break;
-        }
-    }
-
-    // Collect the outcome from the upload task
-    let outcome = match upload_handle.await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(UploadError::Pesto(e.to_string())),
-        Err(e) => return Err(UploadError::Pesto(format!("upload task panicked: {e}"))),
     };
 
     let _ = tx.send(AppEvent::Progress(format!(

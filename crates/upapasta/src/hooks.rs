@@ -28,6 +28,8 @@ pub struct HookContext {
     pub password: String,
     /// Path to the generated `.nzb` file, if any.
     pub nzb_path: String,
+    /// Path to the `.nfo` file, if any.
+    pub nfo_path: String,
 }
 
 impl HookContext {
@@ -57,6 +59,7 @@ impl HookContext {
                 .unwrap_or("")
                 .to_string(),
             nzb_path: nzb_path.unwrap_or("").to_string(),
+            nfo_path: String::new(),
         }
     }
 }
@@ -119,7 +122,8 @@ fn apply_env(cmd: &mut Command, ctx: &HookContext) {
         .env("PESTO_SERVER", &ctx.server)
         .env("PESTO_GROUP", &ctx.group)
         .env("PESTO_PASSWORD", &ctx.password)
-        .env("PESTO_NZB", &ctx.nzb_path);
+        .env("PESTO_NZB", &ctx.nzb_path)
+        .env("PESTO_NFO", &ctx.nfo_path);
 }
 
 #[cfg(unix)]
@@ -209,6 +213,7 @@ mod tests {
             group: "alt.binaries.test".to_string(),
             password: "".to_string(),
             nzb_path: "".to_string(),
+            nfo_path: "".to_string(),
         }
     }
 

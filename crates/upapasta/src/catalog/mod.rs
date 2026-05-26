@@ -266,6 +266,18 @@ impl Catalog {
         Ok(map)
     }
 
+    /// Returns all non-null nzb_path values from the catalog.
+    pub fn all_nzb_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT nzb_path FROM uploads WHERE nzb_path IS NOT NULL")?;
+        let paths = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(paths)
+    }
+
     /// Returns true if at least one record exists (to skip re-import).
     pub fn is_populated(&self) -> bool {
         self.conn

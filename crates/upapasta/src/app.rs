@@ -1,6 +1,8 @@
+use std::cmp::Reverse;
+
 use crate::catalog::{Catalog, CatalogStats, NewUpload, UploadSummary};
 use crate::events::{ProgressUpdate, UploadPhase};
-use crate::nzb_viewer::NzbViewerState;
+use crate::nzb_viewer::{NzbContents, NzbViewerState};
 use crate::ui::components::{FileTree, LogPanel, StatusBar, UploadQueue};
 use pesto::config::{self, Config as PestoConfig, FileConfig, ObfuscateMode};
 use std::path::PathBuf;
@@ -13,6 +15,7 @@ pub enum AppState {
     Dashboard,
     Browser,
     History,
+    NzbVault,
     Config,
 }
 
@@ -194,6 +197,88 @@ pub struct App {
     pub confirm_edit_buf: String,
     /// Toggle to reveal the password field value
     pub confirm_show_password: bool,
+
+    /// NZB Vault screen state
+    pub vault: VaultState,
+}
+
+/// One entry in the NZB Vault list.
+#[derive(Debug, Clone)]
+pub struct VaultEntry {
+    /// Full path to the `.nzb` file.
+    pub path: PathBuf,
+    /// Filename (display name).
+    pub name: String,
+    /// File size in bytes.
+    pub file_size: u64,
+    /// Last modification time (Unix timestamp).
+    pub modified: u64,
+    /// Lazily parsed contents (None until the entry is selected).
+    pub contents: Option<NzbContents>,
+    /// Whether this NZB appears in the catalog.
+    pub in_catalog: bool,
+}
+
+/// Sort order for the NZB Vault list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VaultSort {
+    #[default]
+    Date,
+    Name,
+    Size,
+}
+
+/// State for the NZB Vault screen (F4).
+#[derive(Debug, Default)]
+pub struct VaultState {
+    pub entries: Vec<VaultEntry>,
+    pub selected: usize,
+    pub sort: VaultSort,
+    /// NZB viewer overlay (Some when open with `v`)
+    pub viewer: Option<NzbViewerState>,
+    /// Error message if the vault directory could not be read
+    pub load_error: Option<String>,
+}
+
+impl VaultState {
+    /// Toggle the sort mode cycling through Date → Name → Size → Date.
+    pub fn cycle_sort(&mut self) {
+        self.sort = match self.sort {
+            VaultSort::Date => VaultSort::Name,
+            VaultSort::Name => VaultSort::Size,
+            VaultSort::Size => VaultSort::Date,
+        };
+        self.apply_sort();
+    }
+
+    pub fn apply_sort(&mut self) {
+        match self.sort {
+            VaultSort::Date => self.entries.sort_by_key(|e| Reverse(e.modified)),
+            VaultSort::Name => self.entries.sort_by(|a, b| a.name.cmp(&b.name)),
+            VaultSort::Size => self.entries.sort_by_key(|e| Reverse(e.file_size)),
+        }
+    }
+
+    pub fn selected_entry(&self) -> Option<&VaultEntry> {
+        self.entries.get(self.selected)
+    }
+
+    #[allow(dead_code)]
+    pub fn selected_entry_mut(&mut self) -> Option<&mut VaultEntry> {
+        self.entries.get_mut(self.selected)
+    }
+
+    pub fn move_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    pub fn move_down(&mut self) {
+        if !self.entries.is_empty() && self.selected < self.entries.len() - 1 {
+            self.selected += 1;
+        }
+    }
 }
 
 /// State for the History screen.
@@ -299,6 +384,7 @@ impl App {
             confirm_editing: false,
             confirm_edit_buf: String::new(),
             confirm_show_password: false,
+            vault: VaultState::default(),
         };
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {
@@ -345,9 +431,13 @@ impl App {
         self.state = match self.state {
             AppState::Dashboard => AppState::Browser,
             AppState::Browser => AppState::History,
-            AppState::History => AppState::Config,
+            AppState::History => AppState::NzbVault,
+            AppState::NzbVault => AppState::Config,
             AppState::Config => AppState::Dashboard,
         };
+        if self.state == AppState::NzbVault {
+            self.load_vault();
+        }
         self.log_panel.push(format!("Switched to {:?}", self.state));
     }
 
@@ -356,8 +446,126 @@ impl App {
             AppState::Dashboard => AppState::Config,
             AppState::Browser => AppState::Dashboard,
             AppState::History => AppState::Browser,
-            AppState::Config => AppState::History,
+            AppState::NzbVault => AppState::History,
+            AppState::Config => AppState::NzbVault,
         };
+        if self.state == AppState::NzbVault {
+            self.load_vault();
+        }
+    }
+
+    /// Load (or reload) the NZB Vault from the configured nzb_dir.
+    pub fn load_vault(&mut self) {
+        let nzb_dir = self
+            .pesto_config
+            .as_ref()
+            .and_then(|c| c.nzb_dir.as_deref())
+            .map(PathBuf::from);
+
+        let Some(dir) = nzb_dir else {
+            self.vault.entries.clear();
+            self.vault.load_error = Some("nzb_dir not configured in pesto.toml".to_string());
+            return;
+        };
+
+        self.vault.load_error = None;
+
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(d) => d,
+            Err(e) => {
+                self.vault.entries.clear();
+                self.vault.load_error = Some(format!("{}: {}", dir.display(), e));
+                return;
+            }
+        };
+
+        // Collect catalog NZB paths for cross-reference
+        let catalog_paths: std::collections::HashSet<String> = if let Some(ref cat) = self.catalog {
+            cat.all_nzb_paths()
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        let mut entries: Vec<VaultEntry> = read_dir
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|x| x.eq_ignore_ascii_case("nzb"))
+                    .unwrap_or(false)
+            })
+            .map(|e| {
+                let path = e.path();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let meta = e.metadata().ok();
+                let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = meta
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let in_catalog = catalog_paths.contains(&path.to_string_lossy().to_string());
+                VaultEntry {
+                    path,
+                    name,
+                    file_size,
+                    modified,
+                    contents: None,
+                    in_catalog,
+                }
+            })
+            .collect();
+
+        // Apply current sort
+        match self.vault.sort {
+            VaultSort::Date => entries.sort_by_key(|e| Reverse(e.modified)),
+            VaultSort::Name => entries.sort_by(|a, b| a.name.cmp(&b.name)),
+            VaultSort::Size => entries.sort_by_key(|e| Reverse(e.file_size)),
+        }
+
+        self.vault.selected = 0;
+        self.vault.entries = entries;
+        let count = self.vault.entries.len();
+        self.status_bar.set(format!(
+            "NZB Vault — {} file{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+
+    /// Parse the selected vault entry (lazy, only when needed).
+    pub fn vault_parse_selected(&mut self) {
+        let idx = self.vault.selected;
+        if let Some(entry) = self.vault.entries.get_mut(idx) {
+            if entry.contents.is_none() {
+                match crate::nzb_viewer::parse_nzb(&entry.path.to_string_lossy()) {
+                    Ok(c) => entry.contents = Some(c),
+                    Err(e) => {
+                        self.status_bar.set(format!("Parse error: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Open the NZB viewer overlay for the selected vault entry.
+    pub fn vault_open_viewer(&mut self) {
+        self.vault_parse_selected();
+        if let Some(entry) = self.vault.selected_entry() {
+            if let Some(ref contents) = entry.contents {
+                self.vault.viewer = Some(crate::nzb_viewer::NzbViewerState {
+                    contents: contents.clone(),
+                    scroll: 0,
+                });
+            }
+        }
     }
 
     pub fn trigger_upload(&mut self) {
