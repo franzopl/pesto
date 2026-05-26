@@ -269,7 +269,7 @@ This phase is lower priority. Do not block earlier phases on it.
 | 41c       | Full-height upload progress screen               | ✅ Done    |
 | 42        | NZB Vault screen                                 | ✅ Done    |
 | 43a       | Prowlarr config + connection check               | ✅ Done    |
-| 43b       | Prowlarr NZB search                              | 🔲 Planned |
+| 43b       | Prowlarr NZB search                              | ✅ Done    |
 | 43c       | Article availability check (NNTP STAT)           | 🔲 Planned |
 | 43d       | Automated Prowlarr backup workflow               | 🔲 Planned |
 | 44        | Catalog enhancements (tags, export, dedup)       | 🔲 Planned |
