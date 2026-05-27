@@ -9,7 +9,7 @@ homepage = "https://github.com/franzopl/pesto"
 readme = "README.md"
 
 [dependencies]
-pesto = { path = "../pesto" }
+pesto = { package = "pesto-poster", path = "../pesto" }
 parmesan = { package = "parmesan-par2", path = "../parmesan" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
