@@ -199,14 +199,18 @@ fn run_mediainfo(path: &Path) -> std::io::Result<String> {
         return Err(std::io::Error::other(msg));
     }
     let raw = String::from_utf8_lossy(&output.stdout);
-    // Replace the first line of the General section that contains the full
-    // filesystem path with just the file's basename, hiding the local directory.
+    // Replace any occurrence of the full filesystem path with just the
+    // basename, hiding the local directory. On Windows, canonicalize() adds a
+    // \\?\ prefix that mediainfo echoes back, so we replace both forms.
     let filename = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let full_path = path.to_string_lossy();
-    Ok(raw.replace(full_path.as_ref(), &filename))
+    let canonical_str = abs.to_string_lossy();
+    let original_str = path.to_string_lossy();
+    let replaced = raw.replace(canonical_str.as_ref(), &filename);
+    let replaced = replaced.replace(original_str.as_ref(), &filename);
+    Ok(replaced)
 }
 
 fn format_size(bytes: u64) -> String {
