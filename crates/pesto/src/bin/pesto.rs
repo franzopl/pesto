@@ -3,7 +3,7 @@
 //! Parses the CLI, resolves the configuration, posts the given files to Usenet
 //! and writes an `.nzb` file describing the result.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1234,7 +1234,30 @@ async fn run_batch(
     Ok((all_segments, any_cancelled, any_failures))
 }
 
+/// How many consecutive failed attempts before giving up on an entry.
+const WATCH_MAX_RETRIES: u32 = 3;
+
+/// Recursively sum the byte size of a path (file or directory).
+fn entry_size(path: &Path) -> u64 {
+    if let Ok(md) = std::fs::metadata(path) {
+        if md.is_file() {
+            return md.len();
+        }
+    }
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    rd.filter_map(|e| e.ok())
+        .map(|e| entry_size(&e.path()))
+        .sum()
+}
+
 /// Run `--watch DIR`: poll for new entries and post each one automatically.
+///
+/// New entries are held in a "pending" state until their total byte size is
+/// stable across two consecutive polls (settle check), preventing premature
+/// uploads of directories that are still being populated.  Failed uploads are
+/// retried up to `WATCH_MAX_RETRIES` times before being abandoned.
 ///
 /// Exits cleanly on SIGTERM or Ctrl-C after finishing any in-progress upload.
 async fn run_watch(
@@ -1245,6 +1268,7 @@ async fn run_watch(
     jobs: usize,
 ) -> Result<()> {
     use tokio::signal;
+    use tokio::sync::mpsc;
 
     eprintln!(
         "watching {} (poll every {}s)",
@@ -1278,13 +1302,22 @@ async fn run_watch(
         shutdown_clone.notify_waiters();
     });
 
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    // Pre-populate seen with whatever is already there so we don't re-post on startup.
+    // `done`: entries that have been successfully uploaded (or permanently failed).
+    let mut done: HashSet<PathBuf> = HashSet::new();
+    // Pre-populate done with whatever is already present so we don't re-post on startup.
     if let Ok(existing) = top_level_entries(watch_dir) {
         for e in existing {
-            seen.insert(e);
+            done.insert(e);
         }
     }
+
+    // `pending`: entries seen but not yet stable.  Value is the size snapshot
+    // from the previous poll; once two consecutive polls agree the entry is
+    // dispatched for upload.
+    let mut pending: HashMap<PathBuf, u64> = HashMap::new();
+
+    // `retry_counts`: number of failed attempts per entry.
+    let mut retry_counts: HashMap<PathBuf, u32> = HashMap::new();
 
     let effective_jobs = if jobs == 0 {
         parmesan::performance_core_count()
@@ -1293,11 +1326,40 @@ async fn run_watch(
     };
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
 
+    // Channel for completed tasks to report back (path, success).
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<(PathBuf, bool)>();
+
     loop {
         // Check for shutdown between polls.
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(poll_interval)) => {}
             _ = shutdown.notified() => { break; }
+        }
+
+        // Drain completed-task notifications before scanning for new entries.
+        while let Ok((entry, success)) = result_rx.try_recv() {
+            if success {
+                done.insert(entry);
+            } else {
+                let attempts = retry_counts.entry(entry.clone()).or_insert(0);
+                *attempts += 1;
+                if *attempts >= WATCH_MAX_RETRIES {
+                    eprintln!(
+                        "watch: giving up on `{}` after {WATCH_MAX_RETRIES} failed attempts",
+                        entry.display()
+                    );
+                    done.insert(entry);
+                } else {
+                    eprintln!(
+                        "watch: will retry `{}` (attempt {}/{})",
+                        entry.display(),
+                        attempts,
+                        WATCH_MAX_RETRIES
+                    );
+                    // Remove from pending so it goes through the settle check again.
+                    pending.remove(&entry);
+                }
+            }
         }
 
         let entries = match top_level_entries(watch_dir) {
@@ -1309,52 +1371,92 @@ async fn run_watch(
         };
 
         for entry in entries {
-            if seen.contains(&entry) {
+            if done.contains(&entry) {
                 continue;
             }
-            seen.insert(entry.clone());
 
-            let params = Arc::clone(&params);
-            let sem = Arc::clone(&semaphore);
-            let watch_done = watch_done.map(PathBuf::from);
-            let label = entry
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "entry".to_string());
+            let current_size = entry_size(&entry);
 
-            tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
-                if !params.json_mode {
-                    println!("\n── watch: {} ──", label);
+            match pending.get(&entry).copied() {
+                None => {
+                    // First time we see this entry — record its size and wait.
+                    pending.insert(entry.clone(), current_size);
+                    let label = entry
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "entry".to_string());
+                    eprintln!("watch: detected `{label}` — waiting for it to stabilise");
                 }
-                match run_single_upload(&params, std::slice::from_ref(&entry), &label).await {
-                    Ok(_) => {
-                        // Move or delete the completed entry.
-                        if let Some(done_dir) = &watch_done {
-                            let dest = done_dir.join(entry.file_name().unwrap_or_default());
-                            if let Err(e) = std::fs::rename(&entry, &dest) {
-                                eprintln!(
-                                    "watch: could not move `{}` to `{}`: {e}",
-                                    entry.display(),
-                                    dest.display()
-                                );
-                            }
-                        } else {
-                            // Delete completed entry.
-                            let is_dir = entry.is_dir();
-                            let result = if is_dir {
-                                std::fs::remove_dir_all(&entry)
-                            } else {
-                                std::fs::remove_file(&entry)
-                            };
-                            if let Err(e) = result {
-                                eprintln!("watch: could not delete `{}`: {e}", entry.display());
-                            }
+                Some(prev_size) if prev_size != current_size => {
+                    // Still changing — update snapshot and keep waiting.
+                    pending.insert(entry.clone(), current_size);
+                }
+                Some(_) => {
+                    // Size unchanged since last poll: entry is stable, dispatch it.
+                    pending.remove(&entry);
+                    // Mark as done immediately so a second poll won't re-queue it
+                    // while the upload task holds the semaphore permit.
+                    done.insert(entry.clone());
+
+                    let params = Arc::clone(&params);
+                    let sem = Arc::clone(&semaphore);
+                    let watch_done = watch_done.map(PathBuf::from);
+                    let tx = result_tx.clone();
+                    let label = entry
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "entry".to_string());
+
+                    tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        if !params.json_mode {
+                            println!("\n── watch: {} ──", label);
                         }
-                    }
-                    Err(e) => eprintln!("watch: upload failed for `{}`: {e:#}", entry.display()),
+                        let success =
+                            match run_single_upload(&params, std::slice::from_ref(&entry), &label)
+                                .await
+                            {
+                                Ok(_) => {
+                                    // Move or delete the completed entry.
+                                    if let Some(done_dir) = &watch_done {
+                                        let dest =
+                                            done_dir.join(entry.file_name().unwrap_or_default());
+                                        if let Err(e) = std::fs::rename(&entry, &dest) {
+                                            eprintln!(
+                                                "watch: could not move `{}` to `{}`: {e}",
+                                                entry.display(),
+                                                dest.display()
+                                            );
+                                        }
+                                    } else {
+                                        let is_dir = entry.is_dir();
+                                        let result = if is_dir {
+                                            std::fs::remove_dir_all(&entry)
+                                        } else {
+                                            std::fs::remove_file(&entry)
+                                        };
+                                        if let Err(e) = result {
+                                            eprintln!(
+                                                "watch: could not delete `{}`: {e}",
+                                                entry.display()
+                                            );
+                                        }
+                                    }
+                                    true
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "watch: upload failed for `{}`: {e:#}",
+                                        entry.display()
+                                    );
+                                    false
+                                }
+                            };
+                        // Report outcome; if the channel is closed we're shutting down.
+                        let _ = tx.send((entry, success));
+                    });
                 }
-            });
+            }
         }
     }
 
