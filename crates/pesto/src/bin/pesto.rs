@@ -333,13 +333,14 @@ struct Cli {
     jobs: usize,
 
     /// Watch DIR for new entries and post each one automatically, implying
-    /// --each. On completion each entry is moved to --watch-done (or deleted).
+    /// --each. On completion each entry is moved to --watch-done (if set);
+    /// otherwise it is left in place.
     /// Exits cleanly on SIGTERM / Ctrl-C after finishing any in-progress upload.
     #[arg(long, value_name = "DIR")]
     watch: Option<PathBuf>,
 
     /// Destination directory for entries processed by --watch. When omitted,
-    /// completed entries are deleted.
+    /// completed entries are left in place.
     #[arg(long, value_name = "DIR")]
     watch_done: Option<PathBuf>,
 
@@ -1417,7 +1418,7 @@ async fn run_watch(
                                 .await
                             {
                                 Ok(_) => {
-                                    // Move or delete the completed entry.
+                                    // Move to --watch-done if specified; otherwise leave in place.
                                     if let Some(done_dir) = &watch_done {
                                         let dest =
                                             done_dir.join(entry.file_name().unwrap_or_default());
@@ -1426,19 +1427,6 @@ async fn run_watch(
                                                 "watch: could not move `{}` to `{}`: {e}",
                                                 entry.display(),
                                                 dest.display()
-                                            );
-                                        }
-                                    } else {
-                                        let is_dir = entry.is_dir();
-                                        let result = if is_dir {
-                                            std::fs::remove_dir_all(&entry)
-                                        } else {
-                                            std::fs::remove_file(&entry)
-                                        };
-                                        if let Err(e) = result {
-                                            eprintln!(
-                                                "watch: could not delete `{}`: {e}",
-                                                entry.display()
                                             );
                                         }
                                     }
