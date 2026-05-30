@@ -1,10 +1,6 @@
-use ratatui::{
-    layout::Rect,
-    style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
-    Frame,
-};
-
+/// Holds the transient status message shown in the bottom bar. Rendering lives
+/// in `ui::draw_status_bar`, which combines this message with context-sensitive
+/// key hints.
 #[derive(Debug, Default)]
 pub struct StatusBar {
     pub message: String,
@@ -17,15 +13,5 @@ impl StatusBar {
 
     pub fn set(&mut self, msg: impl Into<String>) {
         self.message = msg.into();
-    }
-
-    pub fn render(&self, f: &mut Frame, area: Rect) {
-        let help = format!("{}  |  Tab: switch  •  q: quit", self.message);
-
-        let status = Paragraph::new(help)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP).title(" Status "));
-
-        f.render_widget(status, area);
     }
 }
