@@ -290,8 +290,20 @@ impl FileTree {
             .enumerate()
             .map(|(i, path)| {
                 let badge = self.badge_for(path);
-                let icon = if path.is_dir() { "📁" } else { "📄" };
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                let is_dir = path.is_dir();
+                let raw_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                // Directories carry a single-width marker + trailing slash so
+                // they read at a glance without relying on (double-width) emoji.
+                let marker = if is_dir {
+                    crate::ui::theme::DIR_MARK
+                } else {
+                    crate::ui::theme::FILE_MARK
+                };
+                let name = if is_dir {
+                    format!("{raw_name}/")
+                } else {
+                    raw_name.to_string()
+                };
                 let is_selected = i == self.selected;
 
                 let (check, check_style, name_style) = match &badge {
@@ -336,15 +348,26 @@ impl FileTree {
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD)
+                        } else if is_dir {
+                            Style::default().fg(Color::Blue)
                         } else {
                             Style::default()
                         },
                     ),
                 };
 
+                // Marker takes the directory accent unless the row is selected
+                // (then the highlight bg owns the styling).
+                let marker_style = if is_dir && !is_selected {
+                    Style::default().fg(Color::Blue)
+                } else {
+                    name_style
+                };
+
                 ListItem::new(Line::from(vec![
                     Span::styled(check, check_style),
-                    Span::styled(format!("{} {}", icon, name), name_style),
+                    Span::styled(marker, marker_style),
+                    Span::styled(name, name_style),
                 ]))
             })
             .collect();
@@ -395,12 +418,7 @@ impl FileTree {
                     .title(title)
                     .border_style(border_style),
             )
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(crate::ui::theme::highlight());
 
         let mut state = ListState::default();
         state.select(Some(self.selected));
