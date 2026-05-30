@@ -18,6 +18,200 @@
 
 ---
 
+## Phase 40c — Usability Reset (CRITICAL — blocks everything else)
+
+> **Why this exists.** The tool currently passes its own feature checklist but
+> still fails the one job a user actually wants: *"browse my files, pick the
+> ones I want to back up, queue several of them, and let pesto upload them one
+> after another — one NZB per release."* Real usage exposed gaps that no
+> "✅ Done" milestone caught. This phase is about making the happy path
+> trustworthy before adding more screens.
+
+### The user's mental model (what we must honor)
+
+1. I open the file manager and see my disk.
+2. I see at a glance **what still needs uploading** (no NZB yet).
+3. I mark several items — files *and* folders.
+4. I press one key. Pesto uploads them **in sequence**.
+5. Each item becomes **its own NZB**, named after the item. A folder/release
+   becomes **one** NZB, not one per inner file, and never all items merged.
+6. When it finishes, the catalog and the NZB vault reflect exactly what happened
+   — including partial failures.
+
+### 40c-1 — One coherent selection model ✅ Done
+
+> Implemented. The upload queue is now the single source of truth. `Space`
+> queues/unqueues the item under the cursor (file *or* folder) and advances;
+> `Enter` is navigation only and never mutates the queue; `u` opens the config
+> panel for whatever is queued. The Browser `[x]` badge is a render mirror of the
+> queue (`FileTree::set_queued`), so the file list and the queue panel can never
+> disagree. The old `toggle_mark`/`take_marked` second selection set was removed.
+
+
+
+**Problem:** there are two competing selection systems in the Browser.
+`Space` marks into a browser-local set; `Enter` *also* toggles the item
+directly into the queue; `u` then moves marked items into the queue. Three
+verbs, two states, one confused user. The keybinding map at the bottom of this
+document (Space = mark, Enter = enter dir / open detail) does **not** match the
+code.
+
+**Target:**
+- `Space` — the *only* way to mark/unmark an item (file or directory) for the
+  queue. Marking is the queue. No hidden second set.
+- `Enter` — navigation only: enter a directory, or open the detail/NZB panel for
+  a file. Never mutates the queue.
+- `u` — review marked items in the upload-config panel, then confirm.
+- Marked state must be visibly identical in the Browser and in the Queue view
+  (same items, same order, one source of truth).
+
+### 40c-2 — Folder = one release = one NZB ✅ Done
+
+> Implemented. Marking a directory queues it as a single entry; `pesto`'s
+> `expand_inputs` already walks it into one NZB named after the folder (folder
+> names keep their dots — they are not extensions). The queue panel, the upload
+> config panel, and the NZB-status detail now show, per entry, the resulting
+> `<name>.nzb` and, for folders, the bundled file count (`📁 Movie (2024) →
+> 1 NZB (3 files)`), so there is never a surprise before confirming. Counts are
+> cached per queue entry (`App::queue_meta`) to keep the render loop off the
+> filesystem.
+
+
+
+**Problem:** marking is file-by-file. A movie folder (`movie.mkv` + `sample` +
+`.nfo`) cannot be queued as a single release. And the old "merge everything into
+one NZB" bug (fixed in `28caebc`, one NZB per queue item) was the *opposite*
+overcorrection — neither extreme is what users want.
+
+**Target — explicit, predictable grouping:**
+- Marking a **file** ⇒ one NZB for that file.
+- Marking a **directory** ⇒ one NZB containing every file under it, named after
+  the directory. This is the normal Usenet "release" unit.
+- The upload-confirm panel must show, per queue entry: the resulting **NZB name**
+  and how many files it bundles, so there is never a surprise.
+- Never silently merge unrelated queue entries into a single NZB.
+
+### 40c-3 — Honest sequential queue + honest catalog ✅ Done
+
+> Implemented. Catalog records are now written **per item as it finishes**
+> (`ItemUploadDone` → `App::item_upload_done`) using the **real** byte size and
+> the **actual** NZB path from `pesto`'s `UploadOutcome` — the fabricated
+> `total / count` average is gone. A failure no longer erases the batch: each
+> success is already committed, failed items stay in the queue marked `✗` for
+> retry (press `u` again), and successful items leave the queue and gain the
+> uploaded `✓` badge. The queue and the progress screen show live per-item
+> state (`○ queued / ▶ uploading / ✓ done / ✗ failed`) from `App::queue_status`,
+> and the Browser NZB column refreshes as each item lands.
+
+
+
+**Problem:** uploads already run sequentially (good), but bookkeeping is done
+*once at the end* using a global success flag:
+- `upload_finished` records the catalog only `if success && !cancelled`, so if
+  item 2 of 3 fails, **none** of the three are recorded — even the ones that
+  uploaded fine.
+- Per-file size is faked: `size_each = total_bytes / item_count`. Every catalog
+  record gets the batch average, not its real size.
+
+**Target:**
+- Record each item in the catalog **as it finishes**, with its **real** byte
+  size and the **actual** NZB path that pesto wrote.
+- A failed item marks only itself as failed and leaves a visible retry affordance
+  in the queue; it does not erase the successes.
+- The queue view shows live per-item state: `queued / uploading / done / failed`,
+  matching the NZB-status column in the Browser.
+
+### 40c-4 — "What should I upload?" at a glance ✅ Done
+
+> Implemented. `n` toggles an **unbacked-only** filter in the Browser, hiding
+> everything already in the catalog so only what still needs uploading remains
+> (the border turns magenta and the title shows `• filter:unbacked`). A
+> directory counts as needing upload when it was not uploaded as a release and
+> any file under it is still uncatalogued (`dir_has_unbacked`, capped walk). The
+> Browser title carries a live summary — `N items · M unbacked · X GB to upload`
+> (or `all backed ✓`) — recomputed on navigation and whenever the catalog
+> changes, so per-item uploads update it immediately.
+
+
+
+**Problem:** the NZB-status column exists, but there is no way to *filter* the
+Browser down to "things I have not backed up yet." The user's first question is
+always "what still needs uploading?" and today they must eyeball every row.
+
+**Target:**
+- A toggle (e.g. `n`) to filter the Browser to items with **no NZB** (not in
+  catalog, no local NZB). Directories show as needing upload if any child does.
+- A summary line: `N items · M unbacked · X GB to upload`.
+
+### 40c-5 — Persist the queue; tell the truth about pause ✅ Done
+
+> Implemented.
+>
+> **Queue persistence:** the queue is saved to
+> `<config_dir>/upapasta-queue.json` on every mutation (queue/unqueue, remove,
+> clear, reorder, and the post-upload prune) and restored at startup
+> (`App::load_queue`). Paths that no longer exist on disk are dropped on load
+> (with a status note) and the pruned list is re-saved, so a carefully built
+> selection survives navigating away or restarting the app.
+>
+> **Pause removed (honestly):** `pesto`'s poster exposes only a cancel flag
+> (`AtomicBool`), no suspend mechanism, so a real mid-file pause is impossible
+> today. Rather than keep a button that lies, the `p` key, the `upload_paused`
+> state, the `PauseUpload`/`ResumeUpload` events, and all "PAUSED" UI were
+> removed. A true pause requires poster-level support and is tracked as a
+> follow-up (see Phase 46).
+
+### 40c-6 — Reconcile this roadmap with reality ✅ Done
+
+> **Decision:** the queue gets its **own dedicated tab**. Selection still happens
+> in the Browser (`Space`), but all queue *management* now lives in one place.
+>
+> **Real tab order (F1–F6):** `Dashboard · Queue · Browser · History ·
+> NZB Vault · Config`. `Tab`/`Shift+Tab` cycle the same order.
+>
+> The new **Queue screen (F2)** is full-height and shows, per entry, the live
+> status (`○ queued / ▶ uploading / ✓ done / ✗ failed`), the resulting NZB name,
+> the bundled file count for folders, and the size — with a total in the title.
+> Queue management keys (`u` upload, `d` remove, `c` clear, `J/K` reorder) moved
+> off the Dashboard to the Queue screen, so the queue is no longer built in one
+> place and managed in another. The Dashboard is now purely the live
+> upload-progress + log view. Edits are blocked while an upload is running.
+
+---
+
+## Phase 40d — Upload-options workflow ✅ Done
+
+A review of "how does a user change an option?" exposed three problems, all now
+fixed in the upload-config panel (opened with `u` from Browser or Queue):
+
+- **The arrow keys lied.** The panel hinted `←→ cycle` on Obfuscate/Verify, but
+  only PAR2 responded; you had to press `Enter`. Now `←→` (and `Space`) advance
+  every cycle/number/toggle field, matching the hint. The whole field list is
+  driven by one `ConfirmField` enum, so the render and the key handlers can no
+  longer disagree on order or behaviour.
+- **The panel was too thin.** It only exposed 5 settings. It now covers
+  Compress (format + password), From, Category and Article size as well — all of
+  which `effective_config_with_overrides` already applied — plus a one-line
+  legend explaining what the current obfuscation mode actually hides. The new
+  persistent settings are restored across sessions like the others.
+- **Folder/season mode was impossible.** `pesto`'s `--season` (per-episode NZBs
+  **plus** a combined season NZB) had no equivalent in the TUI. A **Folder mode**
+  field now appears whenever a directory is queued, with three options:
+  - `single NZB` — the whole folder as one release (default, unchanged);
+  - `per-file` — one NZB per file inside;
+  - `season` — per-file NZBs **and** a combined season NZB, built in upapasta via
+    `pesto::nzb::generate` over the segments each file posted.
+  Each produced NZB is recorded in the catalog honestly (real size + path) via a
+  per-NZB `CatalogRecord`, so a folder in per-file/season mode yields several
+  truthful catalog rows instead of one. Folder mode is intentionally **per-batch**
+  (resets to `single` each session) so an old `season` choice can never silently
+  change how a folder uploads later.
+
+> Known follow-up: the combined season NZB is recorded and saved locally but not
+> yet pushed to the indexer (the per-episode NZBs are). Tracked for later.
+
+---
+
 ## Phase 41 — TUI Layout Redesign (Current Priority)
 
 ### 41a — Three-pane Browser with NZB Status Column
@@ -27,7 +221,7 @@ Replace the current two-tab (Browser + History) model with a unified
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  upapasta  v2.x  |  [F1 Browser]  [F2 Queue]  [F3 History]  [F4 …] │
+│  upapasta v2  | [F1 Dash] [F2 Queue] [F3 Browser] [F4 Hist] [F5 …] │
 ├──────────────────────┬────────────────┬────────────────────────────┤
 │  FILESYSTEM          │  NZB STATUS    │  DETAIL / LOG              │
 │  ~/Videos/           │                │                            │
@@ -200,12 +394,15 @@ This phase is lower priority. Do not block earlier phases on it.
 
 ---
 
-## Phase 46 — Multi-Server & Retry
+## Phase 46 — Multi-Server, Retry & Real Pause
 
 - Support posting to multiple servers simultaneously (primary + fill servers).
 - Retry failed articles automatically with exponential backoff.
 - Per-server connection health indicators in the Config screen.
 - Alert when a server connection is degraded during upload.
+- **Real pause/resume:** requires a suspend mechanism in `pesto`'s poster
+  (hold the connection pool without tearing it down). Removed from the TUI in
+  40c-5 until the engine supports it — do not re-add a UI-only pause.
 
 ---
 
@@ -237,19 +434,19 @@ This phase is lower priority. Do not block earlier phases on it.
 
 | Key         | Context          | Action                              |
 |-------------|------------------|-------------------------------------|
-| F1–F5       | Global           | Switch tabs                         |
+| F1–F6       | Global           | Jump to tab (Dash/Queue/Browser/Hist/Vault/Config) |
+| Tab / S-Tab | Global           | Cycle tabs                          |
 | j / k       | Lists            | Move cursor                         |
 | Enter       | File tree        | Enter directory / open detail       |
-| Space       | File tree        | Mark/unmark for queue               |
+| Space       | File tree        | Queue/unqueue item (file or folder) |
 | b / Bksp    | File tree        | Go to parent directory              |
 | h           | File tree        | Toggle hidden files                 |
-| u           | Browser          | Open upload config panel for marked |
-| U           | Browser          | Upload single file under cursor     |
+| n           | Browser          | Toggle unbacked-only filter         |
+| u           | Browser, Queue   | Open upload config panel for queue  |
 | d / Del     | Queue            | Remove item from queue              |
 | c           | Queue            | Clear queue                         |
 | Shift+J/K   | Queue            | Reorder items                       |
-| p           | Upload progress  | Pause / Resume                      |
-| Ctrl+X      | Upload progress  | Cancel upload                       |
+| x           | Queue, Dashboard | Cancel running upload               |
 | /           | Log, History     | Start search                        |
 | Esc         | Any              | Close modal / cancel search         |
 | P           | Browser, Vault   | Search Prowlarr for selected file   |
@@ -264,6 +461,13 @@ This phase is lower priority. Do not block earlier phases on it.
 | Milestone | Description                                      | Status    |
 |-----------|--------------------------------------------------|-----------|
 | 40b       | Core upload flow, progress bars, catalog, history| ✅ Done    |
+| 40c-1     | One coherent selection model (queue = single source of truth) | ✅ Done |
+| 40c-2     | Folder = one release = one NZB (with per-entry preview)        | ✅ Done |
+| 40c-3     | Honest sequential queue + honest catalog (per-item record, real size, retry) | ✅ Done |
+| 40c-4     | "What should I upload?" filter (unbacked items)              | ✅ Done |
+| 40c-5     | Persist the queue; remove the fake pause                     | ✅ Done |
+| 40c-6     | Dedicated Queue tab; layout reconciled with reality          | ✅ Done |
+| 40d       | Upload-options workflow: ←→ fix, richer panel, folder/season mode | ✅ Done |
 | 41a       | Three-pane browser with NZB status column        | ✅ Done    |
 | 41b       | Upload config panel redesign                     | ✅ Done    |
 | 41c       | Full-height upload progress screen               | ✅ Done    |
@@ -274,4 +478,4 @@ This phase is lower priority. Do not block earlier phases on it.
 | 43d       | Automated Prowlarr backup workflow               | 🔲 Planned |
 | 44        | Catalog enhancements (tags, export, dedup)       | 🔲 Planned |
 | 45        | TMDb metadata enrichment                         | 🔲 Later   |
-| 46        | Multi-server posting + retry                     | 🔲 Later   |
+| 46        | Multi-server posting + retry + real pause        | 🔲 Later   |

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::{
     layout::Rect,
@@ -14,9 +14,10 @@ use crate::catalog::NzbStatusEntry;
 /// How a file appears in the browser based on its catalog/queue state.
 #[derive(Debug, Clone)]
 pub enum NzbBadge {
-    /// Not in catalog, not marked.
+    /// Not in catalog, not queued.
     None,
-    /// Marked for queuing (Space key).
+    /// Queued for upload (Space key). The queue is the single source of truth;
+    /// this badge is a render mirror of `App::upload_queue`.
     Marked,
     /// Currently being uploaded.
     Uploading,
@@ -26,12 +27,24 @@ pub enum NzbBadge {
 
 #[derive(Debug)]
 pub struct FileTree {
+    /// Items currently visible (after the optional "unbacked only" filter).
     pub items: Vec<PathBuf>,
+    /// Every entry in `current_dir` (before filtering); the source for `items`
+    /// and for the directory summary line.
+    all_items: Vec<PathBuf>,
     pub current_dir: PathBuf,
     pub selected: usize,
     pub show_hidden: bool,
-    /// Absolute paths that have been marked for queuing (Space key).
-    pub marked: HashSet<PathBuf>,
+    /// When true, the browser hides items that already have an NZB (in the
+    /// catalog), so only what still needs uploading is shown.
+    pub filter_unbacked: bool,
+    /// Directory summary, recomputed on refresh / catalog change.
+    /// `(total items, unbacked items, total bytes still to upload)`.
+    summary: (usize, usize, u64),
+    /// Absolute paths currently in the upload queue. This is a render mirror of
+    /// `App::upload_queue`, refreshed via [`set_queued`]; it is never mutated
+    /// directly so the queue stays the single source of truth.
+    pub queued: HashSet<PathBuf>,
     /// NZB status from the catalog, keyed by original_name (filename or full path).
     pub nzb_status: HashMap<String, NzbStatusEntry>,
     /// Names of files currently being uploaded (basename).
@@ -46,10 +59,13 @@ impl FileTree {
     pub fn new() -> Self {
         let mut tree = Self {
             items: vec![],
+            all_items: vec![],
             current_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             selected: 0,
             show_hidden: false,
-            marked: HashSet::new(),
+            filter_unbacked: false,
+            summary: (0, 0, 0),
+            queued: HashSet::new(),
             nzb_status: HashMap::new(),
             uploading: HashSet::new(),
             scroll_offset: 0,
@@ -59,14 +75,24 @@ impl FileTree {
         tree
     }
 
-    /// Replace the NZB status map (called after catalog refresh).
+    /// Replace the NZB status map (called after catalog refresh). The summary
+    /// and the unbacked filter depend on it, so recompute both.
     pub fn set_nzb_status(&mut self, status: HashMap<String, NzbStatusEntry>) {
         self.nzb_status = status;
+        self.recompute_summary();
+        self.apply_filter();
     }
 
     /// Mark names that are currently being uploaded.
     pub fn set_uploading(&mut self, names: HashSet<String>) {
         self.uploading = names;
+    }
+
+    /// Replace the set of queued paths (called whenever the upload queue
+    /// changes). Keeps the `[x]` badge in the Browser in lock-step with the
+    /// queue panel — one selection model, two views.
+    pub fn set_queued(&mut self, paths: HashSet<PathBuf>) {
+        self.queued = paths;
     }
 
     pub fn select_next(&mut self) {
@@ -122,11 +148,13 @@ impl FileTree {
             .unwrap_or_default();
         let full = path.to_string_lossy();
 
-        if self.marked.contains(path) {
-            return NzbBadge::Marked;
-        }
+        // Uploading takes precedence: an item stays in the queue while it is
+        // being posted, so the live ▶ badge must win over the queued [x].
         if self.uploading.contains(name) {
             return NzbBadge::Uploading;
+        }
+        if self.queued.contains(path) {
+            return NzbBadge::Marked;
         }
         if let Some(entry) = self
             .nzb_status
@@ -136,29 +164,6 @@ impl FileTree {
             return NzbBadge::Uploaded(entry.clone());
         }
         NzbBadge::None
-    }
-
-    /// Toggle the mark on the currently selected item and advance cursor.
-    pub fn toggle_mark(&mut self) {
-        if let Some(path) = self.items.get(self.selected).cloned() {
-            if self.marked.contains(&path) {
-                self.marked.remove(&path);
-            } else {
-                self.marked.insert(path);
-            }
-        }
-        self.select_next();
-    }
-
-    /// Return all marked paths (files and directories). Clears the mark set.
-    pub fn take_marked(&mut self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = self.marked.drain().collect();
-        paths.sort();
-        paths
-    }
-
-    pub fn marked_count(&self) -> usize {
-        self.marked.len()
     }
 
     pub fn refresh(&mut self) {
@@ -188,12 +193,77 @@ impl FileTree {
                 }
             });
 
-            self.items = items;
-            if self.selected >= self.items.len() {
-                self.selected = 0;
-                self.scroll_offset = 0;
+            self.all_items = items;
+            self.recompute_summary();
+            self.apply_filter();
+        }
+    }
+
+    /// Rebuild `items` from `all_items`, honoring the unbacked filter, and clamp
+    /// the cursor/scroll to the new length.
+    fn apply_filter(&mut self) {
+        self.items = if self.filter_unbacked {
+            self.all_items
+                .iter()
+                .filter(|p| !self.is_backed(p))
+                .cloned()
+                .collect()
+        } else {
+            self.all_items.clone()
+        };
+        if self.selected >= self.items.len() {
+            self.selected = 0;
+            self.scroll_offset = 0;
+        }
+    }
+
+    /// Toggle the "show only items without an NZB" filter.
+    pub fn toggle_filter_unbacked(&mut self) {
+        self.filter_unbacked = !self.filter_unbacked;
+        self.selected = 0;
+        self.scroll_offset = 0;
+        self.apply_filter();
+    }
+
+    /// Recompute the `(total, unbacked, bytes-to-upload)` summary for the
+    /// current directory listing.
+    fn recompute_summary(&mut self) {
+        let total = self.all_items.len();
+        let mut unbacked = 0usize;
+        let mut bytes = 0u64;
+        for p in &self.all_items {
+            if !self.is_backed(p) {
+                unbacked += 1;
+                bytes += item_size(p);
             }
         }
+        self.summary = (total, unbacked, bytes);
+    }
+
+    /// `(total items, unbacked items, bytes still to upload)` for the status line.
+    pub fn summary(&self) -> (usize, usize, u64) {
+        self.summary
+    }
+
+    /// Whether a path is already backed up (has an NZB in the catalog).
+    ///
+    /// A file is backed when it is in the catalog by full path or base name.
+    /// A directory is backed when it was uploaded as a release (its folder name
+    /// is in the catalog) *or* every file under it is individually backed —
+    /// i.e. it is unbacked if any child still needs uploading.
+    fn is_backed(&self, path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let full = path.to_string_lossy();
+        if self.nzb_status.contains_key(full.as_ref()) || self.nzb_status.contains_key(name) {
+            return true;
+        }
+        if path.is_dir() {
+            return !dir_has_unbacked(path, &self.nzb_status);
+        }
+        false
     }
 
     pub fn go_to_parent(&mut self) {
@@ -220,8 +290,20 @@ impl FileTree {
             .enumerate()
             .map(|(i, path)| {
                 let badge = self.badge_for(path);
-                let icon = if path.is_dir() { "📁" } else { "📄" };
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                let is_dir = path.is_dir();
+                let raw_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                // Directories carry a single-width marker + trailing slash so
+                // they read at a glance without relying on (double-width) emoji.
+                let marker = if is_dir {
+                    crate::ui::theme::DIR_MARK
+                } else {
+                    crate::ui::theme::FILE_MARK
+                };
+                let name = if is_dir {
+                    format!("{raw_name}/")
+                } else {
+                    raw_name.to_string()
+                };
                 let is_selected = i == self.selected;
 
                 let (check, check_style, name_style) = match &badge {
@@ -266,35 +348,64 @@ impl FileTree {
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD)
+                        } else if is_dir {
+                            Style::default().fg(Color::Blue)
                         } else {
                             Style::default()
                         },
                     ),
                 };
 
+                // Marker takes the directory accent unless the row is selected
+                // (then the highlight bg owns the styling).
+                let marker_style = if is_dir && !is_selected {
+                    Style::default().fg(Color::Blue)
+                } else {
+                    name_style
+                };
+
                 ListItem::new(Line::from(vec![
                     Span::styled(check, check_style),
-                    Span::styled(format!("{} {}", icon, name), name_style),
+                    Span::styled(marker, marker_style),
+                    Span::styled(name, name_style),
                 ]))
             })
             .collect();
 
-        let n_marked = self.marked.len();
-        let marked_hint = if n_marked > 0 {
-            format!(" — {} marked", n_marked)
+        let n_queued = self.queued.len();
+        let queued_hint = if n_queued > 0 {
+            format!(" — {} queued", n_queued)
         } else {
             String::new()
         };
 
+        let (total, unbacked, bytes) = self.summary;
+        let summary = if unbacked > 0 {
+            format!(" — {} unbacked · {} to upload", unbacked, fmt_bytes(bytes))
+        } else if total > 0 {
+            " — all backed ✓".to_string()
+        } else {
+            String::new()
+        };
+        let filter_tag = if self.filter_unbacked {
+            " • filter:unbacked"
+        } else {
+            ""
+        };
+
         let title = format!(
-            " Browser — {} ({} items{}{}) ",
+            " Browser — {} ({} items{}{}{}{}) ",
             self.current_dir.display(),
-            self.items.len(),
+            total,
             if self.show_hidden { " • hidden" } else { "" },
-            marked_hint,
+            filter_tag,
+            queued_hint,
+            summary,
         );
 
-        let border_style = if focused {
+        let border_style = if self.filter_unbacked {
+            Style::default().fg(Color::Magenta)
+        } else if focused {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -307,12 +418,7 @@ impl FileTree {
                     .title(title)
                     .border_style(border_style),
             )
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(crate::ui::theme::highlight());
 
         let mut state = ListState::default();
         state.select(Some(self.selected));
@@ -330,5 +436,104 @@ fn badge_symbol(entry: &NzbStatusEntry) -> (&'static str, Color) {
         (true, false) => ("[~] ", Color::Yellow),
         (false, true) => ("[P] ", Color::Magenta),
         (true, true) => ("[*] ", Color::Cyan),
+    }
+}
+
+/// Compact human-readable byte size (e.g. `3.2 GB`) for the summary line.
+fn fmt_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
+}
+
+/// Whether `dir` contains at least one file (recursively) that is not in the
+/// catalog by its base name. Walks with a cap and stops at the first hit, so a
+/// huge tree cannot stall the UI. Symlinks are skipped (as `pesto::walk` does).
+fn dir_has_unbacked(dir: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) -> bool {
+    const CAP: usize = 50_000;
+    let mut stack = vec![dir.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            } else if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                visited += 1;
+                let name = entry.file_name();
+                let in_catalog = name
+                    .to_str()
+                    .map(|n| nzb_status.contains_key(n))
+                    .unwrap_or(false);
+                if !in_catalog {
+                    return true;
+                }
+                if visited >= CAP {
+                    return false;
+                }
+            }
+        }
+    }
+    // No files at all (empty dir) counts as nothing to upload.
+    false
+}
+
+/// Best-effort byte size of an item: file length, or the recursive sum of a
+/// directory's files (capped for very large trees).
+fn item_size(path: &Path) -> u64 {
+    if path.is_file() {
+        return std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    }
+    const CAP: usize = 50_000;
+    let mut stack = vec![path.to_path_buf()];
+    let mut total = 0u64;
+    let mut visited = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            } else if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                visited += 1;
+                if visited >= CAP {
+                    return total;
+                }
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_bytes;
+
+    #[test]
+    fn fmt_bytes_scales_units() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024), "1.0 KB");
+        assert_eq!(fmt_bytes(1536), "1.5 KB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 }

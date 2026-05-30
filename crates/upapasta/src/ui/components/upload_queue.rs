@@ -18,12 +18,20 @@ impl UploadQueue {
         Self::default()
     }
 
-    pub fn add(&mut self, path: String) {
-        if !self.items.contains(&path) {
-            self.items.push(path);
-            if self.selected >= self.items.len() {
-                self.selected = self.items.len().saturating_sub(1);
+    /// Add the path if absent, remove it if present. Returns `true` when the
+    /// item is now queued, `false` when it was removed. This is the single
+    /// mutation used by the Browser's `Space` key, keeping the queue the one
+    /// source of truth for what will be uploaded.
+    pub fn toggle(&mut self, path: String) -> bool {
+        if let Some(pos) = self.items.iter().position(|p| p == &path) {
+            self.items.remove(pos);
+            if self.selected >= self.items.len() && !self.items.is_empty() {
+                self.selected = self.items.len() - 1;
             }
+            false
+        } else {
+            self.items.push(path);
+            true
         }
     }
 
