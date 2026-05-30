@@ -48,13 +48,29 @@ async fn main() -> io::Result<()> {
     // NOTE: The old fake progress simulator was removed.
     // Real progress now only comes from actual `pesto::post()` calls.
 
-    // Spawn keyboard event task using EventStream (async crossterm)
+    // Spawn keyboard event task using EventStream (async crossterm).
+    //
+    // IMPORTANT: keep reading on *every* event kind. A `while let Some(Ok(
+    // Event::Key(_)))` would end the task on the first non-key event (a Resize
+    // or FocusGained — both common right at startup inside tmux), silently
+    // killing all keyboard input while the UI keeps redrawing. Match instead and
+    // ignore the events we don't care about so the reader survives.
     let tx_keys = tx.clone();
     tokio::spawn(async move {
         let mut reader = EventStream::new();
-        while let Some(Ok(Event::Key(key))) = reader.next().await {
-            if key.kind == KeyEventKind::Press {
-                let _ = tx_keys.send(AppEvent::Key(key));
+        loop {
+            match reader.next().await {
+                Some(Ok(Event::Key(key))) => {
+                    if key.kind == KeyEventKind::Press {
+                        let _ = tx_keys.send(AppEvent::Key(key));
+                    }
+                }
+                // Resize / Mouse / Focus / Paste: not handled, but must not stop
+                // the reader.
+                Some(Ok(_)) => {}
+                // A read error or end-of-stream (stdin closed): nothing left to
+                // read, so end the task.
+                Some(Err(_)) | None => break,
             }
         }
     });
