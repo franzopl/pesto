@@ -599,8 +599,30 @@ async fn run_app<B: ratatui::backend::Backend>(
                 } => {
                     app.file_tree.apply_scan(generation, results);
                 }
+                AppEvent::QueueMetaReady {
+                    key,
+                    file_count,
+                    size_bytes,
+                } => {
+                    app.apply_queue_meta(&key, file_count, size_bytes);
+                }
                 _ => {}
             }
+        }
+
+        // Off-thread folder sizing: queueing a folder needs a recursive walk to
+        // count files / sum bytes. Run each pending walk on a blocking worker
+        // and fold the result back via QueueMetaReady.
+        for key in app.take_pending_meta() {
+            let tx_meta = tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let (file_count, size_bytes) = app::dir_stats(std::path::Path::new(&key));
+                let _ = tx_meta.send(AppEvent::QueueMetaReady {
+                    key,
+                    file_count,
+                    size_bytes,
+                });
+            });
         }
 
         // Off-thread directory scan: the Browser's backed/size summary needs

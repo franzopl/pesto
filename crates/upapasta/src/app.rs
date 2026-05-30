@@ -245,6 +245,23 @@ pub struct QueueEntryInfo {
     pub file_count: usize,
     /// Total bytes the entry will upload (file length, or the sum under a dir).
     pub size_bytes: u64,
+    /// Whether `file_count`/`size_bytes` are final. A directory's counts come
+    /// from a recursive walk that runs off the UI thread, so a freshly queued
+    /// folder starts `sized: false` (counts shown as "…") until the background
+    /// job fills them in. Plain files are always `sized: true`.
+    pub sized: bool,
+}
+
+impl QueueEntryInfo {
+    /// File-count label for the UI: the number once known, or "…" while the
+    /// background size job is still running for this folder.
+    pub fn files_label(&self) -> String {
+        if self.sized {
+            self.file_count.to_string()
+        } else {
+            "…".to_string()
+        }
+    }
 }
 
 /// Compute the NZB grouping info for a queued path. For a directory this walks
@@ -252,20 +269,39 @@ pub struct QueueEntryInfo {
 /// confirming, that a folder becomes a single NZB.
 pub fn queue_entry_info(path: &str) -> QueueEntryInfo {
     let p = std::path::Path::new(path);
+    if p.is_dir() {
+        let (file_count, size_bytes) = dir_stats(p);
+        let mut info = queue_entry_info_quick(path);
+        info.file_count = file_count;
+        info.size_bytes = size_bytes;
+        info.sized = true;
+        info
+    } else {
+        queue_entry_info_quick(path)
+    }
+}
+
+/// Like [`queue_entry_info`] but never walks the filesystem: a directory comes
+/// back with `sized: false` and zeroed counts, to be filled in later by a
+/// background [`dir_stats`] job. Use this on the UI thread (queueing, restoring)
+/// so marking a huge folder cannot freeze the loop; a plain file is fully
+/// resolved here since it costs a single `stat`.
+pub fn queue_entry_info_quick(path: &str) -> QueueEntryInfo {
+    let p = std::path::Path::new(path);
     let base = p
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(path)
         .to_string();
     if p.is_dir() {
-        let (file_count, size_bytes) = dir_stats(p);
         QueueEntryInfo {
             // A folder name is kept verbatim: dots in a release name are not a
             // file extension and must not be stripped.
             nzb_name: base,
             is_dir: true,
-            file_count,
-            size_bytes,
+            file_count: 0,
+            size_bytes: 0,
+            sized: false,
         }
     } else {
         // Strip a single extension for a plain file's NZB stem (movie.mkv → movie).
@@ -279,6 +315,7 @@ pub fn queue_entry_info(path: &str) -> QueueEntryInfo {
             is_dir: false,
             file_count: 1,
             size_bytes: std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+            sized: true,
         }
     }
 }
@@ -286,7 +323,7 @@ pub fn queue_entry_info(path: &str) -> QueueEntryInfo {
 /// Recursively count regular files under `dir` and sum their sizes, stopping at
 /// a sane cap so a pathological tree cannot stall the UI. Symlinks are skipped
 /// to match `pesto::walk` (which does the same during the real upload).
-fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
+pub(crate) fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
     const CAP: usize = 100_000;
     let mut stack = vec![dir.to_path_buf()];
     let mut count = 0usize;
@@ -325,6 +362,11 @@ pub struct App {
     /// string stored in `upload_queue.items`. Kept in sync on every queue
     /// mutation so the UI never re-walks directories on the render hot path.
     pub queue_meta: std::collections::HashMap<String, QueueEntryInfo>,
+    /// Queued folder paths whose file count / size still need the recursive
+    /// `dir_stats` walk. The run loop drains this, runs the walk off the UI
+    /// thread, and folds the result back via [`apply_queue_meta`], so marking a
+    /// huge folder never blocks the loop.
+    pub pending_meta: Vec<String>,
     /// Live per-item upload state, keyed by the queue path. Drives the ✓/✗/▶
     /// icons in the queue view and survives a partial batch so a failed item
     /// can be retried without losing the record of the ones that succeeded.
@@ -683,6 +725,7 @@ impl App {
             file_tree: FileTree::new(),
             upload_queue: UploadQueue::new(),
             queue_meta: std::collections::HashMap::new(),
+            pending_meta: Vec::new(),
             queue_status: std::collections::HashMap::new(),
             tick_count: 0,
             log_panel: LogPanel::new(80),
@@ -753,12 +796,14 @@ impl App {
         let key = path.to_string_lossy().to_string();
         let now_queued = self.upload_queue.toggle(key.clone());
         if now_queued {
-            let info = queue_entry_info(&key);
+            // Quick (no walk): a folder's file count / size is computed off the
+            // UI thread so marking a huge directory never freezes the loop.
+            let info = queue_entry_info_quick(&key);
             if info.is_dir {
+                self.pending_meta.push(key.clone());
                 self.status_bar.set(format!(
-                    "Queued folder “{}” → 1 NZB ({} files) — {} in queue",
+                    "Queued folder “{}” → 1 NZB (sizing…) — {} in queue",
                     info.nzb_name,
-                    info.file_count,
                     self.upload_queue.items.len()
                 ));
             } else {
@@ -789,12 +834,30 @@ impl App {
         self.file_tree.set_queued(set);
     }
 
-    /// Grouping info for a queued path, from the cache when available.
+    /// Grouping info for a queued path, from the cache when available. The
+    /// fallback uses the quick (walk-free) form so a render that races ahead of
+    /// the cache cannot trigger a filesystem walk on the UI thread.
     pub fn queue_info(&self, path: &str) -> QueueEntryInfo {
         self.queue_meta
             .get(path)
             .cloned()
-            .unwrap_or_else(|| queue_entry_info(path))
+            .unwrap_or_else(|| queue_entry_info_quick(path))
+    }
+
+    /// Drain the folders awaiting a `dir_stats` walk. The run loop runs these on
+    /// a blocking worker and returns each result via [`apply_queue_meta`].
+    pub fn take_pending_meta(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_meta)
+    }
+
+    /// Fold a completed `dir_stats` result back into the queue cache. Ignored if
+    /// the path has since left the queue (unqueued before the walk finished).
+    pub fn apply_queue_meta(&mut self, key: &str, file_count: usize, size_bytes: u64) {
+        if let Some(info) = self.queue_meta.get_mut(key) {
+            info.file_count = file_count;
+            info.size_bytes = size_bytes;
+            info.sized = true;
+        }
     }
 
     /// Remove the selected queue item, keeping caches and badges in sync.
@@ -2061,11 +2124,20 @@ impl App {
             })
             .collect();
         self.upload_queue.selected = 0;
+        // Quick (walk-free) restore: folders come back unsized and their
+        // file count / size is computed off the UI thread, so restoring a queue
+        // of large folders cannot stall startup.
         self.queue_meta = self
             .upload_queue
             .items
             .iter()
-            .map(|p| (p.clone(), queue_entry_info(p)))
+            .map(|p| (p.clone(), queue_entry_info_quick(p)))
+            .collect();
+        self.pending_meta = self
+            .queue_meta
+            .iter()
+            .filter(|(_, info)| !info.sized)
+            .map(|(p, _)| p.clone())
             .collect();
         self.sync_queue_badges();
         let n = self.upload_queue.items.len();
@@ -2244,5 +2316,53 @@ fn load_pesto_config() -> (Option<PestoConfig>, Option<PathBuf>, Option<String>)
             None,
             Some("Could not determine config path".to_string()),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{queue_entry_info, queue_entry_info_quick};
+    use std::fs;
+
+    /// The quick form must not walk a directory: it returns immediately with
+    /// `sized: false` and zeroed counts so the UI thread never blocks. The full
+    /// form then fills in the real numbers via the recursive walk.
+    #[test]
+    fn quick_info_defers_folder_sizing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(dir.path().join("a.bin"), [0u8; 100]).unwrap();
+        fs::write(sub.join("b.bin"), [0u8; 200]).unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+
+        let quick = queue_entry_info_quick(&path);
+        assert!(quick.is_dir);
+        assert!(!quick.sized);
+        assert_eq!(quick.file_count, 0);
+        assert_eq!(quick.size_bytes, 0);
+        assert_eq!(quick.files_label(), "…");
+
+        // The full form walks the tree (2 files, 300 bytes) and is marked sized.
+        let full = queue_entry_info(&path);
+        assert!(full.sized);
+        assert_eq!(full.file_count, 2);
+        assert_eq!(full.size_bytes, 300);
+        assert_eq!(full.files_label(), "2");
+    }
+
+    /// A plain file is fully resolved by the quick form (a single `stat`), so it
+    /// never needs a background job.
+    #[test]
+    fn quick_info_resolves_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("movie.mkv");
+        fs::write(&file, [0u8; 42]).unwrap();
+
+        let info = queue_entry_info_quick(&file.to_string_lossy());
+        assert!(!info.is_dir);
+        assert!(info.sized);
+        assert_eq!(info.nzb_name, "movie");
+        assert_eq!(info.size_bytes, 42);
     }
 }

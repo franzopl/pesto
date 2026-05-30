@@ -94,6 +94,12 @@ pub enum AppEvent {
         generation: u64,
         results: Vec<(std::path::PathBuf, bool, u64)>,
     },
+    // A queued folder's recursive size walk finished: (path, file_count, bytes).
+    QueueMetaReady {
+        key: String,
+        file_count: usize,
+        size_bytes: u64,
+    },
     // A single queue item started uploading (sequential, one NZB at a time).
     ItemUploadStarted {
         path: String,

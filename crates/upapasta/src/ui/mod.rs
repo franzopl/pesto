@@ -302,7 +302,8 @@ fn draw_nzb_detail_panel(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(" NZB     ", Style::default().fg(Color::DarkGray)),
                     Span::raw(format!(
                         "{}.nzb  ({} files in one release)",
-                        info.nzb_name, info.file_count
+                        info.nzb_name,
+                        info.files_label()
                     )),
                 ]));
             } else {
@@ -443,7 +444,7 @@ fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
                 (
                     theme::DIR_MARK,
                     Style::default().fg(theme::DIR),
-                    format!("  ({} files → 1 NZB)", info.file_count),
+                    format!("  ({} files → 1 NZB)", info.files_label()),
                 )
             } else {
                 (theme::FILE_MARK, Style::default(), String::new())
@@ -524,7 +525,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
                 (theme::FILE_MARK, Style::default())
             };
             let detail = if info.is_dir {
-                format!("  {} files → 1 NZB", info.file_count)
+                format!("  {} files → 1 NZB", info.files_label())
             } else {
                 String::new()
             };
@@ -621,7 +622,7 @@ fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
     for p in queue.iter().take(6) {
         let info = app.queue_info(p);
         let suffix = if info.is_dir {
-            format!(" → {}.nzb ({} files)", info.nzb_name, info.file_count)
+            format!(" → {}.nzb ({} files)", info.nzb_name, info.files_label())
         } else {
             format!(" → {}.nzb", info.nzb_name)
         };
