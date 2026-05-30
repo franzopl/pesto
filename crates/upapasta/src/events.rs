@@ -95,9 +95,22 @@ pub enum AppEvent {
     // A single queue item finished, carrying the real data pesto produced so
     // the catalog can be written per-item (real size, real NZB path) instead of
     // a fabricated average at the end of the batch.
+    //
+    // `record_catalog` is false when the item produced several NZBs (per-file /
+    // season folder modes): each NZB is then recorded via its own
+    // `CatalogRecord`, so the item-level event only updates the queue status.
     ItemUploadDone {
         path: String,
         success: bool,
+        size_bytes: u64,
+        nzb_path: Option<std::path::PathBuf>,
+        duration_s: f64,
+        record_catalog: bool,
+    },
+    // Record one produced NZB in the catalog (used by per-file / season folder
+    // modes where a single queue entry yields multiple NZBs).
+    CatalogRecord {
+        original_name: String,
         size_bytes: u64,
         nzb_path: Option<std::path::PathBuf>,
         duration_s: f64,

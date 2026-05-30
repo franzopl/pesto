@@ -179,6 +179,39 @@ always "what still needs uploading?" and today they must eyeball every row.
 
 ---
 
+## Phase 40d — Upload-options workflow ✅ Done
+
+A review of "how does a user change an option?" exposed three problems, all now
+fixed in the upload-config panel (opened with `u` from Browser or Queue):
+
+- **The arrow keys lied.** The panel hinted `←→ cycle` on Obfuscate/Verify, but
+  only PAR2 responded; you had to press `Enter`. Now `←→` (and `Space`) advance
+  every cycle/number/toggle field, matching the hint. The whole field list is
+  driven by one `ConfirmField` enum, so the render and the key handlers can no
+  longer disagree on order or behaviour.
+- **The panel was too thin.** It only exposed 5 settings. It now covers
+  Compress (format + password), From, Category and Article size as well — all of
+  which `effective_config_with_overrides` already applied — plus a one-line
+  legend explaining what the current obfuscation mode actually hides. The new
+  persistent settings are restored across sessions like the others.
+- **Folder/season mode was impossible.** `pesto`'s `--season` (per-episode NZBs
+  **plus** a combined season NZB) had no equivalent in the TUI. A **Folder mode**
+  field now appears whenever a directory is queued, with three options:
+  - `single NZB` — the whole folder as one release (default, unchanged);
+  - `per-file` — one NZB per file inside;
+  - `season` — per-file NZBs **and** a combined season NZB, built in upapasta via
+    `pesto::nzb::generate` over the segments each file posted.
+  Each produced NZB is recorded in the catalog honestly (real size + path) via a
+  per-NZB `CatalogRecord`, so a folder in per-file/season mode yields several
+  truthful catalog rows instead of one. Folder mode is intentionally **per-batch**
+  (resets to `single` each session) so an old `season` choice can never silently
+  change how a folder uploads later.
+
+> Known follow-up: the combined season NZB is recorded and saved locally but not
+> yet pushed to the indexer (the per-episode NZBs are). Tracked for later.
+
+---
+
 ## Phase 41 — TUI Layout Redesign (Current Priority)
 
 ### 41a — Three-pane Browser with NZB Status Column
@@ -434,6 +467,7 @@ This phase is lower priority. Do not block earlier phases on it.
 | 40c-4     | "What should I upload?" filter (unbacked items)              | ✅ Done |
 | 40c-5     | Persist the queue; remove the fake pause                     | ✅ Done |
 | 40c-6     | Dedicated Queue tab; layout reconciled with reality          | ✅ Done |
+| 40d       | Upload-options workflow: ←→ fix, richer panel, folder/season mode | ✅ Done |
 | 41a       | Three-pane browser with NZB status column        | ✅ Done    |
 | 41b       | Upload config panel redesign                     | ✅ Done    |
 | 41c       | Full-height upload progress screen               | ✅ Done    |

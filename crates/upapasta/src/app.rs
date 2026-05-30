@@ -532,6 +532,65 @@ pub struct SessionOverrides {
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub compress_password: Option<String>,
+    /// Compression archive format: `none`, `zip`, `7z` or `rar`.
+    pub compress_format: Option<String>,
+    /// How a queued directory becomes NZB(s). `None` = the default (`single`).
+    pub folder_mode: Option<FolderMode>,
+}
+
+/// How a queued directory is turned into NZB(s) at upload time.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FolderMode {
+    /// One NZB for the whole folder (a single release). The default.
+    #[default]
+    Single,
+    /// One NZB per file inside the folder (no combined release NZB).
+    PerFile,
+    /// One NZB per file *and* a combined "season" NZB over all of them.
+    Season,
+}
+
+impl FolderMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            FolderMode::Single => "single NZB",
+            FolderMode::PerFile => "per-file",
+            FolderMode::Season => "season (per-file + combined)",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            FolderMode::Single => FolderMode::PerFile,
+            FolderMode::PerFile => FolderMode::Season,
+            FolderMode::Season => FolderMode::Single,
+        }
+    }
+}
+
+/// One editable setting in the upload-config panel. The order here is the order
+/// shown on screen and navigated with j/k; both the render and the key handlers
+/// derive from this single list, so there are no fragile parallel indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmField {
+    Obfuscate,
+    Par2,
+    FolderMode,
+    Compress,
+    CompressPassword,
+    Verify,
+    NzbPassword,
+    Groups,
+    From,
+    Category,
+    ArticleSize,
+}
+
+/// A rendered snapshot of one field for the panel.
+pub struct ConfirmFieldView {
+    pub label: &'static str,
+    pub value: String,
+    pub hint: &'static str,
 }
 
 /// State for the Config screen.
@@ -951,6 +1010,7 @@ impl App {
         size_bytes: u64,
         nzb_path: Option<PathBuf>,
         duration_s: f64,
+        record_catalog: bool,
     ) {
         let status = if success {
             FileStatus::Done
@@ -967,16 +1027,27 @@ impl App {
             }
         }
 
-        if !success {
-            return;
-        }
-
-        if let Some(ref cat) = self.catalog {
+        // Per-file / season folder modes record each produced NZB separately via
+        // `CatalogRecord`, so the item-level event must not double-record.
+        if success && record_catalog {
             let original_name = std::path::Path::new(path)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path)
                 .to_string();
+            self.record_catalog_entry(original_name, size_bytes, nzb_path, duration_s);
+        }
+    }
+
+    /// Record one produced NZB in the catalog and refresh the Browser status.
+    pub fn record_catalog_entry(
+        &mut self,
+        original_name: String,
+        size_bytes: u64,
+        nzb_path: Option<PathBuf>,
+        duration_s: f64,
+    ) {
+        if let Some(ref cat) = self.catalog {
             let group = self
                 .pesto_config
                 .as_ref()
@@ -1516,67 +1587,137 @@ impl App {
         if let Some(ref pw) = ov.compress_password {
             cfg.compress_password = Some(pw.clone());
         }
+        if let Some(ref fmt) = ov.compress_format {
+            cfg.compress_format = if fmt == "none" {
+                None
+            } else {
+                Some(fmt.clone())
+            };
+        }
         Some(cfg)
+    }
+
+    /// The effective folder mode for this batch (override or the default).
+    pub fn effective_folder_mode(&self) -> FolderMode {
+        self.config_state.overrides.folder_mode.unwrap_or_default()
     }
 
     // ── Upload config panel field editing ─────────────────────────────────────
 
-    /// Number of editable fields in the upload config panel.
-    /// 0=Obfuscate  1=PAR2%  2=Verify  3=Password  4=Groups
-    pub const CONFIRM_FIELDS: usize = 5;
+    /// The fields shown in the panel, in order. `Folder mode` only appears when
+    /// a directory is queued (it is a no-op for plain files).
+    pub fn confirm_order(&self) -> Vec<ConfirmField> {
+        use ConfirmField::*;
+        let has_dir = self
+            .upload_queue
+            .items
+            .iter()
+            .any(|p| self.queue_info(p).is_dir);
+        let mut v = vec![Obfuscate, Par2];
+        if has_dir {
+            v.push(FolderMode);
+        }
+        v.extend([
+            Compress,
+            CompressPassword,
+            Verify,
+            NzbPassword,
+            Groups,
+            From,
+            Category,
+            ArticleSize,
+        ]);
+        v
+    }
+
+    /// The field currently under the cursor.
+    fn current_confirm_field(&self) -> Option<ConfirmField> {
+        self.confirm_order().get(self.confirm_field).copied()
+    }
 
     pub fn confirm_field_next(&mut self) {
-        self.confirm_field = (self.confirm_field + 1) % Self::CONFIRM_FIELDS;
+        let len = self.confirm_order().len().max(1);
+        self.confirm_field = (self.confirm_field + 1) % len;
     }
 
     pub fn confirm_field_prev(&mut self) {
+        let len = self.confirm_order().len().max(1);
         self.confirm_field = if self.confirm_field == 0 {
-            Self::CONFIRM_FIELDS - 1
+            len - 1
         } else {
             self.confirm_field - 1
         };
     }
 
-    /// Cycle / toggle enum and bool fields. For text fields (3, 4), enter edit mode.
+    fn obf_effective(&self) -> ObfuscateMode {
+        self.config_state.overrides.obfuscate.unwrap_or(
+            self.pesto_config
+                .as_ref()
+                .map(|c| c.obfuscate)
+                .unwrap_or(ObfuscateMode::None),
+        )
+    }
+
+    fn par2_effective(&self) -> u8 {
+        self.config_state
+            .overrides
+            .par2
+            .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10))
+    }
+
+    fn compress_effective(&self) -> String {
+        self.config_state
+            .overrides
+            .compress_format
+            .clone()
+            .or_else(|| {
+                self.pesto_config
+                    .as_ref()
+                    .and_then(|c| c.compress_format.clone())
+            })
+            .unwrap_or_else(|| "none".to_string())
+    }
+
+    /// Cycle / toggle enum and bool fields; for text/number fields, enter edit mode.
     pub fn confirm_field_activate(&mut self) {
-        match self.confirm_field {
-            0 => {
-                // Obfuscate: cycle None → Subject → Full → None
-                let current = self.config_state.overrides.obfuscate.unwrap_or(
+        let Some(field) = self.current_confirm_field() else {
+            return;
+        };
+        match field {
+            ConfirmField::Obfuscate => self.confirm_cycle_obfuscate(true),
+            ConfirmField::FolderMode => {
+                let cur = self.effective_folder_mode();
+                self.config_state.overrides.folder_mode = Some(cur.next());
+            }
+            ConfirmField::Compress => self.confirm_cycle_compress(true),
+            ConfirmField::Verify => self.confirm_toggle_verify(),
+            // Number / text fields → enter edit mode prefilled with the current value.
+            ConfirmField::Par2 => self.confirm_start_edit(self.par2_effective().to_string()),
+            ConfirmField::ArticleSize => {
+                let kb = self.config_state.overrides.article_size_kb.unwrap_or(
                     self.pesto_config
                         .as_ref()
-                        .map(|c| c.obfuscate)
-                        .unwrap_or(ObfuscateMode::None),
+                        .map(|c| c.article_size / 1024)
+                        .unwrap_or(768),
                 );
-                self.config_state.overrides.obfuscate = Some(match current {
-                    ObfuscateMode::None => ObfuscateMode::Subject,
-                    ObfuscateMode::Subject => ObfuscateMode::Full,
-                    ObfuscateMode::Full => ObfuscateMode::None,
-                });
+                self.confirm_start_edit(kb.to_string());
             }
-            1 => {
-                // PAR2 %: enter text-edit mode
-                let current = self
+            ConfirmField::CompressPassword => {
+                let cur = self
                     .config_state
                     .overrides
-                    .par2
-                    .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
-                self.confirm_edit_buf = current.to_string();
-                self.confirm_editing = true;
+                    .compress_password
+                    .clone()
+                    .or_else(|| {
+                        self.pesto_config
+                            .as_ref()
+                            .and_then(|c| c.compress_password.clone())
+                    })
+                    .unwrap_or_default();
+                self.confirm_start_edit(cur);
             }
-            2 => {
-                // Verify: toggle
-                let current = self.config_state.overrides.verify.unwrap_or(
-                    self.pesto_config
-                        .as_ref()
-                        .map(|c| c.verify)
-                        .unwrap_or(false),
-                );
-                self.config_state.overrides.verify = Some(!current);
-            }
-            3 => {
-                // NZB Password: enter text-edit mode
-                let current = self
+            ConfirmField::NzbPassword => {
+                let cur = self
                     .config_state
                     .overrides
                     .nzb_password
@@ -1587,69 +1728,257 @@ impl App {
                             .and_then(|c| c.nzb_password.clone())
                     })
                     .unwrap_or_default();
-                self.confirm_edit_buf = current;
-                self.confirm_editing = true;
+                self.confirm_start_edit(cur);
             }
-            4 => {
-                // Groups: enter text-edit mode
-                let current = self
+            ConfirmField::Groups => {
+                let cur = self
                     .config_state
                     .overrides
                     .groups
                     .clone()
                     .or_else(|| self.pesto_config.as_ref().map(|c| c.groups.join(", ")))
                     .unwrap_or_default();
-                self.confirm_edit_buf = current;
-                self.confirm_editing = true;
+                self.confirm_start_edit(cur);
+            }
+            ConfirmField::From => {
+                let cur = self
+                    .config_state
+                    .overrides
+                    .from
+                    .clone()
+                    .or_else(|| self.pesto_config.as_ref().map(|c| c.from.clone()))
+                    .unwrap_or_default();
+                self.confirm_start_edit(cur);
+            }
+            ConfirmField::Category => {
+                let cur = self
+                    .config_state
+                    .overrides
+                    .nzb_category
+                    .clone()
+                    .or_else(|| {
+                        self.pesto_config
+                            .as_ref()
+                            .and_then(|c| c.nzb_category.clone())
+                    })
+                    .unwrap_or_default();
+                self.confirm_start_edit(cur);
+            }
+        }
+    }
+
+    fn confirm_start_edit(&mut self, prefill: String) {
+        self.confirm_edit_buf = prefill;
+        self.confirm_editing = true;
+    }
+
+    fn confirm_cycle_obfuscate(&mut self, _forward: bool) {
+        let next = match self.obf_effective() {
+            ObfuscateMode::None => ObfuscateMode::Subject,
+            ObfuscateMode::Subject => ObfuscateMode::Full,
+            ObfuscateMode::Full => ObfuscateMode::None,
+        };
+        self.config_state.overrides.obfuscate = Some(next);
+    }
+
+    fn confirm_cycle_compress(&mut self, _forward: bool) {
+        let next = match self.compress_effective().as_str() {
+            "none" => "zip",
+            "zip" => "7z",
+            "7z" => "rar",
+            _ => "none",
+        };
+        self.config_state.overrides.compress_format = Some(next.to_string());
+    }
+
+    fn confirm_toggle_verify(&mut self) {
+        let cur = self.config_state.overrides.verify.unwrap_or(
+            self.pesto_config
+                .as_ref()
+                .map(|c| c.verify)
+                .unwrap_or(false),
+        );
+        self.config_state.overrides.verify = Some(!cur);
+    }
+
+    /// `→` / `l` / Space: advance cycle/number/toggle fields in place.
+    pub fn confirm_field_increment(&mut self) {
+        match self.current_confirm_field() {
+            Some(ConfirmField::Obfuscate) => self.confirm_cycle_obfuscate(true),
+            Some(ConfirmField::Compress) => self.confirm_cycle_compress(true),
+            Some(ConfirmField::Verify) => self.confirm_toggle_verify(),
+            Some(ConfirmField::FolderMode) => {
+                let cur = self.effective_folder_mode();
+                self.config_state.overrides.folder_mode = Some(cur.next());
+            }
+            Some(ConfirmField::Par2) => {
+                let cur = self.par2_effective();
+                self.config_state.overrides.par2 = Some(if cur >= 50 { 0 } else { cur + 5 });
             }
             _ => {}
         }
     }
 
-    pub fn confirm_field_increment(&mut self) {
-        if self.confirm_field == 1 {
-            let current = self
-                .config_state
-                .overrides
-                .par2
-                .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
-            self.config_state.overrides.par2 = Some(if current >= 50 { 0 } else { current + 5 });
-        }
-    }
-
+    /// `←` / `h`: step cycle/number/toggle fields backwards.
     pub fn confirm_field_decrement(&mut self) {
-        if self.confirm_field == 1 {
-            let current = self
-                .config_state
-                .overrides
-                .par2
-                .unwrap_or(self.pesto_config.as_ref().map(|c| c.par2).unwrap_or(10));
-            self.config_state.overrides.par2 = Some(if current == 0 {
-                50
-            } else {
-                current.saturating_sub(5)
-            });
+        match self.current_confirm_field() {
+            // Cycles are short; stepping backwards is the same as cycling forward.
+            Some(ConfirmField::Obfuscate) => self.confirm_cycle_obfuscate(false),
+            Some(ConfirmField::Compress) => self.confirm_cycle_compress(false),
+            Some(ConfirmField::Verify) => self.confirm_toggle_verify(),
+            Some(ConfirmField::FolderMode) => {
+                let cur = self.effective_folder_mode();
+                self.config_state.overrides.folder_mode = Some(cur.next());
+            }
+            Some(ConfirmField::Par2) => {
+                let cur = self.par2_effective();
+                self.config_state.overrides.par2 =
+                    Some(if cur == 0 { 50 } else { cur.saturating_sub(5) });
+            }
+            _ => {}
         }
     }
 
     /// Commit the text edit buffer into the relevant session override.
     pub fn confirm_confirm_edit(&mut self) {
         let buf = self.confirm_edit_buf.trim().to_string();
-        match self.confirm_field {
-            1 => {
+        let set_opt = |b: String| if b.is_empty() { None } else { Some(b) };
+        match self.current_confirm_field() {
+            Some(ConfirmField::Par2) => {
                 self.config_state.overrides.par2 = buf.parse::<u8>().ok().map(|v| v.min(50));
             }
-            3 => {
-                self.config_state.overrides.nzb_password =
-                    if buf.is_empty() { None } else { Some(buf) };
+            Some(ConfirmField::ArticleSize) => {
+                self.config_state.overrides.article_size_kb =
+                    buf.parse::<usize>().ok().filter(|kb| *kb > 0);
             }
-            4 => {
-                self.config_state.overrides.groups = if buf.is_empty() { None } else { Some(buf) };
+            Some(ConfirmField::CompressPassword) => {
+                self.config_state.overrides.compress_password = set_opt(buf);
+            }
+            Some(ConfirmField::NzbPassword) => {
+                self.config_state.overrides.nzb_password = set_opt(buf);
+            }
+            Some(ConfirmField::Groups) => {
+                self.config_state.overrides.groups = set_opt(buf);
+            }
+            Some(ConfirmField::From) => {
+                self.config_state.overrides.from = set_opt(buf);
+            }
+            Some(ConfirmField::Category) => {
+                self.config_state.overrides.nzb_category = set_opt(buf);
             }
             _ => {}
         }
         self.confirm_editing = false;
         self.confirm_edit_buf.clear();
+    }
+
+    /// Rendered snapshot of all panel fields, in display order.
+    pub fn confirm_field_views(&self) -> Vec<ConfirmFieldView> {
+        let ov = &self.config_state.overrides;
+        let cfg = self.pesto_config.as_ref();
+        let mask = |raw: &str| -> String {
+            if raw.is_empty() {
+                "—".to_string()
+            } else if self.confirm_show_password {
+                raw.to_string()
+            } else {
+                "•".repeat(raw.len().min(20))
+            }
+        };
+        self.confirm_order()
+            .into_iter()
+            .map(|field| {
+                let (label, value, hint): (&'static str, String, &'static str) = match field {
+                    ConfirmField::Obfuscate => (
+                        "Obfuscate",
+                        match self.obf_effective() {
+                            ObfuscateMode::None => "none",
+                            ObfuscateMode::Subject => "subject",
+                            ObfuscateMode::Full => "full",
+                        }
+                        .to_string(),
+                        "←→ cycle",
+                    ),
+                    ConfirmField::Par2 => (
+                        "PAR2 %",
+                        format!("{}%", self.par2_effective()),
+                        "←→ or Enter",
+                    ),
+                    ConfirmField::FolderMode => (
+                        "Folder",
+                        self.effective_folder_mode().label().to_string(),
+                        "←→ cycle",
+                    ),
+                    ConfirmField::Compress => ("Compress", self.compress_effective(), "←→ cycle"),
+                    ConfirmField::CompressPassword => {
+                        let raw = ov
+                            .compress_password
+                            .clone()
+                            .or_else(|| cfg.and_then(|c| c.compress_password.clone()))
+                            .unwrap_or_default();
+                        ("Zip pass", mask(&raw), "Enter edit  Tab show")
+                    }
+                    ConfirmField::Verify => (
+                        "Verify",
+                        if ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)) {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                        .to_string(),
+                        "←→ toggle",
+                    ),
+                    ConfirmField::NzbPassword => {
+                        let raw = ov
+                            .nzb_password
+                            .clone()
+                            .or_else(|| cfg.and_then(|c| c.nzb_password.clone()))
+                            .unwrap_or_default();
+                        ("NZB pass", mask(&raw), "Enter edit  Tab show")
+                    }
+                    ConfirmField::Groups => (
+                        "Groups",
+                        ov.groups
+                            .clone()
+                            .or_else(|| cfg.map(|c| c.groups.join(", ")))
+                            .unwrap_or_else(|| "—".to_string()),
+                        "Enter edit",
+                    ),
+                    ConfirmField::From => (
+                        "From",
+                        ov.from
+                            .clone()
+                            .or_else(|| cfg.map(|c| c.from.clone()))
+                            .unwrap_or_else(|| "—".to_string()),
+                        "Enter edit",
+                    ),
+                    ConfirmField::Category => (
+                        "Category",
+                        ov.nzb_category
+                            .clone()
+                            .or_else(|| cfg.and_then(|c| c.nzb_category.clone()))
+                            .unwrap_or_else(|| "—".to_string()),
+                        "Enter edit",
+                    ),
+                    ConfirmField::ArticleSize => {
+                        let kb = ov
+                            .article_size_kb
+                            .unwrap_or(cfg.map(|c| c.article_size / 1024).unwrap_or(768));
+                        ("Article", format!("{kb} KB"), "Enter edit")
+                    }
+                };
+                ConfirmFieldView { label, value, hint }
+            })
+            .collect()
+    }
+
+    /// One-line explanation of the current obfuscation mode, for the panel.
+    pub fn obfuscate_legend(&self) -> &'static str {
+        match self.obf_effective() {
+            ObfuscateMode::None => "none: public subject + real filenames",
+            ObfuscateMode::Subject => "subject: random subject, real poster + filenames",
+            ObfuscateMode::Full => "full: random subject + poster + filenames",
+        }
     }
 
     pub fn confirm_cancel_edit(&mut self) {
@@ -1759,6 +2088,21 @@ impl App {
             if o.compress_password.is_none() {
                 o.compress_password = prefs.compress_password;
             }
+            if o.compress_format.is_none() {
+                o.compress_format = prefs.compress_format;
+            }
+            if o.from.is_none() {
+                o.from = prefs.from;
+            }
+            if o.nzb_category.is_none() {
+                o.nzb_category = prefs.nzb_category;
+            }
+            if o.article_size_kb.is_none() {
+                o.article_size_kb = prefs.article_size_kb;
+            }
+            // folder_mode is intentionally NOT restored: it is a per-batch choice
+            // (defaults to a single release NZB each session) so an old "season"
+            // selection can never silently change how a folder uploads later.
         }
     }
 }

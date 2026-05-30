@@ -175,11 +175,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Up | KeyCode::Char('k') => app.confirm_field_prev(),
                         // Enter or e: cycle enum/bool, or enter edit mode for text fields
                         KeyCode::Enter | KeyCode::Char('e') => app.confirm_field_activate(),
-                        // Right/l/Space: increment cycle fields
+                        // Right/l/Space: advance cycle/number/toggle fields
                         KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
                             app.confirm_field_increment();
                         }
-                        // Left/h: decrement (PAR2 only)
+                        // Left/h: step cycle/number/toggle fields backwards
                         KeyCode::Left | KeyCode::Char('h') => app.confirm_field_decrement(),
                         _ => {}
                     },
@@ -512,8 +512,24 @@ async fn run_app<B: ratatui::backend::Backend>(
                     size_bytes,
                     nzb_path,
                     duration_s,
+                    record_catalog,
                 } => {
-                    app.item_upload_done(&path, success, size_bytes, nzb_path, duration_s);
+                    app.item_upload_done(
+                        &path,
+                        success,
+                        size_bytes,
+                        nzb_path,
+                        duration_s,
+                        record_catalog,
+                    );
+                }
+                AppEvent::CatalogRecord {
+                    original_name,
+                    size_bytes,
+                    nzb_path,
+                    duration_s,
+                } => {
+                    app.record_catalog_entry(original_name, size_bytes, nzb_path, duration_s);
                 }
                 AppEvent::UploadFinished { success, cancelled } => {
                     app.upload_finished(success, cancelled);
@@ -728,6 +744,10 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         build_dry_run_config()
     };
 
+    // How directories in the queue become NZB(s): one release NZB (default),
+    // one NZB per file, or per-file + a combined season NZB.
+    let folder_mode = app.effective_folder_mode();
+
     let cancel_token = app.current_cancel_token.clone().unwrap_or_default();
 
     // Direct uploads into nzb_dir/uploaded/ so the vault can distinguish them
@@ -741,17 +761,19 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         let _ = std::fs::create_dir_all(d);
     }
 
-    // Each queue item is uploaded individually so each file gets its own NZB.
+    // Each queue item is uploaded in sequence. A directory becomes one release
+    // NZB (Single), one NZB per file (PerFile), or per-file NZBs plus a combined
+    // season NZB (Season). Files always upload as a single NZB.
     tokio::spawn(async move {
         let total = entry_paths.len();
         let mut any_cancelled = false;
         let mut all_ok = true;
-        for (i, path) in entry_paths.iter().enumerate() {
+        'outer: for (i, path) in entry_paths.iter().enumerate() {
+            let key = path.to_string_lossy().into_owned();
             let label = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| format!("file-{}", i + 1));
-            let key = path.to_string_lossy().into_owned();
             if total > 1 {
                 let _ = tx.send(AppEvent::Progress(format!(
                     "=== Upload {}/{}: {} ===",
@@ -762,46 +784,174 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             }
             let _ = tx.send(AppEvent::ItemUploadStarted { path: key.clone() });
             let item_start = Instant::now();
-            let result = run_real_upload(
-                config.clone(),
-                vec![path.clone()],
-                label,
-                nzb_out_dir.clone(),
-                tx.clone(),
-                cancel_token.clone(),
-            )
-            .await;
-            let duration_s = item_start.elapsed().as_secs_f64();
-            match result {
-                Err(ref e) => {
-                    let _ = tx.send(AppEvent::UploadError(e.to_string()));
+
+            let expand = path.is_dir() && folder_mode != app::FolderMode::Single;
+
+            if !expand {
+                // One NZB for this entry (a file, or a folder as a single release).
+                let result = run_real_upload(
+                    config.clone(),
+                    vec![path.clone()],
+                    label,
+                    nzb_out_dir.clone(),
+                    tx.clone(),
+                    cancel_token.clone(),
+                )
+                .await;
+                let duration_s = item_start.elapsed().as_secs_f64();
+                match result {
+                    Err(ref e) => {
+                        let _ = tx.send(AppEvent::UploadError(e.to_string()));
+                        let _ = tx.send(AppEvent::ItemUploadDone {
+                            path: key,
+                            success: false,
+                            size_bytes: 0,
+                            nzb_path: None,
+                            duration_s,
+                            record_catalog: false,
+                        });
+                        all_ok = false;
+                    }
+                    Ok(ref o) if o.cancelled => {
+                        any_cancelled = true;
+                        break;
+                    }
+                    Ok(o) => {
+                        let success = !o.had_failures;
+                        if !success {
+                            all_ok = false;
+                        }
+                        let _ = tx.send(AppEvent::ItemUploadDone {
+                            path: key,
+                            success,
+                            size_bytes: o.total_bytes,
+                            nzb_path: o.nzb_path,
+                            duration_s,
+                            record_catalog: true,
+                        });
+                    }
+                }
+                continue;
+            }
+
+            // PerFile / Season: expand the folder into its files and upload each
+            // as its own NZB, recording each in the catalog as it lands.
+            let files = match pesto::walk::expand_inputs(std::slice::from_ref(path)) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::UploadError(format!("expand {label}: {e}")));
                     let _ = tx.send(AppEvent::ItemUploadDone {
                         path: key,
                         success: false,
                         size_bytes: 0,
                         nzb_path: None,
-                        duration_s,
+                        duration_s: item_start.elapsed().as_secs_f64(),
+                        record_catalog: false,
                     });
                     all_ok = false;
+                    continue;
                 }
-                Ok(ref o) if o.cancelled => {
-                    any_cancelled = true;
-                    break;
-                }
-                Ok(o) => {
-                    let success = !o.had_failures;
-                    if !success {
-                        all_ok = false;
+            };
+
+            let mut all_segments = Vec::new();
+            let mut total_size = 0u64;
+            let mut folder_ok = true;
+            for inf in &files {
+                let ep_name = inf
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| inf.name.clone());
+                let ep_start = Instant::now();
+                let result = run_real_upload(
+                    config.clone(),
+                    vec![inf.path.clone()],
+                    ep_name.clone(),
+                    nzb_out_dir.clone(),
+                    tx.clone(),
+                    cancel_token.clone(),
+                )
+                .await;
+                let ep_dur = ep_start.elapsed().as_secs_f64();
+                match result {
+                    Err(ref e) => {
+                        let _ = tx.send(AppEvent::UploadError(e.to_string()));
+                        folder_ok = false;
                     }
-                    let _ = tx.send(AppEvent::ItemUploadDone {
-                        path: key,
-                        success,
-                        size_bytes: o.total_bytes,
-                        nzb_path: o.nzb_path,
-                        duration_s,
-                    });
+                    Ok(ref o) if o.cancelled => {
+                        any_cancelled = true;
+                        break 'outer;
+                    }
+                    Ok(o) => {
+                        if o.had_failures {
+                            folder_ok = false;
+                        }
+                        total_size += o.total_bytes;
+                        let _ = tx.send(AppEvent::CatalogRecord {
+                            original_name: ep_name,
+                            size_bytes: o.total_bytes,
+                            nzb_path: o.nzb_path,
+                            duration_s: ep_dur,
+                        });
+                        all_segments.extend(o.segments);
+                    }
                 }
             }
+
+            // Season: consolidate every posted segment into one combined NZB.
+            let mut season_nzb = None;
+            if folder_mode == app::FolderMode::Season && !all_segments.is_empty() {
+                if let Some(ref dir) = nzb_out_dir {
+                    let out = dir.join(format!("{label}.nzb"));
+                    let meta = pesto::nzb::NzbMeta {
+                        name: Some(label.clone()),
+                        password: config
+                            .nzb_password
+                            .clone()
+                            .or_else(|| config.compress_password.clone()),
+                        category: config.nzb_category.clone(),
+                    };
+                    let xml = pesto::nzb::generate(
+                        &config.from,
+                        &config.groups,
+                        &all_segments,
+                        &meta,
+                        config.obfuscate == ObfuscateMode::Full,
+                    );
+                    match std::fs::write(&out, xml) {
+                        Ok(()) => {
+                            let _ = tx.send(AppEvent::Progress(format!(
+                                "wrote season nzb: {}",
+                                out.display()
+                            )));
+                            let _ = tx.send(AppEvent::CatalogRecord {
+                                original_name: label.clone(),
+                                size_bytes: total_size,
+                                nzb_path: Some(out.clone()),
+                                duration_s: item_start.elapsed().as_secs_f64(),
+                            });
+                            season_nzb = Some(out);
+                        }
+                        Err(e) => {
+                            let _ =
+                                tx.send(AppEvent::UploadError(format!("season nzb write: {e}")));
+                            folder_ok = false;
+                        }
+                    }
+                }
+            }
+
+            if !folder_ok {
+                all_ok = false;
+            }
+            let _ = tx.send(AppEvent::ItemUploadDone {
+                path: key,
+                success: folder_ok,
+                size_bytes: total_size,
+                nzb_path: season_nzb,
+                duration_s: item_start.elapsed().as_secs_f64(),
+                record_catalog: false,
+            });
         }
         let _ = tx.send(AppEvent::UploadFinished {
             success: all_ok && !any_cancelled,

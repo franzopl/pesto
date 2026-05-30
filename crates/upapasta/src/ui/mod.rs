@@ -593,12 +593,9 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
-    use pesto::config::ObfuscateMode;
-
     let s = app.effective_upload_settings();
     let queue = &app.upload_queue.items;
     let cfg = app.pesto_config.as_ref();
-    let ov = &app.config_state.overrides;
 
     let border_style = Style::default()
         .fg(Color::Yellow)
@@ -707,80 +704,21 @@ fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
     );
 
     // ── Editable fields ─────────────────────────────────────────────────────
-    let obf_str = match ov
-        .obfuscate
-        .unwrap_or(cfg.map(|c| c.obfuscate).unwrap_or(ObfuscateMode::None))
-    {
-        ObfuscateMode::None => "none",
-        ObfuscateMode::Subject => "subject",
-        ObfuscateMode::Full => "full",
-    };
-    let par2_str = format!("{}%", ov.par2.unwrap_or(cfg.map(|c| c.par2).unwrap_or(10)));
-    let verify_str = if ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)) {
-        "on"
-    } else {
-        "off"
-    };
-
-    let pw_raw = ov
-        .nzb_password
-        .as_deref()
-        .or_else(|| cfg.and_then(|c| c.nzb_password.as_deref()))
-        .unwrap_or("");
-    let pw_display = if pw_raw.is_empty() {
-        "—".to_string()
-    } else if app.confirm_show_password {
-        pw_raw.to_string()
-    } else {
-        "•".repeat(pw_raw.len().min(20))
-    };
-
-    let groups_str = ov
-        .groups
-        .clone()
-        .or_else(|| cfg.map(|c| c.groups.join(", ")))
-        .unwrap_or_else(|| "—".to_string());
-
-    struct Field {
-        label: &'static str,
-        value: String,
-        hint: &'static str,
-    }
-    let fields = [
-        Field {
-            label: " Obfuscate",
-            value: obf_str.to_string(),
-            hint: "←→ cycle",
-        },
-        Field {
-            label: " PAR2 %  ",
-            value: par2_str,
-            hint: "←→ or Enter",
-        },
-        Field {
-            label: " Verify  ",
-            value: verify_str.to_string(),
-            hint: "←→ toggle",
-        },
-        Field {
-            label: " Password",
-            value: pw_display,
-            hint: "Enter edit  Tab show",
-        },
-        Field {
-            label: " Groups  ",
-            value: groups_str,
-            hint: "Enter edit",
-        },
-    ];
+    // Field labels, values and hints all come from one source in `app`, so the
+    // panel and the key handlers can never disagree on order or behaviour.
+    let fields = app.confirm_field_views();
 
     let field_area = vchunks[2];
     let header = Line::from(Span::styled(
         " Settings  (j/k navigate · Enter/e edit · ←→ cycle)",
         Style::default().fg(Color::DarkGray),
     ));
+    let legend = Line::from(Span::styled(
+        format!(" {}", app.obfuscate_legend()),
+        Style::default().fg(Color::DarkGray),
+    ));
 
-    let mut field_lines: Vec<Line> = vec![header, Line::from("")];
+    let mut field_lines: Vec<Line> = vec![header, legend, Line::from("")];
 
     for (i, field) in fields.iter().enumerate() {
         let is_sel = app.confirm_field == i;
