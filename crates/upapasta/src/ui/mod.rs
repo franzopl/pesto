@@ -1,14 +1,13 @@
 use crate::app::{App, AppState};
 use pesto::config::ObfuscateMode;
 pub mod components;
+pub mod theme;
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs,
-    },
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline},
     Frame,
 };
 
@@ -27,21 +26,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    // Compact mode: skip header when height is tight
+    // Compact mode: drop the separator rule under the tab strip when height is tight
     let compact = area.height < 20;
 
     let constraints: Vec<Constraint> = if compact {
         vec![
-            Constraint::Length(3), // Tabs only
+            Constraint::Length(1), // Tab strip (no rule)
             Constraint::Min(5),    // Main content
             Constraint::Length(1), // Status (slim)
         ]
     } else {
         vec![
-            Constraint::Length(3), // Header
-            Constraint::Length(3), // Tabs
+            Constraint::Length(2), // Tab strip + separator rule
             Constraint::Min(10),   // Main content
-            Constraint::Length(3), // Status bar
+            Constraint::Length(1), // Status bar (single line)
         ]
     };
 
@@ -50,18 +48,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .constraints(constraints)
         .split(area);
 
-    if compact {
-        draw_tabs(f, app, chunks[0]);
-        draw_main(f, app, chunks[1]);
-        let slim = Paragraph::new(app.status_bar.message.clone())
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(slim, chunks[2]);
-    } else {
-        draw_header(f, chunks[0]);
-        draw_tabs(f, app, chunks[1]);
-        draw_main(f, app, chunks[2]);
-        draw_status_bar(f, app, chunks[3]);
-    }
+    draw_top_bar(f, app, chunks[0], !compact);
+    draw_main(f, app, chunks[1]);
+    draw_status_bar(f, app, chunks[2]);
 
     // Prowlarr search overlay floats above everything
     if app.prowlarr.search.is_some() {
@@ -69,60 +58,63 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_header(f: &mut Frame, area: Rect) {
-    let title = Line::from(vec![
+/// Single-line top bar: brand on the left, tab strip in the middle, version on
+/// the right. When `rule` is true a thin separator is drawn on the row below,
+/// giving structure without stacking bordered boxes.
+fn draw_top_bar(f: &mut Frame, app: &App, area: Rect, rule: bool) {
+    const TABS: [(&str, AppState); 6] = [
+        ("Dashboard", AppState::Dashboard),
+        ("Queue", AppState::Queue),
+        ("Browser", AppState::Browser),
+        ("History", AppState::History),
+        ("Vault", AppState::NzbVault),
+        ("Config", AppState::Config),
+    ];
+
+    let mut spans: Vec<Span> = vec![
         Span::styled(
-            "UPA",
+            " UPAPASTA",
             Style::default()
-                .fg(Color::Green)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("PASTA "),
-        Span::styled("v2", Style::default().fg(Color::Yellow)),
-        Span::raw(" — Rust Edition"),
-    ]);
-
-    let header = Paragraph::new(title)
-        .style(Style::default().fg(Color::White))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
-                .title(" Welcome to UpaPasta "),
-        );
-
-    f.render_widget(header, area);
-}
-
-fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let titles = vec![
-        " Dashboard ",
-        " Queue ",
-        " Browser ",
-        " History ",
-        " NZB Vault ",
-        " Config ",
+        Span::styled("  ", theme::label()),
     ];
-    let selected = match app.state {
-        AppState::Dashboard => 0,
-        AppState::Queue => 1,
-        AppState::Browser => 2,
-        AppState::History => 3,
-        AppState::NzbVault => 4,
-        AppState::Config => 5,
+
+    for (label, state) in TABS {
+        if app.state == state {
+            spans.push(Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::FOCUS)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(format!(" {label} "), theme::label()));
+        }
+        spans.push(Span::raw(" "));
+    }
+
+    let strip_area = if rule {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+        // Separator rule under the strip.
+        let rule_line = "─".repeat(parts[1].width as usize);
+        f.render_widget(Paragraph::new(rule_line).style(theme::label()), parts[1]);
+        parts[0]
+    } else {
+        area
     };
 
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .style(Style::default().fg(Color::DarkGray))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(Block::default().borders(Borders::ALL).title(" Navigation "));
-
-    f.render_widget(tabs, area);
+    // Right-aligned version tag, drawn first so the tab strip can overlay the left.
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled("v2 ", theme::label()))).alignment(Alignment::Right),
+        strip_area,
+    );
+    f.render_widget(Paragraph::new(Line::from(spans)), strip_area);
 }
 
 fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
@@ -420,12 +412,14 @@ fn draw_nzb_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         _ => Color::DarkGray,
     };
 
-    let para = ratatui::widgets::Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(border_color)),
-    );
+    let para = ratatui::widgets::Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(para, area);
 }
 
@@ -444,26 +438,20 @@ fn draw_browser_queue(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::White)
             };
-            let (status_glyph, status_color) = match app.item_status(item) {
-                crate::app::FileStatus::Active => ("▶ ", Color::Cyan),
-                crate::app::FileStatus::Done => ("✓ ", Color::Green),
-                crate::app::FileStatus::Failed => ("✗ ", Color::Red),
-                crate::app::FileStatus::Pending => {
-                    if app.upload_in_progress {
-                        ("· ", Color::DarkGray)
-                    } else {
-                        ("○ ", Color::DarkGray)
-                    }
-                }
-            };
-            let (icon, suffix) = if info.is_dir {
-                ("📁 ", format!("  ({} files → 1 NZB)", info.file_count))
+            let (glyph, status_color) =
+                theme::status_glyph(app.item_status(item), app.upload_in_progress);
+            let (marker, marker_style, suffix) = if info.is_dir {
+                (
+                    theme::DIR_MARK,
+                    Style::default().fg(theme::DIR),
+                    format!("  ({} files → 1 NZB)", info.file_count),
+                )
             } else {
-                ("📄 ", String::new())
+                (theme::FILE_MARK, Style::default(), String::new())
             };
             ratatui::widgets::ListItem::new(Line::from(vec![
-                Span::styled(status_glyph, Style::default().fg(status_color)),
-                Span::styled(icon, Style::default()),
+                Span::styled(format!("{glyph} "), Style::default().fg(status_color)),
+                Span::styled(marker, marker_style),
                 Span::styled(info.nzb_name, style),
                 Span::styled(suffix, Style::default().fg(Color::DarkGray)),
             ]))
@@ -530,19 +518,12 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
                 FileStatus::Failed => failed += 1,
                 _ => {}
             }
-            let (glyph, color) = match status {
-                FileStatus::Active => ("▶", Color::Cyan),
-                FileStatus::Done => ("✓", Color::Green),
-                FileStatus::Failed => ("✗", Color::Red),
-                FileStatus::Pending => {
-                    if app.upload_in_progress {
-                        ("·", Color::DarkGray)
-                    } else {
-                        ("○", Color::DarkGray)
-                    }
-                }
+            let (glyph, color) = theme::status_glyph(status, app.upload_in_progress);
+            let (marker, marker_style) = if info.is_dir {
+                (theme::DIR_MARK, Style::default().fg(theme::DIR))
+            } else {
+                (theme::FILE_MARK, Style::default())
             };
-            let icon = if info.is_dir { "📁" } else { "📄" };
             let detail = if info.is_dir {
                 format!("  {} files → 1 NZB", info.file_count)
             } else {
@@ -557,7 +538,7 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{} ", glyph), Style::default().fg(color)),
-                Span::raw(format!("{} ", icon)),
+                Span::styled(marker, marker_style),
                 Span::styled(info.nzb_name, name_style),
                 Span::styled(detail, Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -579,155 +560,127 @@ fn draw_queue(f: &mut Frame, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(Color::Green)),
+                .border_style(Style::default().fg(theme::OK)),
         )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(theme::highlight());
     let mut state = ListState::default();
     state.select(Some(app.upload_queue.selected));
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
-    let s = app.effective_upload_settings();
     let queue = &app.upload_queue.items;
     let cfg = app.pesto_config.as_ref();
 
-    let border_style = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
+        .border_style(Style::default().fg(theme::FOCUS))
         .title(Span::styled(
-            " Upload Config  [y: start  Esc: cancel] ",
+            " Upload Config ",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::FOCUS)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner_area = outer.inner(area);
     f.render_widget(outer, area);
 
-    // Vertical sections inside the panel
-    let file_count = queue.len().min(6) as u16;
+    // One row of horizontal padding inside the border for breathing room.
+    let inner_area = inner_area.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+
+    // Vertical sections: each opens with a muted section header line instead of
+    // an edge-to-edge rule, so the panel reads as grouped fields, not a form.
+    let file_rows = queue.len().min(6) as u16;
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(file_count + 2), // files block
-            Constraint::Length(4),              // read-only info
-            Constraint::Min(7),                 // editable fields
-            Constraint::Length(1),              // bottom hint
+            Constraint::Length(file_rows + 2), // FILES header + rows + spacer
+            Constraint::Length(4),             // DESTINATION header + 2 + spacer
+            Constraint::Min(7),                // SETTINGS
+            Constraint::Length(1),             // bottom hint
         ])
         .split(inner_area);
 
-    // ── Files list ──────────────────────────────────────────────────────────
-    let file_items: Vec<Line> = queue
-        .iter()
-        .take(6)
-        .map(|p| {
-            let info = app.queue_info(p);
-            let suffix = if info.is_dir {
-                format!(" → {}.nzb ({} files)", info.nzb_name, info.file_count)
-            } else {
-                format!(" → {}.nzb", info.nzb_name)
-            };
-            let icon = if info.is_dir { "📁 " } else { "📄 " };
-            let name = std::path::Path::new(p)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(p);
-            let prefix_len = icon.chars().count() + suffix.chars().count();
-            let max = (vchunks[0].width as usize).saturating_sub(prefix_len + 2);
-            let short = if name.len() > max && max > 3 {
-                format!("{}…", &name[..max - 1])
-            } else {
-                name.to_string()
-            };
-            Line::from(vec![
-                Span::styled(icon, Style::default().fg(Color::DarkGray)),
-                Span::raw(short),
-                Span::styled(suffix, Style::default().fg(Color::DarkGray)),
-            ])
-        })
-        .collect();
-
-    let extra = queue.len().saturating_sub(6);
-    let file_title = if extra > 0 {
-        format!(" Files ({}, +{} more) ", queue.len(), extra)
-    } else {
-        format!(" Files ({}) ", queue.len())
+    let section = |text: String| {
+        Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ))
     };
-    let mut all_file_lines = file_items;
-    if extra > 0 {
-        all_file_lines.push(Line::from(Span::styled(
-            format!(" … and {} more", extra),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    f.render_widget(
-        ratatui::widgets::Paragraph::new(all_file_lines).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .title(file_title)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        ),
-        vchunks[0],
-    );
 
-    // ── Read-only info (server, compress) ──────────────────────────────────
+    // ── FILES ─────────────────────────────────────────────────────────────────
+    let extra = queue.len().saturating_sub(6);
+    let mut file_lines: Vec<Line> = vec![section(if extra > 0 {
+        format!("FILES ({}, +{} more)", queue.len(), extra)
+    } else {
+        format!("FILES ({})", queue.len())
+    })];
+    for p in queue.iter().take(6) {
+        let info = app.queue_info(p);
+        let suffix = if info.is_dir {
+            format!(" → {}.nzb ({} files)", info.nzb_name, info.file_count)
+        } else {
+            format!(" → {}.nzb", info.nzb_name)
+        };
+        let (marker, marker_style) = if info.is_dir {
+            (theme::DIR_MARK, Style::default().fg(theme::DIR))
+        } else {
+            (theme::FILE_MARK, Style::default())
+        };
+        let name = std::path::Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(p);
+        let prefix_len = marker.chars().count() + suffix.chars().count();
+        let max = (vchunks[0].width as usize).saturating_sub(prefix_len + 2);
+        let short = truncate_str(name, max);
+        file_lines.push(Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::raw(short),
+            Span::styled(suffix, theme::label()),
+        ]));
+    }
+    f.render_widget(ratatui::widgets::Paragraph::new(file_lines), vchunks[0]);
+
+    // ── DESTINATION (read-only) ────────────────────────────────────────────────
     let server_str = cfg
         .map(|c| format!("{}:{}", c.host, c.port))
         .unwrap_or_else(|| "dry-run".to_string());
-
     let info_lines = vec![
+        section("DESTINATION".to_string()),
         Line::from(vec![
-            Span::styled(" Server   ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Server    ", theme::label()),
             Span::raw(server_str),
         ]),
-        Line::from(vec![
-            Span::styled(" Compress ", Style::default().fg(Color::DarkGray)),
-            Span::raw(s.compression.clone()),
-        ]),
     ];
-    f.render_widget(
-        ratatui::widgets::Paragraph::new(info_lines).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        ),
-        vchunks[1],
-    );
+    f.render_widget(ratatui::widgets::Paragraph::new(info_lines), vchunks[1]);
 
-    // ── Editable fields ─────────────────────────────────────────────────────
+    // ── SETTINGS (editable) ─────────────────────────────────────────────────────
     // Field labels, values and hints all come from one source in `app`, so the
     // panel and the key handlers can never disagree on order or behaviour.
     let fields = app.confirm_field_views();
-
-    let field_area = vchunks[2];
-    let header = Line::from(Span::styled(
-        " Settings  (j/k navigate · Enter/e edit · ←→ cycle)",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let legend = Line::from(Span::styled(
-        format!(" {}", app.obfuscate_legend()),
-        Style::default().fg(Color::DarkGray),
-    ));
-
-    let mut field_lines: Vec<Line> = vec![header, legend, Line::from("")];
+    let mut field_lines: Vec<Line> = vec![
+        section("SETTINGS".to_string()),
+        Line::from(Span::styled(
+            format!("  {}", app.obfuscate_legend()),
+            theme::label(),
+        )),
+        Line::from(""),
+    ];
 
     for (i, field) in fields.iter().enumerate() {
         let is_sel = app.confirm_field == i;
         let is_editing = is_sel && app.confirm_editing;
 
-        let cursor = if is_sel {
-            Span::styled("▶", Style::default().fg(Color::Yellow))
+        // A left bar marks the selected field instead of a stray arrow glyph.
+        let bar = if is_sel {
+            Span::styled("▌ ", Style::default().fg(theme::FOCUS))
         } else {
-            Span::raw(" ")
+            Span::raw("  ")
         };
 
         let label_style = if is_sel {
@@ -735,7 +688,7 @@ fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme::label()
         };
 
         let value_display = if is_editing {
@@ -745,31 +698,26 @@ fn draw_upload_config_panel(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let value_style = if is_editing {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme::OK).add_modifier(Modifier::BOLD)
         } else if is_sel {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(theme::FOCUS)
         } else {
             Style::default().fg(Color::White)
         };
 
-        let hint_style = Style::default().fg(Color::DarkGray);
-
         field_lines.push(Line::from(vec![
-            cursor,
+            bar,
             Span::styled(format!("{:<10}", field.label), label_style),
-            Span::styled(" ", Style::default()),
             Span::styled(value_display, value_style),
             if is_sel && !is_editing {
-                Span::styled(format!("  {}", field.hint), hint_style)
+                Span::styled(format!("   {}", field.hint), theme::label())
             } else {
                 Span::raw("")
             },
         ]));
     }
 
-    f.render_widget(ratatui::widgets::Paragraph::new(field_lines), field_area);
+    f.render_widget(ratatui::widgets::Paragraph::new(field_lines), vchunks[2]);
 
     // ── Bottom hint line ────────────────────────────────────────────────────
     let hint = Line::from(vec![
@@ -1059,8 +1007,6 @@ fn draw_speed_sparkline(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
-    use crate::app::FileStatus;
-
     let files = &app.progress.files;
     let n = files.len();
 
@@ -1098,12 +1044,8 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
             0
         };
 
-        let (status_icon, icon_color) = match fp.status {
-            FileStatus::Done => ("✓", Color::Green),
-            FileStatus::Failed => ("✗", Color::Red),
-            FileStatus::Active => ("▶", Color::Cyan),
-            FileStatus::Pending => (" ", Color::DarkGray),
-        };
+        // Upload is in progress on this screen, so pending shows the running dot.
+        let (status_icon, icon_color) = theme::status_glyph(fp.status, true);
 
         let name_row = rows[i * 2];
         let gauge_row = rows[i * 2 + 1];
@@ -1115,11 +1057,7 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
             .and_then(|n| n.to_str())
             .unwrap_or(&fp.name);
         let max_name = (name_row.width as usize).saturating_sub(4);
-        let short_name = if display_name.len() > max_name && max_name > 3 {
-            format!("{}…", &display_name[..max_name - 1])
-        } else {
-            display_name.to_string()
-        };
+        let short_name = truncate_str(display_name, max_name);
         let name_line = Line::from(vec![
             Span::styled(
                 format!(" {} ", status_icon),
@@ -1129,13 +1067,8 @@ fn draw_per_file_progress(f: &mut Frame, app: &App, area: Rect) {
         ]);
         f.render_widget(Paragraph::new(name_line), name_row);
 
-        // Gauge
-        let gauge_color = match fp.status {
-            FileStatus::Done => Color::Green,
-            FileStatus::Failed => Color::Red,
-            FileStatus::Active => Color::Cyan,
-            FileStatus::Pending => Color::DarkGray,
-        };
+        // Gauge — same color as the status glyph.
+        let gauge_color = icon_color;
         let label = if fp.total_segments > 0 {
             format!("{pct}%  {}/{}", fp.done_segments, fp.total_segments)
         } else {
@@ -1178,74 +1111,51 @@ fn draw_upload_settings_summary(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, area);
 }
 
+/// Single-line status bar: the live message in white, then context-sensitive
+/// key hints in muted grey. No border — it sits flush at the bottom.
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    if app.show_upload_confirm {
-        let help = if app.confirm_editing {
-            "Enter: confirm  •  Esc: cancel edit  •  Tab: toggle password visibility"
+    // Hints shown after the message, tailored to the current screen/mode.
+    let hints: String = if app.show_upload_confirm {
+        if app.confirm_editing {
+            "Enter confirm · Esc cancel edit · Tab show password".into()
         } else {
-            "j/k: navigate  •  Enter/←→: edit field  •  y: start upload  •  Esc: cancel"
+            "j/k move · Enter/←→ edit · y start · Esc cancel".into()
+        }
+    } else if app.upload_in_progress {
+        "x cancel · Tab switch · q quit".into()
+    } else if app.state == AppState::Queue && !app.upload_queue.items.is_empty() {
+        "u upload · d remove · c clear · J/K reorder · Tab switch".into()
+    } else if app.state == AppState::Browser {
+        let filter = if app.file_tree.filter_unbacked {
+            "n all"
+        } else {
+            "n unbacked"
         };
-        let status = Paragraph::new(help)
-            .style(Style::default().fg(Color::Yellow))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .title(" Upload Config "),
-            );
-        f.render_widget(status, area);
-        return;
-    }
-
-    if app.upload_in_progress {
-        let help = format!(
-            "{}  •  x: cancel  •  Tab: switch  •  q: quit",
-            app.status_bar.message
-        );
-        let status = Paragraph::new(help)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP).title(" Status "));
-        f.render_widget(status, area);
-        return;
-    }
-
-    if app.state == AppState::Queue && !app.upload_queue.items.is_empty() {
-        let hint = format!(
-            "{}  •  u: upload  •  d: remove  •  c: clear  •  J/K: reorder  •  Tab: switch",
-            app.status_bar.message
-        );
-        let status = Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP).title(" Status "));
-        f.render_widget(status, area);
-        return;
-    }
-
-    if app.state == AppState::Browser {
         let n = app.upload_queue.items.len();
-        let filter_hint = if app.file_tree.filter_unbacked {
-            "n: show all"
+        if n > 0 {
+            format!("Space queue · u upload ({n}) · {filter} · Tab switch")
         } else {
-            "n: unbacked only"
-        };
-        let hint = if n > 0 {
-            format!(
-                "{}  •  Space: queue/unqueue  •  u: upload ({} queued)  •  {}  •  Tab: switch",
-                app.status_bar.message, n, filter_hint
-            )
-        } else {
-            format!(
-                "{}  •  Space: queue file/folder  •  {}  •  Enter: open  •  Tab: switch",
-                app.status_bar.message, filter_hint
-            )
-        };
-        let status = Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::TOP).title(" Status "));
-        f.render_widget(status, area);
-        return;
-    }
+            format!("Space queue · Enter open · {filter} · Tab switch")
+        }
+    } else if app.state == AppState::Config {
+        "j/k move · Enter/e edit · r reset · R reset all · C check Prowlarr · Tab switch".into()
+    } else {
+        "Tab switch · q quit".into()
+    };
 
-    app.status_bar.render(f, area);
+    // The upload-config hints read better in the focus color; everything else
+    // is muted so the eye lands on the message first.
+    let hint_style = if app.show_upload_confirm {
+        Style::default().fg(theme::FOCUS)
+    } else {
+        theme::label()
+    };
+
+    let line = Line::from(vec![
+        Span::styled(format!(" {}  ", app.status_bar.message), Style::default()),
+        Span::styled(hints, hint_style),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 // ── History screen ─────────────────────────────────────────────────────────
@@ -1332,11 +1242,7 @@ fn draw_history_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .map(|b| format_bytes(b as u64))
                 .unwrap_or_else(|| "—".to_string());
             let cat_color = category_color(&r.category);
-            let short_name = if r.original_name.len() > 34 {
-                format!("{}…", &r.original_name[..33])
-            } else {
-                r.original_name.clone()
-            };
+            let short_name = truncate_str(&r.original_name, 34);
             let line = Line::from(vec![
                 Span::styled(format!("{} ", date), Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -1362,11 +1268,7 @@ fn draw_history_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .borders(Borders::ALL)
                 .title(" Uploads (j/k to navigate) "),
         )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(theme::highlight())
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, area, &mut state);
@@ -1481,6 +1383,20 @@ fn draw_history_stats(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Truncate `s` to at most `max` *characters* (not bytes), appending an ellipsis
+/// when shortened. Char-safe so names with accents or other multibyte UTF-8
+/// (e.g. "Programação") never panic on a non-char-boundary slice.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        let kept: String = s.chars().take(max - 1).collect();
+        format!("{kept}…")
+    }
+}
 
 fn format_bytes(b: u64) -> String {
     if b >= 1_073_741_824 {
@@ -1761,7 +1677,9 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
 
             let line = Line::from(vec![
                 override_indicator,
-                Span::styled(format!("{:<14}", field.label), label_style),
+                // Wide enough for the longest label ("Compress password") so the
+                // value column never butts up against the label.
+                Span::styled(format!("{:<18}", field.label), label_style),
                 Span::styled(value_display, value_style),
                 if is_sel {
                     Span::styled(format!("   ← {}", field.hint), hint_style)
@@ -1791,13 +1709,12 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
         .count()
     };
 
+    // Keystroke hints live in the status bar; the title stays short so it never
+    // overflows the panel.
     let title = if override_count > 0 {
-        format!(
-            " Overrides ({} active)  [j/k navigate · Enter/e edit · r reset field · R reset all] ",
-            override_count
-        )
+        format!(" Overrides ({override_count} active) ")
     } else {
-        " Overrides  [j/k navigate · Enter/e edit · r reset field] ".to_string()
+        " Overrides ".to_string()
     };
 
     let list = List::new(items)
@@ -2011,11 +1928,7 @@ fn draw_nzb_vault(f: &mut Frame, app: &App, area: Rect) {
                 let size_str = format_bytes(e.file_size);
                 // Reserve space for: " ✓ ↑ " (5) + "  123.4 KB" (11) = 16 cols
                 let name_width = chunks[0].width.saturating_sub(18) as usize;
-                let name = if e.name.len() > name_width {
-                    format!("{}…", &e.name[..name_width.saturating_sub(1)])
-                } else {
-                    e.name.clone()
-                };
+                let name = truncate_str(&e.name, name_width);
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", catalog_marker), catalog_style),
                     Span::styled(format!("{} ", origin_sym), origin_style),
@@ -2036,11 +1949,7 @@ fn draw_nzb_vault(f: &mut Frame, app: &App, area: Rect) {
                 .title(list_title)
                 .border_style(Style::default().fg(Color::Blue)),
         )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(theme::highlight());
 
     let mut list_state = ListState::default();
     list_state.select(if app.vault.entries.is_empty() {
@@ -2217,11 +2126,7 @@ fn draw_vault_viewer_overlay(f: &mut Frame, app: &App, area: Rect) {
     meta_lines.push(header);
 
     for nf in &c.files {
-        let name = if nf.name.len() > 40 {
-            format!("{}…", &nf.name[..39])
-        } else {
-            nf.name.clone()
-        };
+        let name = truncate_str(&nf.name, 40);
         meta_lines.push(Line::from(Span::raw(format!(
             " {:<40}  {:>9}  {:>6}",
             name,
@@ -2302,11 +2207,7 @@ fn draw_prowlarr_search_overlay(f: &mut Frame, app: &App, area: Rect) {
                 };
                 // Truncate title to fit
                 let max_title = h_chunks[0].width.saturating_sub(20) as usize;
-                let title_disp = if r.title.len() > max_title {
-                    format!("{}…", &r.title[..max_title.saturating_sub(1)])
-                } else {
-                    r.title.clone()
-                };
+                let title_disp = truncate_str(&r.title, max_title);
                 ListItem::new(Line::from(vec![
                     Span::raw(format!(" {:<width$}", title_disp, width = max_title)),
                     Span::styled(
@@ -2325,11 +2226,7 @@ fn draw_prowlarr_search_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .title(title)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(theme::highlight());
 
     let mut list_state = ListState::default();
     list_state.select(if search.results.is_empty() {
@@ -2438,4 +2335,30 @@ fn draw_prowlarr_search_overlay(f: &mut Frame, app: &App, area: Rect) {
         .block(block)
         .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(detail, h_chunks[1]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_str;
+
+    #[test]
+    fn truncate_keeps_short_strings() {
+        assert_eq!(truncate_str("abc", 5), "abc");
+        assert_eq!(truncate_str("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncate_adds_ellipsis_when_too_long() {
+        assert_eq!(truncate_str("abcdef", 4), "abc\u{2026}");
+    }
+
+    #[test]
+    fn truncate_is_char_safe_with_multibyte() {
+        // Must not panic on a multibyte boundary (regression: vault crash on
+        // "Programa\u{e7}\u{e3}o"-style names).
+        let s = "Programa\u{e7}\u{e3}o_e_IA";
+        let out = truncate_str(s, 10);
+        assert!(out.chars().count() <= 10);
+        assert!(out.ends_with('\u{2026}'));
+    }
 }
