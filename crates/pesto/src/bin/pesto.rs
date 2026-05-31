@@ -1192,8 +1192,9 @@ async fn run_batch(
                 println!(r#"{{"type":"nzb_written","path":"{path_esc}","season":true}}"#);
             }
 
-            // Upload consolidated NZB to indexer when configured.
-            if !config.no_upload {
+            // Upload consolidated NZB to indexer when configured. Never in
+            // --dry-run / --par2-only: those modes must not touch the network.
+            if !config.no_upload && !config.dry_run && !config.par2_only {
                 if let Some(url) = &config.indexer_url {
                     if let Some(api_key) = &config.indexer_api_key {
                         let nzb_name = season_path
@@ -1251,7 +1252,9 @@ async fn run_batch(
                 password: effective_password.as_deref(),
                 server: &config.host,
             };
-            if !config.no_hooks {
+            // Skip hooks for --dry-run / --par2-only, matching the per-entry
+            // path: no real upload happened, so post-upload hooks must not fire.
+            if !config.no_hooks && !config.dry_run && !config.par2_only {
                 if let Some(cmd) = &config.post_hook {
                     run_post_hook(cmd, &hook_env);
                 }
