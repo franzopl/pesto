@@ -9,6 +9,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::app::{DiskNzbInfo, NzbOrigin};
 use crate::catalog::NzbStatusEntry;
 
 /// How a file appears in the browser based on its catalog/queue state.
@@ -24,9 +25,12 @@ pub enum NzbBadge {
     /// In catalog — carries the status entry.
     Uploaded(NzbStatusEntry),
     /// Not in the catalog, but a matching `.nzb` already exists in `nzb_dir`
-    /// (matched by release name). The file was uploaded before, just not
-    /// recorded in this catalog.
-    OnDisk,
+    /// (matched by release name). Carries the on-disk origin so a Prowlarr
+    /// download is distinguished from a prior upload, plus the password flag.
+    OnDisk {
+        origin: NzbOrigin,
+        has_password: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -52,9 +56,11 @@ pub struct FileTree {
     /// NZB status from the catalog, keyed by original_name (filename or full path).
     pub nzb_status: HashMap<String, NzbStatusEntry>,
     /// Release keys (see [`release_key`]) of every `.nzb` found in the
-    /// configured `nzb_dir`. Lets the browser flag a file as already-uploaded
-    /// when a matching NZB exists on disk even if the catalog has no record.
-    pub nzb_disk_index: HashSet<String>,
+    /// configured `nzb_dir`, mapped to their [`DiskNzbInfo`] (origin + password).
+    /// Lets the browser flag a file as already-backed when a matching NZB exists
+    /// on disk even if the catalog has no record, and distinguish a Prowlarr
+    /// download from a prior upload.
+    pub nzb_disk_index: HashMap<String, DiskNzbInfo>,
     /// Names of files currently being uploaded (basename).
     pub uploading: HashSet<String>,
     /// First visible item index — managed manually to get correct scroll behaviour.
@@ -85,7 +91,7 @@ pub struct DirScanJob {
     pub generation: u64,
     items: Vec<PathBuf>,
     nzb_status: HashMap<String, NzbStatusEntry>,
-    nzb_disk_index: HashSet<String>,
+    nzb_disk_index: HashMap<String, DiskNzbInfo>,
 }
 
 impl DirScanJob {
@@ -120,7 +126,7 @@ impl FileTree {
             summary: (0, 0, 0),
             queued: HashSet::new(),
             nzb_status: HashMap::new(),
-            nzb_disk_index: HashSet::new(),
+            nzb_disk_index: HashMap::new(),
             uploading: HashSet::new(),
             scroll_offset: 0,
             visible_height: 20,
@@ -147,7 +153,7 @@ impl FileTree {
     /// Replace the on-disk NZB release index (release keys of every `.nzb` in
     /// `nzb_dir`). Like the catalog map, backed status depends on it, so the
     /// scan cache is invalidated and a fresh background scan is scheduled.
-    pub fn set_nzb_disk_index(&mut self, index: HashSet<String>) {
+    pub fn set_nzb_disk_index(&mut self, index: HashMap<String, DiskNzbInfo>) {
         self.nzb_disk_index = index;
         self.invalidate_scan();
         self.recompute_summary();
@@ -235,9 +241,14 @@ impl FileTree {
             return NzbBadge::Uploaded(entry.clone());
         }
         // Not in the catalog, but maybe a matching .nzb already exists in
-        // nzb_dir (e.g. uploaded by a different tool or before this catalog).
-        if !path.is_dir() && self.nzb_disk_index.contains(&release_key(name)) {
-            return NzbBadge::OnDisk;
+        // nzb_dir (e.g. a Prowlarr download, or uploaded before this catalog).
+        if !path.is_dir() {
+            if let Some(info) = self.nzb_disk_index.get(&release_key(name)) {
+                return NzbBadge::OnDisk {
+                    origin: info.origin,
+                    has_password: info.has_password,
+                };
+            }
         }
         NzbBadge::None
     }
@@ -458,21 +469,23 @@ impl FileTree {
                             },
                         )
                     }
-                    NzbBadge::OnDisk => (
-                        "[✓] ",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::DIM),
-                        if is_selected {
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::DIM)
-                        },
-                    ),
+                    NzbBadge::OnDisk {
+                        origin,
+                        has_password,
+                    } => {
+                        let (sym, color) = disk_badge_symbol(*origin, *has_password);
+                        (
+                            sym,
+                            Style::default().fg(color).add_modifier(Modifier::DIM),
+                            if is_selected {
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(color).add_modifier(Modifier::DIM)
+                            },
+                        )
+                    }
                     NzbBadge::None => (
                         "[ ] ",
                         Style::default().fg(Color::DarkGray),
@@ -573,6 +586,19 @@ fn badge_symbol(entry: &NzbStatusEntry) -> (&'static str, Color) {
     }
 }
 
+/// Returns `(badge_string, color)` for an `.nzb` matched on disk but not in the
+/// catalog. A password-protected release is always flagged with a magenta `P`
+/// for maximum visibility; otherwise a Prowlarr download shows a yellow `↓` and
+/// a prior upload (or manual file) a green `✓`. Badge stays 4 chars wide.
+fn disk_badge_symbol(origin: NzbOrigin, has_password: bool) -> (&'static str, Color) {
+    match (origin, has_password) {
+        (NzbOrigin::Downloaded, false) => ("[↓] ", Color::Yellow),
+        (NzbOrigin::Downloaded, true) => ("[↓P]", Color::Magenta),
+        (_, false) => ("[✓] ", Color::Green),
+        (_, true) => ("[✓P]", Color::Magenta),
+    }
+}
+
 /// Compact human-readable byte size (e.g. `3.2 GB`) for the summary line.
 fn fmt_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -600,7 +626,7 @@ fn fmt_bytes(bytes: u64) -> String {
 fn path_is_backed(
     path: &Path,
     nzb_status: &HashMap<String, NzbStatusEntry>,
-    nzb_disk_index: &HashSet<String>,
+    nzb_disk_index: &HashMap<String, DiskNzbInfo>,
 ) -> bool {
     let name = path
         .file_name()
@@ -614,7 +640,7 @@ fn path_is_backed(
         return !dir_has_unbacked(path, nzb_status, nzb_disk_index);
     }
     // A matching .nzb already on disk counts as backed.
-    nzb_disk_index.contains(&release_key(name))
+    nzb_disk_index.contains_key(&release_key(name))
 }
 
 /// Whether `dir` contains at least one file (recursively) that is not in the
@@ -623,7 +649,7 @@ fn path_is_backed(
 fn dir_has_unbacked(
     dir: &Path,
     nzb_status: &HashMap<String, NzbStatusEntry>,
-    nzb_disk_index: &HashSet<String>,
+    nzb_disk_index: &HashMap<String, DiskNzbInfo>,
 ) -> bool {
     const CAP: usize = 50_000;
     let mut stack = vec![dir.to_path_buf()];
@@ -643,7 +669,9 @@ fn dir_has_unbacked(
                 let name = entry.file_name();
                 let backed = name
                     .to_str()
-                    .map(|n| nzb_status.contains_key(n) || nzb_disk_index.contains(&release_key(n)))
+                    .map(|n| {
+                        nzb_status.contains_key(n) || nzb_disk_index.contains_key(&release_key(n))
+                    })
                     .unwrap_or(false);
                 if !backed {
                     return true;

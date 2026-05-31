@@ -396,6 +396,51 @@ fn draw_nzb_detail_panel(f: &mut Frame, app: &App, area: Rect) {
             (" NZB Status ".to_string(), lines)
         }
 
+        (
+            Some(NzbBadge::OnDisk {
+                origin,
+                has_password,
+            }),
+            Some(path),
+        ) => {
+            use crate::app::NzbOrigin;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let (status_text, status_color) = match origin {
+                NzbOrigin::Downloaded => ("↓ Downloaded via Prowlarr", Color::Yellow),
+                _ => ("✓ NZB found on disk", Color::Green),
+            };
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(" File    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(name.to_string()),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Status  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(status_text, Style::default().fg(status_color)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Pass    ", Style::default().fg(Color::DarkGray)),
+                    if *has_password {
+                        Span::styled("Set", Style::default().fg(Color::Magenta))
+                    } else {
+                        Span::styled("None", Style::default().fg(Color::DarkGray))
+                    },
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Not recorded in this catalog (matched by release name).",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            // Legend row
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                " [✓] upload  [↓] download  [P] password",
+                Style::default().fg(Color::DarkGray),
+            )]));
+            (" NZB Status ".to_string(), lines)
+        }
+
         _ => {
             let lines = vec![Line::from(Span::styled(
                 " Navigate to a file to see its NZB status.",
@@ -414,6 +459,12 @@ fn draw_nzb_detail_panel(f: &mut Frame, app: &App, area: Rect) {
         },
         Some(NzbBadge::Marked) => Color::Green,
         Some(NzbBadge::Uploading) => Color::Cyan,
+        Some(NzbBadge::OnDisk { has_password, .. }) if *has_password => Color::Magenta,
+        Some(NzbBadge::OnDisk {
+            origin: crate::app::NzbOrigin::Downloaded,
+            ..
+        }) => Color::Yellow,
+        Some(NzbBadge::OnDisk { .. }) => Color::Green,
         _ => Color::DarkGray,
     };
 

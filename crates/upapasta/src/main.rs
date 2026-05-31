@@ -116,7 +116,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                             && !app.history.searching
                             && app.history.nzb_viewer.is_none()
                             && !app.config_state.editing
-                            && !app.show_upload_confirm =>
+                            && !app.show_upload_confirm
+                            && app.prowlarr.search.is_none()
+                            && app.prowlarr.batch.is_none() =>
                     {
                         return Ok(())
                     }
@@ -125,7 +127,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                             && !app.history.searching
                             && app.history.nzb_viewer.is_none()
                             && !app.config_state.editing
-                            && !app.show_upload_confirm =>
+                            && !app.show_upload_confirm
+                            && app.prowlarr.search.is_none()
+                            && app.prowlarr.batch.is_none() =>
                     {
                         return Ok(())
                     }

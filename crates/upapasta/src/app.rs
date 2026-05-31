@@ -471,6 +471,18 @@ pub enum NzbOrigin {
     Manual,
 }
 
+/// Lightweight metadata about an `.nzb` found on disk, keyed by release key in
+/// the browser's disk index. Lets the Browser distinguish a Prowlarr download
+/// from a prior upload and flag password-protected releases without consulting
+/// the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiskNzbInfo {
+    /// Origin derived from the immediate parent directory name.
+    pub origin: NzbOrigin,
+    /// True when the NZB head carries a `<meta type="password">` tag.
+    pub has_password: bool,
+}
+
 /// Sort order for the NZB Vault list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VaultSort {
@@ -1249,7 +1261,7 @@ impl App {
         else {
             return;
         };
-        let mut index = std::collections::HashSet::new();
+        let mut index = std::collections::HashMap::new();
         collect_nzb_release_keys(&dir, &mut index);
         self.file_tree.set_nzb_disk_index(index);
     }
@@ -1690,8 +1702,8 @@ impl App {
         };
 
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let mut doc = match text.parse::<toml_edit::DocumentMut>() {
-            Ok(d) => d,
+        let new_text = match apply_indexer_field(&text, field, value) {
+            Ok(t) => t,
             Err(e) => {
                 self.status_bar.set(format!(
                     "Saved for this session (config.toml parse error: {e})"
@@ -1700,22 +1712,10 @@ impl App {
             }
         };
 
-        // Navigate/create [output.indexer]. Chained indexing auto-vivifies the
-        // intermediate tables as *implicit* ones, so empty parents are never
-        // rendered as bare `[output]` / `[output.indexer]` headers.
-        match value {
-            Some(v) => doc["output"]["indexer"][field] = toml_edit::value(v),
-            None => {
-                if let Some(tbl) = doc["output"]["indexer"].as_table_mut() {
-                    tbl.remove(field);
-                }
-            }
-        }
-
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match std::fs::write(&path, doc.to_string()) {
+        match std::fs::write(&path, new_text) {
             Ok(()) => self
                 .status_bar
                 .set(format!("Saved Prowlarr {field} to {}", path.display())),
@@ -2410,14 +2410,28 @@ fn collect_nzbs_recursive(
     }
 }
 
-/// Recursively scan `dir` for `.nzb` files and insert each file's release key
-/// (see `file_tree::release_key`) into `out`. Capped so a pathological tree
-/// cannot stall startup; symlinks are skipped to match the rest of the walk
-/// logic.
-fn collect_nzb_release_keys(dir: &std::path::Path, out: &mut std::collections::HashSet<String>) {
+/// Recursively scan `dir` for `.nzb` files and map each file's release key
+/// (see `file_tree::release_key`) to its [`DiskNzbInfo`] (origin + password).
+/// Capped so a pathological tree cannot stall startup; symlinks are skipped to
+/// match the rest of the walk logic.
+fn collect_nzb_release_keys(
+    dir: &std::path::Path,
+    out: &mut std::collections::HashMap<String, DiskNzbInfo>,
+) {
     const CAP: usize = 200_000;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
+        // Origin is derived from the immediate parent directory name, matching
+        // `collect_nzbs_recursive` and `prowlarr::dest_path_in` (downloaded/).
+        let origin = d
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| match n {
+                "uploaded" => NzbOrigin::Uploaded,
+                "downloaded" => NzbOrigin::Downloaded,
+                _ => NzbOrigin::Manual,
+            })
+            .unwrap_or(NzbOrigin::Manual);
         let Ok(rd) = std::fs::read_dir(&d) else {
             continue;
         };
@@ -2435,7 +2449,20 @@ fn collect_nzb_release_keys(dir: &std::path::Path, out: &mut std::collections::H
                     .unwrap_or(false);
                 if is_nzb {
                     if let Some(n) = name.to_str() {
-                        out.insert(crate::ui::components::file_tree::release_key(n));
+                        let info = DiskNzbInfo {
+                            origin,
+                            has_password: nzb_head_has_password(&entry.path()),
+                        };
+                        out.entry(crate::ui::components::file_tree::release_key(n))
+                            // On a duplicate release key, prefer a non-Manual
+                            // origin and keep a password flag once seen.
+                            .and_modify(|e| {
+                                if e.origin == NzbOrigin::Manual {
+                                    e.origin = info.origin;
+                                }
+                                e.has_password |= info.has_password;
+                            })
+                            .or_insert(info);
                     }
                     if out.len() >= CAP {
                         return;
@@ -2446,6 +2473,20 @@ fn collect_nzb_release_keys(dir: &std::path::Path, out: &mut std::collections::H
     }
 }
 
+/// Cheap password probe: read only the head of an `.nzb` (the `<head>`/`<meta>`
+/// block always precedes the `<file>` entries) and look for a
+/// `<meta type="password">` tag. Avoids parsing whole NZBs, which can be huge.
+fn nzb_head_has_password(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 4096];
+    let n = f.read(&mut buf).unwrap_or(0);
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.contains("type=\"password\"") || head.contains("type='password'")
+}
+
 /// Path to the upload preferences file.
 fn upload_prefs_path() -> Option<PathBuf> {
     pesto::config::config_dir().map(|d| d.join("upapasta-prefs.json"))
@@ -2454,6 +2495,59 @@ fn upload_prefs_path() -> Option<PathBuf> {
 /// Path to the persisted upload queue.
 fn queue_path() -> Option<PathBuf> {
     pesto::config::config_dir().map(|d| d.join("upapasta-queue.json"))
+}
+
+/// Insert, update, or remove `[output.indexer].<field>` in a config.toml
+/// document, preserving everything else (comments, ordering, formatting).
+///
+/// A `Some(value)` writes/updates the key; `None` removes it. The `[output]` /
+/// `[output.indexer]` parents are vivified as *implicit regular* tables (see
+/// [`ensure_implicit_table`]) so they render as `[output.indexer]` headers
+/// rather than inline tables — empty parents are never emitted as bare headers,
+/// and a later removal can find the key. Returns the new document text, or a
+/// parse error if the input is not valid TOML.
+fn apply_indexer_field(
+    text: &str,
+    field: &str,
+    value: Option<&str>,
+) -> Result<String, toml_edit::TomlError> {
+    use toml_edit::Item;
+    let mut doc = text.parse::<toml_edit::DocumentMut>()?;
+    match value {
+        Some(v) => {
+            let output = ensure_implicit_table(doc.as_table_mut(), "output");
+            let indexer = ensure_implicit_table(output, "indexer");
+            indexer.insert(field, toml_edit::value(v));
+        }
+        None => {
+            if let Some(output) = doc.get_mut("output").and_then(Item::as_table_mut) {
+                if let Some(indexer) = output.get_mut("indexer").and_then(Item::as_table_mut) {
+                    indexer.remove(field);
+                }
+            }
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// Return a mutable reference to `parent[key]` as a regular table, creating it
+/// as an *implicit* table when absent (or when the slot holds a non-table, e.g.
+/// an inline table). Implicit means the empty header is suppressed, so a nested
+/// child like `[output.indexer]` does not drag a bare `[output]` header along.
+fn ensure_implicit_table<'a>(
+    parent: &'a mut toml_edit::Table,
+    key: &str,
+) -> &'a mut toml_edit::Table {
+    if !parent
+        .get(key)
+        .map(toml_edit::Item::is_table)
+        .unwrap_or(false)
+    {
+        let mut tbl = toml_edit::Table::new();
+        tbl.set_implicit(true);
+        parent.insert(key, toml_edit::Item::Table(tbl));
+    }
+    parent[key].as_table_mut().expect("just ensured table")
 }
 
 /// Expand a leading `~` to the user's home directory.
@@ -2504,8 +2598,83 @@ fn load_pesto_config() -> (Option<PestoConfig>, Option<PathBuf>, Option<String>)
 
 #[cfg(test)]
 mod tests {
-    use super::{queue_entry_info, queue_entry_info_quick};
+    use super::{apply_indexer_field, queue_entry_info, queue_entry_info_quick};
     use std::fs;
+
+    fn indexer_str(doc_text: &str, field: &str) -> Option<String> {
+        let doc = doc_text
+            .parse::<toml_edit::DocumentMut>()
+            .expect("output is valid TOML");
+        // Read with `get` chaining: indexing a regular `Table` with a missing
+        // key panics, and a removed field is legitimately absent.
+        doc.get("output")
+            .and_then(|o| o.get("indexer"))
+            .and_then(|i| i.get(field))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// Writing into an empty (or missing) config creates `[output.indexer]`
+    /// with the field, and the result is valid TOML.
+    #[test]
+    fn indexer_field_written_into_empty_config() {
+        let out = apply_indexer_field("", "url", Some("http://localhost:9696")).unwrap();
+        assert_eq!(
+            indexer_str(&out, "url").as_deref(),
+            Some("http://localhost:9696")
+        );
+        // No bare empty `[output]` header should precede the nested table.
+        assert!(
+            !out.contains("[output]\n"),
+            "unexpected bare header:\n{out}"
+        );
+    }
+
+    /// Existing keys and comments elsewhere in the file are preserved, and a new
+    /// `[output.indexer]` field is added alongside an existing one.
+    #[test]
+    fn indexer_field_preserves_rest_of_config() {
+        let original = "\
+# my config
+[server]
+host = \"news.example.com\" # keep me
+
+[output]
+nzb_dir = \"~/nzb\"
+
+[output.indexer]
+url = \"http://old:9696\"
+";
+        let out = apply_indexer_field(original, "api_key", Some("secret123")).unwrap();
+        // Comment and unrelated keys survive verbatim.
+        assert!(out.contains("# my config"));
+        assert!(out.contains("host = \"news.example.com\" # keep me"));
+        assert!(out.contains("nzb_dir = \"~/nzb\""));
+        // Both the pre-existing url and the new api_key are present.
+        assert_eq!(indexer_str(&out, "url").as_deref(), Some("http://old:9696"));
+        assert_eq!(indexer_str(&out, "api_key").as_deref(), Some("secret123"));
+    }
+
+    /// Writing the same field twice updates in place rather than duplicating it.
+    #[test]
+    fn indexer_field_updates_in_place() {
+        let step1 = apply_indexer_field("", "url", Some("http://a:1")).unwrap();
+        let step2 = apply_indexer_field(&step1, "url", Some("http://b:2")).unwrap();
+        assert_eq!(
+            step2.matches("url =").count(),
+            1,
+            "url duplicated:\n{step2}"
+        );
+        assert_eq!(indexer_str(&step2, "url").as_deref(), Some("http://b:2"));
+    }
+
+    /// A `None` value removes the field (clearing it in the Config screen).
+    #[test]
+    fn indexer_field_removed_when_none() {
+        let with = apply_indexer_field("", "api_key", Some("secret")).unwrap();
+        let without = apply_indexer_field(&with, "api_key", None).unwrap();
+        assert_eq!(indexer_str(&without, "api_key"), None);
+    }
 
     /// The quick form must not walk a directory: it returns immediately with
     /// `sized: false` and zeroed counts so the UI thread never blocks. The full
