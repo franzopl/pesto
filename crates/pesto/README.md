@@ -32,7 +32,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [PAR2 recovery data](#par2-recovery-data)
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
-- [NZB metadata and indexer upload](#nzb-metadata-and-indexer-upload)
+- [NZB metadata](#nzb-metadata)
 - [All flags](#all-flags)
 - [Exit codes](#exit-codes)
 - [JSON output mode](#json-output-mode)
@@ -450,7 +450,7 @@ pesto --dry-run --par2 15 ./MyShow.S01/
 
 ---
 
-## NZB metadata and indexer upload
+## NZB metadata
 
 ### Custom NZB metadata
 
@@ -468,24 +468,6 @@ These values are written as `<meta>` elements in the `.nzb`:
 <meta type="name">My Movie (2024)</meta>
 <meta type="category">Movies</meta>
 <meta type="password">archive_pass</meta>
-```
-
-### Automatic upload to a Newznab indexer
-
-Add this to your config:
-
-```toml
-[output.indexer]
-url      = "https://my.indexer.com"
-api_key  = "abc123"
-category = "5000"   # optional Newznab category ID
-```
-
-`pesto` will POST the `.nzb` to the indexer after every successful upload.
-Skip it for a single run with:
-
-```bash
-pesto --no-upload movie.mkv
 ```
 
 ### NZB output path
@@ -551,8 +533,8 @@ Pass `--nfo` to generate a `.nfo` text file alongside the `.nzb`. pesto runs
 to a recursive directory listing. The path is exposed as `PESTO_NFO` to every
 hook script.
 
-NFO generation is a local operation — it works with `--dry-run` and
-`--no-upload` just as it does in a full upload run.
+NFO generation is a local operation — it works with `--dry-run` just as it
+does in a full upload run.
 
 ```bash
 pesto --nfo movie.mkv
@@ -630,7 +612,6 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--nfo` / `--no-nfo` | `output.nfo` | off | Generate a `.nfo` file alongside the `.nzb` |
 | `--post-hook <CMD>` | `output.post_hook` | — | Shell command run after each successful upload |
 | `--history` / `--no-history` | `output.history` | on | Write a record to the upload history log |
-| `--no-upload` | — | off | Skip automatic indexer upload this run |
 | `--notify` / `--no-notify` | — | on | Send completion notification (webhook / ntfy) |
 | `-q`, `--quiet` | `output.quiet` | off | Single-line minimal output (no panel) |
 | `--bell` | `output.bell` | off | Write ASCII BEL to stderr on completion |

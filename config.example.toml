@@ -162,8 +162,7 @@ groups = ["alt.binaries.test"]
 # PESTO_GROUP, PESTO_PASSWORD, PESTO_SERVER.
 # post_hook = "notify-send 'pesto' 'Upload done: $PESTO_NAME'"
 #
-# See examples/hooks/ for ready-made hook scripts (generic Newznab and legacy upload API).
-# post_hook = "/path/to/hooks/other-indexer.sh"
+# See examples/hooks/ for ready-made hook scripts (curupira.sh, generic-indexer.sh, etc.).
 
 # history — write a record to history.jsonl after each upload. Default: true.
 # history = true
@@ -181,15 +180,14 @@ groups = ["alt.binaries.test"]
 # Useful for desktop notification integrations. Default: false.
 # bell = false
 
-# ── Indexer upload ───────────────────────────────────────────────────────────
+# ── Prowlarr / indexer connection ────────────────────────────────────────────
 #
-# Automatically POST the generated .nzb to a Newznab-compatible indexer after
-# each successful upload. Skip for a single run with --no-upload.
+# URL and API key used by upapasta to search and download NZBs from Prowlarr.
+# This section is not used by the pesto CLI itself.
 #
 # [output.indexer]
-# url     = "https://my.indexer.com"
+# url     = "https://prowlarr.example.com"
 # api_key = "abc123"
-# category = "5000"   # optional Newznab category ID
 
 # ── Completion notifications ─────────────────────────────────────────────────
 #

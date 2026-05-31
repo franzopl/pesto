@@ -433,7 +433,7 @@ directly and reimplemented post-upload steps incompletely (broken NZB write,
 no compression, no history, no NFO, broken hooks). This phase centralised
 everything in a new `pesto::upload::run_upload()` public API.
 
-- [x] Created `crates/pesto/src/upload.rs` with `run_upload()` — canonical full pipeline: compress → PAR2 → post → NZB write (versioned) → history → indexer → notifications → NFO → hooks → cleanup temp dir
+- [x] Created `crates/pesto/src/upload.rs` with `run_upload()` — canonical full pipeline: compress → PAR2 → post → NZB write (versioned) → history → notifications → NFO → hooks → cleanup temp dir
 - [x] Moved `upapasta/src/hooks.rs` to `pesto/src/hooks.rs` (now public in pesto lib)
 - [x] Added `pesto::upload::UploadOutcome` return type with segments, cancelled, had_failures, nzb_path, total_bytes
 - [x] Fixed progress bar frozen at 99%: send 100% on `Finished` event without setting `events_done`; post-upload `Status` events (NZB path, hook output) continue to stream to log panel

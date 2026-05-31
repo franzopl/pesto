@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.11] — 2026-05-31
+
+### Removed
+- **Newznab indexer upload** (`[output.indexer]`, `--no-upload`). The built-in
+  `t=addnzb` POST path had poor real-world server support and could not carry
+  an NFO file. Post-upload hooks (e.g. `curupira.sh`, `generic-indexer.sh`)
+  cover the same use case with full NFO support and more flexibility.
+  The `[output.indexer]` TOML key is still read to supply the Prowlarr URL
+  and API key for the upapasta search/download integration.
+
 ## [0.3.10] — 2026-05-30
 
 ### Fixed
@@ -80,9 +90,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - `--nfo` now generates the `.nfo` file unconditionally — it no longer
-  requires a successful upload. The flag works correctly with `--dry-run`,
-  `--no-upload`, and when the upload fails or is cancelled. NFO is a local
-  artifact (reads files, runs `mediainfo`) and has no network dependency.
+  requires a successful upload. The flag works correctly with `--dry-run`
+  and when the upload fails or is cancelled. NFO is a local artifact (reads
+  files, runs `mediainfo`) and has no network dependency.
 - `mediainfo` failures now produce an actionable message: the error includes
   whether the binary was not found in `PATH` or exited with a non-zero status
   and its stderr output. Previously the failure was silent.
@@ -169,7 +179,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **`--no-hooks`**: skip all post-upload hooks for a single run (both
   `--post-hook` commands and scripts in `~/.config/pesto/hooks/`).
-  Useful when testing or reposting without triggering indexer notifications.
+  Useful when testing or reposting without triggering hook side-effects.
 
 ### Fixed
 - **Season NZB folder name**: the consolidated season `.nzb` now includes
@@ -241,7 +251,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Docs
 - `config.example.toml` now documents all implemented sections and fields
-  (`[notify]`, `[output.indexer]`, `posting.date`, `posting.no_archive`, etc.).
+  (`[notify]`, `posting.date`, `posting.no_archive`, etc.).
 - README: new Prerequisites section, expanded All Flags table (9 missing flags
   added), Installing section with pre-built binary links.
 - ROADMAP: Phase 22 (public release preparation) added.
@@ -322,8 +332,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Phase 15 — NZB metadata**
   - `--nzb-name`, `--nzb-password`, `--nzb-category` flags and corresponding
     `output.*` config keys; written as `<meta>` elements in the `.nzb`.
-  - Automatic NZB upload to Newznab-compatible indexers via `[output.indexer]`
-    config section. `--no-upload` flag skips it for a single run.
 - **Phase 14 — Posting features**
   - `--date` flag and `posting.date` config key (`now`, `random`, RFC 2822).
   - `--no-archive` flag and `posting.no_archive` — adds `X-No-Archive: yes`.
