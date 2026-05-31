@@ -543,6 +543,29 @@ pub struct ProwlarrState {
     pub api_key_override: Option<String>,
     /// Active search overlay (Some while open).
     pub search: Option<ProwlarrSearchState>,
+    /// Progress of an in-flight "search the whole queue" batch (Some while running).
+    pub batch: Option<ProwlarrBatchState>,
+}
+
+/// Progress of a batch search over every queued item.
+///
+/// Drives the queue auto-fetch: each queued release is searched on Prowlarr and
+/// an exact-name match is downloaded directly. Non-exact matches are only
+/// counted (and logged) — never auto-downloaded.
+#[derive(Debug, Default, Clone)]
+pub struct ProwlarrBatchState {
+    /// Number of queued items processed so far.
+    pub done: usize,
+    /// Total queued items to process.
+    pub total: usize,
+    /// Releases auto-downloaded (exact name match found).
+    pub downloaded: usize,
+    /// Releases searched but with no exact-name match.
+    pub no_match: usize,
+    /// Search or download errors.
+    pub failed: usize,
+    /// Release name currently being searched.
+    pub current: String,
 }
 
 /// State for the Prowlarr search results overlay.
@@ -791,6 +814,9 @@ impl App {
 
         // Populate history list + browser upload indicators on startup
         app.refresh_history();
+        // Index existing .nzb files in nzb_dir so the browser flags releases
+        // that already have an NZB even when the catalog has no record.
+        app.refresh_nzb_disk_index();
 
         // Do NOT add example files on startup anymore (was confusing users)
         app.log_panel
@@ -1209,6 +1235,25 @@ impl App {
         }
     }
 
+    /// Build the on-disk NZB index by scanning the configured `nzb_dir`
+    /// recursively for `.nzb` files and keying them by release name. This is
+    /// what lets the Browser flag a file as already-uploaded when a matching
+    /// NZB exists on disk but is not in the catalog (e.g. uploaded by another
+    /// tool, or before this catalog existed). No-op when `nzb_dir` is unset.
+    pub fn refresh_nzb_disk_index(&mut self) {
+        let Some(dir) = self
+            .pesto_config
+            .as_ref()
+            .and_then(|c| c.nzb_dir.as_deref())
+            .map(expand_tilde)
+        else {
+            return;
+        };
+        let mut index = std::collections::HashSet::new();
+        collect_nzb_release_keys(&dir, &mut index);
+        self.file_tree.set_nzb_disk_index(index);
+    }
+
     pub fn upload_finished(&mut self, success: bool, cancelled: bool) {
         // Catalog records are written per-item in `item_upload_done`, with the
         // real size and NZB path; nothing is recorded here. This finalizes the
@@ -1591,19 +1636,93 @@ impl App {
             7 => ov.nzb_category = if buf.is_empty() { None } else { Some(buf) },
             8 => ov.compress_password = if buf.is_empty() { None } else { Some(buf) },
             10 => {
-                self.prowlarr.url_override = if buf.is_empty() { None } else { Some(buf) };
+                let val = if buf.is_empty() { None } else { Some(buf) };
+                self.prowlarr.url_override = val.clone();
                 // Reset connection status so user can re-test with new URL
                 self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
+                // Prowlarr config is persisted to config.toml so it survives
+                // restarts (unlike the upload overrides, which are session-only).
+                self.persist_indexer_field("url", val.as_deref());
+                self.config_state.editing = false;
+                self.config_state.edit_buf.clear();
+                return;
             }
             11 => {
-                self.prowlarr.api_key_override = if buf.is_empty() { None } else { Some(buf) };
+                let val = if buf.is_empty() { None } else { Some(buf) };
+                self.prowlarr.api_key_override = val.clone();
                 self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
+                self.persist_indexer_field("api_key", val.as_deref());
+                self.config_state.editing = false;
+                self.config_state.edit_buf.clear();
+                return;
             }
             _ => {}
         }
         self.config_state.editing = false;
         self.config_state.edit_buf.clear();
         self.status_bar.set("Override saved (session only)");
+    }
+
+    /// Persist a `[output.indexer]` field (e.g. `url`, `api_key`) to the pesto
+    /// `config.toml` so Prowlarr settings survive a restart. Uses `toml_edit` to
+    /// preserve the rest of the file (comments, formatting, ordering). A `None`
+    /// value removes the key. Also updates the in-memory resolved config so the
+    /// change takes effect immediately even after the session override is reset.
+    fn persist_indexer_field(&mut self, field: &str, value: Option<&str>) {
+        // Mirror the change into the already-resolved in-memory config.
+        if let Some(cfg) = self.pesto_config.as_mut() {
+            let owned = value.map(str::to_string);
+            match field {
+                "url" => cfg.indexer_url = owned,
+                "api_key" => cfg.indexer_api_key = owned,
+                _ => {}
+            }
+        }
+
+        let Some(path) = self
+            .config_path
+            .clone()
+            .or_else(pesto::config::default_config_path)
+        else {
+            self.status_bar
+                .set("Saved for this session (could not locate config.toml)");
+            return;
+        };
+
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut doc = match text.parse::<toml_edit::DocumentMut>() {
+            Ok(d) => d,
+            Err(e) => {
+                self.status_bar.set(format!(
+                    "Saved for this session (config.toml parse error: {e})"
+                ));
+                return;
+            }
+        };
+
+        // Navigate/create [output.indexer]. Chained indexing auto-vivifies the
+        // intermediate tables as *implicit* ones, so empty parents are never
+        // rendered as bare `[output]` / `[output.indexer]` headers.
+        match value {
+            Some(v) => doc["output"]["indexer"][field] = toml_edit::value(v),
+            None => {
+                if let Some(tbl) = doc["output"]["indexer"].as_table_mut() {
+                    tbl.remove(field);
+                }
+            }
+        }
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&path, doc.to_string()) {
+            Ok(()) => self
+                .status_bar
+                .set(format!("Saved Prowlarr {field} to {}", path.display())),
+            Err(e) => self
+                .status_bar
+                .set(format!("Saved for this session (write failed: {e})")),
+        }
     }
 
     pub fn config_cancel_edit(&mut self) {
@@ -2288,6 +2407,42 @@ fn collect_nzbs_recursive(
             in_catalog,
             origin,
         });
+    }
+}
+
+/// Recursively scan `dir` for `.nzb` files and insert each file's release key
+/// (see `file_tree::release_key`) into `out`. Capped so a pathological tree
+/// cannot stall startup; symlinks are skipped to match the rest of the walk
+/// logic.
+fn collect_nzb_release_keys(dir: &std::path::Path, out: &mut std::collections::HashSet<String>) {
+    const CAP: usize = 200_000;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            } else if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                let name = entry.file_name();
+                let is_nzb = std::path::Path::new(&name)
+                    .extension()
+                    .map(|x| x.eq_ignore_ascii_case("nzb"))
+                    .unwrap_or(false);
+                if is_nzb {
+                    if let Some(n) = name.to_str() {
+                        out.insert(crate::ui::components::file_tree::release_key(n));
+                    }
+                    if out.len() >= CAP {
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 

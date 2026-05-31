@@ -272,7 +272,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.status_bar.set("Showing all items");
                             }
                         }
-                        KeyCode::Char('P') => {
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
                             trigger_prowlarr_search(app, tx.clone());
                         }
                         _ => {}
@@ -318,6 +318,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                         KeyCode::Char('x') if app.upload_in_progress => {
                             app.cancel_upload();
+                        }
+                        // Search Prowlarr for every queued release and auto-fetch
+                        // exact-name matches directly into nzb_dir.
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            trigger_prowlarr_queue_search(app, tx.clone());
                         }
                         _ => {}
                     },
@@ -469,7 +474,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
-                        KeyCode::Char('P') => {
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
                             trigger_prowlarr_search(app, tx.clone());
                         }
                         _ => {}
@@ -597,12 +602,60 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 .into_owned();
                             app.status_bar.set(format!("Downloaded: {}", name));
                             app.prowlarr.search = None;
+                            // The new .nzb now backs a release: refresh the disk
+                            // index so the Browser shows the [✓] badge for it.
+                            app.refresh_nzb_disk_index();
                             if app.state == app::AppState::NzbVault {
                                 app.load_vault();
                             }
                         }
                         Err(e) => {
                             app.status_bar.set(format!("Download failed: {}", e));
+                        }
+                    }
+                }
+                AppEvent::ProwlarrBatchProgress {
+                    done,
+                    total,
+                    current,
+                    downloaded,
+                    no_match,
+                    failed,
+                    log,
+                } => {
+                    app.log_panel.push(log);
+                    app.prowlarr.batch = Some(app::ProwlarrBatchState {
+                        done,
+                        total,
+                        downloaded,
+                        no_match,
+                        failed,
+                        current,
+                    });
+                    app.status_bar.set(format!(
+                        "Prowlarr queue search {}/{} — {} fetched, {} no match, {} failed",
+                        done, total, downloaded, no_match, failed
+                    ));
+                }
+                AppEvent::ProwlarrBatchDone {
+                    downloaded,
+                    no_match,
+                    failed,
+                } => {
+                    app.prowlarr.batch = None;
+                    app.status_bar.set(format!(
+                        "Queue search done — {} fetched, {} no match, {} failed",
+                        downloaded, no_match, failed
+                    ));
+                    app.log_panel.push(format!(
+                        "=== Prowlarr queue search done: {} fetched · {} no match · {} failed ===",
+                        downloaded, no_match, failed
+                    ));
+                    // Newly downloaded NZBs back queued releases: refresh badges.
+                    if downloaded > 0 {
+                        app.refresh_nzb_disk_index();
+                        if app.state == app::AppState::NzbVault {
+                            app.load_vault();
                         }
                     }
                 }
@@ -728,12 +781,163 @@ fn trigger_prowlarr_search(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
 
     tokio::spawn(async move {
         let result = match prowlarr::build_client() {
-            Ok(client) => prowlarr::search_by_release(&cfg, &client, &release_name)
-                .await
-                .map_err(|e| e.to_string()),
+            Ok(client) => {
+                // Restrict to Usenet indexers (best-effort; an empty list falls
+                // back to protocol filtering inside search_by_release).
+                let ids = prowlarr::usenet_indexer_ids(&cfg, &client)
+                    .await
+                    .unwrap_or_default();
+                prowlarr::search_by_release(&cfg, &client, &release_name, &ids)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
             Err(e) => Err(e.to_string()),
         };
         let _ = tx.send(AppEvent::ProwlarrSearchDone(result));
+    });
+}
+
+/// Called when the user presses 'p' on the Queue screen.
+///
+/// Searches Prowlarr for every queued release in one background pass and
+/// auto-downloads any result whose name matches the release exactly (same
+/// [`release_key`]). Items without an exact match are only counted/logged —
+/// never auto-downloaded. Progress is streamed back via `ProwlarrBatchProgress`
+/// and a final `ProwlarrBatchDone`.
+fn trigger_prowlarr_queue_search(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    use crate::ui::components::file_tree::release_key;
+
+    if app.prowlarr.batch.is_some() {
+        app.status_bar.set("Queue search already running");
+        return;
+    }
+
+    let cfg = app.prowlarr.resolve(app.pesto_config.as_ref());
+    let Some(cfg) = cfg else {
+        app.status_bar
+            .set("Prowlarr not configured — set URL and API key in Config (F5)");
+        return;
+    };
+
+    let nzb_dir = app
+        .pesto_config
+        .as_ref()
+        .and_then(|c| c.nzb_dir.as_deref())
+        .map(app::expand_tilde);
+    let Some(nzb_dir) = nzb_dir else {
+        app.status_bar
+            .set("nzb_dir not configured — set it in pesto.toml");
+        return;
+    };
+
+    let items: Vec<String> = app.upload_queue.items.clone();
+    if items.is_empty() {
+        app.status_bar.set("Queue is empty — nothing to search");
+        return;
+    }
+
+    let total = items.len();
+    app.prowlarr.batch = Some(app::ProwlarrBatchState {
+        total,
+        ..Default::default()
+    });
+    app.status_bar
+        .set(format!("Searching Prowlarr for {total} queued release(s)…"));
+    app.log_panel
+        .push(format!("=== Prowlarr queue search: {total} item(s) ==="));
+
+    tokio::spawn(async move {
+        let client = match prowlarr::build_client() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(AppEvent::ProwlarrBatchProgress {
+                    done: 0,
+                    total,
+                    current: String::new(),
+                    downloaded: 0,
+                    no_match: 0,
+                    failed: total,
+                    log: format!("✗ HTTP client error: {e}"),
+                });
+                let _ = tx.send(AppEvent::ProwlarrBatchDone {
+                    downloaded: 0,
+                    no_match: 0,
+                    failed: total,
+                });
+                return;
+            }
+        };
+
+        // Discover Usenet indexers once and reuse for every item.
+        let ids = prowlarr::usenet_indexer_ids(&cfg, &client)
+            .await
+            .unwrap_or_default();
+
+        let (mut downloaded, mut no_match, mut failed) = (0usize, 0usize, 0usize);
+
+        for (i, path) in items.iter().enumerate() {
+            let filename = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let release_name = prowlarr::release_name_from_filename(&filename).to_string();
+            let want_key = release_key(&filename);
+
+            let log = match prowlarr::search_by_release(&cfg, &client, &release_name, &ids).await {
+                Ok(results) => {
+                    // Exact match: a result whose title normalizes to the same
+                    // release key as the queued file.
+                    let exact = results
+                        .iter()
+                        .find(|r| release_key(&r.title) == want_key && !want_key.is_empty());
+                    match exact {
+                        Some(result) => {
+                            let dest = prowlarr::dest_path_in(&nzb_dir, result);
+                            match prowlarr::download_nzb(&cfg, &client, result, &dest).await {
+                                Ok(()) => {
+                                    downloaded += 1;
+                                    format!(
+                                        "✓ {release_name} → {}",
+                                        prowlarr::nzb_filename_for(result)
+                                    )
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    format!("✗ {release_name}: download failed: {e}")
+                                }
+                            }
+                        }
+                        None => {
+                            no_match += 1;
+                            format!(
+                                "– {release_name}: no exact match ({} result(s))",
+                                results.len()
+                            )
+                        }
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    format!("✗ {release_name}: search failed: {e}")
+                }
+            };
+
+            let _ = tx.send(AppEvent::ProwlarrBatchProgress {
+                done: i + 1,
+                total,
+                current: release_name,
+                downloaded,
+                no_match,
+                failed,
+                log,
+            });
+        }
+
+        let _ = tx.send(AppEvent::ProwlarrBatchDone {
+            downloaded,
+            no_match,
+            failed,
+        });
     });
 }
 
@@ -749,7 +953,7 @@ fn trigger_prowlarr_download(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>)
         .pesto_config
         .as_ref()
         .and_then(|c| c.nzb_dir.as_deref())
-        .map(PathBuf::from);
+        .map(app::expand_tilde);
     let Some(nzb_dir) = nzb_dir else {
         app.status_bar
             .set("nzb_dir not configured — set it in pesto.toml");

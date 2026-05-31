@@ -140,6 +140,23 @@ pub enum AppEvent {
     ProwlarrSearchDone(Result<Vec<crate::prowlarr::SearchResult>, String>),
     // NZB download finished: Ok(dest_path) or Err(msg)
     ProwlarrDownloadDone(Result<std::path::PathBuf, String>),
+    // One item of a queue batch search finished. `outcome` is a human-readable
+    // log line; the counters carry the running tally for the progress display.
+    ProwlarrBatchProgress {
+        done: usize,
+        total: usize,
+        current: String,
+        downloaded: usize,
+        no_match: usize,
+        failed: usize,
+        log: String,
+    },
+    // Queue batch search finished with final tallies.
+    ProwlarrBatchDone {
+        downloaded: usize,
+        no_match: usize,
+        failed: usize,
+    },
 }
 
 pub struct EventHandler {

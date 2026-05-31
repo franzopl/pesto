@@ -23,6 +23,10 @@ pub enum NzbBadge {
     Uploading,
     /// In catalog — carries the status entry.
     Uploaded(NzbStatusEntry),
+    /// Not in the catalog, but a matching `.nzb` already exists in `nzb_dir`
+    /// (matched by release name). The file was uploaded before, just not
+    /// recorded in this catalog.
+    OnDisk,
 }
 
 #[derive(Debug)]
@@ -47,6 +51,10 @@ pub struct FileTree {
     pub queued: HashSet<PathBuf>,
     /// NZB status from the catalog, keyed by original_name (filename or full path).
     pub nzb_status: HashMap<String, NzbStatusEntry>,
+    /// Release keys (see [`release_key`]) of every `.nzb` found in the
+    /// configured `nzb_dir`. Lets the browser flag a file as already-uploaded
+    /// when a matching NZB exists on disk even if the catalog has no record.
+    pub nzb_disk_index: HashSet<String>,
     /// Names of files currently being uploaded (basename).
     pub uploading: HashSet<String>,
     /// First visible item index — managed manually to get correct scroll behaviour.
@@ -77,6 +85,7 @@ pub struct DirScanJob {
     pub generation: u64,
     items: Vec<PathBuf>,
     nzb_status: HashMap<String, NzbStatusEntry>,
+    nzb_disk_index: HashSet<String>,
 }
 
 impl DirScanJob {
@@ -88,7 +97,7 @@ impl DirScanJob {
             .items
             .into_iter()
             .map(|p| {
-                let backed = path_is_backed(&p, &self.nzb_status);
+                let backed = path_is_backed(&p, &self.nzb_status, &self.nzb_disk_index);
                 // Only unbacked items contribute to the "to upload" byte total,
                 // so skip the (expensive) size walk for backed ones.
                 let size = if backed { 0 } else { item_size(&p) };
@@ -111,6 +120,7 @@ impl FileTree {
             summary: (0, 0, 0),
             queued: HashSet::new(),
             nzb_status: HashMap::new(),
+            nzb_disk_index: HashSet::new(),
             uploading: HashSet::new(),
             scroll_offset: 0,
             visible_height: 20,
@@ -129,6 +139,16 @@ impl FileTree {
         self.nzb_status = status;
         // Backed status depends on the catalog, so the cache is now stale:
         // schedule a fresh background scan instead of walking here.
+        self.invalidate_scan();
+        self.recompute_summary();
+        self.apply_filter();
+    }
+
+    /// Replace the on-disk NZB release index (release keys of every `.nzb` in
+    /// `nzb_dir`). Like the catalog map, backed status depends on it, so the
+    /// scan cache is invalidated and a fresh background scan is scheduled.
+    pub fn set_nzb_disk_index(&mut self, index: HashSet<String>) {
+        self.nzb_disk_index = index;
         self.invalidate_scan();
         self.recompute_summary();
         self.apply_filter();
@@ -214,6 +234,11 @@ impl FileTree {
         {
             return NzbBadge::Uploaded(entry.clone());
         }
+        // Not in the catalog, but maybe a matching .nzb already exists in
+        // nzb_dir (e.g. uploaded by a different tool or before this catalog).
+        if !path.is_dir() && self.nzb_disk_index.contains(&release_key(name)) {
+            return NzbBadge::OnDisk;
+        }
         NzbBadge::None
     }
 
@@ -275,6 +300,7 @@ impl FileTree {
             generation: self.scan_generation,
             items: self.all_items.clone(),
             nzb_status: self.nzb_status.clone(),
+            nzb_disk_index: self.nzb_disk_index.clone(),
         })
     }
 
@@ -432,6 +458,21 @@ impl FileTree {
                             },
                         )
                     }
+                    NzbBadge::OnDisk => (
+                        "[✓] ",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::DIM),
+                        if is_selected {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::DIM)
+                        },
+                    ),
                     NzbBadge::None => (
                         "[ ] ",
                         Style::default().fg(Color::DarkGray),
@@ -556,7 +597,11 @@ fn fmt_bytes(bytes: u64) -> String {
 /// unbacked if any child still needs uploading. The directory case walks the
 /// subtree, so this runs on a blocking worker (see [`DirScanJob::run`]), never
 /// on the UI thread.
-fn path_is_backed(path: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) -> bool {
+fn path_is_backed(
+    path: &Path,
+    nzb_status: &HashMap<String, NzbStatusEntry>,
+    nzb_disk_index: &HashSet<String>,
+) -> bool {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -566,15 +611,20 @@ fn path_is_backed(path: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) -> 
         return true;
     }
     if path.is_dir() {
-        return !dir_has_unbacked(path, nzb_status);
+        return !dir_has_unbacked(path, nzb_status, nzb_disk_index);
     }
-    false
+    // A matching .nzb already on disk counts as backed.
+    nzb_disk_index.contains(&release_key(name))
 }
 
 /// Whether `dir` contains at least one file (recursively) that is not in the
 /// catalog by its base name. Walks with a cap and stops at the first hit, so a
 /// huge tree cannot stall the UI. Symlinks are skipped (as `pesto::walk` does).
-fn dir_has_unbacked(dir: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) -> bool {
+fn dir_has_unbacked(
+    dir: &Path,
+    nzb_status: &HashMap<String, NzbStatusEntry>,
+    nzb_disk_index: &HashSet<String>,
+) -> bool {
     const CAP: usize = 50_000;
     let mut stack = vec![dir.to_path_buf()];
     let mut visited = 0usize;
@@ -591,11 +641,11 @@ fn dir_has_unbacked(dir: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) ->
             } else if ft.is_file() {
                 visited += 1;
                 let name = entry.file_name();
-                let in_catalog = name
+                let backed = name
                     .to_str()
-                    .map(|n| nzb_status.contains_key(n))
+                    .map(|n| nzb_status.contains_key(n) || nzb_disk_index.contains(&release_key(n)))
                     .unwrap_or(false);
-                if !in_catalog {
+                if !backed {
                     return true;
                 }
                 if visited >= CAP {
@@ -606,6 +656,72 @@ fn dir_has_unbacked(dir: &Path, nzb_status: &HashMap<String, NzbStatusEntry>) ->
     }
     // No files at all (empty dir) counts as nothing to upload.
     false
+}
+
+/// Known media/archive extensions stripped when deriving a release key. Only
+/// these are removed (not arbitrary trailing segments), so codec/group tags
+/// like `x264` or `-cza` survive and stay part of the match.
+const RELEASE_KEY_EXTS: &[&str] = &[
+    "mkv", "mp4", "avi", "m2ts", "ts", "mov", "wmv", "flv", "iso", "img", "rar", "zip", "7z",
+    "mka", "webm", "m4v", "mpg", "mpeg", "vob",
+];
+
+/// Derive a comparison key that matches a media file against an existing `.nzb`.
+///
+/// The same transformation is applied to both sides so different naming
+/// conventions converge:
+///   * `Zootopia.2016...DUAL-cza.mkv`            (media file)
+///   * `Zootopia.2016...DUAL-cza.nzb`            (NZB named after the release)
+///   * `20260427T151003Z_Zootopia...BiOMA.mkv.nzb` (upapasta-generated NZB)
+///
+/// Steps: strip a trailing `.nzb`, then any trailing known media/archive
+/// extensions, then a leading `YYYYMMDDThhmmssZ_` timestamp prefix, and finally
+/// keep only lowercase alphanumerics so separators do not affect the match.
+pub(crate) fn release_key(name: &str) -> String {
+    let mut base = name.to_string();
+
+    // 1. Drop a trailing `.nzb` (case-insensitive).
+    if base.len() >= 4 && base[base.len() - 4..].eq_ignore_ascii_case(".nzb") {
+        base.truncate(base.len() - 4);
+    }
+
+    // 2. Drop trailing known media/archive extensions (e.g. `.mkv.nzb` →
+    //    `.mkv` → ``). Loops so doubled extensions are all removed.
+    loop {
+        let stripped = base
+            .rfind('.')
+            .map(|dot| {
+                let ext = base[dot + 1..].to_ascii_lowercase();
+                if RELEASE_KEY_EXTS.contains(&ext.as_str()) {
+                    base.truncate(dot);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if !stripped {
+            break;
+        }
+    }
+
+    // 3. Drop a leading timestamp prefix: 8 digits, 'T', 6 digits, 'Z', '_'.
+    let b = base.as_bytes();
+    if b.len() > 17
+        && b[..8].iter().all(u8::is_ascii_digit)
+        && b[8].eq_ignore_ascii_case(&b'T')
+        && b[9..15].iter().all(u8::is_ascii_digit)
+        && b[15].eq_ignore_ascii_case(&b'Z')
+        && b[16] == b'_'
+    {
+        base.drain(..17);
+    }
+
+    // 4. Normalize: lowercase alphanumerics only.
+    base.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// Best-effort byte size of an item: file length, or the recursive sum of a
@@ -642,8 +758,38 @@ fn item_size(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_bytes, FileTree};
+    use super::{fmt_bytes, release_key, FileTree};
     use std::fs;
+
+    #[test]
+    fn release_key_matches_media_and_nzb_names() {
+        // The reported case: a media file and its sibling .nzb (named after the
+        // release, no media extension) must produce the same key.
+        let media = "Zootopia.2016.1080p.DSNP.WEB-DL.DDP5.1.H.264.DUAL-cza.mkv";
+        let nzb = "Zootopia.2016.1080p.DSNP.WEB-DL.DDP5.1.H.264.DUAL-cza.nzb";
+        assert_eq!(release_key(media), release_key(nzb));
+        assert!(!release_key(media).is_empty());
+    }
+
+    #[test]
+    fn release_key_handles_upapasta_timestamp_and_double_extension() {
+        // upapasta-generated NZBs carry a timestamp prefix and keep the media
+        // extension before `.nzb`: `<ts>_<release>.mkv.nzb`.
+        let media = "Zootopia.2.2025.1080p.DSNP.WEB-DL.DDP5.1.H.264.DUAL-BiOMA.mkv";
+        let nzb =
+            "20260427T151003Z_Zootopia.2.2025.1080p.DSNP.WEB-DL.DDP5.1.H.264.DUAL-BiOMA.mkv.nzb";
+        assert_eq!(release_key(media), release_key(nzb));
+    }
+
+    #[test]
+    fn release_key_keeps_codec_and_group_tags() {
+        // A trailing alphanumeric tag like `x264` is NOT an extension we strip,
+        // so two distinct releases stay distinct.
+        assert_ne!(
+            release_key("Movie.2024.1080p.x264-AAA.mkv"),
+            release_key("Movie.2024.1080p.x264-BBB.mkv")
+        );
+    }
 
     #[test]
     fn fmt_bytes_scales_units() {

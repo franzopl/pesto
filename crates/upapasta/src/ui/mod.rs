@@ -55,6 +55,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.prowlarr.search.is_some() {
         draw_prowlarr_search_overlay(f, app, area);
     }
+
+    // Queue batch-search progress floats above everything too.
+    if app.prowlarr.batch.is_some() {
+        draw_prowlarr_batch_overlay(f, app, area);
+    }
 }
 
 /// Single-line top bar: brand on the left, tab strip in the middle, version on
@@ -1124,7 +1129,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     } else if app.upload_in_progress {
         "x cancel · Tab switch · q quit".into()
     } else if app.state == AppState::Queue && !app.upload_queue.items.is_empty() {
-        "u upload · d remove · c clear · J/K reorder · Tab switch".into()
+        "u upload · d remove · c clear · J/K reorder · p fetch NZBs · Tab switch".into()
     } else if app.state == AppState::Browser {
         let filter = if app.file_tree.filter_unbacked {
             "n all"
@@ -1133,9 +1138,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         };
         let n = app.upload_queue.items.len();
         if n > 0 {
-            format!("Space queue · u upload ({n}) · {filter} · Tab switch")
+            format!("Space queue · u upload ({n}) · {filter} · p search · Tab switch")
         } else {
-            format!("Space queue · Enter open · {filter} · Tab switch")
+            format!("Space queue · Enter open · {filter} · p search · Tab switch")
         }
     } else if app.state == AppState::Config {
         "j/k move · Enter/e edit · r reset · R reset all · C check Prowlarr · Tab switch".into()
@@ -2147,6 +2152,58 @@ fn draw_vault_viewer_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(Color::Yellow)),
         )
         .scroll((scroll as u16, 0));
+    f.render_widget(p, popup);
+}
+
+// ── Prowlarr queue batch-search overlay ─────────────────────────────────────────
+
+fn draw_prowlarr_batch_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let Some(ref batch) = app.prowlarr.batch else {
+        return;
+    };
+
+    let popup = centered_rect(55, 30, area);
+    f.render_widget(Clear, popup);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" Searching queue — {}/{}", batch.done, batch.total),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                " {}",
+                truncate_str(&batch.current, popup.width.saturating_sub(4) as usize)
+            ),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!(" ✓ {} fetched", batch.downloaded),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                format!("– {} no match", batch.no_match),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("   "),
+            Span::styled(
+                format!("✗ {} failed", batch.failed),
+                Style::default().fg(Color::Red),
+            ),
+        ]),
+    ];
+
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Prowlarr — queue auto-fetch ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
     f.render_widget(p, popup);
 }
 

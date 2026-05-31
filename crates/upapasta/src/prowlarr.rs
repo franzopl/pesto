@@ -84,6 +84,10 @@ pub struct SearchResult {
     /// Whether the indexer flagged this as a passworded release.
     #[serde(default)]
     pub password_protected: bool,
+    /// Indexer protocol: `"usenet"` or `"torrent"`. Used to drop torrent
+    /// results so only `.nzb`-backed releases are shown.
+    #[serde(default)]
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,11 +134,60 @@ pub async fn check_connection(cfg: &ProwlarrConfig, client: &Client) -> Result<S
     Ok(s.version)
 }
 
+/// Fetch the IDs of every **Usenet** indexer configured in Prowlarr.
+///
+/// Prowlarr's aggregated `/api/v1/search` queries *all* indexers, including
+/// torrent trackers. Passing the resulting IDs as `indexerIds[]` restricts a
+/// search to Usenet sources so torrent trackers are never even queried.
+///
+/// Returns an empty vector when no Usenet indexer is configured; the caller
+/// can then fall back to protocol-based filtering of the results.
+pub async fn usenet_indexer_ids(cfg: &ProwlarrConfig, client: &Client) -> Result<Vec<u32>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Indexer {
+        id: u32,
+        #[serde(default)]
+        protocol: String,
+        #[serde(default)]
+        enable: bool,
+    }
+
+    let url = format!("{}/api/v1/indexer", cfg.url);
+    let resp = client
+        .get(&url)
+        .header("X-Api-Key", &cfg.api_key)
+        .send()
+        .await
+        .context("listing Prowlarr indexers")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!(
+            "indexer list HTTP {}: {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    let indexers: Vec<Indexer> = resp.json().await.context("parsing indexer list")?;
+    Ok(indexers
+        .into_iter()
+        .filter(|i| i.enable && i.protocol.eq_ignore_ascii_case("usenet"))
+        .map(|i| i.id)
+        .collect())
+}
+
 /// Search Prowlarr for a release by **exact name**.
 ///
 /// `release_name` should be the filename without extension, e.g.
 /// `"Movie.2024.1080p.BluRay.x264-GROUP"`.  We pass it verbatim as `q=` so
 /// the search targets the exact release, not a fuzzy title match.
+///
+/// When `indexer_ids` is non-empty the search is restricted to those indexers
+/// (see [`usenet_indexer_ids`]) so torrent trackers are skipped entirely. As a
+/// safety net, any non-Usenet result that slips through is dropped.
 ///
 /// Returns results sorted by title similarity to `release_name` (exact match
 /// first, then prefix matches, then the rest ordered by date descending).
@@ -142,23 +195,30 @@ pub async fn search_by_release(
     cfg: &ProwlarrConfig,
     client: &Client,
     release_name: &str,
+    indexer_ids: &[u32],
 ) -> Result<Vec<SearchResult>> {
     let url = format!("{}/api/v1/search", cfg.url);
+    let mut query: Vec<(&str, String)> = vec![
+        ("query", release_name.to_string()),
+        ("type", "search".to_string()),
+        // Usenet category buckets (movies, TV, etc.).
+        ("categories[]", "1000".to_string()),
+        ("categories[]", "2000".to_string()),
+        ("categories[]", "3000".to_string()),
+        ("categories[]", "4000".to_string()),
+        ("categories[]", "5000".to_string()),
+        ("categories[]", "6000".to_string()),
+        ("categories[]", "7000".to_string()),
+    ];
+    // Restrict the search to the given (Usenet) indexers when known.
+    for id in indexer_ids {
+        query.push(("indexerIds[]", id.to_string()));
+    }
+
     let resp = client
         .get(&url)
         .header("X-Api-Key", &cfg.api_key)
-        .query(&[
-            ("query", release_name),
-            ("type", "search"),
-            // Usenet only — skip torrent indexers
-            ("categories[]", "1000"),
-            ("categories[]", "2000"),
-            ("categories[]", "3000"),
-            ("categories[]", "4000"),
-            ("categories[]", "5000"),
-            ("categories[]", "6000"),
-            ("categories[]", "7000"),
-        ])
+        .query(&query)
         .send()
         .await
         .context("sending search request")?;
@@ -174,6 +234,10 @@ pub async fn search_by_release(
     }
 
     let mut results: Vec<SearchResult> = resp.json().await.context("parsing search results")?;
+
+    // Drop torrent results (defensive: should be empty when indexer_ids is set).
+    // Keep entries that report Usenet or report nothing at all.
+    results.retain(|r| r.protocol.is_empty() || r.protocol.eq_ignore_ascii_case("usenet"));
 
     // Sort: exact match first, then prefix, then by date (newest first).
     let q_lower = release_name.to_lowercase();
