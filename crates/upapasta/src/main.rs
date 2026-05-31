@@ -1,5 +1,10 @@
 use std::{
-    io, path::PathBuf, sync::atomic::AtomicBool, sync::atomic::Ordering, sync::Arc, time::Duration,
+    io,
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+    sync::atomic::Ordering,
+    sync::Arc,
+    time::Duration,
     time::Instant,
 };
 
@@ -1474,6 +1479,20 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                                 nzb_path: Some(out.clone()),
                                 duration_s: item_start.elapsed().as_secs_f64(),
                             });
+
+                            // Run post-upload hooks on the combined season pack so
+                            // it reaches the indexer just like each episode does.
+                            // Per-episode hooks run inside `run_upload`; this NZB is
+                            // written here, outside that pipeline, so without this
+                            // the season pack is posted but never sent on. Skip when
+                            // an episode failed — an incomplete pack must not be
+                            // forwarded to the indexer (matches run_upload, which
+                            // only runs hooks when there were no failures).
+                            if folder_ok {
+                                run_season_hooks(&config, path, &label, &out, total_size, &tx)
+                                    .await;
+                            }
+
                             season_nzb = Some(out);
                         }
                         Err(e) => {
@@ -1570,6 +1589,75 @@ fn build_dry_run_config() -> Config {
 /// NZB writing, history recording, indexer upload, notifications, and
 /// post-upload hooks are all handled inside `run_upload`; the TUI receives
 /// them as `Status` events on the same channel.
+/// Run the post-upload hooks on the combined season-pack NZB.
+///
+/// Mirrors the NFO + hook stage of [`pesto::upload::run_upload`] (which only
+/// fires for the per-episode runs): generate a season `.nfo` next to the pack
+/// `.nzb` when NFOs are enabled, build the same [`HookContext`], then run every
+/// configured hook so the pack is forwarded to the indexer like the episodes.
+async fn run_season_hooks(
+    config: &Config,
+    season_dir: &Path,
+    label: &str,
+    nzb_path: &Path,
+    total_bytes: u64,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    if config.no_hooks {
+        return;
+    }
+
+    // Best-effort season NFO from the folder's media (via mediainfo), written
+    // next to the pack NZB so hooks that forward an NFO get one.
+    let nfo_path = if config.nfo {
+        let dest = nzb_path.with_extension("nfo");
+        match pesto::nfo::generate_season(std::slice::from_ref(&season_dir.to_path_buf())) {
+            Some(content) => match pesto::nfo::write(&dest, &content) {
+                Ok(()) => {
+                    let _ = tx.send(AppEvent::Progress(format!(
+                        "wrote season nfo: {}",
+                        dest.display()
+                    )));
+                    Some(dest)
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Progress(format!("season nfo write failed: {e}")));
+                    None
+                }
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let ctx = pesto::hooks::HookContext {
+        name: label.to_string(),
+        total_bytes,
+        server: config.host.clone(),
+        group: config.groups.first().cloned().unwrap_or_default(),
+        password: config
+            .nzb_password
+            .as_deref()
+            .or(config.compress_password.as_deref())
+            .unwrap_or("")
+            .to_string(),
+        nzb_path: nzb_path.to_string_lossy().into_owned(),
+        nfo_path: nfo_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+
+    let hook_cfg = config.clone();
+    let log_lines = tokio::task::spawn_blocking(move || pesto::hooks::run_hooks(&hook_cfg, &ctx))
+        .await
+        .unwrap_or_else(|e| vec![format!("hook task panicked: {e}")]);
+    for line in log_lines {
+        let _ = tx.send(AppEvent::Progress(format!("[hook] {line}")));
+    }
+}
+
 async fn run_real_upload(
     config: Config,
     entry_paths: Vec<PathBuf>,
