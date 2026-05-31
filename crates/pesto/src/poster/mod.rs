@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::article::{
-    default_subject, format_rfc2822, generate_message_id, obfuscated_name, Article,
+    default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
@@ -166,6 +166,11 @@ struct Shared {
     pool: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Total number of post attempts that failed and triggered a retry (26d).
     total_retries: std::sync::atomic::AtomicUsize,
+    /// Newsgroup(s) every article in this run is posted to. When several groups
+    /// are configured one is picked at random once per run (see
+    /// [`pick_post_group`]), so a whole upload stays together in a single group
+    /// while the footprint spreads across groups over many runs.
+    post_group: Vec<String>,
 }
 
 impl Shared {
@@ -347,6 +352,7 @@ pub async fn post_files_with_progress_and_cancel(
         resume_path: resume_path_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
         total_retries: std::sync::atomic::AtomicUsize::new(0),
+        post_group: pick_post_group(&config.groups),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -1304,7 +1310,7 @@ async fn worker(
             let article = Article {
                 message_id: message_id.clone(),
                 from: shared.config.from.clone(),
-                newsgroups: shared.config.groups.clone(),
+                newsgroups: shared.post_group.clone(),
                 subject: default_subject(&task.meta.subject_name, task.part, task.total),
                 date: resolve_date(shared.config.date.as_deref()),
                 no_archive: shared.config.no_archive,
@@ -1543,6 +1549,23 @@ async fn worker(
 
     shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
     slot.quit().await;
+}
+
+/// Choose the newsgroup(s) for a whole run.
+///
+/// When several groups are configured, one is picked at random (once per run)
+/// rather than cross-posting every article to all of them. The whole upload
+/// then stays together in a single group, while the footprint still spreads
+/// across the configured groups over many runs. With zero or one configured
+/// group the slice is returned as-is.
+fn pick_post_group(groups: &[String]) -> Vec<String> {
+    match groups {
+        [] | [_] => groups.to_vec(),
+        _ => {
+            let idx = (rand_u64() % groups.len() as u64) as usize;
+            vec![groups[idx].clone()]
+        }
+    }
 }
 
 /// Compute the `Date:` header value from the config `date` option.
@@ -1958,6 +1981,34 @@ mod tests {
         assert_eq!(par2_output_dir(&meta), std::path::Path::new("/srv"));
     }
 
+    // ── pick_post_group ───────────────────────────────────────────────────────
+
+    #[test]
+    fn pick_post_group_empty_is_empty() {
+        assert!(pick_post_group(&[]).is_empty());
+    }
+
+    #[test]
+    fn pick_post_group_single_returns_that_group() {
+        let groups = vec!["alt.binaries.test".to_string()];
+        assert_eq!(pick_post_group(&groups), groups);
+    }
+
+    #[test]
+    fn pick_post_group_picks_one_member_of_the_list() {
+        let groups = vec![
+            "alt.binaries.a".to_string(),
+            "alt.binaries.b".to_string(),
+            "alt.binaries.c".to_string(),
+        ];
+        // Always a single group, and always one drawn from the configured list.
+        for _ in 0..100 {
+            let picked = pick_post_group(&groups);
+            assert_eq!(picked.len(), 1);
+            assert!(groups.contains(&picked[0]));
+        }
+    }
+
     // ── physical_core_count ───────────────────────────────────────────────────
 
     #[test]
@@ -1981,6 +2032,7 @@ mod tests {
         )
         .unwrap();
         config.article_size = article_size;
+        let post_group = pick_post_group(&config.groups);
         Arc::new(Shared {
             config,
             servers: Arc::new(vec![]),
@@ -1992,6 +2044,7 @@ mod tests {
             resume_path: None,
             pool: Arc::new(Mutex::new(Vec::new())),
             total_retries: std::sync::atomic::AtomicUsize::new(0),
+            post_group,
         })
     }
 

@@ -155,7 +155,7 @@ pub fn obfuscated_name() -> String {
 /// A fresh source of randomness. `RandomState` is seeded by the OS on every
 /// construction, so each call yields an unrelated 64-bit value — the same
 /// trick used for `Message-ID`s, which keeps `pesto` free of an RNG crate.
-fn rand_u64() -> u64 {
+pub(crate) fn rand_u64() -> u64 {
     RandomState::new().build_hasher().finish()
 }
 
