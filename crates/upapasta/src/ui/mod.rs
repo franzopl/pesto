@@ -1189,9 +1189,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         };
         let n = app.upload_queue.items.len();
         if n > 0 {
-            format!("Space queue · u upload ({n}) · {filter} · p search · Tab switch")
+            format!("Space queue · u upload ({n}) · {filter} · p search · r hooks · Tab switch")
         } else {
-            format!("Space queue · Enter open · {filter} · p search · Tab switch")
+            format!("Space queue · Enter open · {filter} · p search · r hooks · Tab switch")
         }
     } else if app.state == AppState::Config {
         "j/k move · Enter/e edit · r reset · R reset all · C check Prowlarr · Tab switch".into()

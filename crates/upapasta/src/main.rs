@@ -279,6 +279,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('p') | KeyCode::Char('P') => {
                             trigger_prowlarr_search(app, tx.clone());
                         }
+                        KeyCode::Char('r') => {
+                            trigger_run_hooks(app, tx.clone());
+                        }
                         _ => {}
                     },
                     // ── Queue screen keys (the home for queue management) ───
@@ -534,6 +537,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::RegisterFiles { files } => {
                     app.register_upload_files(files);
                 }
+                AppEvent::HooksDone { ok, log } => {
+                    for line in &log {
+                        app.log_panel.push(format!("  hook> {line}"));
+                    }
+                    if ok {
+                        app.status_bar.set("Hooks finished — see logs");
+                    } else {
+                        app.status_bar.set(
+                            log.first()
+                                .cloned()
+                                .unwrap_or_else(|| "Hooks failed".into()),
+                        );
+                    }
+                }
                 AppEvent::ItemUploadDone {
                     path,
                     success,
@@ -719,6 +736,113 @@ async fn run_app<B: ratatui::backend::Backend>(
         // Small sleep to avoid busy-looping the draw thread
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
+}
+
+/// Called when the user presses 'r' on the Browser (or Vault): run the user's
+/// post-upload hooks against the NZB for the selected release.
+///
+/// This is the generic counterpart to pesto's automatic post-upload hooks: it
+/// resolves the selected item to an `.nzb` on disk (a directly selected `.nzb`
+/// in the Vault, otherwise the matching release in `nzb_dir`), finds a sibling
+/// `.nfo` if present, and runs `post_hook` + every script in
+/// `~/.config/pesto/hooks/` with the usual `PESTO_*` environment — so any hook
+/// the user has (e.g. a Curupira uploader) receives the `.nzb` and `.nfo`.
+fn trigger_run_hooks(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    let Some(cfg) = app.pesto_config.clone() else {
+        app.status_bar
+            .set("pesto.toml not loaded — needed to locate nzb_dir and hooks");
+        return;
+    };
+
+    // Resolve the selected item to a release name and, when possible, a direct
+    // `.nzb` path (Vault entries and `.nzb` files are already NZBs).
+    let (release_name, direct_nzb): (String, Option<PathBuf>) = match app.state {
+        app::AppState::NzbVault => match app.vault.selected_entry() {
+            Some(e) => (
+                prowlarr::release_name_from_filename(&e.name).to_string(),
+                Some(e.path.clone()),
+            ),
+            None => {
+                app.status_bar.set("Nothing selected to run hooks on");
+                return;
+            }
+        },
+        app::AppState::Browser => match app.file_tree.get_selected().cloned() {
+            Some(p) => {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let is_nzb = p
+                    .extension()
+                    .map(|x| x.eq_ignore_ascii_case("nzb"))
+                    .unwrap_or(false);
+                (
+                    prowlarr::release_name_from_filename(&name).to_string(),
+                    is_nzb.then_some(p),
+                )
+            }
+            None => {
+                app.status_bar.set("Nothing selected to run hooks on");
+                return;
+            }
+        },
+        _ => {
+            app.status_bar.set("Select a release in Browser or Vault");
+            return;
+        }
+    };
+
+    let nzb_dir = cfg.nzb_dir.as_deref().map(app::expand_tilde);
+
+    app.status_bar
+        .set(format!("Running hooks for \"{}\"…", release_name));
+    app.log_panel
+        .push(format!("=== Running hooks for {} ===", release_name));
+
+    tokio::task::spawn_blocking(move || {
+        // Locate the NZB: a directly selected one wins; otherwise search nzb_dir
+        // by release key (so a media folder maps to its release/season .nzb).
+        let nzb_path = direct_nzb.or_else(|| {
+            nzb_dir
+                .as_deref()
+                .and_then(|d| app::find_nzb_for_release(d, &release_name))
+        });
+        let Some(nzb_path) = nzb_path else {
+            let _ = tx.send(AppEvent::HooksDone {
+                ok: false,
+                log: vec![format!("No .nzb found for \"{release_name}\" in nzb_dir")],
+            });
+            return;
+        };
+
+        let nfo_path = app::find_sibling_nfo(&nzb_path);
+        let total_bytes = std::fs::metadata(&nzb_path).map(|m| m.len()).unwrap_or(0);
+
+        // Force hooks on for this run regardless of the loaded config's flag.
+        let mut cfg = cfg;
+        cfg.no_hooks = false;
+        let ctx = pesto::hooks::HookContext {
+            name: release_name,
+            total_bytes,
+            server: cfg.host.clone(),
+            group: cfg.groups.first().cloned().unwrap_or_default(),
+            password: cfg
+                .nzb_password
+                .as_deref()
+                .or(cfg.compress_password.as_deref())
+                .unwrap_or("")
+                .to_string(),
+            nzb_path: nzb_path.to_string_lossy().into_owned(),
+            nfo_path: nfo_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+
+        let log = pesto::hooks::run_hooks(&cfg, &ctx);
+        let _ = tx.send(AppEvent::HooksDone { ok: true, log });
+    });
 }
 
 /// Called when the user presses 'C' on the Config screen.

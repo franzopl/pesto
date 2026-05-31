@@ -166,6 +166,12 @@ pub enum AppEvent {
         no_match: usize,
         failed: usize,
     },
+    // Manual "run hooks on selected NZB" finished. `log` carries the lines
+    // produced by pesto's hook runner (post_hook + ~/.config/pesto/hooks/*).
+    HooksDone {
+        ok: bool,
+        log: Vec<String>,
+    },
 }
 
 pub struct EventHandler {

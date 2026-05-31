@@ -2457,6 +2457,74 @@ fn collect_nzbs_recursive(
     }
 }
 
+/// Locate an `.nzb` on disk whose release key matches `release_name`.
+///
+/// The manual "run hooks" action selects a media release in the Browser; we
+/// resolve it to its NZB in `nzb_dir` the same way the disk-index badge does —
+/// by [`release_key`](crate::ui::components::file_tree::release_key) — so a
+/// season pack folder maps to its season `.nzb`. Returns the first match.
+/// Capped and symlink-skipping like the rest of the walk logic.
+pub(crate) fn find_nzb_for_release(
+    nzb_dir: &std::path::Path,
+    release_name: &str,
+) -> Option<PathBuf> {
+    use crate::ui::components::file_tree::release_key;
+    let target = release_key(release_name);
+    if target.is_empty() {
+        return None;
+    }
+    const CAP: usize = 200_000;
+    let mut stack = vec![nzb_dir.to_path_buf()];
+    let mut visited = 0usize;
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            } else if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                visited += 1;
+                let name = entry.file_name();
+                let is_nzb = std::path::Path::new(&name)
+                    .extension()
+                    .map(|x| x.eq_ignore_ascii_case("nzb"))
+                    .unwrap_or(false);
+                if is_nzb {
+                    if let Some(n) = name.to_str() {
+                        if release_key(n) == target {
+                            return Some(entry.path());
+                        }
+                    }
+                }
+                if visited >= CAP {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find a `.nfo` sitting next to `nzb_path` so it can be handed to hooks via
+/// `PESTO_NFO`. Checks `<stem>.nfo` (extension swapped) then `<full-name>.nfo`.
+pub(crate) fn find_sibling_nfo(nzb_path: &std::path::Path) -> Option<PathBuf> {
+    let with_nfo = nzb_path.with_extension("nfo");
+    if with_nfo.is_file() {
+        return Some(with_nfo);
+    }
+    let mut alt = nzb_path.as_os_str().to_owned();
+    alt.push(".nfo");
+    let alt = PathBuf::from(alt);
+    if alt.is_file() {
+        return Some(alt);
+    }
+    None
+}
+
 /// Recursively scan `dir` for `.nzb` files and map each file's release key
 /// (see `file_tree::release_key`) to its [`DiskNzbInfo`] (origin + password).
 /// Capped so a pathological tree cannot stall startup; symlinks are skipped to
