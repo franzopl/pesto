@@ -1166,6 +1166,39 @@ impl App {
             set.insert(b);
         }
         self.file_tree.set_uploading(set);
+
+        // Drop the previous item's rows. Folder modes (PerFile/Season) post each
+        // inner file under its own `real_name`, so the per-file panel is seeded
+        // from this item's pesto `Started` event (see `register_upload_files`),
+        // not from the folder-keyed queue entry.
+        self.progress.files.clear();
+    }
+
+    /// Seed the per-file rows from a pesto run's work plan. Each tuple is
+    /// `(real_name, total_segments, total_bytes)` taken from the `Started`
+    /// event; the same `real_name` keys the later `SegmentDone` updates, so the
+    /// per-file gauges advance instead of sitting at "waiting…". Within one
+    /// queue entry several runs can register files (Season posts each episode as
+    /// its own run), so rows accumulate across runs and are matched by name.
+    pub fn register_upload_files(&mut self, files: Vec<(String, u64, u64)>) {
+        for (name, total_segments, total_bytes) in files {
+            if let Some(fp) = self.progress.files.iter_mut().find(|f| f.name == name) {
+                fp.total_segments = total_segments.max(fp.total_segments);
+                fp.total_bytes = total_bytes.max(fp.total_bytes);
+                if fp.status == FileStatus::Pending {
+                    fp.status = FileStatus::Active;
+                }
+            } else {
+                self.progress.files.push(FileProgress {
+                    name,
+                    total_segments,
+                    done_segments: 0,
+                    total_bytes,
+                    done_bytes: 0,
+                    status: FileStatus::Active,
+                });
+            }
+        }
     }
 
     /// A single queue item finished. Record it in the catalog immediately with
@@ -1346,23 +1379,37 @@ impl App {
 
         self.progress.apply(&update);
 
-        // Apply per-file update if present
+        // Apply per-file update if present. The row is normally seeded from the
+        // run's `Started` event (register_upload_files); fall back to creating it
+        // here so a SegmentDone is never silently dropped.
         if let Some(fu) = &update.file_update {
-            if let Some(fp) = self.progress.files.iter_mut().find(|f| f.name == fu.name) {
-                fp.done_segments += fu.done_segments;
-                fp.done_bytes += fu.done_bytes;
-                fp.total_segments = fu.total_segments.max(fp.total_segments);
-                fp.total_bytes = fu.total_bytes.max(fp.total_bytes);
-
-                if fu.ok {
-                    if fp.done_segments >= fp.total_segments && fp.total_segments > 0 {
-                        fp.status = FileStatus::Done;
-                    } else {
-                        fp.status = FileStatus::Active;
-                    }
-                } else {
-                    fp.status = FileStatus::Failed;
+            let fp = match self.progress.files.iter_mut().find(|f| f.name == fu.name) {
+                Some(fp) => fp,
+                None => {
+                    self.progress.files.push(FileProgress {
+                        name: fu.name.clone(),
+                        total_segments: 0,
+                        done_segments: 0,
+                        total_bytes: 0,
+                        done_bytes: 0,
+                        status: FileStatus::Active,
+                    });
+                    self.progress.files.last_mut().unwrap()
                 }
+            };
+            fp.done_segments += fu.done_segments;
+            fp.done_bytes += fu.done_bytes;
+            fp.total_segments = fu.total_segments.max(fp.total_segments);
+            fp.total_bytes = fu.total_bytes.max(fp.total_bytes);
+
+            if fu.ok {
+                if fp.done_segments >= fp.total_segments && fp.total_segments > 0 {
+                    fp.status = FileStatus::Done;
+                } else {
+                    fp.status = FileStatus::Active;
+                }
+            } else {
+                fp.status = FileStatus::Failed;
             }
         }
 

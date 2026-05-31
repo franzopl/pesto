@@ -242,13 +242,13 @@ impl FileTree {
         }
         // Not in the catalog, but maybe a matching .nzb already exists in
         // nzb_dir (e.g. a Prowlarr download, or uploaded before this catalog).
-        if !path.is_dir() {
-            if let Some(info) = self.nzb_disk_index.get(&release_key(name)) {
-                return NzbBadge::OnDisk {
-                    origin: info.origin,
-                    has_password: info.has_password,
-                };
-            }
+        // A directory matches a release NZB named after the folder — a season
+        // pack downloaded or uploaded as a single .nzb — by its own release key.
+        if let Some(info) = self.nzb_disk_index.get(&release_key(name)) {
+            return NzbBadge::OnDisk {
+                origin: info.origin,
+                has_password: info.has_password,
+            };
         }
         NzbBadge::None
     }
@@ -637,6 +637,12 @@ fn path_is_backed(
         return true;
     }
     if path.is_dir() {
+        // A release NZB named after the folder (e.g. a downloaded season pack)
+        // backs the whole directory; otherwise fall back to checking that every
+        // inner file is individually backed.
+        if nzb_disk_index.contains_key(&release_key(name)) {
+            return true;
+        }
         return !dir_has_unbacked(path, nzb_status, nzb_disk_index);
     }
     // A matching .nzb already on disk counts as backed.

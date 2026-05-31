@@ -104,6 +104,15 @@ pub enum AppEvent {
     ItemUploadStarted {
         path: String,
     },
+    // The files of the current pesto run, taken from its `Started` event. Each
+    // tuple is `(real_name, total_segments, total_bytes)`. Used to seed the
+    // per-file progress rows keyed by the same `real_name` that later
+    // `SegmentDone` events carry, so per-episode bars actually advance (folder
+    // queue entries upload each inner file under its own name, which never
+    // matched the folder-keyed rows before).
+    RegisterFiles {
+        files: Vec<(String, u64, u64)>,
+    },
     // A single queue item finished, carrying the real data pesto produced so
     // the catalog can be written per-item (real size, real NZB path) instead of
     // a fabricated average at the end of the batch.

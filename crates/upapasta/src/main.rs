@@ -531,6 +531,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::ItemUploadStarted { path } => {
                     app.item_upload_started(&path);
                 }
+                AppEvent::RegisterFiles { files } => {
+                    app.register_upload_files(files);
+                }
                 AppEvent::ItemUploadDone {
                     path,
                     success,
@@ -1392,6 +1395,16 @@ async fn run_real_upload(
                 let msg = format_progress_event(&event);
                 if !msg.is_empty() {
                     let _ = tx.send(AppEvent::Progress(msg));
+                }
+                // Seed per-file rows from the run's work plan so per-episode
+                // bars (folder modes post each inner file under its real_name)
+                // have totals and match later SegmentDone events.
+                if let pesto::progress::ProgressEvent::Started { files, .. } = &event {
+                    let regs = files
+                        .iter()
+                        .map(|f| (f.name.clone(), f.segments, f.bytes))
+                        .collect();
+                    let _ = tx.send(AppEvent::RegisterFiles { files: regs });
                 }
                 // When the poster finishes, clamp the bar to 100% so the UI
                 // shows completion while NZB writing and hooks are still running.
