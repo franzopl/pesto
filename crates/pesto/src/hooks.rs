@@ -74,6 +74,36 @@ pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
     logs
 }
 
+/// List the executable hook scripts in `~/.config/pesto/hooks/`, sorted by name.
+///
+/// Exposed so a front-end (e.g. upapasta) can let the user pick a single hook
+/// to run manually instead of running them all.
+pub fn list_hook_scripts() -> Vec<PathBuf> {
+    crate::config::config_dir()
+        .map(|d| d.join("hooks"))
+        .filter(|d| d.is_dir())
+        .map(|d| sorted_executables(&d))
+        .unwrap_or_default()
+}
+
+/// Run a single hook script (one returned by [`list_hook_scripts`]) and return
+/// its log lines. Unlike [`run_hooks`] this ignores `no_hooks` and `post_hook`:
+/// the caller chose exactly this script, so only it runs.
+pub fn run_one_hook(path: &Path, ctx: &HookContext) -> Vec<String> {
+    let label = path.display().to_string();
+    let mut logs = vec![format!("Running hook script: {label}")];
+    match run_script(path, ctx) {
+        Ok(output) => {
+            for line in output.lines() {
+                logs.push(format!("  hook> {line}"));
+            }
+            logs.push(format!("{label}: exited ok"));
+        }
+        Err(e) => logs.push(format!("{label}: error: {e}")),
+    }
+    logs
+}
+
 fn apply_env(cmd: &mut Command, ctx: &HookContext) {
     cmd.env("PESTO_NAME", &ctx.name)
         .env("PESTO_BYTES", ctx.total_bytes.to_string())

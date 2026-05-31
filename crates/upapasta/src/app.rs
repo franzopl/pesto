@@ -438,6 +438,52 @@ pub struct App {
 
     /// Prowlarr integration state
     pub prowlarr: ProwlarrState,
+
+    /// Hook picker overlay: when set, the user is choosing which hook to run
+    /// against the selected release (Browser `r`). `None` = overlay closed.
+    pub hook_picker: Option<HookPickerState>,
+}
+
+/// State of the "run a hook on the selected release" overlay. Lists the
+/// executable hooks in `~/.config/pesto/hooks/` so the user runs exactly one,
+/// not all of them. Carries the resolved selection so the choice survives even
+/// if the Browser cursor moves.
+#[derive(Debug, Clone)]
+pub struct HookPickerState {
+    /// Release name derived from the selected item (for status + NZB lookup).
+    pub release_name: String,
+    /// A directly selected `.nzb` (Vault entry / `.nzb` file); otherwise the
+    /// NZB is resolved from `nzb_dir` by release key when the hook runs.
+    pub direct_nzb: Option<PathBuf>,
+    /// Executable hook scripts available to run.
+    pub hooks: Vec<PathBuf>,
+    /// Index of the highlighted hook.
+    pub selected: usize,
+}
+
+impl HookPickerState {
+    pub fn new(release_name: String, direct_nzb: Option<PathBuf>, hooks: Vec<PathBuf>) -> Self {
+        Self {
+            release_name,
+            direct_nzb,
+            hooks,
+            selected: 0,
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if !self.hooks.is_empty() && self.selected < self.hooks.len() - 1 {
+            self.selected += 1;
+        }
+    }
+
+    pub fn selected_hook(&self) -> Option<&PathBuf> {
+        self.hooks.get(self.selected)
+    }
 }
 
 /// One entry in the NZB Vault list.
@@ -806,6 +852,7 @@ impl App {
             confirm_show_password: false,
             vault: VaultState::default(),
             prowlarr: ProwlarrState::default(),
+            hook_picker: None,
         };
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {

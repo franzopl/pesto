@@ -224,6 +224,27 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                         _ => {}
                     },
+                    // ── Hook picker overlay (takes priority over screen keys) ──
+                    _ if app.hook_picker.is_some() => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            app.hook_picker = None;
+                            app.status_bar.set("Hook picker closed");
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if let Some(ref mut p) = app.hook_picker {
+                                p.move_down();
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            if let Some(ref mut p) = app.hook_picker {
+                                p.move_up();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            run_selected_hook(app, tx.clone());
+                        }
+                        _ => {}
+                    },
                     KeyCode::Char('h') if app.state == app::AppState::Browser => {
                         app.file_tree.toggle_hidden();
                     }
@@ -280,7 +301,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             trigger_prowlarr_search(app, tx.clone());
                         }
                         KeyCode::Char('r') => {
-                            trigger_run_hooks(app, tx.clone());
+                            trigger_run_hooks(app);
                         }
                         _ => {}
                     },
@@ -539,16 +560,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                 }
                 AppEvent::HooksDone { ok, log } => {
                     for line in &log {
-                        app.log_panel.push(format!("  hook> {line}"));
+                        app.log_panel.push(line.clone());
                     }
                     if ok {
-                        app.status_bar.set("Hooks finished — see logs");
+                        app.status_bar.set("Hook finished — see logs");
                     } else {
-                        app.status_bar.set(
-                            log.first()
-                                .cloned()
-                                .unwrap_or_else(|| "Hooks failed".into()),
-                        );
+                        app.status_bar
+                            .set(log.first().cloned().unwrap_or_else(|| "Hook failed".into()));
                     }
                 }
                 AppEvent::ItemUploadDone {
@@ -738,21 +756,19 @@ async fn run_app<B: ratatui::backend::Backend>(
     }
 }
 
-/// Called when the user presses 'r' on the Browser (or Vault): run the user's
-/// post-upload hooks against the NZB for the selected release.
+/// Called when the user presses 'r' on the Browser (or Vault): open the hook
+/// picker so the user runs one chosen hook against the selected release.
 ///
-/// This is the generic counterpart to pesto's automatic post-upload hooks: it
-/// resolves the selected item to an `.nzb` on disk (a directly selected `.nzb`
-/// in the Vault, otherwise the matching release in `nzb_dir`), finds a sibling
-/// `.nfo` if present, and runs `post_hook` + every script in
-/// `~/.config/pesto/hooks/` with the usual `PESTO_*` environment — so any hook
-/// the user has (e.g. a Curupira uploader) receives the `.nzb` and `.nfo`.
-fn trigger_run_hooks(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
-    let Some(cfg) = app.pesto_config.clone() else {
+/// Resolves the selected item to a release name (and a direct `.nzb` path when
+/// the selection already is an NZB), lists the executable scripts in
+/// `~/.config/pesto/hooks/`, and shows the picker. The actual run happens in
+/// [`run_selected_hook`] once the user confirms.
+fn trigger_run_hooks(app: &mut App) {
+    if app.pesto_config.is_none() {
         app.status_bar
             .set("pesto.toml not loaded — needed to locate nzb_dir and hooks");
         return;
-    };
+    }
 
     // Resolve the selected item to a release name and, when possible, a direct
     // `.nzb` path (Vault entries and `.nzb` files are already NZBs).
@@ -793,12 +809,48 @@ fn trigger_run_hooks(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         }
     };
 
+    let hooks = pesto::hooks::list_hook_scripts();
+    if hooks.is_empty() {
+        app.status_bar
+            .set("No executable hooks in ~/.config/pesto/hooks/");
+        return;
+    }
+
+    app.hook_picker = Some(app::HookPickerState::new(release_name, direct_nzb, hooks));
+}
+
+/// Run the hook chosen in the picker against the selected release.
+///
+/// Closes the overlay, resolves the `.nzb` (a directly selected one wins;
+/// otherwise the matching release in `nzb_dir` by release key), finds a sibling
+/// `.nfo`, and runs exactly that one hook with the usual `PESTO_*` environment.
+/// Runs off-thread; output streams back via [`AppEvent::HooksDone`].
+fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    let Some(picker) = app.hook_picker.take() else {
+        return;
+    };
+    let Some(hook) = picker.selected_hook().cloned() else {
+        app.status_bar.set("No hook selected");
+        return;
+    };
+    let Some(cfg) = app.pesto_config.clone() else {
+        app.status_bar.set("pesto.toml not loaded");
+        return;
+    };
+
     let nzb_dir = cfg.nzb_dir.as_deref().map(app::expand_tilde);
+    let release_name = picker.release_name;
+    let direct_nzb = picker.direct_nzb;
+    let hook_label = hook
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| hook.display().to_string());
 
     app.status_bar
-        .set(format!("Running hooks for \"{}\"…", release_name));
-    app.log_panel
-        .push(format!("=== Running hooks for {} ===", release_name));
+        .set(format!("Running hook {hook_label} for \"{release_name}\"…"));
+    app.log_panel.push(format!(
+        "=== Running hook {hook_label} for {release_name} ==="
+    ));
 
     tokio::task::spawn_blocking(move || {
         // Locate the NZB: a directly selected one wins; otherwise search nzb_dir
@@ -819,9 +871,6 @@ fn trigger_run_hooks(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         let nfo_path = app::find_sibling_nfo(&nzb_path);
         let total_bytes = std::fs::metadata(&nzb_path).map(|m| m.len()).unwrap_or(0);
 
-        // Force hooks on for this run regardless of the loaded config's flag.
-        let mut cfg = cfg;
-        cfg.no_hooks = false;
         let ctx = pesto::hooks::HookContext {
             name: release_name,
             total_bytes,
@@ -840,7 +889,7 @@ fn trigger_run_hooks(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 .unwrap_or_default(),
         };
 
-        let log = pesto::hooks::run_hooks(&cfg, &ctx);
+        let log = pesto::hooks::run_one_hook(&hook, &ctx);
         let _ = tx.send(AppEvent::HooksDone { ok: true, log });
     });
 }

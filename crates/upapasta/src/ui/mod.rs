@@ -60,6 +60,52 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.prowlarr.batch.is_some() {
         draw_prowlarr_batch_overlay(f, app, area);
     }
+
+    // Hook picker floats above everything.
+    if app.hook_picker.is_some() {
+        draw_hook_picker_overlay(f, app, area);
+    }
+}
+
+/// Overlay listing the user's hooks so they can run exactly one against the
+/// selected release. Mirrors the Prowlarr search overlay style.
+fn draw_hook_picker_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let Some(ref picker) = app.hook_picker else {
+        return;
+    };
+
+    let popup = centered_rect(70, 60, area);
+    f.render_widget(Clear, popup);
+
+    let title = format!(
+        " Run hook on \"{}\"  [j/k · Enter run · Esc close] ",
+        picker.release_name
+    );
+
+    let items: Vec<ListItem> = picker
+        .hooks
+        .iter()
+        .map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string());
+            ListItem::new(Line::from(Span::raw(format!(" {name}"))))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(theme::highlight());
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(picker.selected));
+    f.render_stateful_widget(list, popup, &mut list_state);
 }
 
 /// Single-line top bar: brand on the left, tab strip in the middle, version on
