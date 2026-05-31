@@ -227,8 +227,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                     // ── Hook picker overlay (takes priority over screen keys) ──
                     _ if app.hook_picker.is_some() => match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => {
-                            app.hook_picker = None;
-                            app.status_bar.set("Hook picker closed");
+                            // Esc first cancels a pending re-send confirmation,
+                            // then (a second time) closes the picker.
+                            match app.hook_picker.as_mut().and_then(|p| p.pending_confirm) {
+                                Some(_) => {
+                                    if let Some(ref mut p) = app.hook_picker {
+                                        p.pending_confirm = None;
+                                    }
+                                    app.status_bar.set("Re-send cancelled");
+                                }
+                                None => {
+                                    app.hook_picker = None;
+                                    app.status_bar.set("Hook picker closed");
+                                }
+                            }
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
                             if let Some(ref mut p) = app.hook_picker {
@@ -241,7 +253,28 @@ async fn run_app<B: ratatui::backend::Backend>(
                             }
                         }
                         KeyCode::Enter => {
-                            run_selected_hook(app, tx.clone());
+                            // Re-sending a hook that already succeeded for this
+                            // release asks for confirmation first (one extra Enter).
+                            let needs_confirm = app
+                                .hook_picker
+                                .as_ref()
+                                .map(|p| {
+                                    p.pending_confirm != Some(p.selected)
+                                        && p.selected_hook()
+                                            .map(|h| p.sent_at(h).is_some())
+                                            .unwrap_or(false)
+                                })
+                                .unwrap_or(false);
+                            if needs_confirm {
+                                if let Some(ref mut p) = app.hook_picker {
+                                    p.pending_confirm = Some(p.selected);
+                                }
+                                app.status_bar.set(
+                                    "Already sent — press Enter again to re-send, Esc to cancel",
+                                );
+                            } else {
+                                run_selected_hook(app, tx.clone());
+                            }
                         }
                         _ => {}
                     },
@@ -558,12 +591,20 @@ async fn run_app<B: ratatui::backend::Backend>(
                 AppEvent::RegisterFiles { files } => {
                     app.register_upload_files(files);
                 }
-                AppEvent::HooksDone { ok, log } => {
+                AppEvent::HooksDone {
+                    ok,
+                    release_key,
+                    release_name,
+                    hook_name,
+                    log,
+                } => {
                     for line in &log {
                         app.log_panel.push(line.clone());
                     }
                     if ok {
-                        app.status_bar.set("Hook finished — see logs");
+                        app.record_hook_run(&release_key, &release_name, &hook_name);
+                        app.status_bar
+                            .set(format!("Hook {hook_name} sent for {release_name}"));
                     } else {
                         app.status_bar
                             .set(log.first().cloned().unwrap_or_else(|| "Hook failed".into()));
@@ -827,11 +868,22 @@ fn trigger_run_hooks(app: &mut App) {
         return;
     }
 
+    // Past successful runs for this release, so the picker can flag what was
+    // already sent and confirm before re-sending.
+    let runs = {
+        let key = ui::components::file_tree::release_key(&release_name);
+        app.catalog
+            .as_ref()
+            .and_then(|c| c.hook_runs_for(&key).ok())
+            .unwrap_or_default()
+    };
+
     app.hook_picker = Some(app::HookPickerState::new(
         release_name,
         direct_nzb,
         media_path,
         hooks,
+        runs,
     ));
 }
 
@@ -858,15 +910,15 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
     let release_name = picker.release_name;
     let direct_nzb = picker.direct_nzb;
     let media_path = picker.media_path;
-    let hook_label = hook
+    let hook_name = hook
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| hook.display().to_string());
 
     app.status_bar
-        .set(format!("Running hook {hook_label} for \"{release_name}\"…"));
+        .set(format!("Running hook {hook_name} for \"{release_name}\"…"));
     app.log_panel.push(format!(
-        "=== Running hook {hook_label} for {release_name} ==="
+        "=== Running hook {hook_name} for {release_name} ==="
     ));
 
     tokio::task::spawn_blocking(move || {
@@ -880,6 +932,9 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         let Some(nzb_path) = nzb_path else {
             let _ = tx.send(AppEvent::HooksDone {
                 ok: false,
+                release_key: String::new(),
+                release_name: release_name.clone(),
+                hook_name: hook_name.clone(),
                 log: vec![format!("No .nzb found for \"{release_name}\" in nzb_dir")],
             });
             return;
@@ -908,7 +963,7 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         let total_bytes = std::fs::metadata(&nzb_path).map(|m| m.len()).unwrap_or(0);
 
         let ctx = pesto::hooks::HookContext {
-            name: release_name,
+            name: release_name.clone(),
             total_bytes,
             server: cfg.host.clone(),
             group: cfg.groups.first().cloned().unwrap_or_default(),
@@ -925,11 +980,18 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 .unwrap_or_default(),
         };
 
-        let mut log = pesto::hooks::run_one_hook(&hook, &ctx);
+        let (ok, mut log) = pesto::hooks::run_one_hook(&hook, &ctx);
         if let Some(line) = nfo_log {
             log.insert(0, line);
         }
-        let _ = tx.send(AppEvent::HooksDone { ok: true, log });
+        let release_key = ui::components::file_tree::release_key(&release_name);
+        let _ = tx.send(AppEvent::HooksDone {
+            ok,
+            release_key,
+            release_name,
+            hook_name,
+            log,
+        });
     });
 }
 

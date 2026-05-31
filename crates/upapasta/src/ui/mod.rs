@@ -77,10 +77,24 @@ fn draw_hook_picker_overlay(f: &mut Frame, app: &App, area: Rect) {
     let popup = centered_rect(70, 60, area);
     f.render_widget(Clear, popup);
 
-    let title = format!(
-        " Run hook on \"{}\"  [j/k · Enter run · Esc close] ",
-        picker.release_name
-    );
+    let confirming = picker.pending_confirm == Some(picker.selected);
+    let (title, border) = if confirming {
+        (
+            format!(
+                " Re-send to \"{}\"?  [Enter confirm · Esc cancel] ",
+                picker.release_name
+            ),
+            Color::Yellow,
+        )
+    } else {
+        (
+            format!(
+                " Run hook on \"{}\"  [j/k · Enter run · Esc close] ",
+                picker.release_name
+            ),
+            Color::Cyan,
+        )
+    };
 
     let items: Vec<ListItem> = picker
         .hooks
@@ -90,7 +104,15 @@ fn draw_hook_picker_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.display().to_string());
-            ListItem::new(Line::from(Span::raw(format!(" {name}"))))
+            let mut spans = vec![Span::raw(format!(" {name}"))];
+            // Flag hooks this release was already sent through, with the date.
+            if let Some(dt) = picker.sent_at(p) {
+                spans.push(Span::styled(
+                    format!("   ✓ sent {}", dt.format("%Y-%m-%d %H:%M")),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -99,7 +121,7 @@ fn draw_hook_picker_overlay(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(border)),
         )
         .highlight_style(theme::highlight());
 

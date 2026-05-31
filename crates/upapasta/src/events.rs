@@ -166,10 +166,15 @@ pub enum AppEvent {
         no_match: usize,
         failed: usize,
     },
-    // Manual "run hooks on selected NZB" finished. `log` carries the lines
-    // produced by pesto's hook runner (post_hook + ~/.config/pesto/hooks/*).
+    // Manual "run a hook on the selected release" finished. `ok` is true only
+    // when the hook exited 0; the app then records the run for the release so
+    // the Browser and picker can flag it. `release_key`/`hook_name` are empty
+    // for early failures (e.g. no .nzb found), which are not recorded.
     HooksDone {
         ok: bool,
+        release_key: String,
+        release_name: String,
+        hook_name: String,
         log: Vec<String>,
     },
 }

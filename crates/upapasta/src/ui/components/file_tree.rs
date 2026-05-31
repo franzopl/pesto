@@ -61,6 +61,9 @@ pub struct FileTree {
     /// on disk even if the catalog has no record, and distinguish a Prowlarr
     /// download from a prior upload.
     pub nzb_disk_index: HashMap<String, DiskNzbInfo>,
+    /// Release keys (see [`release_key`]) of releases already sent through a
+    /// hook (e.g. an indexer upload). Drives the "sent" marker in the list.
+    pub hooked: HashSet<String>,
     /// Names of files currently being uploaded (basename).
     pub uploading: HashSet<String>,
     /// First visible item index — managed manually to get correct scroll behaviour.
@@ -127,6 +130,7 @@ impl FileTree {
             queued: HashSet::new(),
             nzb_status: HashMap::new(),
             nzb_disk_index: HashMap::new(),
+            hooked: HashSet::new(),
             uploading: HashSet::new(),
             scroll_offset: 0,
             visible_height: 20,
@@ -153,6 +157,17 @@ impl FileTree {
     /// Replace the on-disk NZB release index (release keys of every `.nzb` in
     /// `nzb_dir`). Like the catalog map, backed status depends on it, so the
     /// scan cache is invalidated and a fresh background scan is scheduled.
+    /// Replace the set of release keys already sent through a hook. Only affects
+    /// the row marker (not backed status), so no scan invalidation is needed.
+    pub fn set_hooked_index(&mut self, keys: HashSet<String>) {
+        self.hooked = keys;
+    }
+
+    /// Whether `name`'s release has already been sent through a hook.
+    pub fn is_hooked(&self, name: &str) -> bool {
+        !self.hooked.is_empty() && self.hooked.contains(&release_key(name))
+    }
+
     pub fn set_nzb_disk_index(&mut self, index: HashMap<String, DiskNzbInfo>) {
         self.nzb_disk_index = index;
         self.invalidate_scan();
@@ -509,11 +524,23 @@ impl FileTree {
                     name_style
                 };
 
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(check, check_style),
                     Span::styled(marker, marker_style),
                     Span::styled(name, name_style),
-                ]))
+                ];
+                // Trailing marker for releases already sent through a hook (e.g.
+                // uploaded to an indexer). Distinct from the upload/disk badge.
+                if self.is_hooked(raw_name) {
+                    spans.push(Span::styled(
+                        " ↑sent",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+
+                ListItem::new(Line::from(spans))
             })
             .collect();
 

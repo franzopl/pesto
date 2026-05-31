@@ -112,9 +112,73 @@ impl Catalog {
                  ON uploads(original_name);
              CREATE INDEX IF NOT EXISTS idx_uploads_category
                  ON uploads(category);
+
+             CREATE TABLE IF NOT EXISTS hook_runs (
+                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                 ran_at        TEXT    NOT NULL,
+                 release_key   TEXT    NOT NULL,
+                 release_name  TEXT    NOT NULL,
+                 hook_name     TEXT    NOT NULL
+             );
+
+             CREATE INDEX IF NOT EXISTS idx_hook_runs_release_key
+                 ON hook_runs(release_key);
             ",
         )?;
         Ok(())
+    }
+
+    /// Record a successful hook run for a release (e.g. an indexer upload via a
+    /// post-upload hook), keyed by `release_key` so the Browser and the hook
+    /// picker can flag it later regardless of the exact on-disk name.
+    pub fn record_hook_run(
+        &self,
+        release_key: &str,
+        release_name: &str,
+        hook_name: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO hook_runs (ran_at, release_key, release_name, hook_name)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                Utc::now().to_rfc3339(),
+                release_key,
+                release_name,
+                hook_name,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Most recent run time per hook name for a given release key. Drives the
+    /// "✓ sent <date>" markers in the hook picker.
+    pub fn hook_runs_for(&self, release_key: &str) -> Result<HashMap<String, DateTime<Utc>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT hook_name, MAX(ran_at) FROM hook_runs
+             WHERE release_key = ?1 GROUP BY hook_name",
+        )?;
+        let mut out = HashMap::new();
+        let rows = stmt.query_map(params![release_key], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (name, dt) = row?;
+            out.insert(name, parse_dt(&dt));
+        }
+        Ok(out)
+    }
+
+    /// Every release key that has at least one recorded hook run. Loaded into
+    /// the Browser so releases already sent through a hook get a marker.
+    pub fn hooked_release_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT release_key FROM hook_runs")?;
+        let keys = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(keys)
     }
 
     /// Insert a new upload record. Returns the row id.
@@ -609,6 +673,33 @@ mod tests {
         let rows = c.list(Some("breaking"), 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].category, "TV");
+    }
+
+    #[test]
+    fn hook_runs_record_and_query() {
+        let c = temp_catalog();
+        // Two runs of the same hook for one release, plus a different hook.
+        c.record_hook_run("relkey1", "Some.Release.S01", "curupira.sh")
+            .unwrap();
+        c.record_hook_run("relkey1", "Some.Release.S01", "curupira.sh")
+            .unwrap();
+        c.record_hook_run("relkey1", "Some.Release.S01", "other.sh")
+            .unwrap();
+        c.record_hook_run("relkey2", "Another.Release", "curupira.sh")
+            .unwrap();
+
+        // Per-release: one entry per hook name (latest run).
+        let runs = c.hook_runs_for("relkey1").unwrap();
+        assert_eq!(runs.len(), 2);
+        assert!(runs.contains_key("curupira.sh"));
+        assert!(runs.contains_key("other.sh"));
+        assert!(c.hook_runs_for("missing").unwrap().is_empty());
+
+        // Distinct release keys with any run.
+        let keys = c.hooked_release_keys().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("relkey1"));
+        assert!(keys.contains("relkey2"));
     }
 
     #[test]

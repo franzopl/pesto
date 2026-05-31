@@ -463,6 +463,12 @@ pub struct HookPickerState {
     pub hooks: Vec<PathBuf>,
     /// Index of the highlighted hook.
     pub selected: usize,
+    /// Last successful run time per hook *name* for this release, from the
+    /// catalog. Drives the "✓ sent <date>" marker and the re-send confirmation.
+    pub runs: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+    /// Index awaiting a re-send confirmation (a hook already sent for this
+    /// release). The next Enter on the same row runs it; navigating clears it.
+    pub pending_confirm: Option<usize>,
 }
 
 impl HookPickerState {
@@ -471,6 +477,7 @@ impl HookPickerState {
         direct_nzb: Option<PathBuf>,
         media_path: Option<PathBuf>,
         hooks: Vec<PathBuf>,
+        runs: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     ) -> Self {
         Self {
             release_name,
@@ -478,21 +485,31 @@ impl HookPickerState {
             media_path,
             hooks,
             selected: 0,
+            runs,
+            pending_confirm: None,
         }
     }
 
     pub fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.pending_confirm = None;
     }
 
     pub fn move_down(&mut self) {
         if !self.hooks.is_empty() && self.selected < self.hooks.len() - 1 {
             self.selected += 1;
         }
+        self.pending_confirm = None;
     }
 
     pub fn selected_hook(&self) -> Option<&PathBuf> {
         self.hooks.get(self.selected)
+    }
+
+    /// The last-sent time for a hook path, if this release was sent through it.
+    pub fn sent_at(&self, hook: &std::path::Path) -> Option<chrono::DateTime<chrono::Utc>> {
+        let name = hook.file_name()?.to_str()?;
+        self.runs.get(name).copied()
     }
 }
 
@@ -886,6 +903,8 @@ impl App {
         // Index existing .nzb files in nzb_dir so the browser flags releases
         // that already have an NZB even when the catalog has no record.
         app.refresh_nzb_disk_index();
+        // Flag releases already sent through a hook (e.g. an indexer upload).
+        app.refresh_hooked_index();
 
         // Do NOT add example files on startup anymore (was confusing users)
         app.log_panel
@@ -1354,6 +1373,33 @@ impl App {
         let mut index = std::collections::HashMap::new();
         collect_nzb_release_keys(&dir, &mut index);
         self.file_tree.set_nzb_disk_index(index);
+    }
+
+    /// Reload the set of release keys that already went through a hook (e.g. an
+    /// indexer upload) from the catalog into the Browser, so those releases get
+    /// the "sent" marker.
+    pub fn refresh_hooked_index(&mut self) {
+        let keys = self
+            .catalog
+            .as_ref()
+            .and_then(|c| c.hooked_release_keys().ok())
+            .unwrap_or_default();
+        self.file_tree.set_hooked_index(keys);
+    }
+
+    /// Record a successful hook run for a release and refresh the Browser marker.
+    /// No-op when the release key is empty (early failures) or no catalog exists.
+    pub fn record_hook_run(&mut self, release_key: &str, release_name: &str, hook_name: &str) {
+        if release_key.is_empty() {
+            return;
+        }
+        if let Some(cat) = self.catalog.as_ref() {
+            if let Err(e) = cat.record_hook_run(release_key, release_name, hook_name) {
+                self.log_panel
+                    .push_error(format!("could not record hook run: {e}"));
+            }
+        }
+        self.refresh_hooked_index();
     }
 
     pub fn upload_finished(&mut self, success: bool, cancelled: bool) {

@@ -87,9 +87,10 @@ pub fn list_hook_scripts() -> Vec<PathBuf> {
 }
 
 /// Run a single hook script (one returned by [`list_hook_scripts`]) and return
-/// its log lines. Unlike [`run_hooks`] this ignores `no_hooks` and `post_hook`:
-/// the caller chose exactly this script, so only it runs.
-pub fn run_one_hook(path: &Path, ctx: &HookContext) -> Vec<String> {
+/// `(success, log_lines)`. `success` is true only when the script exited 0.
+/// Unlike [`run_hooks`] this ignores `no_hooks` and `post_hook`: the caller
+/// chose exactly this script, so only it runs.
+pub fn run_one_hook(path: &Path, ctx: &HookContext) -> (bool, Vec<String>) {
     let label = path.display().to_string();
     let mut logs = vec![format!("Running hook script: {label}")];
     match run_script(path, ctx) {
@@ -98,10 +99,13 @@ pub fn run_one_hook(path: &Path, ctx: &HookContext) -> Vec<String> {
                 logs.push(format!("  hook> {line}"));
             }
             logs.push(format!("{label}: exited ok"));
+            (true, logs)
         }
-        Err(e) => logs.push(format!("{label}: error: {e}")),
+        Err(e) => {
+            logs.push(format!("{label}: error: {e}"));
+            (false, logs)
+        }
     }
-    logs
 }
 
 fn apply_env(cmd: &mut Command, ctx: &HookContext) {
