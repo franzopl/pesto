@@ -1043,23 +1043,29 @@ fn trigger_prowlarr_search(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
     };
 
     // Derive the release name from the selected path (Browser or Vault).
-    let filename: Option<String> = match app.state {
-        app::AppState::Browser => app
-            .file_tree
-            .get_selected()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned()),
-        app::AppState::NzbVault => app.vault.selected_entry().map(|e| e.name.clone()),
+    // A directory selection keeps its name verbatim; only a file has an
+    // extension to strip.
+    let selection: Option<(String, bool)> = match app.state {
+        app::AppState::Browser => app.file_tree.get_selected().and_then(|p| {
+            p.file_name()
+                .map(|n| (n.to_string_lossy().into_owned(), p.is_dir()))
+        }),
+        app::AppState::NzbVault => app.vault.selected_entry().map(|e| (e.name.clone(), false)),
         _ => None,
     };
 
-    let Some(filename) = filename else {
+    let Some((filename, is_dir)) = selection else {
         app.status_bar.set("Nothing selected to search");
         return;
     };
 
-    // Strip the file extension to get the release name.
-    let release_name = prowlarr::release_name_from_filename(&filename).to_string();
+    // A release folder has no extension — stripping after the last dot would
+    // drop a group tag and break the match. Only a file's extension is stripped.
+    let release_name = if is_dir {
+        filename.clone()
+    } else {
+        prowlarr::release_name_from_filename(&filename).to_string()
+    };
 
     app.status_bar
         .set(format!("Searching Prowlarr for \"{}\"…", release_name));
@@ -1162,11 +1168,19 @@ fn trigger_prowlarr_queue_search(app: &mut App, tx: mpsc::UnboundedSender<AppEve
         let (mut downloaded, mut no_match, mut failed) = (0usize, 0usize, 0usize);
 
         for (i, path) in items.iter().enumerate() {
-            let filename = std::path::Path::new(path)
+            let p = std::path::Path::new(path);
+            let filename = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
-            let release_name = prowlarr::release_name_from_filename(&filename).to_string();
+            // A release folder has no extension — stripping after the last dot
+            // would drop a group tag (e.g. `.x264-GROUP`) and break the match.
+            // Only plain files carry a container/.nzb extension to strip.
+            let release_name = if p.is_dir() {
+                filename.clone()
+            } else {
+                prowlarr::release_name_from_filename(&filename).to_string()
+            };
             let want_key = release_key(&filename);
 
             let log = match prowlarr::search_by_release(&cfg, &client, &release_name, &ids).await {
