@@ -387,6 +387,24 @@ pesto --season ./Season01/
 pesto --season --jobs 2 ./Season01/
 ```
 
+### `--merge-season` — combine per-episode NZBs offline
+
+If a folder was posted with `--each` and you need a combined season NZB after
+the fact, use `--merge-season`. No server connection is required.
+
+```bash
+# Read all .nzb files in the directory, group by season, write one combined NZB per group
+pesto --merge-season ./nzb/uploaded/
+
+# Override the display name in the NZB <head>
+pesto --merge-season ./nzb/uploaded/ --nzb-name "Batwheels Season 2"
+```
+
+Files are grouped by their season identifier (`S01`, `S02`, …). Each group
+produces one output NZB named after the group key (e.g. `Batwheels.S02.nzb`)
+written beside the source files. The terminal prints each included episode with
+its file and segment counts.
+
 ### `--watch` — daemon mode
 
 ```bash
@@ -619,6 +637,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | **Batch / watch** | | | |
 | `--each` | — | off | Post each top-level entry as its own release |
 | `--season` | — | off | Like `--each`, plus a consolidated season `.nzb` |
+| `--merge-season <DIR>` | — | — | Merge per-episode NZBs in DIR into season NZBs (offline) |
 | `--jobs <N>` | — | `1` | Parallel uploads for `--each`/`--season` (0 = CPU count) |
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
 | `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |

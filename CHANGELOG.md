@@ -7,6 +7,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`pesto --merge-season <dir>`** — offline command that reads all `.nzb` files
+  in a directory, groups them by season identifier (`S01`, `S02`, …) and writes
+  one combined season `.nzb` per group beside the source files. No server
+  connection is required. Each included episode is printed to the terminal with
+  its file and segment counts. Useful when a folder was posted with `--each` and
+  a combined season NZB is needed after the fact.
+- **`pesto::nzb::parse()`** — public function that reconstructs a
+  `Vec<PostedSegment>` from an existing `.nzb` document, enabling NZB-level
+  tooling without re-posting.
+
+### Changed
+- **upapasta season pack retry**: when one or more episodes in a `--season`
+  upload fail with segment errors (e.g. server rejects an article with `441`),
+  `upapasta` now automatically retries only the failed episodes. Resume state
+  (`resume = true`) is forced for every episode in a season pack so that
+  already-accepted segments are skipped on retry and only the missing parts are
+  re-sent. If every failed episode recovers, the combined season NZB is
+  generated and forwarded to the indexer as normal.
+- **upapasta Prowlarr HTTP timeout**: increased from 15 s to 90 s to prevent
+  spurious timeouts on slow Prowlarr instances.
+
 ## [0.3.11] — 2026-05-31
 
 ### Removed
