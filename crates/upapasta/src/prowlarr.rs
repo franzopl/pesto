@@ -100,7 +100,7 @@ pub struct CategoryEntry {
 /// Build a shared `reqwest::Client` (reuse across calls).
 pub fn build_client() -> Result<Client> {
     Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(90))
         .build()
         .context("building HTTP client")
 }
