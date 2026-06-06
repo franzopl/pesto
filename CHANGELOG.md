@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.13] — 2026-06-05
+
+### Fixed
+- **Windows compatibility**: `find_binary` now uses `std::env::split_paths`
+  instead of hardcoded `split(':')`, so `7z.exe` and `rar.exe` are correctly
+  located on Windows where PATH uses `;` as separator. Also checks `.exe`,
+  `.cmd`, and `.bat` extensions on Windows.
+
 ## [0.3.12] — 2026-06-03
 
 ### Added
