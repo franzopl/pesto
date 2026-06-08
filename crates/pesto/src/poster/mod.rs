@@ -1865,7 +1865,12 @@ pub async fn check_articles(
         let tx = events_tx.clone();
 
         handles.push(tokio::spawn(async move {
-            let mut slot = ConnectionSlot::new(Arc::clone(&servers), worker_idx);
+            let server_idx = if servers.is_empty() {
+                0
+            } else {
+                worker_idx % servers.len()
+            };
+            let mut slot = ConnectionSlot::new(Arc::clone(&servers), server_idx);
 
             for seg in &chunk {
                 let mut found = false;
