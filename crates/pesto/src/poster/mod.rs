@@ -1642,6 +1642,138 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
     shared.failures.lock().unwrap().push(description);
 }
 
+/// Re-post a subset of already-posted segments whose `Message-ID`s are listed
+/// in `missing_ids`.
+///
+/// Each missing segment is located by path and byte offset, re-encoded as
+/// yEnc, and posted with its **original** `Message-ID` so the existing `.nzb`
+/// remains valid. Returns the number of segments successfully reposted.
+pub async fn repost_missing_segments(
+    config: &Config,
+    all_segments: &[PostedSegment],
+    missing_ids: &[String],
+    events: Option<&ProgressSender>,
+) -> Result<usize> {
+    if missing_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let missing_set: std::collections::HashSet<&str> =
+        missing_ids.iter().map(String::as_str).collect();
+    let to_repost: Vec<&PostedSegment> = all_segments
+        .iter()
+        .filter(|s| missing_set.contains(s.message_id.as_str()))
+        .collect();
+
+    if to_repost.is_empty() {
+        return Ok(0);
+    }
+
+    let server = config
+        .all_servers()
+        .next()
+        .expect("at least one server is configured");
+    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
+
+    let article_size = config.article_size;
+    let mut reposted = 0usize;
+
+    for seg in &to_repost {
+        // Derive the file path from the segment's file_name relative to the
+        // working directory. This matches how InputFile paths are resolved.
+        let path = PathBuf::from(&seg.file_name);
+        let offset = (seg.part as u64 - 1) * article_size as u64;
+
+        let mut file = match File::open(&path).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(file = %seg.file_name, "repost: cannot open file: {e}");
+                continue;
+            }
+        };
+
+        use tokio::io::AsyncSeekExt;
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+            warn!(file = %seg.file_name, offset, "repost: seek failed: {e}");
+            continue;
+        }
+
+        let len = seg.bytes as usize;
+        let mut buf = vec![0u8; len];
+        if let Err(e) = file.read_exact(&mut buf).await {
+            warn!(file = %seg.file_name, "repost: read failed: {e}");
+            continue;
+        }
+
+        let spec = yenc::PartSpec {
+            number: seg.part,
+            total: seg.total,
+            offset,
+        };
+        let encoded = yenc::encode_part(
+            &seg.subject_name,
+            seg.file_size,
+            spec,
+            &buf,
+            config.line_length,
+            None,
+        );
+        let article = Article {
+            message_id: seg.message_id.clone(),
+            from: config.from.clone(),
+            newsgroups: config.groups.clone(),
+            subject: default_subject(&seg.subject_name, seg.part, seg.total),
+            date: None,
+            no_archive: config.no_archive,
+        };
+        let headers = article.build_headers();
+
+        let mut ok = false;
+        for attempt in 1..=config.retries.max(1) {
+            match slot.ensure_connected().await {
+                Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
+                    Ok(()) => {
+                        ok = true;
+                        break;
+                    }
+                    Err(e) => {
+                        slot.invalidate();
+                        warn!(id = %seg.message_id, attempt, "repost attempt failed: {e}");
+                        if attempt < config.retries.max(1) {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!(attempt, "repost: connect failed: {e}");
+                    if attempt < config.retries.max(1) {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+
+        if ok {
+            reposted += 1;
+            if let Some(tx) = events {
+                let _ = tx.send(ProgressEvent::Status {
+                    text: format!("reposted {reposted}/{} missing article(s)", to_repost.len()),
+                });
+            }
+        } else {
+            warn!(id = %seg.message_id, "repost: gave up after all retries");
+        }
+    }
+
+    if let Some(tx) = events {
+        let _ = tx.send(ProgressEvent::Status {
+            text: String::new(),
+        });
+    }
+
+    Ok(reposted)
+}
+
 /// Check that every article in `segments` is retrievable via `STAT`.
 ///
 /// Opens a single NNTP connection (using the primary server from `config`),
