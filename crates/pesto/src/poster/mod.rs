@@ -1690,9 +1690,16 @@ pub async fn check_articles(
                         break;
                     }
                     Ok(false) => {
-                        // Not found yet — wait a bit and retry.
                         if attempt < max_attempts {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            let delay = 20u64;
+                            if let Some(tx) = events {
+                                let _ = tx.send(ProgressEvent::CheckRetrying {
+                                    attempt: attempt as u32,
+                                    max_attempts: max_attempts as u32,
+                                    delay_secs: delay,
+                                });
+                            }
+                            tokio::time::sleep(Duration::from_secs(delay)).await;
                         }
                     }
                     Err(_) => {

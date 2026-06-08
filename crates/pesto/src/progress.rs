@@ -125,6 +125,8 @@ pub enum ProgressEvent {
     CheckProgress { checked: u64, ok: bool },
     /// Post-upload check finished. `failed` is the number of missing articles.
     CheckDone { failed: u64 },
+    /// An article was not found on attempt `attempt`; retrying after `delay_secs`.
+    CheckRetrying { attempt: u32, max_attempts: u32, delay_secs: u64 },
     /// Worker connection `conn` is authenticating with the server.
     ConnectionAuth { conn: usize },
     /// Worker connection `conn` failed an attempt and is retrying.
@@ -279,6 +281,9 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     }
                     ProgressEvent::CheckDone { failed } => {
                         let _ = writeln!(out, r#"{{"type":"check_done","failed":{failed}}}"#);
+                    }
+                    ProgressEvent::CheckRetrying { attempt, max_attempts, delay_secs } => {
+                        let _ = writeln!(out, r#"{{"type":"check_retrying","attempt":{attempt},"max_attempts":{max_attempts},"delay_secs":{delay_secs}}}"#);
                     }
                     // Connection and pool events are noisy and not useful to consumers.
                     ProgressEvent::ConnectionBusy { .. }

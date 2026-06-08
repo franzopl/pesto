@@ -150,6 +150,7 @@ struct RenderState {
     check_checked: u64,
     check_failed: u64,
     check_start: Instant,
+    check_retry_msg: Option<String>,
     // PAR2 encode info block (shown while encoding, inspired by parpar)
     par2_info: Option<Par2Info>,
     // PAR2 input slice encode progress
@@ -205,6 +206,7 @@ impl RenderState {
             check_checked: 0,
             check_failed: 0,
             check_start: Instant::now(),
+            check_retry_msg: None,
             par2_info: None,
             par2_encode_done: 0,
             par2_encode_total: 0,
@@ -386,16 +388,24 @@ impl RenderState {
                 self.check_checked = 0;
                 self.check_failed = 0;
                 self.check_start = Instant::now();
+                self.check_retry_msg = None;
             }
             ProgressEvent::CheckProgress { checked, ok } => {
                 self.check_checked = checked;
+                self.check_retry_msg = None;
                 if !ok {
                     self.check_failed += 1;
                 }
             }
+            ProgressEvent::CheckRetrying { attempt, max_attempts, delay_secs } => {
+                self.check_retry_msg = Some(format!(
+                    "⏳ article not found — retry {attempt}/{max_attempts} in {delay_secs}s",
+                ));
+            }
             ProgressEvent::CheckDone { failed } => {
                 self.check_active = false;
                 self.check_failed = failed;
+                self.check_retry_msg = None;
             }
         }
     }
@@ -946,6 +956,9 @@ impl RenderState {
                 lines.push(ansi(&line, "31")); // red when articles are missing
             } else {
                 lines.push(line);
+            }
+            if let Some(msg) = &self.check_retry_msg {
+                lines.push(ansi(&format!("  {msg}"), "33")); // yellow retry notice
             }
         }
 
