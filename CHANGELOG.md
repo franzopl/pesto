@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.16] — 2026-06-08
+
+### Added
+- **Automatic repost of missing articles**: when `--check` finds articles not
+  confirmed by the server, pesto now automatically re-reads each missing
+  segment from the original file at the correct byte offset, re-encodes it as
+  yEnc, and reposts it with the **same `Message-ID`** so the existing `.nzb`
+  remains valid without regeneration.
+- After reposting, a second STAT pass confirms the articles landed. Terminal
+  output reports each step clearly:
+  ```
+  check: 1 article(s) not found — reposting…
+  check: reposted 1/1 article(s)
+  check: all article(s) confirmed after repost
+  ```
+
 ## [0.3.15] — 2026-06-08
 
 ### Fixed
