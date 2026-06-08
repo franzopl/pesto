@@ -1711,6 +1711,7 @@ fn build_dry_run_config() -> Config {
         check: false,
         check_delay_secs: 0,
         check_retries: 1,
+        check_connections: 1,
         pipeline_depth: 0,
     }
 }

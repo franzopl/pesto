@@ -135,6 +135,7 @@ async fn posts_every_segment_to_a_mock_server() {
         check: false,
         check_delay_secs: 30,
         check_retries: 2,
+        check_connections: 1,
         pipeline_depth: 1,
     };
 
@@ -289,6 +290,7 @@ fn make_config(port: u16) -> Config {
         check: false,
         check_delay_secs: 30,
         check_retries: 2,
+        check_connections: 1,
         pipeline_depth: 1,
     }
 }

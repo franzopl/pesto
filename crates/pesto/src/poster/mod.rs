@@ -1803,69 +1803,103 @@ pub async fn check_articles(
         let mut remaining = config.check_delay_secs;
         while remaining > 0 {
             if let Some(tx) = events {
-                let _ = tx.send(ProgressEvent::CheckWaiting { remaining_secs: remaining });
+                let _ = tx.send(ProgressEvent::CheckWaiting {
+                    remaining_secs: remaining,
+                });
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             remaining -= 1;
         }
     }
 
-    // Open a single connection for the check pass — STAT is lightweight.
-    let server = config
-        .all_servers()
-        .next()
-        .expect("at least one server is configured");
-    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
-
-    let mut missing = Vec::new();
+    // Distribute segments across N parallel workers, each holding its own
+    // NNTP connection. Results (missing IDs and per-article ok/fail) are
+    // collected via shared atomics and a mutex-protected list.
+    let n_workers = config.check_connections.max(1).min(segments.len());
     let max_attempts = config.check_retries.max(1) as usize;
 
-    for (idx, seg) in segments.iter().enumerate() {
-        let mut found = false;
-        for attempt in 1..=max_attempts {
-            match slot.ensure_connected().await {
-                Ok(conn) => match conn.stat(&seg.message_id).await {
-                    Ok(true) => {
-                        found = true;
-                        break;
-                    }
-                    Ok(false) => {
-                        if attempt < max_attempts {
-                            let delay = 20u64;
-                            if let Some(tx) = events {
-                                let _ = tx.send(ProgressEvent::CheckRetrying {
-                                    attempt: attempt as u32,
-                                    max_attempts: max_attempts as u32,
-                                    delay_secs: delay,
-                                });
+    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
+    let missing_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let done_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    // Split segments into chunks — one per worker.
+    let chunks: Vec<Vec<PostedSegment>> = {
+        let mut v: Vec<Vec<PostedSegment>> = (0..n_workers).map(|_| Vec::new()).collect();
+        for (i, seg) in segments.iter().enumerate() {
+            v[i % n_workers].push(seg.clone());
+        }
+        v
+    };
+
+    let events_tx: Option<ProgressSender> = events.cloned();
+
+    let mut handles = Vec::with_capacity(n_workers);
+    for (worker_idx, chunk) in chunks.into_iter().enumerate() {
+        let servers = Arc::clone(&servers);
+        let missing_ids = Arc::clone(&missing_ids);
+        let done_count = Arc::clone(&done_count);
+        let tx = events_tx.clone();
+
+        handles.push(tokio::spawn(async move {
+            let mut slot = ConnectionSlot::new(Arc::clone(&servers), worker_idx);
+
+            for seg in &chunk {
+                let mut found = false;
+                for attempt in 1..=max_attempts {
+                    match slot.ensure_connected().await {
+                        Ok(conn) => match conn.stat(&seg.message_id).await {
+                            Ok(true) => {
+                                found = true;
+                                break;
                             }
-                            tokio::time::sleep(Duration::from_secs(delay)).await;
+                            Ok(false) => {
+                                if attempt < max_attempts {
+                                    let delay = 20u64;
+                                    if let Some(tx) = &tx {
+                                        let _ = tx.send(ProgressEvent::CheckRetrying {
+                                            attempt: attempt as u32,
+                                            max_attempts: max_attempts as u32,
+                                            delay_secs: delay,
+                                        });
+                                    }
+                                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                                }
+                            }
+                            Err(_) => {
+                                slot.invalidate();
+                                if attempt < max_attempts {
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            if attempt < max_attempts {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
                         }
-                    }
-                    Err(_) => {
-                        slot.invalidate();
-                        if attempt < max_attempts {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        }
-                    }
-                },
-                Err(_) => {
-                    if attempt < max_attempts {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
+
+                if !found {
+                    missing_ids.lock().unwrap().push(seg.message_id.clone());
+                }
+
+                let checked = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(tx) = &tx {
+                    let _ = tx.send(ProgressEvent::CheckProgress { checked, ok: found });
+                }
             }
-        }
-
-        if !found {
-            missing.push(seg.message_id.clone());
-        }
-
-        let checked = idx as u64 + 1;
-        if let Some(tx) = events {
-            let _ = tx.send(ProgressEvent::CheckProgress { checked, ok: found });
-        }
+        }));
     }
+
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    let missing = Arc::try_unwrap(missing_ids)
+        .unwrap_or_else(|arc| Mutex::new(arc.lock().unwrap().clone()))
+        .into_inner()
+        .unwrap();
 
     let failed = missing.len() as u64;
     if let Some(tx) = events {
