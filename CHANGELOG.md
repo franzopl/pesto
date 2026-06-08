@@ -7,6 +7,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.14] — 2026-06-08
+
+### Fixed
+- **`--verify` mode**: `stat()` now normalises angle brackets before sending
+  the `STAT` command (RFC 3977 §6.2.4). The sequential verify path was passing
+  `Message-ID`s that already contained `<…>`, causing the server to receive
+  malformed commands like `STAT <<<id@domain>>>` and reject them as "not found",
+  triggering useless retries. Thanks to **@fabricionaweb** for the fix.
+
+### Changed
+- **Docs**: removed references to the `curupira.sh` hook example, which is no
+  longer shipped in the repository. The `generic-indexer.sh` example is now
+  used in all installation snippets.
+
+### Tests
+- Added two async unit tests for `nntp::Connection::stat()` covering both
+  calling conventions: message-id with and without angle brackets.
+
 ## [0.3.13] — 2026-06-05
 
 ### Fixed
