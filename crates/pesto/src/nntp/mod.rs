@@ -233,13 +233,17 @@ impl Connection {
         }
     }
 
-    /// Check whether an article with `message_id` (without angle brackets) is
-    /// present on the server, using the `STAT` command (RFC 3977 §6.2.4).
+    /// Check whether an article with `message_id` is present on the server,
+    /// using the `STAT` command (RFC 3977 §6.2.4).
+    ///
+    /// The `message_id` may be passed with or without angle brackets; they are
+    /// stripped before the command is sent.
     ///
     /// Returns `true` when the server responds 223 (article exists), `false`
     /// on 430 (not found). Any other response code is returned as an error.
     pub async fn stat(&mut self, message_id: &str) -> Result<bool> {
-        let resp = self.command(&format!("STAT <{message_id}>")).await?;
+        let id = message_id.trim_start_matches('<').trim_end_matches('>');
+        let resp = self.command(&format!("STAT <{id}>")).await?;
         match resp.code {
             223 => Ok(true),
             430 => Ok(false),

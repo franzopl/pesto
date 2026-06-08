@@ -1681,13 +1681,10 @@ pub async fn check_articles(
     let max_attempts = config.check_retries.max(1) as usize;
 
     for (idx, seg) in segments.iter().enumerate() {
-        // Strip angle brackets for the STAT command.
-        let id = seg.message_id.trim_start_matches('<').trim_end_matches('>');
-
         let mut found = false;
         for attempt in 1..=max_attempts {
             match slot.ensure_connected().await {
-                Ok(conn) => match conn.stat(id).await {
+                Ok(conn) => match conn.stat(&seg.message_id).await {
                     Ok(true) => {
                         found = true;
                         break;
