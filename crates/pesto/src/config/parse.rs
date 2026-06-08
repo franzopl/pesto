@@ -223,7 +223,8 @@ impl Config {
             check_delay_secs: cli
                 .check_delay_secs
                 .unwrap_or_else(|| file.posting.check_delay.unwrap_or(30)),
-            check: cli.check
+            check: cli
+                .check
                 .unwrap_or_else(|| file.posting.check.unwrap_or(false))
                 || cli.check_delay_secs.is_some(),
             check_retries: cli

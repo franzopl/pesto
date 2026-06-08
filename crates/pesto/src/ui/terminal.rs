@@ -397,7 +397,11 @@ impl RenderState {
                     self.check_failed += 1;
                 }
             }
-            ProgressEvent::CheckRetrying { attempt, max_attempts, delay_secs } => {
+            ProgressEvent::CheckRetrying {
+                attempt,
+                max_attempts,
+                delay_secs,
+            } => {
                 self.check_retry_msg = Some(format!(
                     "⏳ article not found — retry {attempt}/{max_attempts} in {delay_secs}s",
                 ));
