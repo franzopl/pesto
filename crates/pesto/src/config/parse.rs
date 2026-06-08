@@ -228,7 +228,7 @@ impl Config {
                 || cli.check_delay_secs.is_some(),
             check_retries: cli
                 .check_retries
-                .unwrap_or_else(|| file.posting.check_retries.unwrap_or(2)),
+                .unwrap_or_else(|| file.posting.check_retries.unwrap_or(3)),
             // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth

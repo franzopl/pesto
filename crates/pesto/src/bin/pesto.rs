@@ -358,7 +358,7 @@ struct Cli {
     check_delay: Option<u64>,
 
     /// Number of STAT attempts per article during post-check before marking
-    /// it as missing [config: posting.check_retries, default 2].
+    /// it as missing; 20 seconds between each retry [config: posting.check_retries, default 3].
     #[arg(long, value_name = "N")]
     check_retries: Option<u32>,
 
