@@ -814,17 +814,73 @@ async fn run_single_upload(
             eprintln!("  - {failure}");
         }
     }
-    if !check_missing.is_empty() {
+    let check_missing = if !check_missing.is_empty() {
         eprintln!(
-            "check: {} article(s) not found on server:",
+            "check: {} article(s) not found — reposting…",
             check_missing.len()
         );
-        for id in &check_missing {
-            eprintln!("  - {id}");
+
+        let (repost_tx, repost_renderer) = if params.json_mode {
+            pesto::progress::spawn_json_emitter()
+        } else {
+            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+        };
+
+        let reposted = pesto::poster::repost_missing_segments(
+            config,
+            &outcome.segments,
+            &check_missing,
+            Some(&repost_tx),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("check: repost error: {e:#}");
+            0
+        });
+
+        drop(repost_tx);
+        let _ = repost_renderer.await;
+
+        eprintln!(
+            "check: reposted {reposted}/{} article(s)",
+            check_missing.len()
+        );
+
+        // Second STAT pass to confirm reposts landed (no extra delay — they
+        // were just posted so propagation should be immediate).
+        let (verify_tx, verify_renderer) = if params.json_mode {
+            pesto::progress::spawn_json_emitter()
+        } else {
+            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+        };
+        let still_missing =
+            pesto::poster::check_articles(config, &outcome.segments, Some(&verify_tx))
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("check: verify after repost failed: {e:#}");
+                    check_missing.clone()
+                });
+        drop(verify_tx);
+        let _ = verify_renderer.await;
+
+        if still_missing.is_empty() {
+            eprintln!("check: all article(s) confirmed after repost");
+        } else {
+            eprintln!(
+                "check: {} article(s) still missing after repost:",
+                still_missing.len()
+            );
+            for id in &still_missing {
+                eprintln!("  - {id}");
+            }
         }
-    } else if config.check && !config.dry_run && !config.par2_only && !outcome.cancelled {
-        eprintln!("check: all {} article(s) verified", outcome.segments.len());
-    }
+        still_missing
+    } else {
+        if config.check && !config.dry_run && !config.par2_only && !outcome.cancelled {
+            eprintln!("check: all {} article(s) verified", outcome.segments.len());
+        }
+        Vec::new()
+    };
 
     // Write NZB.
     // The canonical copy goes to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb.
