@@ -385,6 +385,7 @@ impl RenderState {
                 }
             }
             ProgressEvent::CheckStarted { total } => {
+                self.started = true; // allow draw_panel when used as a standalone check renderer
                 self.check_active = true;
                 self.check_total = total;
                 self.check_checked = 0;
@@ -394,6 +395,7 @@ impl RenderState {
                 self.check_waiting_secs = None;
             }
             ProgressEvent::CheckWaiting { remaining_secs } => {
+                self.started = true;
                 self.check_active = true;
                 self.check_waiting_secs = Some(remaining_secs);
             }
