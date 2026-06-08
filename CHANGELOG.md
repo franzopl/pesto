@@ -7,6 +7,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.15] — 2026-06-08
+
+### Fixed
+- **`--check-delay` implies `--check`**: passing `--check-delay <N>` alone now
+  activates the post-upload STAT pass automatically. Previously both flags had
+  to be specified together; the delay value was silently ignored without
+  `--check`.
+
+### Changed
+- **Post-upload check retry interval**: increased from 5 s to **20 s** between
+  each STAT retry, giving slow-propagating servers adequate time between
+  attempts.
+- **Default `check_retries`**: raised from 2 to **3** (covers up to 40 s of
+  additional propagation time after `check_delay` expires).
+- **Terminal retry feedback**: when an article is not found on a STAT attempt,
+  a yellow notice is shown in the check panel:
+  `⏳ article not found — retry 1/3 in 20s`. Clears automatically on the next
+  progress update.
+
+### Docs
+- Added a dedicated **Post-upload check** subsection under *Reliability*
+  explaining both verification modes (`--verify` vs `--check`/`--check-delay`),
+  the implied-`--check` behaviour, retry mechanics, and the terminal output.
+- Added `--check`, `--check-delay`, and `--check-retries` to the flags table.
+
 ## [0.3.14] — 2026-06-08
 
 ### Fixed
