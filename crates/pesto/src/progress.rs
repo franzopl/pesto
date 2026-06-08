@@ -125,6 +125,9 @@ pub enum ProgressEvent {
     CheckProgress { checked: u64, ok: bool },
     /// Post-upload check finished. `failed` is the number of missing articles.
     CheckDone { failed: u64 },
+    /// Waiting for server propagation before the STAT pass. `remaining_secs`
+    /// counts down to zero each second.
+    CheckWaiting { remaining_secs: u64 },
     /// An article was not found on attempt `attempt`; retrying after `delay_secs`.
     CheckRetrying {
         attempt: u32,
@@ -285,6 +288,12 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     }
                     ProgressEvent::CheckDone { failed } => {
                         let _ = writeln!(out, r#"{{"type":"check_done","failed":{failed}}}"#);
+                    }
+                    ProgressEvent::CheckWaiting { remaining_secs } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_waiting","remaining_secs":{remaining_secs}}}"#
+                        );
                     }
                     ProgressEvent::CheckRetrying {
                         attempt,

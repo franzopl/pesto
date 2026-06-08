@@ -151,6 +151,7 @@ struct RenderState {
     check_failed: u64,
     check_start: Instant,
     check_retry_msg: Option<String>,
+    check_waiting_secs: Option<u64>,
     // PAR2 encode info block (shown while encoding, inspired by parpar)
     par2_info: Option<Par2Info>,
     // PAR2 input slice encode progress
@@ -207,6 +208,7 @@ impl RenderState {
             check_failed: 0,
             check_start: Instant::now(),
             check_retry_msg: None,
+            check_waiting_secs: None,
             par2_info: None,
             par2_encode_done: 0,
             par2_encode_total: 0,
@@ -389,10 +391,16 @@ impl RenderState {
                 self.check_failed = 0;
                 self.check_start = Instant::now();
                 self.check_retry_msg = None;
+                self.check_waiting_secs = None;
+            }
+            ProgressEvent::CheckWaiting { remaining_secs } => {
+                self.check_active = true;
+                self.check_waiting_secs = Some(remaining_secs);
             }
             ProgressEvent::CheckProgress { checked, ok } => {
                 self.check_checked = checked;
                 self.check_retry_msg = None;
+                self.check_waiting_secs = None;
                 if !ok {
                     self.check_failed += 1;
                 }
@@ -410,6 +418,7 @@ impl RenderState {
                 self.check_active = false;
                 self.check_failed = failed;
                 self.check_retry_msg = None;
+                self.check_waiting_secs = None;
             }
         }
     }
@@ -936,33 +945,45 @@ impl RenderState {
         // --- post-check STAT phase ---------------------------------------
         if self.check_active || (final_draw && self.check_total > 0) {
             let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
-            let frac = if self.check_total > 0 {
-                (self.check_checked as f64 / self.check_total as f64).clamp(0.0, 1.0)
+
+            if let Some(remaining) = self.check_waiting_secs {
+                // Propagation delay: show a pulsing wait bar and countdown.
+                let line = format!("▸ check  waiting for propagation · {remaining}s remaining");
+                lines.push(ansi(&line, "2")); // dim while waiting
             } else {
-                0.0
-            };
-            let bar = render_bar(frac, 10);
-            let failed_str = if self.check_failed > 0 {
-                format!(" · {} missing", self.check_failed)
-            } else {
-                String::new()
-            };
-            let elapsed_str = if !self.check_active {
-                format!(" · elapsed {}", format_duration(elapsed))
-            } else {
-                String::new()
-            };
-            let line = format!(
-                "▸ check [{bar}] {}/{}{failed_str}{elapsed_str}",
-                self.check_checked, self.check_total
-            );
-            if self.check_failed > 0 {
-                lines.push(ansi(&line, "31")); // red when articles are missing
-            } else {
+                let frac = if self.check_total > 0 {
+                    (self.check_checked as f64 / self.check_total as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let bar = render_bar(frac, 26);
+                let elapsed_str = if !self.check_active {
+                    format!(" · elapsed {}", format_duration(elapsed))
+                } else {
+                    String::new()
+                };
+                let line = if self.check_failed > 0 {
+                    let line = format!(
+                        "▸ check  [{}] {}/{} · {} missing{}",
+                        bar, self.check_checked, self.check_total, self.check_failed, elapsed_str
+                    );
+                    ansi(&line, "31") // red — articles missing
+                } else if !self.check_active && self.check_total > 0 {
+                    let line = format!(
+                        "▸ check  [{}] {}/{} · all verified{}",
+                        bar, self.check_checked, self.check_total, elapsed_str
+                    );
+                    ansi(&line, "32") // green — all good
+                } else {
+                    format!(
+                        "▸ check  [{}] {}/{}{}",
+                        bar, self.check_checked, self.check_total, elapsed_str
+                    )
+                };
                 lines.push(line);
-            }
-            if let Some(msg) = &self.check_retry_msg {
-                lines.push(ansi(&format!("  {msg}"), "33")); // yellow retry notice
+                if let Some(msg) = &self.check_retry_msg {
+                    lines.push(ansi(&format!("  {msg}"), "33")); // yellow retry notice
+                }
             }
         }
 

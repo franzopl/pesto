@@ -1797,9 +1797,17 @@ pub async fn check_articles(
         let _ = tx.send(ProgressEvent::CheckStarted { total });
     }
 
-    // Wait for server propagation before checking.
+    // Wait for server propagation, emitting a per-second countdown so the
+    // terminal shows a live "waiting N s remaining" notice.
     if config.check_delay_secs > 0 {
-        tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
+        let mut remaining = config.check_delay_secs;
+        while remaining > 0 {
+            if let Some(tx) = events {
+                let _ = tx.send(ProgressEvent::CheckWaiting { remaining_secs: remaining });
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            remaining -= 1;
+        }
     }
 
     // Open a single connection for the check pass — STAT is lightweight.
