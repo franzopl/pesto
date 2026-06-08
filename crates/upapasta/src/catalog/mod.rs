@@ -38,6 +38,8 @@ pub struct UploadSummary {
     pub upload_duration_s: Option<f64>,
     pub usenet_group: Option<String>,
     pub nzb_path: Option<String>,
+    /// True when the upload finished with segment failures (incomplete release).
+    pub had_failures: bool,
 }
 
 /// Minimal NZB status info used by the file browser for per-file indicators.
@@ -125,6 +127,10 @@ impl Catalog {
                  ON hook_runs(release_key);
             ",
         )?;
+        // Incremental migrations — safe to run on existing databases.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE uploads ADD COLUMN had_failures INTEGER NOT NULL DEFAULT 0;",
+        );
         Ok(())
     }
 
@@ -187,8 +193,8 @@ impl Catalog {
             "INSERT INTO uploads
              (uploaded_at, original_name, category, obfuscated_name, rar_password,
               size_bytes, tmdb_id, usenet_group, nntp_server, par2_redundancy,
-              upload_duration_s, rar_file_count, nzb_path, subject)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+              upload_duration_s, rar_file_count, nzb_path, subject, had_failures)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 r.uploaded_at.to_rfc3339(),
                 r.original_name,
@@ -204,6 +210,7 @@ impl Catalog {
                 r.rar_file_count,
                 r.nzb_path,
                 r.subject,
+                r.had_failures as i64,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -214,13 +221,13 @@ impl Catalog {
     pub fn list(&self, filter: Option<&str>, limit: usize) -> Result<Vec<UploadSummary>> {
         let sql = if filter.is_some() {
             "SELECT id, uploaded_at, original_name, category, size_bytes,
-                    upload_duration_s, usenet_group, nzb_path
+                    upload_duration_s, usenet_group, nzb_path, had_failures
              FROM uploads
              WHERE lower(original_name) LIKE lower(?1)
              ORDER BY uploaded_at DESC LIMIT ?2"
         } else {
             "SELECT id, uploaded_at, original_name, category, size_bytes,
-                    upload_duration_s, usenet_group, nzb_path
+                    upload_duration_s, usenet_group, nzb_path, had_failures
              FROM uploads
              ORDER BY uploaded_at DESC LIMIT ?2"
         };
@@ -391,6 +398,7 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 
 fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadSummary> {
     let dt_str: String = r.get(1)?;
+    let had_failures_int: i64 = r.get(8).unwrap_or(0);
     Ok(UploadSummary {
         id: r.get(0)?,
         uploaded_at: parse_dt(&dt_str),
@@ -400,6 +408,7 @@ fn row_to_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadSummary> {
         upload_duration_s: r.get(5)?,
         usenet_group: r.get(6)?,
         nzb_path: r.get(7)?,
+        had_failures: had_failures_int != 0,
     })
 }
 
@@ -443,6 +452,7 @@ pub struct NewUpload {
     pub rar_file_count: Option<i64>,
     pub nzb_path: Option<String>,
     pub subject: Option<String>,
+    pub had_failures: bool,
 }
 
 impl NewUpload {
@@ -627,6 +637,7 @@ impl LegacyRecord {
             rar_file_count: self.num_arquivos_rar,
             nzb_path: self.caminho_nzb,
             subject: self.subject,
+            had_failures: false,
         }
     }
 }
@@ -640,6 +651,30 @@ pub fn default_catalog_path() -> Option<PathBuf> {
 /// Default legacy JSONL path: ~/.config/upapasta/history.jsonl
 pub fn legacy_jsonl_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "upapasta").map(|d| d.config_dir().join("history.jsonl"))
+}
+
+/// Default persistent upload log path: ~/.local/share/upapasta/upload.log
+pub fn default_log_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "upapasta")
+        .map(|d| d.data_local_dir().join("upload.log"))
+}
+
+/// Append one log line to the persistent upload log file.
+/// Each line is timestamped and terminated with `\n`. Silently no-ops on error
+/// so a missing or unwritable log never crashes the application.
+pub fn append_upload_log(path: &Path, line: &str) {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+        let _ = writeln!(f, "[{ts}] {line}");
+    }
 }
 
 #[cfg(test)]
