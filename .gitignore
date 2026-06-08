@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 /bench/results/
 /bench/par2_out/
 /node_modules/
