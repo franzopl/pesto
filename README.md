@@ -32,6 +32,11 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [PAR2 recovery data](#par2-recovery-data)
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
+  - [Upload resume](#upload-resume)
+  - [Inline verify](#inline-verify---verify)
+  - [Post-upload check](#post-upload-check---check----check-delay)
+  - [Rate limiting](#rate-limiting)
+  - [Dry run](#dry-run)
 - [NZB metadata](#nzb-metadata)
 - [All flags](#all-flags)
 - [Exit codes](#exit-codes)
@@ -422,13 +427,52 @@ pesto --no-resume movie.mkv
 
 ### Post-verification via STAT
 
+pesto has two independent verification modes:
+
+#### Inline verify (`--verify`)
+
+Confirms each article immediately after posting via a `STAT` command. Failed
+checks trigger an automatic repost. Off by default because it adds one
+round-trip per article and is incompatible with pipelining.
+
 ```bash
-# After posting each article, confirm with STAT that the server registered it
 pesto --verify movie.mkv
 ```
 
-Failed STAT checks trigger automatic reposts. Off by default because it adds
-one round-trip per article.
+#### Post-upload check (`--check` / `--check-delay`)
+
+After the entire upload is complete, waits a configurable number of seconds
+for the server to propagate the articles, then runs a `STAT` pass over every
+article. Any article not found is reported as missing.
+
+Passing `--check-delay` alone is enough to activate the check — `--check` is
+implied automatically.
+
+```bash
+# Wait 30 s then verify all articles (default delay)
+pesto --check movie.mkv
+
+# Wait 60 s before verifying (recommended for servers with slow propagation)
+pesto --check-delay 60 movie.mkv
+
+# Explicit: wait 120 s, up to 5 STAT attempts per article (20 s apart)
+pesto --check --check-delay 120 --check-retries 5 movie.mkv
+```
+
+When an article is not found on the first attempt, pesto retries up to
+`--check-retries` times (default **3**) with **20 seconds** between each
+attempt. The terminal shows a live notice during each wait:
+
+```
+▸ check [████      ] 4281/4281 · 1 missing
+  ⏳ article not found — retry 1/3 in 20s
+```
+
+| Flag | Config key | Default | Description |
+|------|-----------|---------|-------------|
+| `--check` | `posting.check` | off | Run a STAT pass after upload |
+| `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass (implies `--check`) |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article; 20 s between each |
 
 ### Rate limiting
 
@@ -597,7 +641,10 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
 | `--dry-run` | — | off | Encode only; never touch the network |
 | `--no-resume` | — | off | Ignore existing state; start fresh |
-| `--verify` | `posting.verify` | off | Confirm each article with STAT |
+| `--verify` | `posting.verify` | off | Confirm each article inline with STAT (one round-trip per article) |
+| `--check` | `posting.check` | off | Run a STAT pass over all articles after the upload completes |
+| `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass; implies `--check` |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article during the check pass; 20 s between each |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
