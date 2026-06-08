@@ -124,6 +124,8 @@ pub struct PostingSection {
     pub check_delay: Option<u64>,
     /// Number of STAT attempts per article during post-check. Default: 2.
     pub check_retries: Option<u32>,
+    /// Number of parallel NNTP connections for the post-check STAT pass. Default: 8.
+    pub check_connections: Option<usize>,
     /// Number of articles to send per connection before reading responses.
     /// Values > 1 enable NNTP pipelining, which cuts per-article RTT cost.
     /// Incompatible with `verify = true`. Default: 1.
@@ -257,6 +259,7 @@ pub struct Overrides {
     pub check: Option<bool>,
     pub check_delay_secs: Option<u64>,
     pub check_retries: Option<u32>,
+    pub check_connections: Option<usize>,
     pub pipeline_depth: Option<usize>,
 }
 
@@ -314,6 +317,7 @@ pub struct Config {
     pub check: bool,
     pub check_delay_secs: u64,
     pub check_retries: u32,
+    pub check_connections: usize,
     pub pipeline_depth: usize,
 }
 

@@ -93,6 +93,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         check: false,
         check_delay_secs: 30,
         check_retries: 2,
+        check_connections: 1,
         pipeline_depth: 1,
     };
 

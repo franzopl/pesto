@@ -61,6 +61,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         check: false,
         check_delay_secs: 30,
         check_retries: 2,
+        check_connections: 1,
         pipeline_depth: 1,
     }
 }

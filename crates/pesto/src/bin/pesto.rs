@@ -362,6 +362,11 @@ struct Cli {
     #[arg(long, value_name = "N")]
     check_retries: Option<u32>,
 
+    /// Number of parallel NNTP connections for the post-check STAT pass
+    /// [config: posting.check_connections, default 8].
+    #[arg(long, value_name = "N")]
+    check_connections: Option<usize>,
+
     /// Name to use when reading from stdin (`-`). Required when a `-` path is
     /// given; determines the filename in the NZB and PAR2 metadata.
     #[arg(long, value_name = "NAME")]
@@ -481,6 +486,7 @@ impl Cli {
             check: if self.check { Some(true) } else { None },
             check_delay_secs: self.check_delay,
             check_retries: self.check_retries,
+            check_connections: self.check_connections,
             pipeline_depth: self.pipeline_depth,
         }
     }
