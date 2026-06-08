@@ -514,6 +514,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stat_accepts_message_id_with_angle_brackets() {
+        // Caller passes "<mid@host>" — brackets must not be doubled on the wire.
+        let (mut conn, mut server) = mock_conn(b"223 0 <mid@host> Article exists\r\n").await;
+        assert!(conn.stat("<mid@host>").await.unwrap());
+
+        // Verify the command sent to the server did not contain double brackets.
+        let mut buf = vec![0u8; 64];
+        let n = tokio::io::AsyncReadExt::read(&mut server, &mut buf)
+            .await
+            .unwrap();
+        let sent = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(
+            sent.contains("STAT <mid@host>"),
+            "unexpected command: {sent}"
+        );
+        assert!(!sent.contains("<<"), "double brackets in: {sent}");
+    }
+
+    #[tokio::test]
+    async fn stat_accepts_message_id_without_angle_brackets() {
+        // Caller passes bare "mid@host" — brackets must still be added correctly.
+        let (mut conn, mut server) = mock_conn(b"223 0 <mid@host> Article exists\r\n").await;
+        assert!(conn.stat("mid@host").await.unwrap());
+
+        let mut buf = vec![0u8; 64];
+        let n = tokio::io::AsyncReadExt::read(&mut server, &mut buf)
+            .await
+            .unwrap();
+        let sent = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(
+            sent.contains("STAT <mid@host>"),
+            "unexpected command: {sent}"
+        );
+    }
+
+    #[tokio::test]
     async fn read_response_detects_closed_connection() {
         // An empty stream simulates a server that closes the connection.
         let (mut conn, server) = mock_conn(b"").await;
