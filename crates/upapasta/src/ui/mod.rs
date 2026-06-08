@@ -1411,11 +1411,20 @@ fn draw_history_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .map(|b| format_bytes(b as u64))
                 .unwrap_or_else(|| "—".to_string());
             let cat_color = category_color(&r.category);
-            let short_name = truncate_str(&r.original_name, 34);
+            let short_name = truncate_str(&r.original_name, 33);
+            let (status_glyph, status_color) = if r.had_failures {
+                (theme::ST_FAILED, Color::Red)
+            } else {
+                (theme::ST_DONE, Color::Green)
+            };
             let line = Line::from(vec![
                 Span::styled(format!("{} ", date), Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{:<35}", short_name),
+                    format!("{} ", status_glyph),
+                    Style::default().fg(status_color),
+                ),
+                Span::styled(
+                    format!("{:<34}", short_name),
                     Style::default().fg(Color::White),
                 ),
                 Span::styled(format!("{:<8}", r.category), Style::default().fg(cat_color)),
@@ -1472,10 +1481,19 @@ fn draw_history_detail(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| "—".to_string());
     let group = r.usenet_group.as_deref().unwrap_or("—");
 
+    let (status_text, status_color) = if r.had_failures {
+        (" ✗ incomplete (segment failures)", Color::Red)
+    } else {
+        (" ✓ complete", Color::Green)
+    };
     let lines = vec![
         Line::from(vec![
             Span::styled(" Name    ", Style::default().fg(Color::DarkGray)),
             Span::raw(r.original_name.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled(" Status  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(status_text, Style::default().fg(status_color)),
         ]),
         Line::from(vec![
             Span::styled(" Date    ", Style::default().fg(Color::DarkGray)),

@@ -1307,13 +1307,14 @@ impl App {
 
         // Per-file / season folder modes record each produced NZB separately via
         // `CatalogRecord`, so the item-level event must not double-record.
-        if success && record_catalog {
+        // Failed uploads are also recorded so they appear in History with a ✗ indicator.
+        if record_catalog {
             let original_name = std::path::Path::new(path)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path)
                 .to_string();
-            self.record_catalog_entry(original_name, size_bytes, nzb_path, duration_s);
+            self.record_catalog_entry(original_name, size_bytes, nzb_path, duration_s, !success);
         }
     }
 
@@ -1324,6 +1325,7 @@ impl App {
         size_bytes: u64,
         nzb_path: Option<PathBuf>,
         duration_s: f64,
+        had_failures: bool,
     ) {
         if let Some(ref cat) = self.catalog {
             let group = self
@@ -1338,6 +1340,7 @@ impl App {
             rec.usenet_group = group;
             rec.nntp_server = server;
             rec.nzb_path = nzb_path.map(|p| p.to_string_lossy().into_owned());
+            rec.had_failures = had_failures;
             if let Err(e) = cat.record(&rec) {
                 self.log_panel.push(format!("catalog record error: {}", e));
             }

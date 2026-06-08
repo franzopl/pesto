@@ -47,6 +47,8 @@ async fn main() -> io::Result<()> {
     app.load_upload_prefs();
     app.load_queue();
 
+    let upload_log_path = crate::catalog::default_log_path();
+
     // Event channel (the backbone of the new architecture)
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -89,7 +91,14 @@ async fn main() -> io::Result<()> {
         }
     });
 
-    let res = run_app(&mut terminal, &mut app, tx.clone(), &mut rx).await;
+    let res = run_app(
+        &mut terminal,
+        &mut app,
+        tx.clone(),
+        &mut rx,
+        upload_log_path.as_deref(),
+    )
+    .await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -108,6 +117,7 @@ async fn run_app<B: ratatui::backend::Backend>(
     app: &mut App,
     tx: mpsc::UnboundedSender<AppEvent>,
     rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+    upload_log_path: Option<&std::path::Path>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -572,6 +582,19 @@ async fn run_app<B: ratatui::backend::Backend>(
                     _ => {}
                 },
                 AppEvent::Progress(msg) => {
+                    // Persist lines that are meaningful for post-session review.
+                    if let Some(lp) = upload_log_path {
+                        let m = msg.trim();
+                        if m.starts_with("===")
+                            || m.starts_with("wrote nzb")
+                            || m.starts_with("wrote nfo")
+                            || m.starts_with("PostOutcome")
+                            || m.starts_with("FAILED")
+                            || m.starts_with("Segment FAILED")
+                        {
+                            crate::catalog::append_upload_log(lp, m);
+                        }
+                    }
                     // Auto-classify ERROR/WARN lines
                     let msg_lower = msg.to_lowercase();
                     if msg_lower.starts_with("error") || msg_lower.starts_with("failed") {
@@ -584,6 +607,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                 }
                 AppEvent::UploadError(msg) => {
+                    if let Some(lp) = upload_log_path {
+                        crate::catalog::append_upload_log(lp, &format!("ERROR: {msg}"));
+                    }
                     app.log_panel.push_error(format!("ERROR: {}", msg));
                     app.status_bar.set("Upload error — see logs for details");
                 }
@@ -623,6 +649,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                     duration_s,
                     record_catalog,
                 } => {
+                    if let Some(lp) = upload_log_path {
+                        let status = if success { "OK" } else { "FAILED" };
+                        crate::catalog::append_upload_log(
+                            lp,
+                            &format!("{status} {path} ({size_bytes} bytes, {duration_s:.1}s)"),
+                        );
+                    }
                     app.item_upload_done(
                         &path,
                         success,
@@ -638,7 +671,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                     nzb_path,
                     duration_s,
                 } => {
-                    app.record_catalog_entry(original_name, size_bytes, nzb_path, duration_s);
+                    app.record_catalog_entry(
+                        original_name,
+                        size_bytes,
+                        nzb_path,
+                        duration_s,
+                        false,
+                    );
                 }
                 AppEvent::UploadFinished { success, cancelled } => {
                     app.upload_finished(success, cancelled);
