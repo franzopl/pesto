@@ -1729,7 +1729,8 @@ pub async fn repost_missing_segments(
         let headers = article.build_headers();
 
         let mut ok = false;
-        for attempt in 1..=config.retries.max(1) {
+        let max_retries = config.retries.max(1);
+        for attempt in 1..=max_retries {
             match slot.ensure_connected().await {
                 Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
                     Ok(()) => {
@@ -1739,14 +1740,24 @@ pub async fn repost_missing_segments(
                     Err(e) => {
                         slot.invalidate();
                         warn!(id = %seg.message_id, attempt, "repost attempt failed: {e}");
-                        if attempt < config.retries.max(1) {
+                        if let Some(tx) = events {
+                            let _ = tx.send(ProgressEvent::Status {
+                                text: format!("repost attempt {attempt}/{max_retries} failed: {e}"),
+                            });
+                        }
+                        if attempt < max_retries {
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
                 },
                 Err(e) => {
                     warn!(attempt, "repost: connect failed: {e}");
-                    if attempt < config.retries.max(1) {
+                    if let Some(tx) = events {
+                        let _ = tx.send(ProgressEvent::Status {
+                            text: format!("repost connect failed (attempt {attempt}): {e}"),
+                        });
+                    }
+                    if attempt < max_retries {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -1762,6 +1773,14 @@ pub async fn repost_missing_segments(
             }
         } else {
             warn!(id = %seg.message_id, "repost: gave up after all retries");
+            if let Some(tx) = events {
+                let _ = tx.send(ProgressEvent::Status {
+                    text: format!(
+                        "repost failed: {} (check logs for details)",
+                        &seg.message_id
+                    ),
+                });
+            }
         }
     }
 
