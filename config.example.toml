@@ -155,8 +155,9 @@ groups = ["alt.binaries.test"]
 # resume — save upload progress to a .pesto-state sidecar file after every
 # article. If the upload is interrupted, re-running the same command resumes
 # from where it stopped instead of starting over. The state file is placed
-# beside the .nzb output (same name, .pesto-state extension) and deleted
-# automatically on successful completion. Default: false.
+# beside the .nzb output (same name, .pesto-state extension). Note: state
+# files are NOT automatically deleted on success — remove them manually.
+# Default: false.
 # resume = false
 
 # nfo — generate a .nfo text file alongside the .nzb. Default: false.

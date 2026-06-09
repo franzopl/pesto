@@ -189,10 +189,6 @@ struct Cli {
     #[arg(long)]
     resume: bool,
 
-    /// Accepted for backward compatibility; no-op (resume is off by default).
-    #[arg(long, hide = true)]
-    no_resume: bool,
-
     /// After posting each article, confirm it is present on the server with
     /// STAT and repost if not found [config: posting.verify, default false].
     #[arg(long)]

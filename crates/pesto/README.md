@@ -439,15 +439,25 @@ deleted if `--watch-done` is not set.
 
 ### Upload resume
 
-If a posting run is interrupted (Ctrl-C, network failure, etc.), `pesto` saves
+If a posting run is interrupted (Ctrl-C, network failure, etc.), `pesto` can save
 state to a `.pesto-state` sidecar file next to the `.nzb`. On the next run with
 the same output path, already-posted articles are skipped and their `Message-ID`s
 are reused, so the final `.nzb` is complete and correct.
 
+Resume is **off by default**. Enable it for a single run:
+
 ```bash
-# Disable resume — ignore any existing state and start from scratch
-pesto --no-resume movie.mkv
+pesto --resume movie.mkv
 ```
+
+Or enable it permanently in config.toml:
+```toml
+[output]
+resume = true
+```
+
+State files are created beside the .nzb and are not automatically cleaned up.
+You can delete them manually when you no longer need them.
 
 ### Post-verification via STAT
 
@@ -626,7 +636,6 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--par2 <PERCENT>` | `posting.par2` | `10` | PAR2 recovery percentage (0 = off) |
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
 | `--dry-run` | — | off | Encode only; never touch the network |
-| `--no-resume` | — | off | Ignore existing state; start fresh |
 | `--verify` | `posting.verify` | off | Confirm each article with STAT |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
