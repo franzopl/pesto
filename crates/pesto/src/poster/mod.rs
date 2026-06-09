@@ -2017,11 +2017,7 @@ pub async fn repost_failed_tasks(
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::Status {
-                    text: format!(
-                        "retry: {}/{} segment(s) recovered",
-                        recovered.len(),
-                        i + 1
-                    ),
+                    text: format!("retry: {}/{} segment(s) recovered", recovered.len(), i + 1),
                 });
             }
         } else {
@@ -2034,7 +2030,9 @@ pub async fn repost_failed_tasks(
     }
 
     if let Some(tx) = events {
-        let _ = tx.send(ProgressEvent::Status { text: String::new() });
+        let _ = tx.send(ProgressEvent::Status {
+            text: String::new(),
+        });
     }
 
     Ok(recovered)
