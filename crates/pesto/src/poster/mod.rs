@@ -18,7 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::article::{
-    default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, Article,
+    default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, random_from,
+    Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
@@ -119,6 +120,7 @@ pub struct PostedSegment {
     pub total: u32,
     pub message_id: String,
     pub bytes: u64,
+    pub from: String,
 }
 
 /// The result of a posting run.
@@ -138,6 +140,10 @@ struct FileMeta {
     real_name: String,
     subject_name: String,
     yenc_name: String,
+    /// Poster identity for this file. In obfuscate mode a fresh random
+    /// identity is generated per file so segments cannot be correlated
+    /// across files by the From header.
+    from: String,
     size: u64,
 }
 
@@ -258,11 +264,11 @@ pub async fn post_files_with_progress_and_cancel(
         // `real_name` is the published name: a relative path like
         // `season01/ep01.mkv` for files found inside a directory argument.
         let real_name = input.name.clone();
-        let (subject_name, yenc_name) = match config.obfuscate {
-            ObfuscateMode::None => (real_name.clone(), real_name.clone()),
+        let (subject_name, yenc_name, from) = match config.obfuscate {
+            ObfuscateMode::None => (real_name.clone(), real_name.clone(), config.from.clone()),
             ObfuscateMode::Full => {
                 let obfuscated = obfuscated_name();
-                (obfuscated.clone(), obfuscated)
+                (obfuscated.clone(), obfuscated, random_from())
             }
         };
         metas.push(Arc::new(FileMeta {
@@ -270,6 +276,7 @@ pub async fn post_files_with_progress_and_cancel(
             real_name,
             subject_name,
             yenc_name,
+            from,
             size: md.len(),
         }));
     }
@@ -1115,11 +1122,15 @@ async fn push_par2_file(
         bytes: size,
     });
 
-    let (subject_name, yenc_name) = match shared.config.obfuscate {
-        ObfuscateMode::None => (real_name.clone(), real_name.clone()),
+    let (subject_name, yenc_name, from) = match shared.config.obfuscate {
+        ObfuscateMode::None => (
+            real_name.clone(),
+            real_name.clone(),
+            shared.config.from.clone(),
+        ),
         ObfuscateMode::Full => {
             let obfuscated = obfuscated_name();
-            (obfuscated.clone(), obfuscated)
+            (obfuscated.clone(), obfuscated, random_from())
         }
     };
 
@@ -1128,6 +1139,7 @@ async fn push_par2_file(
         real_name,
         subject_name,
         yenc_name,
+        from,
         size,
     });
 
@@ -1282,6 +1294,7 @@ async fn worker(
                         total: task.total,
                         message_id: existing_id,
                         bytes: 0,
+                        from: task.meta.from.clone(),
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1311,7 +1324,7 @@ async fn worker(
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
             let article = Article {
                 message_id: message_id.clone(),
-                from: shared.config.from.clone(),
+                from: task.meta.from.clone(),
                 newsgroups: shared.post_group.clone(),
                 subject: default_subject(&task.meta.subject_name, task.part, task.total),
                 date: resolve_date(shared.config.date.as_deref()),
@@ -1341,6 +1354,7 @@ async fn worker(
                     total: p.task.total,
                     message_id: p.message_id,
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
+                    from: p.task.meta.from.clone(),
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1620,6 +1634,7 @@ fn commit_result(
             total: task.total,
             message_id,
             bytes: wire_bytes as u64,
+            from: task.meta.from.clone(),
         });
     } else {
         record_failure(shared, &task.meta, &task, last_err);
@@ -1722,7 +1737,7 @@ pub async fn repost_missing_segments(
         );
         let article = Article {
             message_id: seg.message_id.clone(),
-            from: config.from.clone(),
+            from: seg.from.clone(),
             newsgroups: config.groups.clone(),
             subject: default_subject(&seg.subject_name, seg.part, seg.total),
             date: None,
@@ -2163,6 +2178,7 @@ mod tests {
             real_name: name.into(),
             subject_name: name.into(),
             yenc_name: name.into(),
+            from: String::new(),
             size: 0,
         }
     }

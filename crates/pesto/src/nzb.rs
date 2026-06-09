@@ -211,6 +211,7 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 total: 0, // fixed up when </file> is seen
                 message_id,
                 bytes,
+                from: String::new(),
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
@@ -326,6 +327,7 @@ mod tests {
             total,
             message_id: id.to_string(),
             bytes: 500,
+            from: String::new(),
         }
     }
 
@@ -370,6 +372,7 @@ mod tests {
             total: 1,
             message_id: "<id@x>".to_string(),
             bytes: 500,
+            from: String::new(),
         };
         let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta());
         // The wire subject is obfuscated; the NZB always carries the real filename.
@@ -388,6 +391,7 @@ mod tests {
             total: 1,
             message_id: "<id@x>".to_string(),
             bytes: 500,
+            from: String::new(),
         };
         let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta());
         // Subject on the wire is obfuscated; NZB name= always uses the real filename.
