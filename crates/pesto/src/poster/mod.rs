@@ -18,7 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::article::{
-    default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, Article,
+    default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, random_from,
+    Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
@@ -119,6 +120,7 @@ pub struct PostedSegment {
     pub total: u32,
     pub message_id: String,
     pub bytes: u64,
+    pub from: String,
 }
 
 /// The result of a posting run.
@@ -127,6 +129,9 @@ pub struct PostOutcome {
     pub segments: Vec<PostedSegment>,
     pub failures: Vec<String>,
     pub cancelled: bool,
+    /// The newsgroup(s) actually used for this upload (one entry when multiple
+    /// groups are configured, since `pick_post_group` selects one at random).
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +140,10 @@ struct FileMeta {
     real_name: String,
     subject_name: String,
     yenc_name: String,
+    /// Poster identity for this file. In obfuscate mode a fresh random
+    /// identity is generated per file so segments cannot be correlated
+    /// across files by the From header.
+    from: String,
     size: u64,
 }
 
@@ -144,6 +153,12 @@ struct PostTask {
     total: u32,
     offset: u64,
     data: Vec<u8>,
+    /// Per-article subject token. In paranoid mode each article gets a unique
+    /// value; otherwise this mirrors `meta.subject_name`.
+    subject_name: String,
+    /// Per-article From header. In paranoid mode each article gets a unique
+    /// identity; otherwise this mirrors `meta.from`.
+    from: String,
 }
 
 struct Shared {
@@ -255,12 +270,11 @@ pub async fn post_files_with_progress_and_cancel(
         // `real_name` is the published name: a relative path like
         // `season01/ep01.mkv` for files found inside a directory argument.
         let real_name = input.name.clone();
-        let (subject_name, yenc_name) = match config.obfuscate {
-            ObfuscateMode::None => (real_name.clone(), real_name.clone()),
-            ObfuscateMode::Subject => (obfuscated_name(), real_name.clone()),
-            ObfuscateMode::Full => {
+        let (subject_name, yenc_name, from) = match config.obfuscate {
+            ObfuscateMode::None => (real_name.clone(), real_name.clone(), config.from.clone()),
+            ObfuscateMode::Full | ObfuscateMode::Paranoid => {
                 let obfuscated = obfuscated_name();
-                (obfuscated.clone(), obfuscated)
+                (obfuscated.clone(), obfuscated, random_from())
             }
         };
         metas.push(Arc::new(FileMeta {
@@ -268,6 +282,7 @@ pub async fn post_files_with_progress_and_cancel(
             real_name,
             subject_name,
             yenc_name,
+            from,
             size: md.len(),
         }));
     }
@@ -477,6 +492,7 @@ pub async fn post_files_with_progress_and_cancel(
         segments,
         failures,
         cancelled,
+        groups: shared.post_group.clone(),
     })
 }
 
@@ -920,13 +936,14 @@ async fn producer(
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
                             if tx
-                                .send(PostTask {
-                                    meta: meta.clone(),
-                                    part: i,
-                                    total: total_parts,
+                                .send(make_task(
+                                    meta.clone(),
+                                    i,
+                                    total_parts,
                                     offset,
-                                    data: buf,
-                                })
+                                    buf,
+                                    &shared.config,
+                                ))
                                 .await
                                 .is_err()
                             {
@@ -1112,12 +1129,15 @@ async fn push_par2_file(
         bytes: size,
     });
 
-    let (subject_name, yenc_name) = match shared.config.obfuscate {
-        ObfuscateMode::None => (real_name.clone(), real_name.clone()),
-        ObfuscateMode::Subject => (obfuscated_name(), real_name.clone()),
-        ObfuscateMode::Full => {
+    let (subject_name, yenc_name, from) = match shared.config.obfuscate {
+        ObfuscateMode::None => (
+            real_name.clone(),
+            real_name.clone(),
+            shared.config.from.clone(),
+        ),
+        ObfuscateMode::Full | ObfuscateMode::Paranoid => {
             let obfuscated = obfuscated_name();
-            (obfuscated.clone(), obfuscated)
+            (obfuscated.clone(), obfuscated, random_from())
         }
     };
 
@@ -1126,6 +1146,7 @@ async fn push_par2_file(
         real_name,
         subject_name,
         yenc_name,
+        from,
         size,
     });
 
@@ -1134,13 +1155,14 @@ async fn push_par2_file(
         let mut buf = vec![0u8; len];
         file.read_exact(&mut buf).await?;
         if tx
-            .send(PostTask {
-                meta: meta.clone(),
-                part: i as u32 + 1,
+            .send(make_task(
+                meta.clone(),
+                i as u32 + 1,
                 total,
                 offset,
-                data: buf,
-            })
+                buf,
+                &shared.config,
+            ))
             .await
             .is_err()
         {
@@ -1274,12 +1296,13 @@ async fn worker(
                 {
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
-                        subject_name: task.meta.subject_name.clone(),
+                        subject_name: task.subject_name.clone(),
                         file_size: task.meta.size,
                         part: task.part,
                         total: task.total,
                         message_id: existing_id,
                         bytes: 0,
+                        from: task.from.clone(),
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1309,7 +1332,7 @@ async fn worker(
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
             let article = Article {
                 message_id: message_id.clone(),
-                from: shared.config.from.clone(),
+                from: task.from.clone(),
                 newsgroups: shared.post_group.clone(),
                 subject: default_subject(&task.meta.subject_name, task.part, task.total),
                 date: resolve_date(shared.config.date.as_deref()),
@@ -1333,12 +1356,13 @@ async fn worker(
             for p in pending {
                 shared.results.lock().unwrap().push(PostedSegment {
                     file_name: p.task.meta.real_name.clone(),
-                    subject_name: p.task.meta.subject_name.clone(),
+                    subject_name: p.task.subject_name.clone(),
                     file_size: p.task.meta.size,
                     part: p.task.part,
                     total: p.task.total,
                     message_id: p.message_id,
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
+                    from: p.task.from.clone(),
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1556,6 +1580,32 @@ async fn worker(
 /// When several groups are configured, one is picked at random (once per run)
 /// rather than cross-posting every article to all of them. The whole upload
 /// then stays together in a single group, while the footprint still spreads
+/// Build a `PostTask`, generating per-article subject and From when in
+/// `ObfuscateMode::Paranoid`; otherwise copies them from `FileMeta`.
+fn make_task(
+    meta: Arc<FileMeta>,
+    part: u32,
+    total: u32,
+    offset: u64,
+    data: Vec<u8>,
+    config: &Config,
+) -> PostTask {
+    let (subject_name, from) = if config.obfuscate == ObfuscateMode::Paranoid {
+        (obfuscated_name(), random_from())
+    } else {
+        (meta.subject_name.clone(), meta.from.clone())
+    };
+    PostTask {
+        meta,
+        part,
+        total,
+        offset,
+        data,
+        subject_name,
+        from,
+    }
+}
+
 /// across the configured groups over many runs. With zero or one configured
 /// group the slice is returned as-is.
 fn pick_post_group(groups: &[String]) -> Vec<String> {
@@ -1612,12 +1662,13 @@ fn commit_result(
         }
         shared.results.lock().unwrap().push(PostedSegment {
             file_name: task.meta.real_name.clone(),
-            subject_name: task.meta.subject_name.clone(),
+            subject_name: task.subject_name.clone(),
             file_size: task.meta.size,
             part: task.part,
             total: task.total,
             message_id,
             bytes: wire_bytes as u64,
+            from: task.from.clone(),
         });
     } else {
         record_failure(shared, &task.meta, &task, last_err);
@@ -1720,7 +1771,7 @@ pub async fn repost_missing_segments(
         );
         let article = Article {
             message_id: seg.message_id.clone(),
-            from: config.from.clone(),
+            from: seg.from.clone(),
             newsgroups: config.groups.clone(),
             subject: default_subject(&seg.subject_name, seg.part, seg.total),
             date: None,
@@ -2161,6 +2212,7 @@ mod tests {
             real_name: name.into(),
             subject_name: name.into(),
             yenc_name: name.into(),
+            from: String::new(),
             size: 0,
         }
     }
@@ -2297,6 +2349,8 @@ mod tests {
             total: 5,
             offset: 0,
             data: vec![],
+            subject_name: "ep.mkv".into(),
+            from: String::new(),
         };
         record_failure(&shared, &task.meta, &task, "timeout");
         let failures = shared.failures.lock().unwrap();
@@ -2360,7 +2414,7 @@ mod tests {
             Overrides {
                 dry_run: Some(true),
                 par2: Some(0),
-                obfuscate: Some(crate::config::ObfuscateMode::Subject),
+                obfuscate: Some(crate::config::ObfuscateMode::Full),
                 ..Default::default()
             },
         )

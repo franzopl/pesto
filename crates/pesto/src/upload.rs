@@ -18,6 +18,7 @@ use crate::progress::ProgressSender;
 /// The result of a completed upload pipeline.
 pub struct UploadOutcome {
     pub segments: Vec<PostedSegment>,
+    pub groups: Vec<String>,
     pub cancelled: bool,
     pub had_failures: bool,
     pub nzb_path: Option<PathBuf>,
@@ -76,7 +77,7 @@ pub async fn run_upload(
             })
             .unwrap_or_else(|| "archive".to_string());
 
-        let archive_stem = if config.obfuscate == ObfuscateMode::Full {
+        let archive_stem = if config.obfuscate != ObfuscateMode::None {
             crate::article::obfuscated_name()
         } else {
             archive_stem
@@ -274,13 +275,8 @@ pub async fn run_upload(
                     .or_else(|| effective_password.clone()),
                 category: config.nzb_category.clone(),
             };
-            let xml = crate::nzb::generate(
-                &config.from,
-                &config.groups,
-                &outcome.segments,
-                &nzb_meta,
-                config.obfuscate == ObfuscateMode::Full,
-            );
+            let xml =
+                crate::nzb::generate(&config.from, &outcome.groups, &outcome.segments, &nzb_meta);
             match tokio::fs::write(&out, &xml).await {
                 Ok(()) => {
                     emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
@@ -414,6 +410,7 @@ pub async fn run_upload(
 
     Ok(UploadOutcome {
         segments: outcome.segments,
+        groups: outcome.groups,
         cancelled: outcome.cancelled,
         had_failures,
         nzb_path,

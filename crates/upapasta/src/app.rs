@@ -99,12 +99,12 @@ pub struct UploadSettingsSummary {
 // internal values to display labels only — the stored values (enums, bools and
 // the compress-format token used by the cycle handlers) are untouched.
 
-/// Display label for an obfuscation mode: `None` / `Subject` / `Full`.
+/// Display label for an obfuscation mode.
 pub fn obf_label(mode: ObfuscateMode) -> &'static str {
     match mode {
         ObfuscateMode::None => "None",
-        ObfuscateMode::Subject => "Subject",
         ObfuscateMode::Full => "Full",
+        ObfuscateMode::Paranoid => "Paranoid",
     }
 }
 
@@ -1924,9 +1924,9 @@ impl App {
             .unwrap_or(ObfuscateMode::None);
         let current = self.config_state.overrides.obfuscate.unwrap_or(cfg_default);
         self.config_state.overrides.obfuscate = Some(match current {
-            None => Subject,
-            Subject => Full,
+            None => Full,
             Full => None,
+            Paranoid => None,
         });
         self.status_bar.set("Obfuscate mode changed");
     }
@@ -2165,9 +2165,9 @@ impl App {
 
     fn confirm_cycle_obfuscate(&mut self, _forward: bool) {
         let next = match self.obf_effective() {
-            ObfuscateMode::None => ObfuscateMode::Subject,
-            ObfuscateMode::Subject => ObfuscateMode::Full,
+            ObfuscateMode::None => ObfuscateMode::Full,
             ObfuscateMode::Full => ObfuscateMode::None,
+            ObfuscateMode::Paranoid => ObfuscateMode::None,
         };
         self.config_state.overrides.obfuscate = Some(next);
     }
@@ -2362,8 +2362,10 @@ impl App {
     pub fn obfuscate_legend(&self) -> &'static str {
         match self.obf_effective() {
             ObfuscateMode::None => "None: public subject + real filenames",
-            ObfuscateMode::Subject => "Subject: random subject, real poster + filenames",
             ObfuscateMode::Full => "Full: random subject + poster + filenames",
+            ObfuscateMode::Paranoid => {
+                "Paranoid: unique subject + poster per article (experimental)"
+            }
         }
     }
 

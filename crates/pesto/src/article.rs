@@ -146,10 +146,15 @@ impl Article {
 
 /// Generate a random 32-hex-character name, used to obfuscate the subject and
 /// yEnc file name when posting. Each call yields a fresh value.
+/// Generate a random obfuscated name for use as a subject or yEnc `name=`.
+///
+/// Uses a variable length (10–30 chars) and an alphanumeric charset
+/// (`[A-Za-z0-9]`) so the output has no fixed-length or hex-only fingerprint
+/// that would identify it as pesto-generated. Inspired by juicenet's schizo
+/// mode variable-length randomisation.
 pub fn obfuscated_name() -> String {
-    let high = RandomState::new().build_hasher().finish();
-    let low = RandomState::new().build_hasher().finish();
-    format!("{high:016x}{low:016x}")
+    let len = 10 + (rand_u64() as usize % 21); // 10..=30 chars
+    random_alnum(len)
 }
 
 /// A fresh source of randomness. `RandomState` is seeded by the OS on every
@@ -157,6 +162,23 @@ pub fn obfuscated_name() -> String {
 /// trick used for `Message-ID`s, which keeps `pesto` free of an RNG crate.
 pub(crate) fn rand_u64() -> u64 {
     RandomState::new().build_hasher().finish()
+}
+
+/// Build a string of `len` random alphanumeric characters (`[A-Za-z0-9]`).
+fn random_alnum(len: usize) -> String {
+    const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut s = String::with_capacity(len);
+    let (mut bits, mut left) = (0u64, 0u32);
+    for _ in 0..len {
+        if left < 8 {
+            bits = rand_u64();
+            left = 64;
+        }
+        s.push(ALNUM[(bits & 0xff) as usize % ALNUM.len()] as char);
+        bits >>= 8;
+        left -= 8;
+    }
+    s
 }
 
 /// Build a string of `len` random lowercase ASCII letters.
@@ -178,14 +200,14 @@ fn random_alpha(len: usize) -> String {
 
 /// Generate a random `From` header of the form `Name <local@domain.tld>`.
 ///
-/// Both the display name and the address use a randomised character count so
-/// no two posts share an obvious fingerprint. Used whenever the user has not
-/// pinned a fixed `from` in the config or via `--from`.
+/// All components use variable lengths and alphanumeric charsets. The TLD is
+/// a random 2–5 char string instead of a real TLD, matching juicenet's schizo
+/// mode to avoid fingerprinting by TLD pattern.
 pub fn random_from() -> String {
     let name = random_alpha(5 + (rand_u64() as usize % 8)); // 5..=12 chars
-    let local = random_alpha(6 + (rand_u64() as usize % 9)); // 6..=14 chars
-    let domain = random_alpha(5 + (rand_u64() as usize % 8)); // 5..=12 chars
-    let tld = ["com", "net", "org"][rand_u64() as usize % 3];
+    let local = random_alnum(10 + (rand_u64() as usize % 11)); // 10..=20 chars
+    let domain = random_alnum(5 + (rand_u64() as usize % 6)); // 5..=10 chars
+    let tld = random_alpha(2 + (rand_u64() as usize % 4)); // 2..=5 chars
     let mut display = name;
     display[..1].make_ascii_uppercase();
     format!("{display} <{local}@{domain}.{tld}>")
@@ -313,12 +335,21 @@ mod tests {
     }
 
     #[test]
-    fn obfuscated_name_is_unique_32_hex_chars() {
-        let a = obfuscated_name();
-        let b = obfuscated_name();
-        assert_eq!(a.len(), 32);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, b);
+    fn obfuscated_name_is_variable_length_alnum() {
+        for _ in 0..50 {
+            let s = obfuscated_name();
+            assert!(
+                (10..=30).contains(&s.len()),
+                "expected length 10..=30, got {}",
+                s.len()
+            );
+            assert!(
+                s.chars().all(|c| c.is_ascii_alphanumeric()),
+                "non-alphanumeric char in `{s}`"
+            );
+        }
+        // uniqueness
+        assert_ne!(obfuscated_name(), obfuscated_name());
     }
 
     #[test]

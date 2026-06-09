@@ -138,8 +138,8 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     nzb_dir: Option<PathBuf>,
 
-    /// Obfuscation mode: `none`, `subject` or `full`. A bare `--obfuscate`
-    /// means `full` [config: posting.obfuscate, default none].
+    /// Obfuscation mode: `none`, `full`. A bare `--obfuscate` means `full`
+    /// [config: posting.obfuscate, default none].
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1,
           default_missing_value = "full", require_equals = true)]
     obfuscate: Option<ObfuscateMode>,
@@ -509,6 +509,7 @@ struct UploadParams {
 /// The result of a single upload (one entry in `--each` / `--season`).
 struct UploadResult {
     segments: Vec<PostedSegment>,
+    groups: Vec<String>,
     cancelled: bool,
     had_failures: bool,
 }
@@ -578,7 +579,7 @@ async fn run_single_upload(
             })
             .unwrap_or_else(|| "archive".to_string());
 
-        let archive_stem = if config.obfuscate == ObfuscateMode::Full {
+        let archive_stem = if config.obfuscate != ObfuscateMode::None {
             pesto::article::obfuscated_name()
         } else {
             archive_stem
@@ -920,10 +921,9 @@ async fn run_single_upload(
                 };
                 let xml = pesto::nzb::generate(
                     &config.from,
-                    &config.groups,
+                    &outcome.groups,
                     &outcome.segments,
                     &nzb_meta,
-                    config.obfuscate == pesto::config::ObfuscateMode::Full,
                 );
                 tokio::fs::write(out, &xml)
                     .await
@@ -1102,6 +1102,7 @@ async fn run_single_upload(
 
     Ok(UploadResult {
         segments: outcome.segments,
+        groups: outcome.groups,
         cancelled: outcome.cancelled,
         had_failures: !outcome.failures.is_empty() || !check_missing.is_empty(),
     })
@@ -1152,6 +1153,7 @@ async fn run_batch(
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
     let mut all_segments: Vec<PostedSegment> = Vec::new();
+    let mut all_groups: Vec<String> = Vec::new();
     let mut any_cancelled = false;
     let mut any_failures = false;
 
@@ -1179,6 +1181,11 @@ async fn run_batch(
         match handle.await {
             Ok(Ok(result)) => {
                 all_segments.extend(result.segments);
+                for g in result.groups {
+                    if !all_groups.contains(&g) {
+                        all_groups.push(g);
+                    }
+                }
                 if result.cancelled {
                     any_cancelled = true;
                 }
@@ -1214,13 +1221,7 @@ async fn run_batch(
                     .or_else(|| config.compress_password.clone()),
                 category: config.nzb_category.clone(),
             };
-            let xml = pesto::nzb::generate(
-                &config.from,
-                &config.groups,
-                &all_segments,
-                &nzb_meta,
-                config.obfuscate == pesto::config::ObfuscateMode::Full,
-            );
+            let xml = pesto::nzb::generate(&config.from, &all_groups, &all_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
@@ -1622,7 +1623,7 @@ fn run_merge_season(dir: &Path, display_name: Option<&str>) -> Result<()> {
             password: None,
             category: None,
         };
-        let xml = pesto::nzb::generate(&poster, &all_groups, &combined_segments, &meta, false);
+        let xml = pesto::nzb::generate(&poster, &all_groups, &combined_segments, &meta);
 
         std::fs::write(&output_path, &xml)
             .with_context(|| format!("writing {}", output_path.display()))?;

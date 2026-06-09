@@ -161,7 +161,6 @@ async fn posts_every_segment_to_a_mock_server() {
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
-        false,
     );
     assert_eq!(nzb.matches("<segment ").count(), 3);
     assert!(nzb.contains("<file "));

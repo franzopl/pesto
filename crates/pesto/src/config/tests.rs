@@ -340,7 +340,7 @@ fn toml_posting_section_sets_all_fields() {
         retries = 5
         par2 = 20
         verify = true
-        obfuscate = "subject"
+        obfuscate = "full"
         date = "now"
         no_archive = true
         message_id_domain = "example.com"
@@ -355,7 +355,7 @@ fn toml_posting_section_sets_all_fields() {
     assert_eq!(cfg.retries, 5);
     assert_eq!(cfg.par2, 20);
     assert!(cfg.verify);
-    assert_eq!(cfg.obfuscate, ObfuscateMode::Subject);
+    assert_eq!(cfg.obfuscate, ObfuscateMode::Full);
     assert_eq!(cfg.date.as_deref(), Some("now"));
     assert!(cfg.no_archive);
     assert_eq!(cfg.message_id_domain.as_deref(), Some("example.com"));
