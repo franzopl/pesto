@@ -66,11 +66,9 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
     }
 }
 
-/// `true` when `s` is a 32-character lowercase-hex obfuscated name.
+/// `true` when `s` looks like a pesto obfuscated name: 10–30 alphanumeric chars.
 fn is_obfuscated_name(s: &str) -> bool {
-    s.len() == 32
-        && s.chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    (10..=30).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Build a two-root directory tree under a fresh temp directory and return
