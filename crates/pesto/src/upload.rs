@@ -274,13 +274,8 @@ pub async fn run_upload(
                     .or_else(|| effective_password.clone()),
                 category: config.nzb_category.clone(),
             };
-            let xml = crate::nzb::generate(
-                &config.from,
-                &config.groups,
-                &outcome.segments,
-                &nzb_meta,
-                config.obfuscate == ObfuscateMode::Full,
-            );
+            let xml =
+                crate::nzb::generate(&config.from, &config.groups, &outcome.segments, &nzb_meta);
             match tokio::fs::write(&out, &xml).await {
                 Ok(()) => {
                     emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));

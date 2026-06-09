@@ -48,19 +48,19 @@ pub enum NzbConflict {
     Fail,
 }
 
-/// How much of a post to obfuscate.
+/// Whether to obfuscate a post.
+///
+/// When enabled, both the subject line and the yEnc `name=` field are
+/// randomised on the wire. The real filename is always preserved in the
+/// generated NZB so that download clients can restore it correctly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ObfuscateMode {
-    /// No obfuscation: the real file name appears in the subject and the
-    /// yEnc header.
+    /// No obfuscation: the real file name appears in the subject and yEnc header.
     #[default]
     None,
-    /// Random subject; the yEnc `name=` field keeps the real file name, so a
-    /// standard client still names the download correctly.
-    Subject,
-    /// Random subject *and* random yEnc `name=` field. Nothing on the wire
-    /// reveals the real name — recover it from the `.nzb` or from PAR2 files.
+    /// Randomise subject and yEnc `name=` on the wire; the NZB always carries
+    /// the real filename so download clients work without PAR2 recovery.
     Full,
 }
 

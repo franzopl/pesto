@@ -138,52 +138,23 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     subjects.dedup();
     assert_eq!(subjects.len(), expected.len(), "obfuscated names collided");
 
-    // With obfuscate=full the `name=` attribute must also be the randomised
-    // token, not the real path — nothing in the .nzb reveals the original name.
+    // The NZB always carries the real filename even in full obfuscation mode.
     let nzb = pesto::nzb::generate(
         &config.from,
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
-        true,
     );
     for rel in &expected {
         assert!(
-            !nzb.contains(&format!("name=\"{rel}\"")),
-            "real path `{rel}` leaked into nzb name= attribute"
+            nzb.contains(&format!("name=\"{rel}\"")),
+            "real path `{rel}` missing from nzb name= attribute"
         );
     }
     assert!(
-        !nzb.contains("subject=\"Show") && !nzb.contains("name=\"Show"),
-        "a real path leaked into the nzb"
+        !nzb.contains("subject=\"Show"),
+        "a real path leaked into the nzb subject"
     );
-
-    std::fs::remove_dir_all(&root).ok();
-}
-
-#[tokio::test]
-async fn subject_obfuscation_keeps_relative_path_as_yenc_name() {
-    let (root, args, expected) = build_tree();
-
-    // `subject` mode obfuscates only the subject; the yEnc name — and so the
-    // segment's published name — stays the real relative path.
-    let config = dry_run_config(ObfuscateMode::Subject);
-    let inputs = expand_inputs(&args).unwrap();
-    let outcome = post_files(&config, &inputs).await.unwrap();
-    assert!(
-        outcome.failures.is_empty(),
-        "failures: {:?}",
-        outcome.failures
-    );
-
-    for rel in &expected {
-        let seg = outcome
-            .segments
-            .iter()
-            .find(|s| &s.file_name == rel)
-            .unwrap_or_else(|| panic!("no segment for `{rel}`"));
-        assert!(is_obfuscated_name(&seg.subject_name));
-    }
 
     std::fs::remove_dir_all(&root).ok();
 }

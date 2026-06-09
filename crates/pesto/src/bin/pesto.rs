@@ -923,7 +923,6 @@ async fn run_single_upload(
                     &config.groups,
                     &outcome.segments,
                     &nzb_meta,
-                    config.obfuscate == pesto::config::ObfuscateMode::Full,
                 );
                 tokio::fs::write(out, &xml)
                     .await
@@ -1214,13 +1213,7 @@ async fn run_batch(
                     .or_else(|| config.compress_password.clone()),
                 category: config.nzb_category.clone(),
             };
-            let xml = pesto::nzb::generate(
-                &config.from,
-                &config.groups,
-                &all_segments,
-                &nzb_meta,
-                config.obfuscate == pesto::config::ObfuscateMode::Full,
-            );
+            let xml = pesto::nzb::generate(&config.from, &config.groups, &all_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
@@ -1622,7 +1615,7 @@ fn run_merge_season(dir: &Path, display_name: Option<&str>) -> Result<()> {
             password: None,
             category: None,
         };
-        let xml = pesto::nzb::generate(&poster, &all_groups, &combined_segments, &meta, false);
+        let xml = pesto::nzb::generate(&poster, &all_groups, &combined_segments, &meta);
 
         std::fs::write(&output_path, &xml)
             .with_context(|| format!("writing {}", output_path.display()))?;

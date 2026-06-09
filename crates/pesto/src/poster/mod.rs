@@ -257,7 +257,6 @@ pub async fn post_files_with_progress_and_cancel(
         let real_name = input.name.clone();
         let (subject_name, yenc_name) = match config.obfuscate {
             ObfuscateMode::None => (real_name.clone(), real_name.clone()),
-            ObfuscateMode::Subject => (obfuscated_name(), real_name.clone()),
             ObfuscateMode::Full => {
                 let obfuscated = obfuscated_name();
                 (obfuscated.clone(), obfuscated)
@@ -1114,7 +1113,6 @@ async fn push_par2_file(
 
     let (subject_name, yenc_name) = match shared.config.obfuscate {
         ObfuscateMode::None => (real_name.clone(), real_name.clone()),
-        ObfuscateMode::Subject => (obfuscated_name(), real_name.clone()),
         ObfuscateMode::Full => {
             let obfuscated = obfuscated_name();
             (obfuscated.clone(), obfuscated)
@@ -2360,7 +2358,7 @@ mod tests {
             Overrides {
                 dry_run: Some(true),
                 par2: Some(0),
-                obfuscate: Some(crate::config::ObfuscateMode::Subject),
+                obfuscate: Some(crate::config::ObfuscateMode::Full),
                 ..Default::default()
             },
         )
