@@ -7,6 +7,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.18] — 2026-06-08
+
+### Added
+- **`--obfuscate=paranoid` mode** (experimental, hidden from `--help`): every
+  individual article gets a unique, freshly generated subject and `From` header,
+  making segment grouping by wire metadata impossible. Requires the NZB to
+  download. Must be set explicitly; the `--obfuscate` flag alone still selects
+  `full`.
+- **Per-file `From` rotation in `full` obfuscation**: each file in a batch
+  gets a distinct random sender address, improving anonymity across multi-file
+  uploads.
+- **Variable-length alphanumeric obfuscated names** (schizo-style): subjects
+  and yEnc `name=` fields are now 10–30 random `[A-Za-z0-9]` characters
+  instead of a fixed 32-character hex string, eliminating the fingerprint that
+  made obfuscated posts identifiable.
+- **Random TLD in `From` header**: the generated sender domain now uses a
+  random 2–5 character alphabetic TLD instead of a fixed list of real TLDs.
+- **`PostOutcome.groups`**: the actual newsgroup used for each post is now
+  surfaced in the outcome, enabling accurate NZB generation when only one of
+  many configured groups is selected per post.
+
+### Fixed
+- **NZB `name=` attribute carried an obfuscated filename**: `--obfuscate=full`
+  was randomising the `name=` attribute in the generated `.nzb`, breaking
+  download clients that rely on it to restore the original filename without
+  PAR2. The NZB now always carries the real filename; only the wire subject and
+  yEnc `name=` field are obfuscated.
+- **NZB `<groups>` listed all configured groups**: the NZB was including every
+  group from `config.groups` even when only one was actually used for posting.
+  The actual posted group is now written to the NZB.
+
+### Changed
+- **`ObfuscateMode::Subject` removed**: the mode that only obfuscated the
+  subject (not the yEnc `name=`) has been removed. Use `full` for standard
+  obfuscation. (Existing configs using `subject` will need to be updated.)
+- **`--obfuscate` without a value now selects `full`** (unchanged from before,
+  but now explicitly documented).
+
+### Docs
+- Updated `ROADMAP.md` with completed obfuscation milestones.
+
 ## [0.3.17] — 2026-06-08
 
 ### Added
