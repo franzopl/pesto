@@ -127,6 +127,9 @@ pub struct PostOutcome {
     pub segments: Vec<PostedSegment>,
     pub failures: Vec<String>,
     pub cancelled: bool,
+    /// The newsgroup(s) actually used for this upload (one entry when multiple
+    /// groups are configured, since `pick_post_group` selects one at random).
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +479,7 @@ pub async fn post_files_with_progress_and_cancel(
         segments,
         failures,
         cancelled,
+        groups: shared.post_group.clone(),
     })
 }
 

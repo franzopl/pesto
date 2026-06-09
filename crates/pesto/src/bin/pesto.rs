@@ -509,6 +509,7 @@ struct UploadParams {
 /// The result of a single upload (one entry in `--each` / `--season`).
 struct UploadResult {
     segments: Vec<PostedSegment>,
+    groups: Vec<String>,
     cancelled: bool,
     had_failures: bool,
 }
@@ -920,7 +921,7 @@ async fn run_single_upload(
                 };
                 let xml = pesto::nzb::generate(
                     &config.from,
-                    &config.groups,
+                    &outcome.groups,
                     &outcome.segments,
                     &nzb_meta,
                 );
@@ -1101,6 +1102,7 @@ async fn run_single_upload(
 
     Ok(UploadResult {
         segments: outcome.segments,
+        groups: outcome.groups,
         cancelled: outcome.cancelled,
         had_failures: !outcome.failures.is_empty() || !check_missing.is_empty(),
     })
@@ -1151,6 +1153,7 @@ async fn run_batch(
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
     let mut all_segments: Vec<PostedSegment> = Vec::new();
+    let mut all_groups: Vec<String> = Vec::new();
     let mut any_cancelled = false;
     let mut any_failures = false;
 
@@ -1178,6 +1181,11 @@ async fn run_batch(
         match handle.await {
             Ok(Ok(result)) => {
                 all_segments.extend(result.segments);
+                for g in result.groups {
+                    if !all_groups.contains(&g) {
+                        all_groups.push(g);
+                    }
+                }
                 if result.cancelled {
                     any_cancelled = true;
                 }
@@ -1213,7 +1221,7 @@ async fn run_batch(
                     .or_else(|| config.compress_password.clone()),
                 category: config.nzb_category.clone(),
             };
-            let xml = pesto::nzb::generate(&config.from, &config.groups, &all_segments, &nzb_meta);
+            let xml = pesto::nzb::generate(&config.from, &all_groups, &all_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
