@@ -138,7 +138,6 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
 
     // The NZB always carries the real filename even in full obfuscation mode.
     let nzb = pesto::nzb::generate(
-        &config.from,
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
@@ -152,6 +151,67 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     assert!(
         !nzb.contains("subject=\"Show"),
         "a real path leaked into the nzb subject"
+    );
+
+    // Verify that each <file> element has a distinct poster (from) value.
+    let mut posters: Vec<&str> = Vec::new();
+    for line in nzb.lines() {
+        if line.trim().starts_with("<file ") {
+            if let Some(start) = line.find("poster=\"") {
+                let start = start + 8;
+                if let Some(end) = line[start..].find('"') {
+                    posters.push(&line[start..start + end]);
+                }
+            }
+        }
+    }
+    // Distinct files should have distinct posters in full obfuscation mode.
+    let unique_posters: std::collections::HashSet<_> = posters.iter().copied().collect();
+    assert_eq!(
+        unique_posters.len(),
+        posters.len(),
+        "posters should be unique per file in full obfuscation mode"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn full_obfuscation_nzb_reflects_random_dates() {
+    let (root, args, _expected) = build_tree();
+
+    let mut config = dry_run_config(ObfuscateMode::Full);
+    config.date = Some("random".into());
+    let inputs = expand_inputs(&args).unwrap();
+    let outcome = post_files(&config, &inputs).await.unwrap();
+
+    let nzb = pesto::nzb::generate(
+        &config.groups,
+        &outcome.segments,
+        &pesto::nzb::NzbMeta::default(),
+    );
+
+    // Collect all date="..." values from the NZB.
+    let mut dates: Vec<u64> = Vec::new();
+    for line in nzb.lines() {
+        if line.trim().starts_with("<file ") {
+            if let Some(start) = line.find("date=\"") {
+                let start = start + 6;
+                if let Some(end) = line[start..].find('"') {
+                    let date_str = &line[start..start + end];
+                    if let Ok(ts) = date_str.parse::<u64>() {
+                        dates.push(ts);
+                    }
+                }
+            }
+        }
+    }
+
+    // Distinct files should have distinct dates when date = random.
+    let unique_dates: std::collections::HashSet<_> = dates.iter().copied().collect();
+    assert!(
+        unique_dates.len() > 1 || dates.len() <= 1,
+        "random dates should vary across files; got {dates:?}"
     );
 
     std::fs::remove_dir_all(&root).ok();

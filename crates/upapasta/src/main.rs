@@ -1594,8 +1594,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                             .or_else(|| config.compress_password.clone()),
                         category: config.nzb_category.clone(),
                     };
-                    let xml =
-                        pesto::nzb::generate(&config.from, &config.groups, &all_segments, &meta);
+                    let xml = pesto::nzb::generate(&config.groups, &all_segments, &meta);
                     match std::fs::write(&out, xml) {
                         Ok(()) => {
                             let _ = tx.send(AppEvent::Progress(format!(

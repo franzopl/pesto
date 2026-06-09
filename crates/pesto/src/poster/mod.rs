@@ -121,6 +121,9 @@ pub struct PostedSegment {
     pub message_id: String,
     pub bytes: u64,
     pub from: String,
+    /// Unix timestamp of the `Date` header used on the wire, or `None` when
+    /// the config omitted the date (so the server supplies it).
+    pub date: Option<u64>,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -1296,6 +1299,8 @@ async fn worker(
             headers: Vec<u8>,
             encoded: yenc::EncodedPart,
             encode_time: Duration,
+            /// Unix timestamp of the Date header used for this article.
+            date: Option<u64>,
         }
         let mut pending: Vec<Pending> = Vec::with_capacity(batch.len());
 
@@ -1312,6 +1317,7 @@ async fn worker(
                     .get(&task.meta.real_name, task.part)
                     .map(str::to_string)
                 {
+                    let (_, date_ts) = resolve_date(shared.config.date.as_deref());
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
                         subject_name: task.subject_name.clone(),
@@ -1321,6 +1327,7 @@ async fn worker(
                         message_id: existing_id,
                         bytes: 0,
                         from: task.from.clone(),
+                        date: date_ts,
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1348,12 +1355,13 @@ async fn worker(
             );
             let encode_time = t_enc.elapsed();
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
+            let (date_str, date_ts) = resolve_date(shared.config.date.as_deref());
             let article = Article {
                 message_id: message_id.clone(),
                 from: task.from.clone(),
                 newsgroups: shared.post_group.clone(),
                 subject: default_subject(&task.meta.subject_name, task.part, task.total),
-                date: resolve_date(shared.config.date.as_deref()),
+                date: date_str,
                 no_archive: shared.config.no_archive,
             };
             let headers = article.build_headers();
@@ -1363,6 +1371,7 @@ async fn worker(
                 headers,
                 encoded,
                 encode_time,
+                date: date_ts,
             });
         }
 
@@ -1381,6 +1390,7 @@ async fn worker(
                     message_id: p.message_id,
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
                     from: p.task.from.clone(),
+                    date: p.date,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1489,6 +1499,7 @@ async fn worker(
                 p.headers.len() + p.encoded.body.len(),
                 posted,
                 &last_err,
+                p.date,
             );
         } else {
             // ── Pipelined path ───────────────────────────────────────────────
@@ -1584,6 +1595,7 @@ async fn worker(
                     p.headers.len() + p.encoded.body.len(),
                     posted,
                     &last_err,
+                    p.date,
                 );
             }
         }
@@ -1636,15 +1648,26 @@ fn pick_post_group(groups: &[String]) -> Vec<String> {
     }
 }
 
-/// Compute the `Date:` header value from the config `date` option.
+/// Compute the `Date:` header value and its Unix timestamp from the config
+/// `date` option.
 ///
-/// - `None` / `"now"` → current UTC time formatted as RFC 2822
-/// - `"random"` → random time within the last 30 days
-/// - any other string → used verbatim (caller-supplied RFC 2822 timestamp)
-fn resolve_date(mode: Option<&str>) -> Option<String> {
+/// - `None` → `(None, None)` — header omitted, server fills it in.
+/// - `"now"` → current UTC time formatted as RFC 2822.
+/// - `"random"` → random time within the last 30 days.
+/// - any other string → used verbatim (caller-supplied RFC 2822 timestamp).
+///
+/// Returns `(rfc_2822_string, unix_timestamp_secs)`.
+fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
     match mode {
-        None => None,
-        Some("now") => Some(format_rfc2822(SystemTime::now())),
+        None => (None, None),
+        Some("now") => {
+            let now = SystemTime::now();
+            let ts = now
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs();
+            (Some(format_rfc2822(now)), Some(ts))
+        }
         Some("random") => {
             // Pick a random offset in [0, 30 days) before now.
             use std::collections::hash_map::RandomState;
@@ -1654,9 +1677,17 @@ fn resolve_date(mode: Option<&str>) -> Option<String> {
             let t = SystemTime::now()
                 .checked_sub(Duration::from_secs(offset_secs))
                 .unwrap_or(UNIX_EPOCH);
-            Some(format_rfc2822(t))
+            let ts = t
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs();
+            (Some(format_rfc2822(t)), Some(ts))
         }
-        Some(fixed) => Some(fixed.to_string()),
+        Some(fixed) => {
+            // For fixed dates we don't parse back to unix; the NZB will fall
+            // back to SystemTime::now() if the caller needs a timestamp.
+            (Some(fixed.to_string()), None)
+        }
     }
 }
 
@@ -1669,6 +1700,7 @@ fn commit_result(
     wire_bytes: usize,
     posted: bool,
     last_err: &str,
+    date: Option<u64>,
 ) {
     if posted {
         if let Some(resume) = &shared.resume {
@@ -1687,6 +1719,7 @@ fn commit_result(
             message_id,
             bytes: wire_bytes as u64,
             from: task.from.clone(),
+            date,
         });
     } else {
         record_failure(shared, &task.meta, &task, last_err);
@@ -1933,12 +1966,13 @@ pub async fn repost_failed_tasks(
             None,
         );
         let message_id = generate_message_id(config.message_id_domain.as_deref());
+        let (date_str, date_ts) = resolve_date(config.date.as_deref());
         let article = Article {
             message_id: message_id.clone(),
             from: task.from.clone(),
             newsgroups: groups.to_vec(),
             subject: default_subject(&task.subject_name, task.part, task.total),
-            date: resolve_date(config.date.as_deref()),
+            date: date_str,
             no_archive: config.no_archive,
         };
         let headers = article.build_headers();
@@ -1979,6 +2013,7 @@ pub async fn repost_failed_tasks(
                 message_id,
                 bytes: wire_bytes,
                 from: task.from.clone(),
+                date: date_ts,
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::Status {
@@ -2258,27 +2293,33 @@ mod tests {
 
     #[test]
     fn resolve_date_none_omits_header() {
-        assert_eq!(resolve_date(None), None);
+        assert_eq!(resolve_date(None), (None, None));
     }
 
     #[test]
     fn resolve_date_now_returns_rfc2822() {
-        let d = resolve_date(Some("now")).unwrap();
+        let (d, ts) = resolve_date(Some("now"));
+        let d = d.unwrap();
         // Should look like "Mon, 01 Jan 2024 00:00:00 +0000".
         assert!(d.ends_with("+0000"));
         assert!(d.contains(':'));
+        assert!(ts.unwrap() > 0);
     }
 
     #[test]
     fn resolve_date_random_returns_rfc2822() {
-        let d = resolve_date(Some("random")).unwrap();
+        let (d, ts) = resolve_date(Some("random"));
+        let d = d.unwrap();
         assert!(d.ends_with("+0000"));
+        assert!(ts.unwrap() > 0);
     }
 
     #[test]
     fn resolve_date_fixed_is_returned_verbatim() {
         let fixed = "Tue, 14 Jan 2025 10:00:00 +0000";
-        assert_eq!(resolve_date(Some(fixed)).as_deref(), Some(fixed));
+        let (d, ts) = resolve_date(Some(fixed));
+        assert_eq!(d.as_deref(), Some(fixed));
+        assert!(ts.is_none());
     }
 
     // ── RateLimiter ───────────────────────────────────────────────────────────

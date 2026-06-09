@@ -157,7 +157,6 @@ async fn posts_every_segment_to_a_mock_server() {
 
     // The collected segments must be enough to build a valid .nzb.
     let nzb = pesto::nzb::generate(
-        &config.from,
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
