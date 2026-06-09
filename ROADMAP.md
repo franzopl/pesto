@@ -453,3 +453,26 @@ everything in a new `pesto::upload::run_upload()` public API.
   - `nzb_dir/downloaded/` — NZBs fetched from Prowlarr/indexers (badge `↓` yellow)
   - `nzb_dir/` and any other subdirectory — manually placed NZBs (badge `m` gray)
 - [x] **Fully recursive vault scan** — `collect_nzbs_recursive()` walks all subdirectories at any depth; origin derived from immediate parent folder name
+
+---
+
+## Deferred / Intentionally Not Implemented
+
+### Subject file counter `[N/M]`
+
+**Status:** Intentionally deferred.  
+**Rationale:** Tools like `nyuu` prefix subjects with `[filenum/total]` (e.g. `[1/5] "movie.mkv" yEnc (1/3)`).
+This requires knowing the total file count before posting the first article.
+
+In `pesto`, PAR2 files are generated asynchronously and appended to the queue after data files begin posting.
+Two-pass approaches (compute PAR2 first, then post) would add latency and complexity.
+One-pass with subject rewriting would require reposting already-sent articles.
+
+References:
+- yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
+- Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
+
+This is a cosmetic nicety, _not a spec requirement_. If needed in the future, options include:
+- Count only source files (ignore PAR2 in total) — simple but inconsistent
+- Two-pass mode (compute PAR2 before posting) — adds latency
+- Post-PAR2-only subjects without counters — already works today

@@ -193,12 +193,20 @@ pub fn random_from() -> String {
 
 /// Build a default subject line for one part of a file.
 ///
-/// Single-part files use just the name; multi-part files append `(part/total)`.
+/// Follows the yEnc draft v1.3 specification:
+/// - Primary: <http://www.yenc.org/yenc-draft.1.3.txt>
+/// - Mirror:  <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
+///
+/// Formats:
+/// - Single-part: `"name" yEnc`
+/// - Multi-part:  `"name" yEnc (part/total)`
+///
+/// See ROADMAP.md "Subject file counter" for why `[N/M]` prefixes are omitted.
 pub fn default_subject(name: &str, part: u32, total: u32) -> String {
     if total > 1 {
-        format!("{name} ({part}/{total})")
+        format!("\"{name}\" yEnc ({part}/{total})")
     } else {
-        name.to_string()
+        format!("\"{name}\" yEnc")
     }
 }
 
@@ -232,14 +240,14 @@ mod tests {
             message_id: "<id@pesto>".into(),
             from: "poster <p@example.com>".into(),
             newsgroups: vec!["alt.binaries.test".into(), "alt.binaries.misc".into()],
-            subject: "file.bin (1/2)".into(),
+            subject: "\"file.bin\" yEnc (1/2)".into(),
             date: None,
             no_archive: false,
         };
         let serialized = String::from_utf8(article.serialize(b"BODY")).unwrap();
         assert!(serialized.contains("From: poster <p@example.com>\r\n"));
         assert!(serialized.contains("Newsgroups: alt.binaries.test,alt.binaries.misc\r\n"));
-        assert!(serialized.contains("Subject: file.bin (1/2)\r\n"));
+        assert!(serialized.contains("Subject: \"file.bin\" yEnc (1/2)\r\n"));
         assert!(serialized.contains("Message-ID: <id@pesto>\r\n"));
         assert!(serialized.ends_with("\r\n\r\nBODY"));
     }
@@ -290,8 +298,8 @@ mod tests {
 
     #[test]
     fn default_subject_handles_single_and_multi_part() {
-        assert_eq!(default_subject("file.bin", 1, 1), "file.bin");
-        assert_eq!(default_subject("file.bin", 2, 5), "file.bin (2/5)");
+        assert_eq!(default_subject("file.bin", 1, 1), "\"file.bin\" yEnc");
+        assert_eq!(default_subject("file.bin", 2, 5), "\"file.bin\" yEnc (2/5)");
     }
 
     #[test]
@@ -360,13 +368,13 @@ mod tests {
     #[test]
     fn default_subject_single_part_has_no_parens() {
         let s = default_subject("movie.mkv", 1, 1);
-        assert!(!s.contains('('));
-        assert_eq!(s, "movie.mkv");
+        assert!(!s.contains("(1/1)"));
+        assert_eq!(s, "\"movie.mkv\" yEnc");
     }
 
     #[test]
     fn default_subject_last_part() {
-        assert_eq!(default_subject("f.bin", 10, 10), "f.bin (10/10)");
+        assert_eq!(default_subject("f.bin", 10, 10), "\"f.bin\" yEnc (10/10)");
     }
 
     // ── format_rfc2822 additional edge cases ──────────────────────────────────

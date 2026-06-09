@@ -271,8 +271,30 @@ fn xml_text(line: &str, tag: &str) -> Option<String> {
     Some(xml_unescape(&line[open_end + 1..close_start]))
 }
 
-/// Strip the ` (N/M)` part-indicator suffix from a subject line.
+/// Strip the `"name" yEnc (N/M)` or `"name" yEnc` wrapper from a subject line.
+///
+/// Handles both the current yEnc-spec format and the legacy `name (N/M)` format.
+/// Backward compatibility is needed because `pesto --merge-season` can read
+/// NZBs created before the yEnc spec fix (e.g. subjects like `movie.mkv (1/3)`).
 fn strip_part_suffix(subject: &str) -> String {
+    let unquote = |s: &str| {
+        if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+            s[1..s.len() - 1].to_string()
+        } else {
+            s.to_string()
+        }
+    };
+
+    // New format: "name" yEnc (N/M)  →  strip " yEnc (N/M)"
+    // New format: "name" yEnc        →  strip " yEnc"
+    if let Some(pos) = subject.rfind(" yEnc") {
+        let tail = &subject[pos + 5..];
+        if tail.is_empty() || tail.starts_with(" (") {
+            return unquote(&subject[..pos]);
+        }
+    }
+
+    // Legacy format: name (N/M)
     if let Some(pos) = subject.rfind(" (") {
         let tail = &subject[pos..];
         if tail.contains('/') && tail.ends_with(')') {
@@ -380,8 +402,8 @@ mod tests {
             &no_meta(),
             false,
         );
-        // The subject is the obfuscated name; the real name lives in `name`.
-        assert!(xml.contains("subject=\"deadbeefcafe0000\""));
+        // The subject is the obfuscated name wrapped in quotes; the real name lives in `name`.
+        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
         assert!(!xml.contains("subject=\"secret-movie.mkv\""));
     }
@@ -405,7 +427,7 @@ mod tests {
             true,
         );
         // Both subject= and name= must show only the obfuscated token.
-        assert!(xml.contains("subject=\"deadbeefcafe0000\""));
+        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc\""));
         assert!(xml.contains("name=\"deadbeefcafe0000\""));
         assert!(!xml.contains("secret-movie.mkv"));
     }
@@ -467,7 +489,7 @@ mod tests {
         assert!(xml.contains("name=\"movie.par2\""));
         assert!(xml.contains("name=\"movie.vol00+01.par2\""));
         // Multi-part subject rendered correctly for movie.mkv.
-        assert!(xml.contains("subject=\"movie.mkv (1/3)\""));
+        assert!(xml.contains("subject=\"&quot;movie.mkv&quot; yEnc (1/3)\""));
     }
 
     #[test]
@@ -494,7 +516,7 @@ mod tests {
             &no_meta(),
             false,
         );
-        assert!(xml.contains("subject=\"file.bin\""));
+        assert!(xml.contains("subject=\"&quot;file.bin&quot; yEnc\""));
         assert!(!xml.contains("(1/1)"));
     }
 
@@ -538,7 +560,7 @@ mod tests {
             &no_meta(),
             false,
         );
-        assert!(xml.contains("subject=\"big.bin (1/5)\""));
+        assert!(xml.contains("subject=\"&quot;big.bin&quot; yEnc (1/5)\""));
         assert!(!xml.contains("(2/5)"));
     }
 
@@ -638,5 +660,20 @@ mod tests {
         let parsed = parse(&xml).expect("parse must succeed");
         // message_id must carry angle brackets.
         assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
+    }
+
+    #[test]
+    fn strip_part_suffix_new_format_multi_part() {
+        assert_eq!(strip_part_suffix("\"name\" yEnc (1/3)"), "name");
+    }
+
+    #[test]
+    fn strip_part_suffix_new_format_single_part() {
+        assert_eq!(strip_part_suffix("\"name\" yEnc"), "name");
+    }
+
+    #[test]
+    fn strip_part_suffix_legacy_format() {
+        assert_eq!(strip_part_suffix("name (1/3)"), "name");
     }
 }
