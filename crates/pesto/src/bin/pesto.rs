@@ -539,6 +539,25 @@ async fn run_single_upload(
 
     if !params.json_mode && !params.renderer_opts.quiet && std::io::stderr().is_terminal() {
         pesto::progress::print_tree(&inputs);
+        let compress_fmt = config.compress_format.as_deref().or_else(|| {
+            if config.compress_password.is_some() {
+                Some("7z")
+            } else {
+                None
+            }
+        });
+        pesto::progress::print_upload_flags(&pesto::progress::UploadFlags {
+            obfuscate: match config.obfuscate {
+                ObfuscateMode::None => "none",
+                ObfuscateMode::Full => "full",
+                ObfuscateMode::Paranoid => "paranoid",
+            },
+            compress: compress_fmt,
+            password: config.compress_password.as_deref(),
+            par2: config.par2,
+            resume: config.resume,
+            verify: config.verify,
+        });
     }
 
     let (progress_tx, renderer) = if params.json_mode {

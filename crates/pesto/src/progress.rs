@@ -335,6 +335,60 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// Print a `tree`-style breakdown of the upload payload to stderr.
+/// Upload settings shown below the file tree before posting starts.
+pub struct UploadFlags<'a> {
+    pub obfuscate: &'a str,
+    /// `Some(fmt)` when compression is enabled, e.g. `"7z"`.
+    pub compress: Option<&'a str>,
+    /// `Some(pw)` when an archive password was set.
+    pub password: Option<&'a str>,
+    pub par2: u8,
+    pub resume: bool,
+    pub verify: bool,
+}
+
+/// Print a compact settings block after the file tree.
+///
+/// Only non-default lines are shown so the output stays noise-free for the
+/// common case (no obfuscation, no compression, par2=10, resume=off).
+pub fn print_upload_flags(flags: &UploadFlags<'_>) {
+    let mut lines: Vec<(&str, String)> = Vec::new();
+
+    if flags.obfuscate != "none" {
+        lines.push(("obfuscate", flags.obfuscate.to_string()));
+    }
+    if let Some(fmt) = flags.compress {
+        lines.push(("compress", fmt.to_string()));
+    }
+    if let Some(pw) = flags.password {
+        let preview = if pw.len() > 6 {
+            format!("{}…", &pw[..6])
+        } else {
+            "*".repeat(pw.len())
+        };
+        lines.push(("password", preview));
+    }
+    if flags.par2 != 10 {
+        lines.push(("par2", format!("{}%", flags.par2)));
+    }
+    if flags.resume {
+        lines.push(("resume", "on".to_string()));
+    }
+    if flags.verify {
+        lines.push(("verify", "on".to_string()));
+    }
+
+    if lines.is_empty() {
+        return;
+    }
+
+    let col = lines.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    for (key, val) in &lines {
+        eprintln!("  {:<width$}  {}", key, val, width = col);
+    }
+    eprintln!();
+}
+
 pub fn print_tree(files: &[crate::walk::InputFile]) {
     use std::collections::BTreeMap;
 
