@@ -31,17 +31,11 @@ pub struct NzbMeta {
 ///
 /// The NZB always carries the real filename regardless of obfuscation mode.
 /// Only what goes on the wire (subject + yEnc `name=`) is obfuscated.
-pub fn generate(
-    poster: &str,
-    groups: &[String],
-    segments: &[PostedSegment],
-    meta: &NzbMeta,
-) -> String {
-    let date = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
+///
+/// NZB 1.1 has one `poster` and one `date` per `<file>` element. When
+/// obfuscation rotates these per article (paranoid mode) the first segment's
+/// values are used as the file-level representative.
+pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str(
@@ -74,7 +68,7 @@ pub fn generate(
             .iter()
             .take_while(|s| &s.file_name == name)
             .count();
-        write_file(&mut out, poster, groups, date, &segments[i..i + count]);
+        write_file(&mut out, groups, &segments[i..i + count]);
         i += count;
     }
 
@@ -83,19 +77,20 @@ pub fn generate(
 }
 
 /// Write a single `<file>` element for one file's segments.
-fn write_file(
-    out: &mut String,
-    poster: &str,
-    groups: &[String],
-    date: u64,
-    segs: &[PostedSegment],
-) {
+fn write_file(out: &mut String, groups: &[String], segs: &[PostedSegment]) {
     let first = &segs[0];
     // The NZB always carries the real filename so that download clients can
     // restore it correctly. Only what goes on the wire (subject + yEnc name=)
     // is obfuscated — see ObfuscateMode::Full in poster/mod.rs.
     let file_name = &first.file_name;
     let subject = default_subject(&first.subject_name, 1, first.total);
+    let poster = &first.from;
+    let date = first.date.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
 
     out.push_str(&format!(
         "  <file name=\"{}\" poster=\"{}\" date=\"{}\" subject=\"{}\">\n",
@@ -160,6 +155,9 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
     let mut in_groups = false;
     let mut in_file = false;
 
+    let mut current_poster = String::new();
+    let mut current_date: Option<u64> = None;
+
     for line in content.lines() {
         let t = line.trim();
 
@@ -167,9 +165,11 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
             in_file = true;
             in_groups = false;
             current_file_name = xml_attr(t, "name").context("<file> missing name attribute")?;
+            current_poster = xml_attr(t, "poster").unwrap_or_default();
             if poster.is_empty() {
-                poster = xml_attr(t, "poster").unwrap_or_default();
+                poster = current_poster.clone();
             }
+            current_date = xml_attr(t, "date").and_then(|s| s.parse().ok());
             let subject = xml_attr(t, "subject").unwrap_or_default();
             current_subject_name = strip_part_suffix(&subject);
             file_segment_start = segments.len();
@@ -211,7 +211,8 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 total: 0, // fixed up when </file> is seen
                 message_id,
                 bytes,
-                from: String::new(),
+                from: current_poster.clone(),
+                date: current_date,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
@@ -327,7 +328,8 @@ mod tests {
             total,
             message_id: id.to_string(),
             bytes: 500,
-            from: String::new(),
+            from: "poster <p@x>".to_string(),
+            date: None,
         }
     }
 
@@ -337,7 +339,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_a_well_formed_skeleton() {
-        let xml = generate("p <p@x>", &["alt.test".into()], &[], &no_meta());
+        let xml = generate(&["alt.test".into()], &[], &no_meta());
         assert!(xml.starts_with("<?xml version=\"1.0\""));
         assert!(xml.contains("<nzb xmlns="));
         assert!(xml.trim_end().ends_with("</nzb>"));
@@ -351,7 +353,7 @@ mod tests {
             seg("a.bin", 2, 2, "<id-a2@pesto>"),
             seg("b.bin", 1, 1, "<id-b1@pesto>"),
         ];
-        let xml = generate("poster <p@x>", &["alt.test".into()], &segments, &no_meta());
+        let xml = generate(&["alt.test".into()], &segments, &no_meta());
 
         assert_eq!(xml.matches("<file ").count(), 2);
         assert_eq!(xml.matches("<segment ").count(), 3);
@@ -373,8 +375,9 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
             from: String::new(),
+            date: None,
         };
-        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta());
+        let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // The wire subject is obfuscated; the NZB always carries the real filename.
         assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
@@ -392,8 +395,9 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
             from: String::new(),
+            date: None,
         };
-        let xml = generate("poster <p@x>", &["alt.test".into()], &[segment], &no_meta());
+        let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // Subject on the wire is obfuscated; NZB name= always uses the real filename.
         assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
@@ -402,8 +406,10 @@ mod tests {
 
     #[test]
     fn xml_special_characters_are_escaped() {
-        let segments = vec![seg("a&b<c>.bin", 1, 1, "<i@x>")];
-        let xml = generate("a \"b\" & <c>", &["alt.test".into()], &segments, &no_meta());
+        let mut s = seg("a&b<c>.bin", 1, 1, "<i@x>");
+        s.from = "a \"b\" & <c>".to_string();
+        let segments = vec![s];
+        let xml = generate(&["alt.test".into()], &segments, &no_meta());
         assert!(xml.contains("poster=\"a &quot;b&quot; &amp; &lt;c&gt;\""));
         assert!(xml.contains("a&amp;b&lt;c&gt;.bin"));
     }
@@ -415,7 +421,7 @@ mod tests {
             password: Some("s3cr3t".into()),
             category: Some("TV > HD".into()),
         };
-        let xml = generate("p <p@x>", &["alt.test".into()], &[], &meta);
+        let xml = generate(&["alt.test".into()], &[], &meta);
         assert!(xml.contains("<meta type=\"name\">My Upload</meta>"));
         assert!(xml.contains("<meta type=\"password\">s3cr3t</meta>"));
         assert!(xml.contains("<meta type=\"category\">TV &gt; HD</meta>"));
@@ -425,7 +431,7 @@ mod tests {
     fn head_block_always_present() {
         // <head> is emitted even when no meta fields are set, for maximum
         // compatibility with strict NZB parsers.
-        let xml = generate("p <p@x>", &["alt.test".into()], &[], &no_meta());
+        let xml = generate(&["alt.test".into()], &[], &no_meta());
         assert!(xml.contains("<head>"));
         assert!(xml.contains("</head>"));
         assert!(!xml.contains("<meta"));
@@ -441,7 +447,7 @@ mod tests {
             seg("movie.par2", 1, 1, "<p1@x>"),
             seg("movie.vol00+01.par2", 1, 1, "<p2@x>"),
         ];
-        let xml = generate("poster <p@x>", &groups, &segments, &no_meta());
+        let xml = generate(&groups, &segments, &no_meta());
 
         // Three distinct <file> blocks.
         assert_eq!(xml.matches("<file ").count(), 3);
@@ -457,12 +463,7 @@ mod tests {
     #[test]
     fn multiple_groups_all_emitted() {
         let groups = vec!["alt.binaries.a".into(), "alt.binaries.b".into()];
-        let xml = generate(
-            "p <p@x>",
-            &groups,
-            &[seg("f.bin", 1, 1, "<id@x>")],
-            &no_meta(),
-        );
+        let xml = generate(&groups, &[seg("f.bin", 1, 1, "<id@x>")], &no_meta());
         assert!(xml.contains("<group>alt.binaries.a</group>"));
         assert!(xml.contains("<group>alt.binaries.b</group>"));
         assert_eq!(xml.matches("<group>").count(), 2);
@@ -471,7 +472,6 @@ mod tests {
     #[test]
     fn single_part_subject_has_no_part_indicator() {
         let xml = generate(
-            "p <p@x>",
             &["alt.test".into()],
             &[seg("file.bin", 1, 1, "<id@x>")],
             &no_meta(),
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn escape_apostrophe() {
         let segments = vec![seg("it's.bin", 1, 1, "<id@x>")];
-        let xml = generate("p <p@x>", &["alt.test".into()], &segments, &no_meta());
+        let xml = generate(&["alt.test".into()], &segments, &no_meta());
         assert!(xml.contains("it&apos;s.bin"), "apostrophe must be escaped");
         assert!(!xml.contains("it's.bin"));
     }
@@ -495,7 +495,7 @@ mod tests {
         let mut s = seg("Season01/ep01.mkv", 1, 1, "<id@x>");
         s.file_name = "Season01/ep01.mkv".into();
         s.subject_name = "Season01/ep01.mkv".into();
-        let xml = generate("p <p@x>", &["alt.test".into()], &[s], &no_meta());
+        let xml = generate(&["alt.test".into()], &[s], &no_meta());
         assert!(xml.contains("name=\"Season01/ep01.mkv\""));
     }
 
@@ -507,7 +507,7 @@ mod tests {
             seg("big.bin", 2, 5, "<a2@x>"),
             seg("big.bin", 3, 5, "<a3@x>"),
         ];
-        let xml = generate("p <p@x>", &["alt.test".into()], &segments, &no_meta());
+        let xml = generate(&["alt.test".into()], &segments, &no_meta());
         assert!(xml.contains("subject=\"&quot;big.bin&quot; yEnc (1/5)\""));
         assert!(!xml.contains("(2/5)"));
     }
@@ -516,14 +516,13 @@ mod tests {
     fn segment_bytes_attribute_is_exact() {
         let mut s = seg("f.bin", 1, 1, "<id@x>");
         s.bytes = 123_456;
-        let xml = generate("p <p@x>", &["alt.test".into()], &[s], &no_meta());
+        let xml = generate(&["alt.test".into()], &[s], &no_meta());
         assert!(xml.contains("bytes=\"123456\""));
     }
 
     #[test]
     fn date_attribute_is_a_nonzero_number() {
         let xml = generate(
-            "p <p@x>",
             &["alt.test".into()],
             &[seg("f.bin", 1, 1, "<id@x>")],
             &no_meta(),
@@ -546,7 +545,7 @@ mod tests {
             password: Some("hunter2".into()),
             category: None,
         };
-        let xml = generate("p <p@x>", &["alt.test".into()], &[], &meta);
+        let xml = generate(&["alt.test".into()], &[], &meta);
         assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
         assert!(!xml.contains("type=\"name\""));
         assert!(!xml.contains("type=\"category\""));
@@ -567,7 +566,7 @@ mod tests {
             password: None,
             category: Some("TV".into()),
         };
-        let xml = generate("poster <p@x>", &groups, &segs, &meta);
+        let xml = generate(&groups, &segs, &meta);
         let parsed = parse(&xml).expect("parse must succeed");
 
         assert_eq!(parsed.poster, "poster <p@x>");
@@ -589,7 +588,7 @@ mod tests {
             seg("ep01.mkv", 2, 2, "<e1p2@x>"),
             seg("ep02.mkv", 1, 1, "<e2p1@x>"),
         ];
-        let xml = generate("p <p@x>", &groups, &segs, &no_meta());
+        let xml = generate(&groups, &segs, &no_meta());
         let parsed = parse(&xml).expect("parse must succeed");
 
         assert_eq!(parsed.segments.len(), 3);
@@ -603,7 +602,7 @@ mod tests {
     #[test]
     fn parse_strips_angle_brackets_and_re_adds_them() {
         let segs = vec![seg("f.bin", 1, 1, "<msgid@host>")];
-        let xml = generate("p <p@x>", &["alt.test".into()], &segs, &no_meta());
+        let xml = generate(&["alt.test".into()], &segs, &no_meta());
         let parsed = parse(&xml).expect("parse must succeed");
         // message_id must carry angle brackets.
         assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
