@@ -83,13 +83,6 @@ groups = ["alt.binaries.test"]
 # Default: 10.
 # par2 = 10
 
-# resume — save upload progress to a .pesto-state sidecar file after every
-# article. If the upload is interrupted, re-running the same command resumes
-# from where it stopped instead of starting over. The state file is placed
-# beside the .nzb output (same name, .pesto-state extension) and deleted
-# automatically on successful completion. Default: false.
-# resume = false
-
 # verify — confirm each posted article is present on the server via STAT
 # and repost if not found. Adds one round-trip per article. Default: false.
 # verify = false
@@ -157,6 +150,13 @@ groups = ["alt.binaries.test"]
 # When --password is used, the archive password is stored here automatically.
 # Use this only to set a static password independently of --compress.
 # nzb_password = "archive_pass"
+
+# resume — save upload progress to a .pesto-state sidecar file after every
+# article. If the upload is interrupted, re-running the same command resumes
+# from where it stopped instead of starting over. The state file is placed
+# beside the .nzb output (same name, .pesto-state extension) and deleted
+# automatically on successful completion. Default: false.
+# resume = false
 
 # nfo — generate a .nfo text file alongside the .nzb. Default: false.
 # Runs `mediainfo` on the first video file found; falls back to a directory
