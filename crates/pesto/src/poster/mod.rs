@@ -121,9 +121,9 @@ pub struct PostedSegment {
     pub message_id: String,
     pub bytes: u64,
     pub from: String,
-    /// Unix timestamp of the `Date` header used on the wire, or `None` when
-    /// the config omitted the date (so the server supplies it).
-    pub date: Option<u64>,
+    /// Date header as `(rfc_string, unix_timestamp)`. Both parts are preserved
+    /// so fixed dates survive round-trips and retries.
+    pub date: (Option<String>, Option<u64>),
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -136,6 +136,9 @@ pub struct FailedTask {
     pub part: u32,
     pub total: u32,
     pub from: String,
+    /// Date header as `(rfc_string, unix_timestamp)`. Both are preserved so
+    /// fixed dates (which have `Some` RFC but `None` timestamp) are not lost.
+    pub date: (Option<String>, Option<u64>),
 }
 
 /// The result of a posting run.
@@ -161,6 +164,9 @@ struct FileMeta {
     /// identity is generated per file so segments cannot be correlated
     /// across files by the From header.
     from: String,
+    /// Date header resolved once per file: `(rfc_string, unix_timestamp)`.
+    /// Fixed dates have `Some` RFC but `None` timestamp.
+    date: (Option<String>, Option<u64>),
     size: u64,
 }
 
@@ -176,6 +182,10 @@ struct PostTask {
     /// Per-article From header. In paranoid mode each article gets a unique
     /// identity; otherwise this mirrors `meta.from`.
     from: String,
+    /// Date header for this article: `(rfc_string, unix_timestamp)`.
+    /// In paranoid mode each article gets a unique value; otherwise this
+    /// mirrors `meta.date`.
+    date: (Option<String>, Option<u64>),
 }
 
 struct Shared {
@@ -295,12 +305,14 @@ pub async fn post_files_with_progress_and_cancel(
                 (obfuscated.clone(), obfuscated, random_from())
             }
         };
+        let date = resolve_date(config.date.as_deref());
         metas.push(Arc::new(FileMeta {
             path: path.clone(),
             real_name,
             subject_name,
             yenc_name,
             from,
+            date,
             size: md.len(),
         }));
     }
@@ -1161,6 +1173,7 @@ async fn push_par2_file(
             (obfuscated.clone(), obfuscated, random_from())
         }
     };
+    let date = resolve_date(shared.config.date.as_deref());
 
     let meta = Arc::new(FileMeta {
         path: path.clone(),
@@ -1168,6 +1181,7 @@ async fn push_par2_file(
         subject_name,
         yenc_name,
         from,
+        date,
         size,
     });
 
@@ -1299,8 +1313,8 @@ async fn worker(
             headers: Vec<u8>,
             encoded: yenc::EncodedPart,
             encode_time: Duration,
-            /// Unix timestamp of the Date header used for this article.
-            date: Option<u64>,
+            /// Date header as (rfc_string, unix_timestamp) for this article.
+            date: (Option<String>, Option<u64>),
         }
         let mut pending: Vec<Pending> = Vec::with_capacity(batch.len());
 
@@ -1317,7 +1331,6 @@ async fn worker(
                     .get(&task.meta.real_name, task.part)
                     .map(str::to_string)
                 {
-                    let (_, date_ts) = resolve_date(shared.config.date.as_deref());
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
                         subject_name: task.subject_name.clone(),
@@ -1327,7 +1340,7 @@ async fn worker(
                         message_id: existing_id,
                         bytes: 0,
                         from: task.from.clone(),
-                        date: date_ts,
+                        date: task.date.clone(),
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1355,8 +1368,8 @@ async fn worker(
             );
             let encode_time = t_enc.elapsed();
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
-            let (date_str, date_ts) = resolve_date(shared.config.date.as_deref());
-            if let Some(d) = &date_str {
+            let (rfc_date, _ts) = &task.date;
+            if let Some(d) = &rfc_date {
                 debug!(segment = %message_id, date = %d, "article date");
             }
             let article = Article {
@@ -1364,17 +1377,18 @@ async fn worker(
                 from: task.from.clone(),
                 newsgroups: shared.post_group.clone(),
                 subject: default_subject(&task.meta.subject_name, task.part, task.total),
-                date: date_str,
+                date: rfc_date.clone(),
                 no_archive: shared.config.no_archive,
             };
             let headers = article.build_headers();
+            let task_date = task.date.clone();
             pending.push(Pending {
                 task,
                 message_id,
                 headers,
                 encoded,
                 encode_time,
-                date: date_ts,
+                date: task_date,
             });
         }
 
@@ -1393,7 +1407,7 @@ async fn worker(
                     message_id: p.message_id,
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
                     from: p.task.from.clone(),
-                    date: p.date,
+                    date: p.date.clone(),
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1623,10 +1637,15 @@ fn make_task(
     data: Vec<u8>,
     config: &Config,
 ) -> PostTask {
-    let (subject_name, from) = if config.obfuscate == ObfuscateMode::Paranoid {
-        (obfuscated_name(), random_from())
+    let (subject_name, from, date) = if config.obfuscate == ObfuscateMode::Paranoid {
+        let date = resolve_date(config.date.as_deref());
+        (obfuscated_name(), random_from(), date)
     } else {
-        (meta.subject_name.clone(), meta.from.clone())
+        (
+            meta.subject_name.clone(),
+            meta.from.clone(),
+            meta.date.clone(),
+        )
     };
     PostTask {
         meta,
@@ -1636,6 +1655,7 @@ fn make_task(
         data,
         subject_name,
         from,
+        date,
     }
 }
 
@@ -1709,7 +1729,7 @@ fn commit_result(
     wire_bytes: usize,
     posted: bool,
     last_err: &str,
-    date: Option<u64>,
+    date: (Option<String>, Option<u64>),
 ) {
     if posted {
         if let Some(resume) = &shared.resume {
@@ -1758,6 +1778,7 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
         part: task.part,
         total: task.total,
         from: task.from.clone(),
+        date: task.date.clone(),
     });
 }
 
@@ -1837,12 +1858,13 @@ pub async fn repost_missing_segments(
             config.line_length,
             None,
         );
+        let (rfc_date, _ts) = &seg.date;
         let article = Article {
             message_id: seg.message_id.clone(),
             from: seg.from.clone(),
             newsgroups: config.groups.clone(),
             subject: default_subject(&seg.subject_name, seg.part, seg.total),
-            date: None,
+            date: rfc_date.clone(),
             no_archive: config.no_archive,
         };
         let headers = article.build_headers();
@@ -1975,13 +1997,13 @@ pub async fn repost_failed_tasks(
             None,
         );
         let message_id = generate_message_id(config.message_id_domain.as_deref());
-        let (date_str, date_ts) = resolve_date(config.date.as_deref());
+        let (rfc_date, _ts) = &task.date;
         let article = Article {
             message_id: message_id.clone(),
             from: task.from.clone(),
             newsgroups: groups.to_vec(),
             subject: default_subject(&task.subject_name, task.part, task.total),
-            date: date_str,
+            date: rfc_date.clone(),
             no_archive: config.no_archive,
         };
         let headers = article.build_headers();
@@ -2022,7 +2044,7 @@ pub async fn repost_failed_tasks(
                 message_id,
                 bytes: wire_bytes,
                 from: task.from.clone(),
-                date: date_ts,
+                date: task.date.clone(),
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::Status {
@@ -2437,6 +2459,7 @@ mod tests {
             subject_name: name.into(),
             yenc_name: name.into(),
             from: String::new(),
+            date: (None, None),
             size: 0,
         }
     }
@@ -2576,6 +2599,7 @@ mod tests {
             data: vec![],
             subject_name: "ep.mkv".into(),
             from: String::new(),
+            date: (None, None),
         };
         record_failure(&shared, &task.meta, &task, "timeout");
         let failures = shared.failures.lock().unwrap();
