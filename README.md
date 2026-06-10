@@ -765,7 +765,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--jobs <N>` | — | `1` | Parallel uploads for `--each`/`--season` (0 = CPU count) |
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
 | `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |
-| `--watch-interval <SECS>` | `watch.poll_interval` | `30` | Poll interval for `--watch` |
+| `--watch-interval <SECS>` | — | `30` | Poll interval for `--watch` |
 
 ---
 

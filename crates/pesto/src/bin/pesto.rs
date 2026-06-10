@@ -347,7 +347,7 @@ struct Cli {
     watch_done: Option<PathBuf>,
 
     /// How often (in seconds) to poll the watched directory for new entries
-    /// [config: watch.poll_interval, default 30].
+    /// [default: 30].
     #[arg(long, value_name = "SECS", default_value = "30")]
     watch_interval: u64,
 
