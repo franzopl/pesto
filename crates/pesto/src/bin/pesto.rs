@@ -271,15 +271,25 @@ struct Cli {
     #[arg(long, value_name = "MODE")]
     nzb_conflict: Option<pesto::config::NzbConflict>,
 
+    /// Shell command to execute before the upload begins. If the command exits
+    /// with a non-zero code the upload is aborted immediately. The command
+    /// receives the same environment variables as the post-hook, except
+    /// `PESTO_NZB` and `PESTO_NFO` (which don't exist yet at this point):
+    /// `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`,
+    /// `PESTO_GROUP`, `PESTO_SERVER`
+    /// [config: output.pre_hook].
+    #[arg(long, value_name = "CMD")]
+    pre_hook: Option<String>,
+
     /// Shell command to execute after each successful upload. The command
     /// receives upload details via environment variables:
     /// `PESTO_NZB`, `PESTO_NFO`, `PESTO_NAME`, `PESTO_BYTES`,
-    /// `PESTO_GROUP`, `PESTO_PASSWORD`, `PESTO_SERVER`
+    /// `PESTO_INPUT_PATHS`, `PESTO_GROUP`, `PESTO_PASSWORD`, `PESTO_SERVER`
     /// [config: output.post_hook].
     #[arg(long, value_name = "CMD")]
     post_hook: Option<String>,
 
-    /// Skip all post-upload hooks for this run (both --post-hook and
+    /// Skip all pre- and post-upload hooks for this run (both CLI flags and
     /// scripts in ~/.config/pesto/hooks/).
     #[arg(long)]
     no_hooks: bool,
@@ -472,6 +482,7 @@ impl Cli {
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
+            pre_hook: self.pre_hook.clone(),
             post_hook: self.post_hook.clone(),
             no_hooks: self.no_hooks,
             nfo: if self.nfo { Some(true) } else { None },
@@ -532,6 +543,29 @@ async fn run_single_upload(
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
+
+    // Run pre-hook before anything else (before compression, PAR2, or NNTP).
+    // Non-zero exit aborts the upload immediately.
+    if !config.no_hooks && !config.dry_run {
+        if let Some(cmd) = &config.pre_hook {
+            let input_paths_str = inputs
+                .iter()
+                .map(|f| f.path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":");
+            let pre_env = HookEnv {
+                nzb_path: None,
+                nfo_path: None,
+                name: entry_label,
+                total_bytes,
+                input_paths: &input_paths_str,
+                group: config.groups.first().map(String::as_str),
+                password: None,
+                server: &config.host,
+            };
+            run_pre_hook(cmd, &pre_env)?;
+        }
+    }
 
     if !params.json_mode && !params.renderer_opts.quiet && std::io::stderr().is_terminal() {
         pesto::progress::print_tree(&inputs);
@@ -1140,11 +1174,17 @@ async fn run_single_upload(
     let upload_ok =
         !outcome.cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
     if upload_ok && !config.par2_only && !config.dry_run {
+        let post_input_paths = inputs
+            .iter()
+            .map(|f| f.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
         let hook_env = HookEnv {
             nzb_path: nzb_reported_path.as_deref(),
             nfo_path: nfo_path.as_deref(),
             name: entry_label,
             total_bytes,
+            input_paths: &post_input_paths,
             group: config.groups.first().map(String::as_str),
             password: effective_password.as_deref(),
             server: &config.host,
@@ -1361,6 +1401,7 @@ async fn run_batch(
                 nfo_path: nfo_path.as_deref(),
                 name: &season_label,
                 total_bytes,
+                input_paths: "",
                 group: config.groups.first().map(String::as_str),
                 password: effective_password.as_deref(),
                 server: &config.host,
@@ -2089,6 +2130,8 @@ struct HookEnv<'a> {
     nfo_path: Option<&'a std::path::Path>,
     name: &'a str,
     total_bytes: u64,
+    /// Colon-separated list of input paths (empty string when unknown).
+    input_paths: &'a str,
     group: Option<&'a str>,
     password: Option<&'a str>,
     server: &'a str,
@@ -2097,6 +2140,7 @@ struct HookEnv<'a> {
 fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
     child.env("PESTO_NAME", env.name);
     child.env("PESTO_BYTES", env.total_bytes.to_string());
+    child.env("PESTO_INPUT_PATHS", env.input_paths);
     child.env("PESTO_SERVER", env.server);
     child.env("PESTO_GROUP", env.group.unwrap_or(""));
     child.env("PESTO_PASSWORD", env.password.unwrap_or(""));
@@ -2112,6 +2156,32 @@ fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
     );
+}
+
+/// Execute a shell command as a pre-upload hook.
+///
+/// Runs via `sh -c` on Unix and `cmd /c` on Windows. Returns `Ok(())` when
+/// the command exits with status 0, or an error (which aborts the upload) on
+/// non-zero exit or if the process could not be started.
+fn run_pre_hook(cmd: &str, env: &HookEnv<'_>) -> Result<()> {
+    #[cfg(unix)]
+    let mut child = {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    #[cfg(windows)]
+    let mut child = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", cmd]);
+        c
+    };
+    apply_hook_env(&mut child, env);
+    match child.status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => anyhow::bail!("pre-hook exited with status {s} — upload aborted"),
+        Err(e) => anyhow::bail!("pre-hook failed to start: {e} — upload aborted"),
+    }
 }
 
 /// Execute a shell command as a post-upload hook.

@@ -579,7 +579,50 @@ and `~/nzb/pesto/arquivo.nfo` on every run without any extra flags.
 
 ---
 
-## Post-upload hooks
+## Hooks
+
+pesto supports two hook points: **pre-upload** (runs before anything is posted,
+can abort the upload) and **post-upload** (runs after a successful upload).
+
+### Pre-upload hook
+
+A pre-upload hook runs **before compression, PAR2 generation, and NNTP
+connection**. If the command exits with a non-zero code the upload is aborted
+immediately — nothing is posted and no state is written.
+
+**Use case:** query NZBHydra2 or Prowlarr to check for duplicates before
+uploading.
+
+Configure in `config.toml`:
+
+```toml
+[output]
+pre_hook = "~/.config/pesto/hooks/check-duplicate.sh"
+```
+
+Or for a single run:
+
+```bash
+pesto --pre-hook '~/.config/pesto/hooks/check-duplicate.sh' movie.mkv
+```
+
+Environment variables available to the pre-hook:
+
+| Variable | Description |
+|----------|-------------|
+| `PESTO_NAME` | Release name / entry label |
+| `PESTO_BYTES` | Total size in bytes of all input files (decimal string) |
+| `PESTO_INPUT_PATHS` | Colon-separated list of input file/directory paths |
+| `PESTO_SERVER` | NNTP server hostname |
+| `PESTO_GROUP` | First configured newsgroup |
+
+> `PESTO_NZB`, `PESTO_NFO`, and `PESTO_PASSWORD` are **not** available in the
+> pre-hook — the NZB and NFO don't exist yet, and the archive password is only
+> resolved after compression.
+
+The pre-hook is suppressed by `--no-hooks` and is not run during `--dry-run`.
+
+### Post-upload hooks
 
 Any executable script placed in `~/.config/pesto/hooks/` is run automatically
 after each successful upload, in alphabetical order. Each script receives the
@@ -591,6 +634,7 @@ following environment variables:
 | `PESTO_NFO` | Absolute path to the `.nfo` file (empty when `--nfo` was not used) |
 | `PESTO_NAME` | Release name / entry label |
 | `PESTO_BYTES` | Total bytes posted (decimal string) |
+| `PESTO_INPUT_PATHS` | Colon-separated list of input file/directory paths |
 | `PESTO_GROUP` | First Usenet newsgroup |
 | `PESTO_PASSWORD` | Archive password (empty when none) |
 | `PESTO_SERVER` | NNTP server hostname |
@@ -707,6 +751,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `-v`, `--verbose` | — | off | Increase log verbosity (`-v`=INFO, `-vv`=DEBUG, `-vvv`=TRACE) |
 | `--log-file <FILE>` | — | — | Redirect verbose logs to file (requires `-v`) |
 | `--nfo` / `--no-nfo` | `output.nfo` | off | Generate a `.nfo` file alongside the `.nzb` |
+| `--pre-hook <CMD>` | `output.pre_hook` | — | Shell command run before upload; non-zero exit aborts |
 | `--post-hook <CMD>` | `output.post_hook` | — | Shell command run after each successful upload |
 | `--history` / `--no-history` | `output.history` | on | Write a record to the upload history log |
 | `--notify` / `--no-notify` | — | on | Send completion notification (webhook / ntfy) |

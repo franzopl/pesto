@@ -1696,6 +1696,7 @@ fn build_dry_run_config() -> Config {
         notify_webhook: None,
         notify_ntfy: None,
         notify: None,
+        pre_hook: None,
         post_hook: None,
         no_hooks: true,
         nfo: false,

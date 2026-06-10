@@ -219,6 +219,7 @@ impl Config {
             },
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
+            pre_hook: cli.pre_hook.or(file.output.pre_hook),
             post_hook: cli.post_hook.or(file.output.post_hook),
             no_hooks: cli.no_hooks,
             nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),

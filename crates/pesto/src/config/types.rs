@@ -163,6 +163,8 @@ pub struct OutputSection {
     /// Prowlarr connection settings (URL + API key for search/download).
     #[serde(default)]
     pub indexer: IndexerSection,
+    /// Shell command to execute before the upload begins. Non-zero exit aborts.
+    pub pre_hook: Option<String>,
     /// Shell command to execute after a successful upload.
     pub post_hook: Option<String>,
     /// Generate a `.nfo` file alongside the `.nzb` after posting.
@@ -258,6 +260,7 @@ pub struct Overrides {
     pub date: Option<String>,
     pub no_archive: Option<bool>,
     pub message_id_domain: Option<String>,
+    pub pre_hook: Option<String>,
     pub post_hook: Option<String>,
     pub no_hooks: bool,
     pub nfo: Option<bool>,
@@ -314,6 +317,7 @@ pub struct Config {
     pub notify_webhook: Option<String>,
     pub notify_ntfy: Option<String>,
     pub notify: Option<bool>,
+    pub pre_hook: Option<String>,
     pub post_hook: Option<String>,
     pub no_hooks: bool,
     pub nfo: bool,

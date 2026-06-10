@@ -52,6 +52,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         date: None,
         no_archive: false,
         message_id_domain: None,
+        pre_hook: None,
         post_hook: None,
         no_hooks: false,
         nfo: false,

@@ -165,10 +165,28 @@ groups = ["alt.binaries.test"]
 # listing when no video file is present or mediainfo is not installed.
 # nfo = false
 
+# pre_hook — shell command executed before the upload begins.
+# Runs via `sh -c` on Unix or `cmd /c` on Windows. If the command exits with a
+# non-zero code the upload is aborted immediately — nothing is posted.
+#
+# Available environment variables (NZB and NFO do not exist yet at this point):
+#   PESTO_NAME         — release name (entry label)
+#   PESTO_BYTES        — total size in bytes of all input files
+#   PESTO_INPUT_PATHS  — colon-separated list of input file/directory paths
+#   PESTO_SERVER       — target NNTP server hostname
+#   PESTO_GROUP        — first configured newsgroup
+#
+# Use case: query NZBHydra2 or Prowlarr before uploading to avoid duplicates.
+# Example (abort if the release is already indexed):
+# pre_hook = "~/.config/pesto/hooks/check-duplicate.sh"
+#
+# Suppressed by --no-hooks. Not run during --dry-run.
+# pre_hook = ""
+
 # post_hook — shell command executed after each successful upload.
 # Runs via `sh -c` on Unix or `cmd /c` on Windows. The following environment
 # variables are available: PESTO_NZB, PESTO_NFO, PESTO_NAME, PESTO_BYTES,
-# PESTO_GROUP, PESTO_PASSWORD, PESTO_SERVER.
+# PESTO_INPUT_PATHS, PESTO_GROUP, PESTO_PASSWORD, PESTO_SERVER.
 # post_hook = "notify-send 'pesto' 'Upload done: $PESTO_NAME'"
 #
 # See examples/hooks/ for ready-made hook scripts (curupira.sh, generic-indexer.sh, etc.).
