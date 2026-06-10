@@ -189,10 +189,6 @@ struct Cli {
     #[arg(long)]
     resume: bool,
 
-    /// Accepted for backward compatibility; no-op (resume is off by default).
-    #[arg(long, hide = true)]
-    no_resume: bool,
-
     /// After posting each article, confirm it is present on the server with
     /// STAT and repost if not found [config: posting.verify, default false].
     #[arg(long)]
@@ -384,7 +380,7 @@ struct Cli {
 
     /// Redirect verbose log output to FILE instead of stderr. The terminal
     /// progress panel is kept active when this flag is set. Has no effect
-    /// without -v [config: output.log_file].
+    /// without -v.
     #[arg(long, value_name = "FILE")]
     log_file: Option<PathBuf>,
 
@@ -440,7 +436,7 @@ impl Cli {
             par2_recovery_count: self.recovery_count,
             threads: self.threads,
             simd: Some(self.simd),
-            resume: if self.resume { Some(true) } else { Some(false) },
+            resume: if self.resume { Some(true) } else { None },
             verify: if self.verify { Some(true) } else { None },
             upload_rate: self
                 .rate
