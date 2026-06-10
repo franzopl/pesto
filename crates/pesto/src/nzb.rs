@@ -85,7 +85,8 @@ fn write_file(out: &mut String, groups: &[String], segs: &[PostedSegment]) {
     let file_name = &first.file_name;
     let subject = default_subject(&first.subject_name, 1, first.total);
     let poster = &first.from;
-    let date = first.date.unwrap_or_else(|| {
+    let (_rfc_date, unix_date) = &first.date;
+    let date = unix_date.unwrap_or_else(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -212,7 +213,7 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 message_id,
                 bytes,
                 from: current_poster.clone(),
-                date: current_date,
+                date: (None, current_date),
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
@@ -329,7 +330,7 @@ mod tests {
             message_id: id.to_string(),
             bytes: 500,
             from: "poster <p@x>".to_string(),
-            date: None,
+            date: (None, None),
         }
     }
 
@@ -375,7 +376,7 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
             from: String::new(),
-            date: None,
+            date: (None, None),
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // The wire subject is obfuscated; the NZB always carries the real filename.
@@ -395,7 +396,7 @@ mod tests {
             message_id: "<id@x>".to_string(),
             bytes: 500,
             from: String::new(),
-            date: None,
+            date: (None, None),
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // Subject on the wire is obfuscated; NZB name= always uses the real filename.
