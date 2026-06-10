@@ -673,7 +673,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
 | `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none` or `full`; bare flag = `full` |
-| `--date <VALUE>` | `posting.date` | server-supplied | `now`, `random`, or an RFC 2822 timestamp |
+| `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random`, or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
 | `--pipeline-depth <N>` | `posting.pipeline_depth` | `0` | Articles to pipeline per connection (`0` = adaptive) |
