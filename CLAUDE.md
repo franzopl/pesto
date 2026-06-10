@@ -123,6 +123,13 @@ cargo fmt
 > Note: the Rust toolchain (`cargo`/`rustc`) is not yet installed in this
 > environment. Install it via <https://rustup.rs> before building.
 
+## Testing
+
+**Never execute hooks during tests.** Tests must not trigger indexers, external
+services, or any side-effecting integration. Use mocks or stubs for all
+external dependencies (HTTP clients, NNTP connections, file watchers, indexers).
+A test that sends real data to an external system is a bug, not a test.
+
 ## Pre-commit checklist
 
 **Run all three checks locally and confirm they pass before every `git commit`
