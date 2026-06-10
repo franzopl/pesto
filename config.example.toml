@@ -199,6 +199,12 @@ groups = ["alt.binaries.test"]
 # Set to ~/.config/upapasta to share the catalog with upapasta.
 # history_dir = "~/.config/upapasta"
 
+# session_log — save a per-upload DEBUG log under <history_dir>/logs/ so any
+# run can be analysed afterwards without re-running with -vv. Independent of
+# the -v flag. Only the 50 most recent logs are kept. Default: true.
+# Disable per-run with --no-session-log.
+# session_log = true
+
 # quiet — single-line minimal output instead of the full terminal panel.
 # Designed for tmux/screen users who want minimal terminal noise. Default: false.
 # quiet = false

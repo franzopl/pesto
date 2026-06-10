@@ -1356,6 +1356,9 @@ async fn worker(
             let encode_time = t_enc.elapsed();
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
             let (date_str, date_ts) = resolve_date(shared.config.date.as_deref());
+            if let Some(d) = &date_str {
+                debug!(segment = %message_id, date = %d, "article date");
+            }
             let article = Article {
                 message_id: message_id.clone(),
                 from: task.from.clone(),
@@ -1653,7 +1656,7 @@ fn pick_post_group(groups: &[String]) -> Vec<String> {
 ///
 /// - `None` → `(None, None)` — header omitted, server fills it in.
 /// - `"now"` → current UTC time formatted as RFC 2822.
-/// - `"random"` → random time within the last 24 hours.
+/// - `"random"` → random time within the last 2 hours.
 /// - any other string → used verbatim (caller-supplied RFC 2822 timestamp).
 ///
 /// Returns `(rfc_2822_string, unix_timestamp_secs)`.
@@ -1669,14 +1672,17 @@ fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
             (Some(format_rfc2822(now)), Some(ts))
         }
         Some("random") => {
-            // Pick a random offset in [0, 24h) before now.
-            // 24h is safe for all known NNTP servers while still breaking the
-            // obvious same-timestamp pattern that reveals articles belong to
-            // the same upload batch.
+            // Pick a random offset in [0, 2h) before now.
+            // This breaks the obvious same-timestamp pattern that reveals
+            // articles belong to the same upload batch, while staying well
+            // inside the acceptance window of servers that reject articles
+            // whose Date is too far in the past (e.g. blocknews returns
+            // `441 437 ... TooOld`). A wider window (24h) tripped that limit
+            // for a small random subset of articles on every obfuscated run.
             use std::collections::hash_map::RandomState;
             use std::hash::{BuildHasher, Hasher};
             let r = RandomState::new().build_hasher().finish();
-            let offset_secs = r % (24 * 3600);
+            let offset_secs = r % (2 * 3600);
             let t = SystemTime::now()
                 .checked_sub(Duration::from_secs(offset_secs))
                 .unwrap_or(UNIX_EPOCH);
@@ -2318,7 +2324,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_date_random_within_24h() {
+    fn resolve_date_random_within_2h() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2327,8 +2333,8 @@ mod tests {
         let ts = ts.unwrap();
         assert!(ts <= now, "random date must not be in the future");
         assert!(
-            now - ts < 24 * 3600 + 1,
-            "random date must be within the last 24 hours"
+            now - ts < 2 * 3600 + 1,
+            "random date must be within the last 2 hours"
         );
     }
 

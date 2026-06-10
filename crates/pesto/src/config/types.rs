@@ -150,6 +150,10 @@ pub struct OutputSection {
     pub history: Option<bool>,
     /// Directory where `history.jsonl` (and `nzb/`) are written.
     pub history_dir: Option<String>,
+    /// Save a per-upload DEBUG log under `<history_dir>/logs/` for later
+    /// analysis, regardless of `-v`. Default: true. Disable with
+    /// `--no-session-log`.
+    pub session_log: Option<bool>,
     /// Default path for the generated `.nzb`. Overridden by `--out`.
     pub nzb: Option<String>,
     /// Directory where `.nzb` files are written by default.

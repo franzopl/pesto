@@ -235,11 +235,13 @@ random TLD. The real file names are only in the `.nzb` you keep, or recoverable
 through the PAR2 set.
 
 When obfuscation is active, pesto also randomises the `Date:` header of each
-article to a time within the last 24 hours. This prevents articles in the same
+article to a time within the last 2 hours. This prevents articles in the same
 batch from sharing an identical timestamp, which would make them trivially
-groupable even when every other field is randomised. The 24-hour window is safe
-for all known NNTP servers. You can override this with `--date now` or an
-explicit timestamp if needed.
+groupable even when every other field is randomised. The window is kept short
+because some servers reject articles whose `Date` is too far in the past
+(e.g. blocknews returns `441 437 ... TooOld`); a wider window tripped that limit
+for a small random subset of articles. You can override this with `--date now`
+or an explicit timestamp if needed.
 
 A bare `--obfuscate` (no value) means `full`.
 
@@ -452,6 +454,29 @@ resume = true
 
 State files are created beside the `.nzb` and are not automatically cleaned up.
 You can delete them manually when you no longer need them.
+
+### Per-upload logs
+
+Every upload writes a DEBUG-level log to `<history_dir>/logs/` (default
+`~/.config/pesto/logs/`), named `<timestamp>_<name>.log`. This happens
+regardless of `-v`, so you can analyse any run afterwards — including which
+articles a server rejected and why (e.g. `441 437 ... TooOld`, `441 435`
+duplicate) — without having to reproduce it with `-vv`. Only the 50 most recent
+pesto logs are kept; older ones are pruned automatically. Files that don't match
+pesto's naming (e.g. legacy upapasta logs sharing the same directory) are never
+touched.
+
+Note that the `-v` flag and these logs are independent: `-v` controls what is
+printed to your terminal (stderr), while the saved log is always full DEBUG.
+Redirecting the terminal with `> file` captures **stdout only**, which is why a
+plain `pesto ... > log.txt` saves almost nothing — use the saved session log,
+`--log-file`, or `2>` instead.
+
+Disable the saved log per-run with `--no-session-log`, or permanently:
+```toml
+[output]
+session_log = false
+```
 
 ### Post-verification via STAT
 
@@ -750,6 +775,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--no-overwrite` | — | — | Alias for `--nzb-conflict=rename` |
 | `-v`, `--verbose` | — | off | Increase log verbosity (`-v`=INFO, `-vv`=DEBUG, `-vvv`=TRACE) |
 | `--log-file <FILE>` | — | — | Redirect verbose logs to file (requires `-v`) |
+| `--no-session-log` | `output.session_log` | on | Disable the per-upload DEBUG log saved under `<history_dir>/logs/` |
 | `--nfo` / `--no-nfo` | `output.nfo` | off | Generate a `.nfo` file alongside the `.nzb` |
 | `--pre-hook <CMD>` | `output.pre_hook` | — | Shell command run before upload; non-zero exit aborts |
 | `--post-hook <CMD>` | `output.post_hook` | — | Shell command run after each successful upload |

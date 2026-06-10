@@ -394,6 +394,11 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     log_file: Option<PathBuf>,
 
+    /// Disable the per-upload DEBUG log normally saved under
+    /// `<history_dir>/logs/` [config: output.session_log, default on].
+    #[arg(long)]
+    no_session_log: bool,
+
     /// Merge all per-episode NZBs in DIR into one combined season NZB and exit.
     /// No server connection is required. NZBs are grouped by their season
     /// identifier (e.g. `S02`); each group produces one output NZB written
@@ -1811,10 +1816,6 @@ fn season_key(stem: &str) -> Option<String> {
 async fn main() -> Result<()> {
     let mut cli = Cli::parse();
 
-    // Initialise logging before anything else so early errors are captured.
-    logging::init(cli.verbose, cli.log_file.as_deref())?;
-    logging::log_system_info();
-
     // `pesto --config` with no value: launch the interactive setup wizard.
     if matches!(cli.config, Some(None)) {
         return pesto::ui::wizard::run();
@@ -1891,6 +1892,8 @@ async fn main() -> Result<()> {
 
     // --merge-season: offline NZB merge, no server connection needed.
     if let Some(ref dir) = cli.merge_season {
+        // No upload here, so no session log — just honour -v/--log-file.
+        logging::init(cli.verbose, cli.log_file.as_deref(), None)?;
         return run_merge_season(dir, cli.nzb_name.as_deref());
     }
 
@@ -1917,8 +1920,33 @@ async fn main() -> Result<()> {
         },
     };
     let nzb_default = nzb_default.or_else(|| file_config.output.nzb.clone());
+    // Read before `file_config` is consumed by `Config::resolve`.
+    let session_log_enabled = !cli.no_session_log && file_config.output.session_log.unwrap_or(true);
     let config = Arc::new(Config::resolve(file_config, cli.overrides())?);
     let json_mode = cli.output_format.trim().eq_ignore_ascii_case("json");
+
+    // Initialise logging now that the history directory is known. The verbose
+    // (`-v`) output goes to stderr or --log-file as before; in parallel, unless
+    // disabled, every upload also writes a DEBUG log to `<history_dir>/logs/`
+    // so it can be analysed afterwards without re-running with -vv.
+    let session_log = if session_log_enabled {
+        let name = cli
+            .files
+            .iter()
+            .find(|p| p.as_os_str() != "-")
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .or_else(|| cli.watch.as_ref().map(|_| "watch".to_string()))
+            .unwrap_or_else(|| "pesto".to_string());
+        pesto::history::session_log_path(config.history_dir.as_deref(), &name, 50)
+    } else {
+        None
+    };
+    logging::init(cli.verbose, cli.log_file.as_deref(), session_log.as_deref())?;
+    logging::log_system_info();
+    if let Some(p) = &session_log {
+        tracing::debug!(path = %p.display(), "session log");
+    }
 
     // Suppress the terminal panel when debug-level logs are going to stderr to
     // avoid the panel and log lines corrupting each other. If the user redirected
