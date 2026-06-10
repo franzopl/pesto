@@ -703,3 +703,35 @@ fn file_upload_rate_used_when_cli_absent() {
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
     assert_eq!(cfg.upload_rate, 1024);
 }
+
+// Regression for #17: `check_delay` set in the TOML config must imply
+// `check = true`, matching the documented `--check-delay` CLI behaviour.
+// Previously the check only auto-enabled for the CLI flag, so a config-only
+// `check_delay` silently skipped the post-upload STAT pass.
+#[test]
+fn config_check_delay_implies_check() {
+    let file: FileConfig =
+        toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\ncheck_delay=60\n")
+            .unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert!(cfg.check, "check_delay in config must enable check");
+    assert_eq!(cfg.check_delay_secs, 60);
+}
+
+#[test]
+fn config_check_off_by_default() {
+    let file: FileConfig =
+        toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\n").unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert!(!cfg.check);
+    assert_eq!(cfg.check_delay_secs, 30);
+}
+
+#[test]
+fn config_explicit_check_true_uses_default_delay() {
+    let file: FileConfig =
+        toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\ncheck=true\n").unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert!(cfg.check);
+    assert_eq!(cfg.check_delay_secs, 30);
+}
