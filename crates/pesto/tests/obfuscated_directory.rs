@@ -90,7 +90,7 @@ fn build_tree() -> (std::path::PathBuf, Vec<std::path::PathBuf>, Vec<String>) {
     for rel in rels {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, vec![0x5Au8; 1000]).unwrap();
+        std::fs::write(&path, vec![0x5Au8; 100_000]).unwrap();
     }
 
     let args = vec![root.join("ShowA"), root.join("ShowB")];
@@ -214,6 +214,39 @@ async fn full_obfuscation_nzb_reflects_random_dates() {
         unique_dates.len() > 1 || dates.len() <= 1,
         "random dates should vary across files; got {dates:?}"
     );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn full_obfuscation_same_file_same_date() {
+    let (root, args, expected) = build_tree();
+
+    let mut config = dry_run_config(ObfuscateMode::Full);
+    config.date = Some("random".into());
+    let inputs = expand_inputs(&args).unwrap();
+    let outcome = post_files(&config, &inputs).await.unwrap();
+
+    // Every segment of the same file must share the exact same date.
+    for rel in &expected {
+        let segs: Vec<_> = outcome
+            .segments
+            .iter()
+            .filter(|s| &s.file_name == rel)
+            .collect();
+        assert!(
+            segs.len() > 1 || expected.len() == 1,
+            "need multiple segments per file to test date sharing"
+        );
+        let first_date = segs[0].date.clone();
+        for seg in &segs[1..] {
+            assert_eq!(
+                seg.date, first_date,
+                "segments of `{rel}` have different dates: {:?} vs {:?}",
+                first_date, seg.date
+            );
+        }
+    }
 
     std::fs::remove_dir_all(&root).ok();
 }
