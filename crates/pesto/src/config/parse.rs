@@ -173,9 +173,7 @@ impl Config {
             threads: cli.threads.unwrap_or(0), // 0 means auto
             simd: cli.simd.unwrap_or_default(),
             verify: cli.verify.or(file.posting.verify).unwrap_or(false),
-            resume: cli
-                .resume
-                .unwrap_or_else(|| file.output.resume.unwrap_or(false)),
+            resume: cli.resume.or(file.output.resume).unwrap_or(false),
             upload_rate: {
                 if let Some(rate) = cli.upload_rate {
                     rate
@@ -193,9 +191,7 @@ impl Config {
             nzb_dir: cli.nzb_dir.or(file.output.nzb_dir),
             indexer_url: file.output.indexer.url,
             indexer_api_key: file.output.indexer.api_key,
-            history: cli
-                .history
-                .unwrap_or_else(|| file.output.history.unwrap_or(true)),
+            history: cli.history.or(file.output.history).unwrap_or(true),
             history_dir: file.output.history_dir.map(|s| {
                 if s.starts_with("~/") {
                     std::env::var_os("HOME")
@@ -222,7 +218,7 @@ impl Config {
             pre_hook: cli.pre_hook.or(file.output.pre_hook),
             post_hook: cli.post_hook.or(file.output.post_hook),
             no_hooks: cli.no_hooks,
-            nfo: cli.nfo.unwrap_or_else(|| file.output.nfo.unwrap_or(false)),
+            nfo: cli.nfo.or(file.output.nfo).unwrap_or(false),
             nzb_conflict: cli
                 .nzb_conflict
                 .or(file.output.nzb_conflict)
@@ -231,17 +227,19 @@ impl Config {
             bell: file.output.bell.unwrap_or(false),
             check_delay_secs: cli
                 .check_delay_secs
-                .unwrap_or_else(|| file.posting.check_delay.unwrap_or(30)),
-            check: cli
-                .check
-                .unwrap_or_else(|| file.posting.check.unwrap_or(false))
-                || cli.check_delay_secs.is_some(),
+                .or(file.posting.check_delay)
+                .unwrap_or(30),
+            check: cli.check.or(file.posting.check).unwrap_or(false)
+                || cli.check_delay_secs.is_some()
+                || file.posting.check_delay.is_some(),
             check_retries: cli
                 .check_retries
-                .unwrap_or_else(|| file.posting.check_retries.unwrap_or(3)),
+                .or(file.posting.check_retries)
+                .unwrap_or(3),
             check_connections: cli
                 .check_connections
-                .unwrap_or_else(|| file.posting.check_connections.unwrap_or(0)),
+                .or(file.posting.check_connections)
+                .unwrap_or(0),
             // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth
