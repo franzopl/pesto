@@ -230,7 +230,7 @@ struct Cli {
     nzb_category: Option<String>,
 
     /// `Date:` header for each article: `now` (current time), `random`
-    /// (random time within the last 24 hours), or a fixed RFC 2822 timestamp.
+    /// (random time within the last 2 hours), or a fixed RFC 2822 timestamp.
     /// Omit to let the server supply the date. When obfuscation is active
     /// and no date is set, the default changes to `random` [config: posting.date].
     #[arg(long, value_name = "DATE")]
