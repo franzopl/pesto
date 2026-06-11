@@ -90,6 +90,7 @@ pub struct UploadSettingsSummary {
     pub from: String,
     pub article_size: String,
     pub verify: String,
+    pub check: String,
 }
 
 // ── Canonical display vocabulary ──────────────────────────────────────────────
@@ -743,6 +744,7 @@ pub struct SessionOverrides {
     pub par2: Option<u8>,
     pub article_size_kb: Option<usize>,
     pub verify: Option<bool>,
+    pub check: Option<bool>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub compress_password: Option<String>,
@@ -793,6 +795,7 @@ pub enum ConfirmField {
     Compress,
     CompressPassword,
     Verify,
+    Check,
     NzbPassword,
     Groups,
     From,
@@ -1581,6 +1584,7 @@ impl App {
             let article = format!("{} KB / {} chars", cfg.article_size / 1024, cfg.line_length);
 
             let verify = on_off(cfg.verify).to_string();
+            let check = on_off(cfg.check).to_string();
 
             UploadSettingsSummary {
                 obfuscate,
@@ -1590,6 +1594,7 @@ impl App {
                 from,
                 article_size: article,
                 verify,
+                check,
             }
         } else {
             // Dry-run defaults (what we currently use in build_dry_run_config)
@@ -1601,6 +1606,7 @@ impl App {
                 from: "upapasta@local (dry-run)".to_string(),
                 article_size: "750 KB / 128 chars (dry-run)".to_string(),
                 verify: "Off (dry-run)".to_string(),
+                check: "Off (dry-run)".to_string(),
             }
         }
     }
@@ -1893,9 +1899,10 @@ impl App {
             3 => ov.par2 = None,
             4 => ov.article_size_kb = None,
             5 => ov.verify = None,
-            6 => ov.nzb_password = None,
-            7 => ov.nzb_category = None,
-            8 => ov.compress_password = None,
+            6 => ov.check = None,
+            7 => ov.nzb_password = None,
+            8 => ov.nzb_category = None,
+            9 => ov.compress_password = None,
             10 => {
                 self.prowlarr.url_override = None;
                 self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
@@ -1969,6 +1976,9 @@ impl App {
         if let Some(verify) = ov.verify {
             cfg.verify = verify;
         }
+        if let Some(check) = ov.check {
+            cfg.check = check;
+        }
         if let Some(ref pw) = ov.nzb_password {
             cfg.nzb_password = Some(pw.clone());
         }
@@ -2012,6 +2022,7 @@ impl App {
             Compress,
             CompressPassword,
             Verify,
+            Check,
             NzbPassword,
             Groups,
             From,
@@ -2082,6 +2093,7 @@ impl App {
             }
             ConfirmField::Compress => self.confirm_cycle_compress(true),
             ConfirmField::Verify => self.confirm_toggle_verify(),
+            ConfirmField::Check => self.confirm_toggle_check(),
             // Number / text fields → enter edit mode prefilled with the current value.
             ConfirmField::Par2 => self.confirm_start_edit(self.par2_effective().to_string()),
             ConfirmField::ArticleSize => {
@@ -2192,12 +2204,22 @@ impl App {
         self.config_state.overrides.verify = Some(!cur);
     }
 
+    fn confirm_toggle_check(&mut self) {
+        let cur = self
+            .config_state
+            .overrides
+            .check
+            .unwrap_or(self.pesto_config.as_ref().map(|c| c.check).unwrap_or(false));
+        self.config_state.overrides.check = Some(!cur);
+    }
+
     /// `→` / `l` / Space: advance cycle/number/toggle fields in place.
     pub fn confirm_field_increment(&mut self) {
         match self.current_confirm_field() {
             Some(ConfirmField::Obfuscate) => self.confirm_cycle_obfuscate(true),
             Some(ConfirmField::Compress) => self.confirm_cycle_compress(true),
             Some(ConfirmField::Verify) => self.confirm_toggle_verify(),
+            Some(ConfirmField::Check) => self.confirm_toggle_check(),
             Some(ConfirmField::FolderMode) => {
                 let cur = self.effective_folder_mode();
                 self.config_state.overrides.folder_mode = Some(cur.next());
@@ -2217,6 +2239,7 @@ impl App {
             Some(ConfirmField::Obfuscate) => self.confirm_cycle_obfuscate(false),
             Some(ConfirmField::Compress) => self.confirm_cycle_compress(false),
             Some(ConfirmField::Verify) => self.confirm_toggle_verify(),
+            Some(ConfirmField::Check) => self.confirm_toggle_check(),
             Some(ConfirmField::FolderMode) => {
                 let cur = self.effective_folder_mode();
                 self.config_state.overrides.folder_mode = Some(cur.next());
@@ -2313,6 +2336,12 @@ impl App {
                         on_off(ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)))
                             .to_string(),
                         "←→ toggle",
+                    ),
+                    ConfirmField::Check => (
+                        "Check",
+                        on_off(ov.check.unwrap_or(cfg.map(|c| c.check).unwrap_or(false)))
+                            .to_string(),
+                        "←→ toggle: STAT all articles after upload",
                     ),
                     ConfirmField::NzbPassword => {
                         let raw = ov
@@ -2475,6 +2504,9 @@ impl App {
             }
             if o.verify.is_none() {
                 o.verify = prefs.verify;
+            }
+            if o.check.is_none() {
+                o.check = prefs.check;
             }
             if o.nzb_password.is_none() {
                 o.nzb_password = prefs.nzb_password;

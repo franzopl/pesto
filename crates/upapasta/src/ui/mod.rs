@@ -1267,6 +1267,7 @@ fn draw_upload_settings_summary(f: &mut Frame, app: &App, area: Rect) {
         Line::from(" From        : ".to_string() + &s.from),
         Line::from(" Article     : ".to_string() + &s.article_size),
         Line::from(" Verify      : ".to_string() + &s.verify),
+        Line::from(" Check       : ".to_string() + &s.check),
     ];
 
     let title = if app.pesto_config.is_some() {
@@ -1678,6 +1679,17 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
             has_override: ov.verify.is_some(),
         },
         ConfigField {
+            label: "Check",
+            value: ov
+                .check
+                .map(on_off)
+                .or_else(|| cfg.map(|c| on_off(c.check)))
+                .unwrap_or("Off")
+                .to_string(),
+            hint: "Enter/e toggles: STAT all articles after upload completes",
+            has_override: ov.check.is_some(),
+        },
+        ConfigField {
             label: "NZB password",
             value: ov
                 .nzb_password
@@ -1882,6 +1894,7 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
             ov.par2.is_some(),
             ov.article_size_kb.is_some(),
             ov.verify.is_some(),
+            ov.check.is_some(),
             ov.nzb_password.is_some(),
             ov.nzb_category.is_some(),
             ov.compress_password.is_some(),
