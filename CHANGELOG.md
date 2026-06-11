@@ -14,6 +14,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   what the pesto CLI already does. All progress events are also written to
   `upload.log` without filtering.
 
+### Fixed
+- **Missing articles after check now block NZB writing and hooks**: when the
+  post-upload STAT check found missing articles and repost still left some
+  unresolved, `run_upload` was writing the NZB and running post-upload hooks
+  anyway (incomplete upload sent to indexers). `had_failures` is now set when
+  articles remain missing after repost; NZB writing and hooks are skipped, and
+  `status=failed` is recorded in the session log summary.
+- **Repost logic moved into `run_upload`**: the automatic repost of missing
+  articles after check was only implemented in the `pesto` CLI, not in
+  `run_upload` (used by upapasta). Upapasta was detecting missing articles,
+  logging them, and continuing without reposting. The full repost + second
+  STAT pass is now part of `run_upload` so all callers benefit.
+
 ### Added
 - **CHECK progress bar in the upapasta dashboard**: when the post-upload STAT
   check is running, a dedicated `CHECK` bar appears below the UPLOAD bar showing

@@ -220,7 +220,7 @@ pub async fn run_upload(
     };
     // ─────────────────────────────────────────────────────────────────────────
 
-    let had_failures = !outcome.failures.is_empty();
+    let mut had_failures = !outcome.failures.is_empty();
 
     // ── Post-check STAT pass ──────────────────────────────────────────────────
     if config.check
@@ -243,82 +243,138 @@ pub async fn run_upload(
             Ok(missing) => {
                 emit_status(
                     &progress_tx,
-                    format!("check: {} article(s) not found on server", missing.len()),
+                    format!("check: {} article(s) not found — reposting…", missing.len()),
                 );
-                for id in &missing {
-                    emit_status(&progress_tx, format!("  missing: {id}"));
+                tracing::warn!(count = missing.len(), "check: articles not found on server");
+
+                let reposted = crate::poster::repost_missing_segments(
+                    config,
+                    &outcome.segments,
+                    &missing,
+                    progress_tx.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    emit_status(&progress_tx, format!("check: repost error: {e:#}"));
+                    tracing::error!(error = %e, "check: repost_missing_segments failed");
+                    0
+                });
+
+                emit_status(
+                    &progress_tx,
+                    format!("check: reposted {reposted}/{} article(s)", missing.len()),
+                );
+
+                // Second STAT pass to confirm reposts landed.
+                match crate::poster::check_articles(config, &outcome.segments, progress_tx.as_ref())
+                    .await
+                {
+                    Ok(still_missing) if still_missing.is_empty() => {
+                        emit_status(&progress_tx, "check: all article(s) confirmed after repost");
+                    }
+                    Ok(still_missing) => {
+                        emit_status(
+                            &progress_tx,
+                            format!(
+                                "check: {} article(s) still missing after repost",
+                                still_missing.len()
+                            ),
+                        );
+                        for id in &still_missing {
+                            emit_status(&progress_tx, format!("  missing: {id}"));
+                        }
+                        tracing::error!(
+                            count = still_missing.len(),
+                            ids = ?still_missing,
+                            "check: articles still missing after repost"
+                        );
+                        had_failures = true;
+                    }
+                    Err(e) => {
+                        emit_status(
+                            &progress_tx,
+                            format!("check: verify after repost failed: {e:#}"),
+                        );
+                        tracing::error!(error = %e, "check: second STAT pass failed");
+                        had_failures = true;
+                    }
                 }
             }
             Err(e) => {
                 emit_status(&progress_tx, format!("check: STAT pass error: {e:#}"));
+                tracing::error!(error = %e, "check: STAT pass failed");
             }
         }
     }
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Write NZB ────────────────────────────────────────────────────────────
-    let nzb_path: Option<PathBuf> =
-        if outcome.cancelled || outcome.segments.is_empty() || config.dry_run || config.par2_only {
-            None
-        } else if let Some(base) = nzb_base {
-            let out = versioned_nzb_path(&base).await;
-            let nzb_meta = crate::nzb::NzbMeta {
-                name: config.nzb_name.clone().or_else(|| {
-                    entry_paths
-                        .first()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().into_owned())
-                }),
-                password: config
-                    .nzb_password
-                    .clone()
-                    .or_else(|| effective_password.clone()),
-                category: config.nzb_category.clone(),
-            };
-            let xml = crate::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
-            match tokio::fs::write(&out, &xml).await {
-                Ok(()) => {
-                    emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
-
-                    if write_history && !config.dry_run {
-                        let par2_str;
-                        let par2_pct = if config.par2 > 0 {
-                            par2_str = format!("{}%", config.par2);
-                            Some(par2_str.as_str())
-                        } else {
-                            None
-                        };
-                        crate::history::record_upload(
-                            &crate::history::UploadRecord {
-                                name: entry_label,
-                                obfuscated_name: if config.obfuscate != ObfuscateMode::None {
-                                    Some(entry_label)
-                                } else {
-                                    None
-                                },
-                                password: effective_password.as_deref(),
-                                total_bytes,
-                                group: config.groups.first().map(String::as_str),
-                                server: Some(config.host.as_str()),
-                                par2_redundancy: par2_pct,
-                                duration_secs: upload_start.elapsed().as_secs_f64(),
-                                nzb_path: Some(&out.display().to_string()),
-                                subject: config.nzb_name.as_deref().or(Some(entry_label)),
-                            },
-                            config.history_dir.as_deref(),
-                        );
-                    }
-
-                    Some(out)
-                }
-                Err(e) => {
-                    emit_status(&progress_tx, format!("failed to write nzb: {e}"));
-                    None
-                }
-            }
-        } else {
-            None
+    let nzb_path: Option<PathBuf> = if outcome.cancelled
+        || outcome.segments.is_empty()
+        || config.dry_run
+        || config.par2_only
+        || had_failures
+    {
+        None
+    } else if let Some(base) = nzb_base {
+        let out = versioned_nzb_path(&base).await;
+        let nzb_meta = crate::nzb::NzbMeta {
+            name: config.nzb_name.clone().or_else(|| {
+                entry_paths
+                    .first()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            }),
+            password: config
+                .nzb_password
+                .clone()
+                .or_else(|| effective_password.clone()),
+            category: config.nzb_category.clone(),
         };
+        let xml = crate::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
+        match tokio::fs::write(&out, &xml).await {
+            Ok(()) => {
+                emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
+
+                if write_history && !config.dry_run {
+                    let par2_str;
+                    let par2_pct = if config.par2 > 0 {
+                        par2_str = format!("{}%", config.par2);
+                        Some(par2_str.as_str())
+                    } else {
+                        None
+                    };
+                    crate::history::record_upload(
+                        &crate::history::UploadRecord {
+                            name: entry_label,
+                            obfuscated_name: if config.obfuscate != ObfuscateMode::None {
+                                Some(entry_label)
+                            } else {
+                                None
+                            },
+                            password: effective_password.as_deref(),
+                            total_bytes,
+                            group: config.groups.first().map(String::as_str),
+                            server: Some(config.host.as_str()),
+                            par2_redundancy: par2_pct,
+                            duration_secs: upload_start.elapsed().as_secs_f64(),
+                            nzb_path: Some(&out.display().to_string()),
+                            subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                        },
+                        config.history_dir.as_deref(),
+                    );
+                }
+
+                Some(out)
+            }
+            Err(e) => {
+                emit_status(&progress_tx, format!("failed to write nzb: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Notifications ────────────────────────────────────────────────────────
