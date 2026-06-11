@@ -55,7 +55,7 @@ impl Connection {
     /// Open a connection to `host:port`, performing the TLS handshake when
     /// `tls` is set, and read the server greeting.
     pub async fn connect(host: &str, port: u16, tls: bool) -> Result<Connection> {
-        debug!(host, port, tls, "connecting");
+        debug!(host = "<redacted>", port, tls, "connecting");
         let tcp = TcpStream::connect((host, port))
             .await
             .with_context(|| format!("connecting to {host}:{port}"))?;
@@ -69,7 +69,7 @@ impl Connection {
                 .connect(server_name, tcp)
                 .await
                 .context("TLS handshake failed")?;
-            debug!(host, "TLS handshake complete");
+            debug!(host = "<redacted>", "TLS handshake complete");
             Box::new(tls_stream)
         } else {
             Box::new(tcp)
@@ -88,15 +88,15 @@ impl Connection {
                 greeting.text
             );
         }
-        debug!(code = greeting.code, text = %greeting.text, "server greeting");
+        debug!(code = greeting.code, text = "<redacted>", "server greeting");
         Ok(conn)
     }
 
     /// Authenticate with `AUTHINFO USER` / `AUTHINFO PASS`.
     ///
-    /// The password is never logged or included in error messages.
+    /// Neither the username nor the password is logged or included in error messages.
     pub async fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
-        debug!(%username, "authenticating");
+        debug!(username = "<redacted>", "authenticating");
         let resp = self.command(&format!("AUTHINFO USER {username}")).await?;
         match resp.code {
             281 => {
@@ -108,7 +108,7 @@ impl Connection {
         }
 
         // Password is kept out of log output; only the command prefix is logged.
-        debug!("sending AUTHINFO PASS [MASKED]");
+        debug!("sending AUTHINFO PASS <redacted>");
         let resp = self.send_command("AUTHINFO PASS ", password).await?;
         if resp.code != 281 {
             bail!(

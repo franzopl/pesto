@@ -52,10 +52,10 @@ impl ConnectionSlot {
             let server = &self.servers[self.server_idx];
             let host = server.host.clone();
             let idx = self.server_idx;
-            info!(server = %host, server_idx = idx, "connecting");
+            info!(server = "<redacted>", server_idx = idx, "connecting");
             match connect_and_auth(server).await {
                 Ok(c) => {
-                    info!(server = %host, "connected and authenticated");
+                    info!(server = "<redacted>", "connected and authenticated");
                     self.conn = Some(c);
                 }
                 Err(e) => {
@@ -73,8 +73,11 @@ impl ConnectionSlot {
     /// [`ensure_connected`][Self::ensure_connected] attempt targets a fresh
     /// server.
     pub fn invalidate(&mut self) {
-        if let Some(idx) = self.conn.as_ref().map(|_| self.server_idx) {
-            info!(server = %self.servers[idx].host, "connection invalidated; rotating to next server");
+        if self.conn.is_some() {
+            info!(
+                server = "<redacted>",
+                "connection invalidated; rotating to next server"
+            );
         }
         self.conn = None;
         self.rotate();

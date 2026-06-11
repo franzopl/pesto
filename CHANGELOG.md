@@ -14,6 +14,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   what the pesto CLI already does. All progress events are also written to
   `upload.log` without filtering.
 
+### Security
+- **Credentials and server hostname redacted in all log levels**: the NNTP
+  username, server hostname, and server greeting text were logged in plain text
+  at DEBUG level (and hostname also at INFO level), appearing in session logs
+  and `-vv` output. All sensitive fields now emit `<redacted>`; the password
+  masking token is also standardised to `<redacted>` (was `[MASKED]`).
+
 ### Fixed
 - **Pipeline error messages no longer repeat the first rejection's message-id**:
   when a pipelined batch fails mid-way, articles that never received a server
