@@ -9,9 +9,10 @@
 //! output mode on stdout. When a `log_file` path is provided that output goes
 //! to the file instead and the terminal panel is not suppressed.
 //!
-//! Independently, a `session_log` path attaches an always-DEBUG layer that
-//! saves a per-upload log next to the history catalog, so any run can be
-//! analysed later even when the terminal was not run with `-vv`.
+//! Independently, a `session_log` path attaches a WARN-level layer that saves
+//! a per-upload log next to the history catalog. Only errors and warnings are
+//! recorded by default, keeping the log small and focused on actionable
+//! failures. Pass `-vv` (or set RUST_LOG) to capture DEBUG detail when needed.
 
 use std::fs::File;
 use std::io;
@@ -41,10 +42,10 @@ fn open_append(path: &Path) -> Result<File> {
 /// 2 = DEBUG, 3+ = TRACE).  `log_file` redirects the `-v` output to a file;
 /// when `None` it goes to stderr.
 ///
-/// `session_log`, when set, attaches a second, **always-DEBUG** layer that
-/// writes to that file regardless of `verbose`. It is used for the per-upload
-/// log saved next to the history catalog, so any run can be analysed later even
-/// when the terminal was not run with `-vv`.
+/// `session_log`, when set, attaches a second layer fixed at WARN that writes
+/// to that file regardless of `verbose`. Only errors and warnings are recorded,
+/// keeping the session log focused on actionable failures. For full detail,
+/// pass `-vv` or set `RUST_LOG=debug`.
 ///
 /// Calling this more than once has no effect (the global subscriber can only
 /// be set once).
@@ -80,14 +81,14 @@ pub fn init(verbose: u8, log_file: Option<&Path>, session_log: Option<&Path>) ->
         None
     };
 
-    // Session layer: fixed at DEBUG (ignores `-v` and RUST_LOG) so the saved
-    // log always carries the per-segment NNTP detail needed for diagnosis.
+    // Session layer: fixed at WARN so the saved log contains only actionable
+    // failures. Use `-vv` or RUST_LOG=debug for full detail.
     let session_layer = match session_log {
         Some(path) => Some(
             fmt::layer()
                 .with_writer(std::sync::Mutex::new(open_append(path)?))
                 .with_ansi(false)
-                .with_filter(LevelFilter::DEBUG)
+                .with_filter(LevelFilter::WARN)
                 .boxed(),
         ),
         None => None,
@@ -171,11 +172,12 @@ impl<'a> MakeWriter<'a> for DynamicFileWriter {
 
 static DYNAMIC_WRITER: OnceLock<DynamicFileWriter> = OnceLock::new();
 
-/// Initialise a DEBUG-level tracing subscriber that writes to a swappable file.
+/// Initialise a WARN-level tracing subscriber that writes to a swappable file.
 ///
 /// Intended for TUI callers (upapasta) where stderr is occupied by the terminal
-/// renderer. Call [`set_session_log`] before each upload and
-/// [`clear_session_log`] when done to rotate the destination file.
+/// renderer. Only errors and warnings are recorded by default; pass `-vv` or
+/// set `RUST_LOG=debug` for full detail. Call [`set_session_log`] before each
+/// upload and [`clear_session_log`] when done to rotate the destination file.
 ///
 /// Like [`init`], subsequent calls are no-ops (the global subscriber is set once).
 pub fn init_for_tui() -> Result<()> {
@@ -185,7 +187,7 @@ pub fn init_for_tui() -> Result<()> {
     let layer = fmt::layer()
         .with_writer(writer)
         .with_ansi(false)
-        .with_filter(LevelFilter::DEBUG)
+        .with_filter(LevelFilter::WARN)
         .boxed();
 
     let subscriber = tracing_subscriber::registry().with(layer);

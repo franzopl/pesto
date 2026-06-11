@@ -16,7 +16,7 @@ use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, 
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
-use tracing::info;
+use tracing::{error, info, warn};
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -852,6 +852,7 @@ async fn run_single_upload(
         .await
         .unwrap_or_else(|e| {
             eprintln!("retry: error: {e:#}");
+            error!(error = %e, "retry: repost_failed_tasks error");
             Vec::new()
         });
 
@@ -890,6 +891,7 @@ async fn run_single_upload(
             .await
             .unwrap_or_else(|e| {
                 eprintln!("check: error during STAT pass: {e:#}");
+                error!(error = %e, "check: STAT pass failed");
                 Vec::new()
             });
         drop(check_tx);
@@ -928,6 +930,10 @@ async fn run_single_upload(
             "check: {} article(s) not found — reposting…",
             check_missing.len()
         );
+        warn!(
+            count = check_missing.len(),
+            "check: articles not found on server"
+        );
 
         let (repost_tx, repost_renderer) = if params.json_mode {
             pesto::progress::spawn_json_emitter()
@@ -944,6 +950,7 @@ async fn run_single_upload(
         .await
         .unwrap_or_else(|e| {
             eprintln!("check: repost error: {e:#}");
+            error!(error = %e, "check: repost_missing_segments failed");
             0
         });
 
@@ -967,6 +974,7 @@ async fn run_single_upload(
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("check: verify after repost failed: {e:#}");
+                    error!(error = %e, "check: second STAT pass (post-repost verify) failed");
                     check_missing.clone()
                 });
         drop(verify_tx);
@@ -982,6 +990,11 @@ async fn run_single_upload(
             for id in &still_missing {
                 eprintln!("  - {id}");
             }
+            error!(
+                count = still_missing.len(),
+                ids = ?still_missing,
+                "check: articles still missing after repost"
+            );
         }
         still_missing
     } else {

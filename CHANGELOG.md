@@ -14,6 +14,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   what the pesto CLI already does. All progress events are also written to
   `upload.log` without filtering.
 
+### Changed
+- **Session logs now record only errors and warnings by default**: the
+  per-upload session log (written to `~/.config/upapasta/logs/` and the pesto
+  CLI equivalent) was previously fixed at DEBUG level, capturing every NNTP
+  command and progress event. It is now fixed at WARN, keeping the log small
+  and focused on actionable failures. Pass `-vv` or set `RUST_LOG=debug` when
+  full trace detail is needed.
+- **Check-phase and retry errors now emit structured log events**: failures
+  during the post-upload STAT pass, missing-article reposts, and segment
+  retries were previously only written to stderr (`eprintln!`). They now also
+  emit `error!`/`warn!` tracing events so the reason is captured in the session
+  log.
+
 ### Security
 - **Credentials and server hostname redacted in all log levels**: the NNTP
   username, server hostname, and server greeting text were logged in plain text
