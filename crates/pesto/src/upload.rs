@@ -235,10 +235,7 @@ pub async fn run_upload(
         );
         match crate::poster::check_articles(config, &outcome.segments, progress_tx.as_ref()).await {
             Ok(missing) if missing.is_empty() => {
-                emit_status(
-                    &progress_tx,
-                    format!("check: all {} article(s) verified", outcome.segments.len()),
-                );
+                // CheckDone { failed: 0 } already emitted by check_articles.
             }
             Ok(missing) => {
                 emit_status(
@@ -270,7 +267,7 @@ pub async fn run_upload(
                     .await
                 {
                     Ok(still_missing) if still_missing.is_empty() => {
-                        emit_status(&progress_tx, "check: all article(s) confirmed after repost");
+                        // CheckDone { failed: 0 } already emitted by check_articles.
                     }
                     Ok(still_missing) => {
                         emit_status(
