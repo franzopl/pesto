@@ -14,6 +14,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   what the pesto CLI already does. All progress events are also written to
   `upload.log` without filtering.
 
+### Added
+- **Check toggle in the upapasta upload panel**: the post-upload STAT check
+  (`check`) is now exposed as a toggleable field in the upload confirmation
+  panel (alongside Verify). Toggle with `←→` or `Enter`; the setting is
+  persisted across sessions like other upload preferences. Also shown in the
+  Effective Upload Settings summary on the Dashboard and the Config overrides
+  panel.
+
 ### Changed
 - **Session log always ends with a one-line summary**: after every upload
   (success, failure, or cancel) a structured summary line is appended to the
