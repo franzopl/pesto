@@ -88,6 +88,7 @@ enum ConnState {
 }
 
 /// Mutable view the renderer builds up from the event stream.
+#[allow(dead_code)]
 struct RenderState {
     started: bool,
     finished: bool,

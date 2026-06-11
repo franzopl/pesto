@@ -1800,12 +1800,15 @@ async fn run_real_upload(
         let _ = pesto::logging::set_session_log(p);
     }
 
-    // Bridge CancellationToken → AtomicBool (pesto's cancel mechanism).
+    // Bridge CancellationToken + signals → AtomicBool (pesto's cancel mechanism).
     let cancel_flag = Arc::new(AtomicBool::new(false));
     {
         let flag = cancel_flag.clone();
         tokio::spawn(async move {
-            cancel_token.cancelled().await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => {},
+                _ = tokio::signal::ctrl_c() => {},
+            }
             flag.store(true, Ordering::Relaxed);
         });
     }

@@ -6,7 +6,8 @@
 //! converge over time.
 
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::Context;
 
@@ -205,13 +206,13 @@ pub async fn run_upload(
 
     // ── Post ─────────────────────────────────────────────────────────────────
     let post_tx = progress_tx.clone();
-    let outcome = if let Some(cancel_flag) = cancel {
+    let outcome = if let Some(ref cancel_flag) = cancel {
         crate::poster::post_files_with_progress_and_cancel(
             config,
             &inputs,
             post_tx,
             resume_path.as_deref(),
-            Some(cancel_flag),
+            Some(cancel_flag.clone()),
         )
         .await?
     } else {
@@ -221,23 +222,29 @@ pub async fn run_upload(
     // ─────────────────────────────────────────────────────────────────────────
 
     let mut had_failures = !outcome.failures.is_empty();
+    let mut cancelled = outcome.cancelled;
 
     // ── Post-check STAT pass ──────────────────────────────────────────────────
     if config.check
         && !config.dry_run
         && !config.par2_only
-        && !outcome.cancelled
+        && !cancelled
         && !outcome.segments.is_empty()
     {
         emit_status(
             &progress_tx,
             format!("checking {} article(s) via STAT…", outcome.segments.len()),
         );
-        match crate::poster::check_articles(config, &outcome.segments, progress_tx.as_ref()).await {
-            Ok(missing) if missing.is_empty() => {
-                // CheckDone { failed: 0 } already emitted by check_articles.
-            }
-            Ok(missing) => {
+        let check_result = crate::poster::check_articles(
+            config,
+            &outcome.segments,
+            progress_tx.as_ref(),
+            cancel.as_ref(),
+        )
+        .await;
+        cancelled = cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
+        match check_result {
+            Ok(missing) if !cancelled && !missing.is_empty() => {
                 emit_status(
                     &progress_tx,
                     format!("check: {} article(s) not found — reposting…", missing.len()),
@@ -249,6 +256,7 @@ pub async fn run_upload(
                     &outcome.segments,
                     &missing,
                     progress_tx.as_ref(),
+                    cancel.as_ref(),
                 )
                 .await
                 .unwrap_or_else(|e| {
@@ -262,40 +270,59 @@ pub async fn run_upload(
                     format!("check: reposted {reposted}/{} article(s)", missing.len()),
                 );
 
-                // Second STAT pass to confirm reposts landed.
-                match crate::poster::check_articles(config, &outcome.segments, progress_tx.as_ref())
+                cancelled = cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
+
+                // Second STAT pass to confirm reposts landed (only if not cancelled).
+                if cancelled {
+                    emit_status(
+                        &progress_tx,
+                        "check: interrupted — skipping verify after repost".to_string(),
+                    );
+                } else {
+                    match crate::poster::check_articles(
+                        config,
+                        &outcome.segments,
+                        progress_tx.as_ref(),
+                        cancel.as_ref(),
+                    )
                     .await
-                {
-                    Ok(still_missing) if still_missing.is_empty() => {
-                        // CheckDone { failed: 0 } already emitted by check_articles.
-                    }
-                    Ok(still_missing) => {
-                        emit_status(
-                            &progress_tx,
-                            format!(
-                                "check: {} article(s) still missing after repost",
-                                still_missing.len()
-                            ),
-                        );
-                        for id in &still_missing {
-                            emit_status(&progress_tx, format!("  missing: {id}"));
+                    {
+                        Ok(still_missing) if still_missing.is_empty() => {
+                            // CheckDone { failed: 0 } already emitted by check_articles.
                         }
-                        tracing::error!(
-                            count = still_missing.len(),
-                            ids = ?still_missing,
-                            "check: articles still missing after repost"
-                        );
-                        had_failures = true;
+                        Ok(still_missing) => {
+                            emit_status(
+                                &progress_tx,
+                                format!(
+                                    "check: {} article(s) still missing after repost",
+                                    still_missing.len()
+                                ),
+                            );
+                            for id in &still_missing {
+                                emit_status(&progress_tx, format!("  missing: {id}"));
+                            }
+                            tracing::error!(
+                                count = still_missing.len(),
+                                ids = ?still_missing,
+                                "check: articles still missing after repost"
+                            );
+                            had_failures = true;
+                        }
+                        Err(e) => {
+                            emit_status(
+                                &progress_tx,
+                                format!("check: verify after repost failed: {e:#}"),
+                            );
+                            tracing::error!(error = %e, "check: second STAT pass failed");
+                            had_failures = true;
+                        }
                     }
-                    Err(e) => {
-                        emit_status(
-                            &progress_tx,
-                            format!("check: verify after repost failed: {e:#}"),
-                        );
-                        tracing::error!(error = %e, "check: second STAT pass failed");
-                        had_failures = true;
-                    }
+                    cancelled =
+                        cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
                 }
+            }
+            Ok(_) => {
+                // Either all verified or cancelled before/during check.
             }
             Err(e) => {
                 emit_status(&progress_tx, format!("check: STAT pass error: {e:#}"));
@@ -306,7 +333,7 @@ pub async fn run_upload(
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Write NZB ────────────────────────────────────────────────────────────
-    let nzb_path: Option<PathBuf> = if outcome.cancelled
+    let nzb_path: Option<PathBuf> = if (cancelled && !config.resume)
         || outcome.segments.is_empty()
         || config.dry_run
         || config.par2_only
@@ -377,7 +404,7 @@ pub async fn run_upload(
     // ── Notifications ────────────────────────────────────────────────────────
     let notify_enabled = config.notify.unwrap_or(true)
         && (config.notify_webhook.is_some() || config.notify_ntfy.is_some());
-    if notify_enabled && !config.par2_only && !config.dry_run && !outcome.cancelled {
+    if notify_enabled && !config.par2_only && !config.dry_run && !cancelled {
         crate::notify::send_all(&crate::notify::NotifyConfig {
             webhook_url: config.notify_webhook.as_deref(),
             ntfy_topic: config.notify_ntfy.as_deref(),
@@ -392,7 +419,7 @@ pub async fn run_upload(
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── NFO + post-upload hooks ──────────────────────────────────────────────
-    if !outcome.cancelled && !had_failures && !config.par2_only && !config.dry_run {
+    if !cancelled && !had_failures && !config.par2_only && !config.dry_run {
         // Generate .nfo next to the .nzb (or next to the source files).
         let nfo_path: Option<PathBuf> = if config.nfo {
             let base = nzb_path
@@ -463,7 +490,7 @@ pub async fn run_upload(
     Ok(UploadOutcome {
         segments: outcome.segments,
         groups: outcome.groups,
-        cancelled: outcome.cancelled,
+        cancelled,
         had_failures,
         nzb_path,
         total_bytes,

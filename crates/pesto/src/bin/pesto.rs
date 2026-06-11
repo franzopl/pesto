@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -544,6 +545,7 @@ async fn run_single_upload(
     params: &UploadParams,
     entry_paths: &[PathBuf],
     entry_label: &str,
+    cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<UploadResult> {
     let config = &params.config;
     let upload_start = std::time::Instant::now();
@@ -819,11 +821,12 @@ async fn run_single_upload(
     let nzb_out_path: Option<String> = nzb_stem.clone();
 
     let t_post = std::time::Instant::now();
-    let outcome = pesto::poster::post_files_with_progress(
+    let outcome = pesto::poster::post_files_with_progress_and_cancel(
         config,
         &inputs,
         Some(progress_tx),
         resume_path.as_deref(),
+        cancel.cloned(),
     )
     .await?;
     let _ = renderer.await;
@@ -850,6 +853,7 @@ async fn run_single_upload(
             &outcome.failed_tasks,
             &outcome.groups,
             Some(&retry_tx),
+            cancel,
         )
         .await
         .unwrap_or_else(|e| {
@@ -877,10 +881,11 @@ async fn run_single_upload(
     }
 
     // ── Post-check STAT pass ──────────────────────────────────────────────────
+    let mut cancelled = outcome.cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
     let check_missing: Vec<String> = if config.check
         && !config.dry_run
         && !config.par2_only
-        && !outcome.cancelled
+        && !cancelled
         && !outcome.segments.is_empty()
     {
         let (check_tx, check_renderer) = if params.json_mode {
@@ -889,13 +894,15 @@ async fn run_single_upload(
             pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
         };
         let t_check = std::time::Instant::now();
-        let missing = pesto::poster::check_articles(config, &outcome.segments, Some(&check_tx))
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("check: error during STAT pass: {e:#}");
-                error!(error = %e, "check: STAT pass failed");
-                Vec::new()
-            });
+        let missing =
+            pesto::poster::check_articles(config, &outcome.segments, Some(&check_tx), cancel)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("check: error during STAT pass: {e:#}");
+                    error!(error = %e, "check: STAT pass failed");
+                    Vec::new()
+                });
+        cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
         drop(check_tx);
         let _ = check_renderer.await;
         let check_ms = t_check.elapsed().as_millis();
@@ -907,18 +914,18 @@ async fn run_single_upload(
     };
 
     if !params.json_mode && config.par2_only {
-        if outcome.cancelled {
+        if cancelled {
             println!("PAR2 generation interrupted.");
         } else {
             println!("PAR2 generation complete.");
         }
     }
 
-    if outcome.cancelled {
+    if cancelled {
         if config.par2_only {
             eprintln!("interrupted — stopped before finishing PAR2 generation");
         } else {
-            eprintln!("interrupted — stopped before posting every requested segment");
+            eprintln!("interrupted — upload incomplete");
         }
     }
     if !outcome.failures.is_empty() {
@@ -927,7 +934,7 @@ async fn run_single_upload(
             eprintln!("  - {failure}");
         }
     }
-    let check_missing = if !check_missing.is_empty() {
+    let check_missing = if !cancelled && !check_missing.is_empty() {
         eprintln!(
             "check: {} article(s) not found — reposting…",
             check_missing.len()
@@ -948,6 +955,7 @@ async fn run_single_upload(
             &outcome.segments,
             &check_missing,
             Some(&repost_tx),
+            cancel,
         )
         .await
         .unwrap_or_else(|e| {
@@ -964,43 +972,60 @@ async fn run_single_upload(
             check_missing.len()
         );
 
+        cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
+
         // Second STAT pass to confirm reposts landed (no extra delay — they
         // were just posted so propagation should be immediate).
-        let (verify_tx, verify_renderer) = if params.json_mode {
-            pesto::progress::spawn_json_emitter()
+        if cancelled {
+            eprintln!("check: interrupted — skipping verify after repost");
+            check_missing
         } else {
-            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-        };
-        let still_missing =
-            pesto::poster::check_articles(config, &outcome.segments, Some(&verify_tx))
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("check: verify after repost failed: {e:#}");
-                    error!(error = %e, "check: second STAT pass (post-repost verify) failed");
-                    check_missing.clone()
-                });
-        drop(verify_tx);
-        let _ = verify_renderer.await;
+            let (verify_tx, verify_renderer) = if params.json_mode {
+                pesto::progress::spawn_json_emitter()
+            } else {
+                pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+            };
+            let still_missing =
+                pesto::poster::check_articles(config, &outcome.segments, Some(&verify_tx), cancel)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("check: verify after repost failed: {e:#}");
+                        error!(error = %e, "check: second STAT pass (post-repost verify) failed");
+                        check_missing.clone()
+                    });
+            cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
+            drop(verify_tx);
+            let _ = verify_renderer.await;
 
-        if still_missing.is_empty() {
-            eprintln!("check: all article(s) confirmed after repost");
-        } else {
-            eprintln!(
-                "check: {} article(s) still missing after repost:",
-                still_missing.len()
-            );
-            for id in &still_missing {
-                eprintln!("  - {id}");
+            if cancelled {
+                eprintln!("check: interrupted during verify after repost");
+                still_missing
+            } else if still_missing.is_empty() {
+                eprintln!("check: all article(s) confirmed after repost");
+                still_missing
+            } else {
+                eprintln!(
+                    "check: {} article(s) still missing after repost:",
+                    still_missing.len()
+                );
+                for id in &still_missing {
+                    eprintln!("  - {id}");
+                }
+                error!(
+                    count = still_missing.len(),
+                    ids = ?still_missing,
+                    "check: articles still missing after repost"
+                );
+                still_missing
             }
-            error!(
-                count = still_missing.len(),
-                ids = ?still_missing,
-                "check: articles still missing after repost"
-            );
         }
-        still_missing
     } else {
-        if config.check && !config.dry_run && !config.par2_only && !outcome.cancelled {
+        if config.check
+            && !config.dry_run
+            && !config.par2_only
+            && !cancelled
+            && !outcome.segments.is_empty()
+        {
             eprintln!("check: all {} article(s) verified", outcome.segments.len());
         }
         Vec::new()
@@ -1037,14 +1062,23 @@ async fn run_single_upload(
     // If the user specified a destination (--out or nzb_dir), a hardlink (or
     // copy when cross-device) is placed there so re-uploads never collide.
     let out: Option<PathBuf> = if let Some(stem) = nzb_out_path {
-        Some(nzb_archive_path(&stem).await)
+        if !cancelled || config.resume {
+            Some(nzb_archive_path(&stem).await)
+        } else {
+            eprintln!("interrupted — skipping nzb output");
+            None
+        }
     } else {
         None
     };
 
     // nzb_reported_path: the path shown to the user and passed to hooks/history.
     // It is the user-dest (hardlink) when set, otherwise the archive copy.
-    let mut nzb_reported_path: Option<PathBuf> = nzb_user_dest.clone().or_else(|| out.clone());
+    let mut nzb_reported_path: Option<PathBuf> = if cancelled && !config.resume {
+        None
+    } else {
+        nzb_user_dest.clone().or_else(|| out.clone())
+    };
 
     let _nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {
@@ -1140,9 +1174,8 @@ async fn run_single_upload(
     // Send completion notifications.
     let notify_enabled = config.notify.unwrap_or(true)
         && (config.notify_webhook.is_some() || config.notify_ntfy.is_some());
-    if notify_enabled && !config.par2_only && !config.dry_run {
-        let had_failures =
-            outcome.cancelled || !outcome.failures.is_empty() || has_unrecoverable_failures;
+    if notify_enabled && !config.par2_only && !config.dry_run && !cancelled {
+        let had_failures = !outcome.failures.is_empty() || has_unrecoverable_failures;
         pesto::notify::send_all(&pesto::notify::NotifyConfig {
             webhook_url: config.notify_webhook.as_deref(),
             ntfy_topic: config.notify_ntfy.as_deref(),
@@ -1155,9 +1188,8 @@ async fn run_single_upload(
         .await;
     }
 
-    // Generate .nfo unconditionally — it is a local artifact and does not
-    // depend on a live NNTP connection, --dry-run, or --no-upload.
-    let nfo_path: Option<PathBuf> = if config.nfo && !config.par2_only {
+    // Generate .nfo as a local artifact when the upload was not cancelled.
+    let nfo_path: Option<PathBuf> = if config.nfo && !config.par2_only && !cancelled {
         let base = nzb_reported_path
             .as_ref()
             .map(|p| p.with_extension("nfo"))
@@ -1192,8 +1224,7 @@ async fn run_single_upload(
     };
 
     // Run post-upload hooks only when the upload actually succeeded.
-    let upload_ok =
-        !outcome.cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
+    let upload_ok = !cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
     if upload_ok && !config.par2_only && !config.dry_run {
         let post_input_paths = inputs
             .iter()
@@ -1252,7 +1283,7 @@ async fn run_single_upload(
     Ok(UploadResult {
         segments: outcome.segments,
         groups: outcome.groups,
-        cancelled: outcome.cancelled,
+        cancelled,
         had_failures: !outcome.failures.is_empty()
             || !check_missing.is_empty()
             || has_unrecoverable_failures,
@@ -1281,6 +1312,7 @@ async fn run_batch(
     dirs: &[PathBuf],
     jobs: usize,
     season_nzb: Option<PathBuf>,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(Vec<PostedSegment>, bool, bool)> {
     // Collect all entries from every directory argument.
     let mut entries: Vec<PathBuf> = Vec::new();
@@ -1315,6 +1347,7 @@ async fn run_batch(
         let entry = entry.clone();
         let params = Arc::clone(&params);
         let sem = Arc::clone(&semaphore);
+        let task_cancel = cancel.clone();
         let label = entry
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1325,7 +1358,7 @@ async fn run_batch(
             if !params.json_mode {
                 println!("\n── {} ──", label);
             }
-            run_single_upload(&params, &[entry], &label).await
+            run_single_upload(&params, &[entry], &label, Some(&task_cancel)).await
         });
         handles.push(handle);
     }
@@ -1359,7 +1392,9 @@ async fn run_batch(
 
     // Write consolidated season NZB (and matching .nfo + hooks) when requested.
     if let Some(season_path) = season_nzb {
-        if !all_segments.is_empty() {
+        if any_cancelled {
+            eprintln!("interrupted — skipping season nzb output");
+        } else if !all_segments.is_empty() {
             let config = &params.config;
             let season_name = config.nzb_name.clone().or_else(|| {
                 season_path
@@ -1477,8 +1512,8 @@ async fn run_watch(
     watch_done: Option<&Path>,
     poll_interval: u64,
     jobs: usize,
-) -> Result<()> {
-    use tokio::signal;
+    cancel: Arc<AtomicBool>,
+) -> Result<bool> {
     use tokio::sync::mpsc;
 
     eprintln!(
@@ -1486,32 +1521,6 @@ async fn run_watch(
         watch_dir.display(),
         poll_interval
     );
-
-    let shutdown = Arc::new(tokio::sync::Notify::new());
-    let shutdown_clone = Arc::clone(&shutdown);
-
-    // Listen for Ctrl-C / SIGTERM on a background task.
-    tokio::spawn(async move {
-        let ctrl_c = async {
-            signal::ctrl_c().await.ok();
-        };
-        #[cfg(unix)]
-        let sigterm = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("SIGTERM handler")
-                .recv()
-                .await;
-        };
-        #[cfg(not(unix))]
-        let sigterm = std::future::pending::<()>();
-
-        tokio::select! {
-            _ = ctrl_c => {},
-            _ = sigterm => {},
-        }
-        eprintln!("\nshutdown requested — finishing in-progress uploads");
-        shutdown_clone.notify_waiters();
-    });
 
     // `done`: entries that have been successfully uploaded (or permanently failed).
     let mut done: HashSet<PathBuf> = HashSet::new();
@@ -1537,19 +1546,31 @@ async fn run_watch(
     };
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
 
-    // Channel for completed tasks to report back (path, success).
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<(PathBuf, bool)>();
+    // Channel for completed tasks to report back (path, success, cancelled).
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<(PathBuf, bool, bool)>();
+
+    let mut any_cancelled = false;
 
     loop {
         // Check for shutdown between polls.
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_secs(poll_interval)) => {}
-            _ = shutdown.notified() => { break; }
+            _ = async {
+                while !cancel.load(Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            } => {
+                eprintln!("\nshutdown requested — finishing in-progress uploads");
+                break;
+            }
         }
 
         // Drain completed-task notifications before scanning for new entries.
-        while let Ok((entry, success)) = result_rx.try_recv() {
-            if success {
+        while let Ok((entry, success, task_cancelled)) = result_rx.try_recv() {
+            if task_cancelled {
+                any_cancelled = true;
+                eprintln!("watch: upload of `{}` was cancelled", entry.display());
+            } else if success {
                 done.insert(entry);
             } else {
                 let attempts = retry_counts.entry(entry.clone()).or_insert(0);
@@ -1617,41 +1638,43 @@ async fn run_watch(
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "entry".to_string());
+                    let task_cancel = cancel.clone();
 
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
                         if !params.json_mode {
                             println!("\n── watch: {} ──", label);
                         }
-                        let success =
-                            match run_single_upload(&params, std::slice::from_ref(&entry), &label)
-                                .await
-                            {
-                                Ok(_) => {
-                                    // Move to --watch-done if specified; otherwise leave in place.
-                                    if let Some(done_dir) = &watch_done {
-                                        let dest =
-                                            done_dir.join(entry.file_name().unwrap_or_default());
-                                        if let Err(e) = std::fs::rename(&entry, &dest) {
-                                            eprintln!(
-                                                "watch: could not move `{}` to `{}`: {e}",
-                                                entry.display(),
-                                                dest.display()
-                                            );
-                                        }
+                        let (success, task_cancelled) = match run_single_upload(
+                            &params,
+                            std::slice::from_ref(&entry),
+                            &label,
+                            Some(&task_cancel),
+                        )
+                        .await
+                        {
+                            Ok(result) if result.cancelled => (false, true),
+                            Ok(_) => {
+                                // Move to --watch-done if specified; otherwise leave in place.
+                                if let Some(done_dir) = &watch_done {
+                                    let dest = done_dir.join(entry.file_name().unwrap_or_default());
+                                    if let Err(e) = std::fs::rename(&entry, &dest) {
+                                        eprintln!(
+                                            "watch: could not move `{}` to `{}`: {e}",
+                                            entry.display(),
+                                            dest.display()
+                                        );
                                     }
-                                    true
                                 }
-                                Err(e) => {
-                                    eprintln!(
-                                        "watch: upload failed for `{}`: {e:#}",
-                                        entry.display()
-                                    );
-                                    false
-                                }
-                            };
+                                (true, false)
+                            }
+                            Err(e) => {
+                                eprintln!("watch: upload failed for `{}`: {e:#}", entry.display());
+                                (false, false)
+                            }
+                        };
                         // Report outcome; if the channel is closed we're shutting down.
-                        let _ = tx.send((entry, success));
+                        let _ = tx.send((entry, success, task_cancelled));
                     });
                 }
             }
@@ -1666,7 +1689,7 @@ async fn run_watch(
     };
     let _ = semaphore.acquire_many(effective_jobs as u32).await;
     eprintln!("watch: all uploads finished, exiting");
-    Ok(())
+    Ok(any_cancelled)
 }
 
 // ── merge-season ─────────────────────────────────────────────────────────────
@@ -2026,16 +2049,25 @@ async fn main() -> Result<()> {
         },
     });
 
+    // Unified cancellation flag: one signal listener for the whole process.
+    let cancel = Arc::new(AtomicBool::new(false));
+    pesto::cancel::spawn_listener(cancel.clone());
+
     // ── --watch mode ──────────────────────────────────────────────────────────
     if let Some(watch_dir) = &cli.watch {
-        return run_watch(
+        let any_cancelled = run_watch(
             params,
             watch_dir,
             cli.watch_done.as_deref(),
             cli.watch_interval,
             cli.jobs,
+            cancel,
         )
-        .await;
+        .await?;
+        if any_cancelled {
+            std::process::exit(130);
+        }
+        return Ok(());
     }
 
     // ── --each / --season batch mode ─────────────────────────────────────────
@@ -2065,7 +2097,7 @@ async fn main() -> Result<()> {
         };
 
         let (_, any_cancelled, any_failures) =
-            run_batch(params, &cli.files, cli.jobs, season_nzb).await?;
+            run_batch(params, &cli.files, cli.jobs, season_nzb, cancel).await?;
 
         if any_cancelled {
             std::process::exit(130);
@@ -2090,7 +2122,7 @@ async fn main() -> Result<()> {
             p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
         })
         .unwrap_or_else(|| format!("{}", std::process::id()));
-    let result = run_single_upload(&params, &cli.files, &label).await?;
+    let result = run_single_upload(&params, &cli.files, &label, Some(&cancel)).await?;
 
     if let Some(ref p) = session_log {
         write_session_summary(

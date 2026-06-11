@@ -25,6 +25,7 @@
 //! ```
 
 pub mod article;
+pub mod cancel;
 pub mod compress;
 pub mod config;
 pub mod history;
@@ -52,7 +53,11 @@ pub async fn post(
     files: Vec<walk::InputFile>,
 ) -> anyhow::Result<(poster::PostOutcome, progress::ProgressReceiver)> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let outcome = poster::post_files_with_progress(&config, &files, Some(tx), None).await?;
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    cancel::spawn_listener(flag.clone());
+    let outcome =
+        poster::post_files_with_progress_and_cancel(&config, &files, Some(tx), None, Some(flag))
+            .await?;
     Ok((outcome, rx))
 }
 
