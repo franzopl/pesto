@@ -1,28 +1,17 @@
-//! End-to-end CLI test: verify `--each` processes top-level entries in the
-//! deterministic order returned by the platform's native `PathBuf` sort. The
-//! test computes the expected order using the same sort the binary uses, so it
-//! is robust across macOS and Linux while still catching scheduler-dependent
-//! reordering bugs.
+//! End-to-end CLI test: verify `--each` processes top-level entries in natural
+//! lexical order. This makes episode numbering human-friendly (`E01`, `E02`,
+//! `E10` instead of `E01`, `E10`, `E02`).
 
-use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-fn each_processes_entries_in_sorted_order() {
+fn each_processes_entries_in_natural_order() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("Season01");
     std::fs::create_dir(&dir).unwrap();
-    let names = ["Show.S01E10.mkv", "Show.S01E01.mkv", "Show.S01E02.mkv"];
-    for name in names {
+    for name in ["Show.S01E10.mkv", "Show.S01E01.mkv", "Show.S01E02.mkv"] {
         std::fs::write(dir.join(name), b"x").unwrap();
     }
-
-    let mut sorted = names.map(PathBuf::from);
-    sorted.sort();
-    let expected: Vec<_> = sorted
-        .iter()
-        .map(|p| format!("── {} ──", p.file_name().unwrap().to_string_lossy()))
-        .collect();
 
     let bin = env!("CARGO_BIN_EXE_pesto");
     let output = Command::new(bin)
@@ -49,5 +38,14 @@ fn each_processes_entries_in_sorted_order() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(labels, expected, "unexpected order in stdout:\n{}", stdout);
+    assert_eq!(
+        labels,
+        vec![
+            "── Show.S01E01.mkv ──",
+            "── Show.S01E02.mkv ──",
+            "── Show.S01E10.mkv ──",
+        ],
+        "unexpected order in stdout:\n{}",
+        stdout
+    );
 }

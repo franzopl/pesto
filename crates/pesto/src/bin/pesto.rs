@@ -1261,14 +1261,17 @@ async fn run_single_upload(
     })
 }
 
-/// Enumerate top-level entries of `dir` (files and subdirectories), sorted by name.
+/// Enumerate top-level entries of `dir` (files and subdirectories), sorted by
+/// name using natural lexical ordering (so `E02` comes before `E10`).
 fn top_level_entries(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading directory `{}`", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .collect();
-    entries.sort();
+    entries.sort_by(|a, b| {
+        lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
+    });
     Ok(entries)
 }
 
