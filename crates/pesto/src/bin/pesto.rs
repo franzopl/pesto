@@ -1312,16 +1312,22 @@ async fn run_batch(
 
     let mut handles = Vec::new();
     for entry in &entries {
+        // Acquire the permit before spawning so uploads start in the sorted
+        // order. With the permit inside the task, the scheduler decided which
+        // upload ran first, making --each non-deterministic.
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
         let entry = entry.clone();
         let params = Arc::clone(&params);
-        let sem = Arc::clone(&semaphore);
         let label = entry
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "entry".to_string());
 
         let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.expect("semaphore closed");
+            let _permit = permit;
             if !params.json_mode {
                 println!("\n── {} ──", label);
             }
@@ -1605,12 +1611,17 @@ async fn run_watch(
                 Some(_) => {
                     // Size unchanged since last poll: entry is stable, dispatch it.
                     pending.remove(&entry);
+                    // Acquire the permit before spawning so uploads start in the
+                    // sorted order returned by top_level_entries().
+                    let permit = Arc::clone(&semaphore)
+                        .acquire_owned()
+                        .await
+                        .expect("semaphore closed");
                     // Mark as done immediately so a second poll won't re-queue it
                     // while the upload task holds the semaphore permit.
                     done.insert(entry.clone());
 
                     let params = Arc::clone(&params);
-                    let sem = Arc::clone(&semaphore);
                     let watch_done = watch_done.map(PathBuf::from);
                     let tx = result_tx.clone();
                     let label = entry
@@ -1619,7 +1630,7 @@ async fn run_watch(
                         .unwrap_or_else(|| "entry".to_string());
 
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let _permit = permit;
                         if !params.json_mode {
                             println!("\n── watch: {} ──", label);
                         }
