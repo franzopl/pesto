@@ -681,9 +681,14 @@ async fn par2_only_ingest(
         }
 
         // Flush the final partial slice for this file (zero-padded inside
-        // feed_par2_slice). No Par2InputProgress here, matching the standard path.
+        // feed_par2_slice).
         if !slice_buf.is_empty() {
             feed_par2_slice(&mut slice_buf, par2_slice_size, worker, true);
+            *par2_slices_fed += 1;
+            shared.emit(ProgressEvent::Par2InputProgress {
+                done: *par2_slices_fed,
+                total: total_slices,
+            });
         }
     }
 
@@ -1007,6 +1012,11 @@ async fn producer(
                 if let Some(worker) = &worker_opt {
                     if !par2_accum.is_empty() {
                         feed_par2_slice(&mut par2_accum, par2_slice_size, worker, true);
+                        par2_slices_fed += 1;
+                        shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
+                            done: par2_slices_fed,
+                            total: total_slices,
+                        });
                     }
                 }
             }
