@@ -39,6 +39,7 @@ sysinfo = { version = "0.36.1", default-features = false, features = ["system"] 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+lexical-sort = "0.3"
 
 [features]
 bench-internals = ["parmesan/bench-internals"]
