@@ -702,8 +702,12 @@ impl RenderState {
 
         // --- overall posting box (only after posting has started) --------
         if !self.files.is_empty() {
-            let frac = if self.total_bytes > 0 {
-                (self.done_bytes as f64 / self.total_bytes as f64).clamp(0.0, 1.0)
+            // Use segment ratio for the bar percentage so it stays in sync with
+            // the N/N seg counter.  total_bytes is pre-seeded with an estimated
+            // PAR2 size, so a byte-ratio bar could stop at ~99% while segments
+            // already read N/N.  Bytes remain the basis for speed/ETA/size.
+            let frac = if self.total_segments > 0 {
+                (self.done_segments as f64 / self.total_segments as f64).clamp(0.0, 1.0)
             } else {
                 0.0
             };
