@@ -54,6 +54,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         line_length: 128,
         retries: 1,
         retry_delay: 1,
+        timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 100,

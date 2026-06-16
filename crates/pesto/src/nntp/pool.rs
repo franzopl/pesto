@@ -131,7 +131,8 @@ impl ConnectionPool {
 /// Open a connection to `server` and authenticate when credentials are
 /// configured.
 pub(crate) async fn connect_and_auth(server: &ServerEntry) -> Result<Connection> {
-    let mut conn = Connection::connect(&server.host, server.port, server.ssl).await?;
+    let mut conn =
+        Connection::connect(&server.host, server.port, server.ssl, server.timeout).await?;
     if let Some(username) = &server.username {
         let password = server.password.as_deref().unwrap_or("");
         conn.authenticate(username, password).await?;
@@ -177,6 +178,7 @@ mod tests {
             username: None,
             password: None,
             retry_delay: 1,
+            timeout: crate::config::DEFAULT_TIMEOUT_SECS,
         }
     }
 

@@ -127,10 +127,23 @@ pub struct PostedSegment {
 }
 
 /// A segment that failed to post during the upload run. Carries enough
-/// information to attempt a fresh post (new Message-ID).
+/// information to re-post the *same* article on the end-of-run retry pass.
 #[derive(Debug, Clone)]
 pub struct FailedTask {
+    /// Published name (relative path / base name) used for NZB metadata and
+    /// logging. Not a filesystem path — see [`FailedTask::file_path`].
     pub file_name: String,
+    /// Absolute filesystem path of the source file, preserved so the end-of-run
+    /// retry can re-read the segment regardless of the current working
+    /// directory. `file_name` alone is insufficient (issue #23).
+    pub file_path: PathBuf,
+    /// The Message-ID the in-run attempts used. The end-of-run retry re-posts
+    /// with this *same* ID so that, if the article actually reached the server
+    /// during the run (e.g. the `240` ack was lost when the connection died),
+    /// the server can deduplicate it: it answers `441 … 435 Already exists`,
+    /// which is now treated as success instead of producing a duplicate article
+    /// under a fresh ID. Mirrors nyuu's same-Message-ID repost strategy.
+    pub message_id: String,
     pub subject_name: String,
     pub file_size: u64,
     pub part: u32,
@@ -1757,7 +1770,7 @@ fn commit_result(
             date,
         });
     } else {
-        record_failure(shared, &task.meta, &task, last_err);
+        record_failure(shared, &task.meta, &task, message_id, last_err);
     }
     let article_bytes = task.data.len() as u64;
     shared.release_buffer(task.data);
@@ -1768,7 +1781,13 @@ fn commit_result(
     });
 }
 
-fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str) {
+fn record_failure(
+    shared: &Shared,
+    meta: &FileMeta,
+    task: &PostTask,
+    message_id: String,
+    error: &str,
+) {
     let description = format!(
         "{} part {}/{}: {error}",
         meta.real_name, task.part, task.total
@@ -1779,6 +1798,8 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
     shared.failures.lock().unwrap().push(description);
     shared.failed_tasks.lock().unwrap().push(FailedTask {
         file_name: meta.real_name.clone(),
+        file_path: meta.path.clone(),
+        message_id,
         subject_name: task.subject_name.clone(),
         file_size: meta.size,
         part: task.part,
@@ -1982,11 +2003,13 @@ pub async fn repost_failed_tasks(
         let offset = (task.part as u64 - 1) * article_size;
         let read_len = (task.file_size - offset).min(article_size) as usize;
 
-        let path = PathBuf::from(&task.file_name);
+        // Re-read from the preserved absolute path, not `file_name` (which is
+        // only the published/relative name and would resolve against the CWD).
+        let path = task.file_path.clone();
         let mut file = match File::open(&path).await {
             Ok(f) => f,
             Err(e) => {
-                warn!(file = %task.file_name, "retry: cannot open file: {e}");
+                warn!(file = %task.file_name, path = %path.display(), "retry: cannot open file: {e}");
                 continue;
             }
         };
@@ -2016,7 +2039,11 @@ pub async fn repost_failed_tasks(
             config.line_length,
             None,
         );
-        let message_id = generate_message_id(config.message_id_domain.as_deref());
+        // Re-post with the *same* Message-ID the in-run attempts used, so a
+        // server that already has the article (lost `240` ack) deduplicates it
+        // via `435 Already exists` instead of accepting a duplicate under a
+        // fresh ID. See [`FailedTask::message_id`].
+        let message_id = task.message_id.clone();
         let (rfc_date, _ts) = &task.date;
         let article = Article {
             message_id: message_id.clone(),
@@ -2668,12 +2695,16 @@ mod tests {
             from: String::new(),
             date: (None, None),
         };
-        record_failure(&shared, &task.meta, &task, "timeout");
+        record_failure(&shared, &task.meta, &task, "<mid@host>".into(), "timeout");
         let failures = shared.failures.lock().unwrap();
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("ep.mkv"));
         assert!(failures[0].contains("2/5"));
         assert!(failures[0].contains("timeout"));
+        // The original Message-ID is preserved for the same-ID end-of-run retry.
+        let tasks = shared.failed_tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].message_id, "<mid@host>");
     }
 
     // ── multi-file dry-run ordering ───────────────────────────────────────────

@@ -45,7 +45,7 @@ impl Config {
         let dry_run = cli.dry_run.unwrap_or(false);
         let par2_only = cli.par2_only.unwrap_or(false);
 
-        let (host, port, ssl, connections, username, password, retry_delay, extra_servers) =
+        let (host, port, ssl, connections, username, password, retry_delay, timeout, extra_servers) =
             if !file.extra_servers.is_empty() {
                 let mut iter = file.extra_servers.into_iter();
                 let primary = iter.next().unwrap();
@@ -65,6 +65,7 @@ impl Config {
                     .retry_delay
                     .or(primary.retry_delay)
                     .unwrap_or(DEFAULT_RETRY_DELAY);
+                let timeout = primary.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
                 let extras: Vec<ServerEntry> = iter
                     .map(|e| -> Result<ServerEntry> {
                         Ok(ServerEntry {
@@ -75,6 +76,8 @@ impl Config {
                             username: e.username,
                             password: e.password,
                             retry_delay: e.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
+                            // Per-entry timeout, falling back to the primary's.
+                            timeout: e.timeout.unwrap_or(timeout),
                         })
                     })
                     .collect::<Result<_>>()?;
@@ -86,6 +89,7 @@ impl Config {
                     username,
                     password,
                     retry_delay,
+                    timeout,
                     extras,
                 )
             } else {
@@ -110,6 +114,7 @@ impl Config {
                     cli.retry_delay
                         .or(file.server.retry_delay)
                         .unwrap_or(DEFAULT_RETRY_DELAY),
+                    file.server.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS),
                     vec![],
                 )
             };
@@ -135,6 +140,7 @@ impl Config {
             username,
             password,
             retry_delay,
+            timeout,
             extra_servers,
             from,
             groups,

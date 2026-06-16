@@ -22,6 +22,11 @@ host = "news.example.com"
 # connections = 4     # Parallel NNTP connections — the main throughput lever.
                       # Default: 4. Most providers allow 10–50.
 # retry_delay = 1     # Seconds to wait between failed post attempts. Default: 1.
+# timeout = 120       # Per-command read timeout in seconds. Aborts a silently
+                      # dead connection instead of hanging until the OS keepalive
+                      # fires (minutes on Windows, hours on Linux). Keep it well
+                      # above the time a slow link needs to acknowledge one
+                      # article, so it never trips a healthy upload. Default: 120.
 
 [auth]
 # Credentials for the NNTP server. Omit the whole section for open servers.
@@ -44,6 +49,7 @@ password = "your_password"
 # username = "user1"
 # password = "pass1"
 # retry_delay = 1
+# timeout = 120       # Optional per-server read timeout (seconds). Default: 120.
 #
 # [[servers]]
 # host = "news.fallback.com"

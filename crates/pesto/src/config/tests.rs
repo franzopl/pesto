@@ -218,7 +218,23 @@ fn all_numeric_defaults_match_constants() {
     assert_eq!(cfg.line_length, DEFAULT_LINE_LENGTH);
     assert_eq!(cfg.retries, DEFAULT_RETRIES);
     assert_eq!(cfg.retry_delay, DEFAULT_RETRY_DELAY);
+    assert_eq!(cfg.timeout, DEFAULT_TIMEOUT_SECS);
     assert_eq!(cfg.par2, DEFAULT_PAR2);
+}
+
+#[test]
+fn timeout_resolves_from_server_section_and_propagates_to_all_servers() {
+    let file: FileConfig = toml::from_str(
+        "[[servers]]\nhost = \"primary\"\ntimeout = 45\n[[servers]]\nhost = \"backup\"\n",
+    )
+    .unwrap();
+    let cfg = Config::resolve(file, base_overrides()).unwrap();
+    assert_eq!(cfg.timeout, 45);
+    // The primary's timeout is surfaced through all_servers()...
+    let servers: Vec<_> = cfg.all_servers().collect();
+    assert_eq!(servers[0].timeout, 45);
+    // ...and an entry without its own timeout inherits the primary's.
+    assert_eq!(servers[1].timeout, 45);
 }
 
 #[test]

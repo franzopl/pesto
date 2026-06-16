@@ -7,6 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`435 Already exists` is no longer treated as a post failure**: when a
+  connection dropped after the server had already accepted an article, the retry
+  re-sent the same Message-ID and the server answered `441 … 435 Already exists
+  in history`. pesto treated that as a fatal error and burned the full retry
+  budget (reconnect + auth + POST) on segments that were already posted. All
+  three `441` POST paths now recognise a `435`/"already exists" rejection as
+  success (RFC 3977 §6.2.2) and continue. (#23)
+- **NNTP reads now have a timeout**: when a TCP connection died silently (no
+  RST/FIN), `read_response` blocked until the OS keepalive aborted the socket
+  (~4.5 min on Windows, ~2 h on Linux). Each connection now enforces a
+  per-command read timeout, configurable via `[server].timeout` (per-server in
+  `[[servers]]`), defaulting to a conservative 120 s — generous enough never to
+  trip a slow-but-healthy upload. (#23)
+- **End-of-run retry can find the source file again**: `FailedTask` only stored
+  the published/base file name, so the retry pass did `PathBuf::from(file_name)`
+  and resolved it against the current working directory, failing with `os error
+  2` unless the CWD happened to be the source folder. It now also stores the
+  absolute `file_path` and re-reads from that. (#23)
+- **End-of-run retry re-posts with the original Message-ID**: the retry pass
+  previously generated a *fresh* Message-ID per attempt, so an article that had
+  actually reached the server during the run (lost `240` ack) would be posted a
+  second time under a new ID — a duplicate. `FailedTask` now carries the
+  original Message-ID and the retry re-uses it, letting the server deduplicate
+  via `435 Already exists` (now treated as success). This mirrors nyuu's
+  same-Message-ID repost strategy. In-run retries already reused the ID. (#23)
+
 ## [0.3.23] — 2026-06-16
 
 ### Fixed
