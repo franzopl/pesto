@@ -26,6 +26,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and resolved it against the current working directory, failing with `os error
   2` unless the CWD happened to be the source folder. It now also stores the
   absolute `file_path` and re-reads from that. (#23)
+- **End-of-run retry re-posts with the original Message-ID**: the retry pass
+  previously generated a *fresh* Message-ID per attempt, so an article that had
+  actually reached the server during the run (lost `240` ack) would be posted a
+  second time under a new ID — a duplicate. `FailedTask` now carries the
+  original Message-ID and the retry re-uses it, letting the server deduplicate
+  via `435 Already exists` (now treated as success). This mirrors nyuu's
+  same-Message-ID repost strategy. In-run retries already reused the ID. (#23)
 
 ## [0.3.23] — 2026-06-16
 
