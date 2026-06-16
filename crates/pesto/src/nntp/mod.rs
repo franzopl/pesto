@@ -15,7 +15,7 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, trace};
 
 /// Monotonic timer for per-command latency logging (26b).
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub mod pool;
 
@@ -49,12 +49,25 @@ impl Response {
 /// A single NNTP session.
 pub struct Connection {
     stream: BufReader<BufWriter<Box<dyn Stream>>>,
+    /// Maximum time to wait for a single server response line. Guards against a
+    /// silently dropped TCP connection where the peer sends neither data nor a
+    /// FIN/RST, which would otherwise block until the OS keepalive fires.
+    read_timeout: Duration,
 }
 
 impl Connection {
     /// Open a connection to `host:port`, performing the TLS handshake when
     /// `tls` is set, and read the server greeting.
-    pub async fn connect(host: &str, port: u16, tls: bool) -> Result<Connection> {
+    ///
+    /// `timeout_secs` bounds how long any later [`read_response`] waits for a
+    /// server reply before failing, so a silently dead socket cannot hang a
+    /// worker indefinitely.
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        tls: bool,
+        timeout_secs: u64,
+    ) -> Result<Connection> {
         debug!(host = "<redacted>", port, tls, "connecting");
         let tcp = TcpStream::connect((host, port))
             .await
@@ -77,6 +90,7 @@ impl Connection {
 
         let mut conn = Connection {
             stream: BufReader::new(BufWriter::new(stream)),
+            read_timeout: Duration::from_secs(timeout_secs),
         };
 
         // 200 = posting allowed, 201 = posting prohibited.
@@ -148,6 +162,10 @@ impl Connection {
         let resp = self.read_response().await?;
         match resp.code {
             240 => Ok(()),
+            441 if already_exists(&resp.text) => {
+                debug!("article already on server (441/435); treating as posted");
+                Ok(())
+            }
             441 => bail!("article rejected by server (441): {}", resp.text),
             _ => bail!("unexpected POST response: {} {}", resp.code, resp.text),
         }
@@ -196,6 +214,10 @@ impl Connection {
         let r240 = self.read_response().await?;
         match r240.code {
             240 => Ok(()),
+            441 if already_exists(&r240.text) => {
+                debug!("article already on server (441/435); treating as posted");
+                Ok(())
+            }
             441 => bail!("article rejected by server (441): {}", r240.text),
             _ => bail!(
                 "unexpected POST response (pipelined): {} {}",
@@ -228,6 +250,10 @@ impl Connection {
         let resp = self.read_response().await?;
         match resp.code {
             240 => Ok(()),
+            441 if already_exists(&resp.text) => {
+                debug!("article already on server (441/435); treating as posted");
+                Ok(())
+            }
             441 => bail!("article rejected by server (441): {}", resp.text),
             _ => bail!("unexpected POST response: {} {}", resp.code, resp.text),
         }
@@ -283,12 +309,20 @@ impl Connection {
     }
 
     /// Read one response line from the server.
+    ///
+    /// The read is bounded by `read_timeout`: if the server sends nothing within
+    /// that window the call fails instead of blocking until the OS keepalive
+    /// eventually aborts the dead socket (minutes to hours).
     async fn read_response(&mut self) -> Result<Response> {
         let mut line = String::new();
-        let n = self
-            .stream
-            .read_line(&mut line)
+        let n = tokio::time::timeout(self.read_timeout, self.stream.read_line(&mut line))
             .await
+            .with_context(|| {
+                format!(
+                    "NNTP read timed out after {}s (connection likely dead)",
+                    self.read_timeout.as_secs()
+                )
+            })?
             .context("reading NNTP response")?;
         if n == 0 {
             bail!("NNTP connection closed by server");
@@ -297,6 +331,19 @@ impl Connection {
         trace!(code = resp.code, text = %resp.text, "←");
         Ok(resp)
     }
+}
+
+/// Decide whether a `441` POST rejection actually means the article is already
+/// present on the server, in which case the POST has effectively succeeded.
+///
+/// When a connection drops after the server accepted an article but before we
+/// read its `240`, a retry re-sends the same Message-ID. The server then
+/// answers `441` wrapping a `435 Already exists in history` (RFC 3977 §6.2.2:
+/// code 435 = "article not wanted; already have it"). Treating that as success
+/// avoids a pointless retry storm over segments that are already posted.
+fn already_exists(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("already exists") || lower.contains("435")
 }
 
 /// Apply NNTP dot-stuffing: any line that begins with `.` gets an extra `.`
@@ -335,6 +382,7 @@ impl Connection {
     ) -> Self {
         Connection {
             stream: BufReader::new(BufWriter::new(Box::new(s))),
+            read_timeout: Duration::from_secs(crate::config::DEFAULT_TIMEOUT_SECS),
         }
     }
 }
@@ -377,6 +425,26 @@ mod tests {
         let r = Response::parse("200 ok").unwrap();
         assert_eq!(r.code, 200);
         assert_eq!(r.text, "ok");
+    }
+
+    // ── already_exists ────────────────────────────────────────────────────────
+
+    #[test]
+    fn already_exists_recognizes_435_rejection() {
+        // The real-world 441 text wraps the 435 code (issue #23).
+        assert!(already_exists(
+            "Article posting failed (posting error: article rejected: 435 Already exists in history)"
+        ));
+        // Either signal alone is enough, case-insensitively.
+        assert!(already_exists("435"));
+        assert!(already_exists("Already Exists"));
+    }
+
+    #[test]
+    fn already_exists_rejects_genuine_failures() {
+        assert!(!already_exists("No such group"));
+        assert!(!already_exists("posting not permitted"));
+        assert!(!already_exists(""));
     }
 
     // ── dot_stuff ─────────────────────────────────────────────────────────────
@@ -495,6 +563,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_441_already_exists_is_treated_as_success() {
+        // A 441 wrapping a 435 "already exists" means the article is already on
+        // the server — a retry after a dropped connection. Not a failure (#23).
+        let (mut conn, _server) = mock_conn(
+            b"340 Send article\r\n\
+              441 Article posting failed (posting error: article rejected: 435 Already exists in history)\r\n",
+        )
+        .await;
+        conn.post(b"article").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pipelined_post_441_already_exists_is_treated_as_success() {
+        // Same idempotency rule on the pipelined response path.
+        let (mut conn, _server) = mock_conn(
+            b"340 Send article\r\n\
+              441 435 Already exists in history\r\n",
+        )
+        .await;
+        conn.read_post_response().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stat_article_found_returns_true() {
         let (mut conn, _server) = mock_conn(b"223 0 <mid@host> Article exists\r\n").await;
         assert!(conn.stat("mid@host").await.unwrap());
@@ -546,6 +637,19 @@ mod tests {
         assert!(
             sent.contains("STAT <mid@host>"),
             "unexpected command: {sent}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_response_times_out_on_silent_connection() {
+        // Server stays open but never replies — the silent-death scenario (#23).
+        // Without a read timeout this would block until the OS keepalive fires.
+        let (mut conn, _server) = mock_conn(b"").await;
+        conn.read_timeout = Duration::from_millis(50);
+        let err = conn.stat("x@y").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("timed out"),
+            "expected timeout error, got: {err:#}"
         );
     }
 

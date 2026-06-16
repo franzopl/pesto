@@ -16,6 +16,15 @@ pub const DEFAULT_LINE_LENGTH: usize = 128;
 pub const DEFAULT_RETRIES: u32 = 3;
 /// Default pause between failed post attempts, in seconds.
 pub const DEFAULT_RETRY_DELAY: u64 = 1;
+/// Default per-command read timeout on an NNTP connection, in seconds.
+///
+/// This bounds how long a worker waits for a server response before treating
+/// the socket as dead. It must be generous enough never to fire on a slow but
+/// healthy upload (a large article on a slow link can legitimately take tens of
+/// seconds to acknowledge), while still rescuing the process from a silently
+/// dropped TCP connection long before the OS keepalive would (~2 h on Linux,
+/// ~4.5 min on Windows). 120 s is a deliberately conservative middle ground.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Default pipeline depth: 0 = adaptive (auto-measure RTT and compute depth).
 pub const DEFAULT_PIPELINE_DEPTH: usize = 0;
 /// Maximum depth the adaptive pipeline will auto-select.
@@ -33,6 +42,8 @@ pub struct ServerEntry {
     pub username: Option<String>,
     pub password: Option<String>,
     pub retry_delay: u64,
+    /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
+    pub timeout: u64,
 }
 
 /// What to do when the NZB user-destination already exists.
@@ -80,6 +91,8 @@ pub struct FileServerEntry {
     pub username: Option<String>,
     pub password: Option<String>,
     pub retry_delay: Option<u64>,
+    /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +104,8 @@ pub struct ServerSection {
     pub connections: Option<usize>,
     /// Seconds to wait between failed post attempts.
     pub retry_delay: Option<u64>,
+    /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -286,6 +301,8 @@ pub struct Config {
     pub username: Option<String>,
     pub password: Option<String>,
     pub retry_delay: u64,
+    /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
+    pub timeout: u64,
     pub extra_servers: Vec<ServerEntry>,
     pub from: String,
     pub groups: Vec<String>,
@@ -346,6 +363,7 @@ impl Config {
             username: self.username.clone(),
             password: self.password.clone(),
             retry_delay: self.retry_delay,
+            timeout: self.timeout,
         })
         .chain(self.extra_servers.iter().cloned())
     }

@@ -130,7 +130,13 @@ pub struct PostedSegment {
 /// information to attempt a fresh post (new Message-ID).
 #[derive(Debug, Clone)]
 pub struct FailedTask {
+    /// Published name (relative path / base name) used for NZB metadata and
+    /// logging. Not a filesystem path — see [`FailedTask::file_path`].
     pub file_name: String,
+    /// Absolute filesystem path of the source file, preserved so the end-of-run
+    /// retry can re-read the segment regardless of the current working
+    /// directory. `file_name` alone is insufficient (issue #23).
+    pub file_path: PathBuf,
     pub subject_name: String,
     pub file_size: u64,
     pub part: u32,
@@ -1779,6 +1785,7 @@ fn record_failure(shared: &Shared, meta: &FileMeta, task: &PostTask, error: &str
     shared.failures.lock().unwrap().push(description);
     shared.failed_tasks.lock().unwrap().push(FailedTask {
         file_name: meta.real_name.clone(),
+        file_path: meta.path.clone(),
         subject_name: task.subject_name.clone(),
         file_size: meta.size,
         part: task.part,
@@ -1982,11 +1989,13 @@ pub async fn repost_failed_tasks(
         let offset = (task.part as u64 - 1) * article_size;
         let read_len = (task.file_size - offset).min(article_size) as usize;
 
-        let path = PathBuf::from(&task.file_name);
+        // Re-read from the preserved absolute path, not `file_name` (which is
+        // only the published/relative name and would resolve against the CWD).
+        let path = task.file_path.clone();
         let mut file = match File::open(&path).await {
             Ok(f) => f,
             Err(e) => {
-                warn!(file = %task.file_name, "retry: cannot open file: {e}");
+                warn!(file = %task.file_name, path = %path.display(), "retry: cannot open file: {e}");
                 continue;
             }
         };
