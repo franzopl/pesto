@@ -1188,8 +1188,12 @@ async fn run_single_upload(
         .await;
     }
 
-    // Generate .nfo as a local artifact when the upload was not cancelled.
-    let nfo_path: Option<PathBuf> = if config.nfo && !config.par2_only && !cancelled {
+    // Generate .nfo as a local artifact only when the upload actually
+    // succeeded. Writing it on failure leaves an orphan `.nfo` in the input
+    // directory (no nzb_reported_path → fallback next to the source files),
+    // which `--resume --each` would later pick up as a standalone release.
+    let upload_ok = !cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
+    let nfo_path: Option<PathBuf> = if config.nfo && upload_ok && !config.par2_only {
         let base = nzb_reported_path
             .as_ref()
             .map(|p| p.with_extension("nfo"))
@@ -1224,7 +1228,6 @@ async fn run_single_upload(
     };
 
     // Run post-upload hooks only when the upload actually succeeded.
-    let upload_ok = !cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
     if upload_ok && !config.par2_only && !config.dry_run {
         let post_input_paths = inputs
             .iter()
@@ -1292,6 +1295,17 @@ async fn run_single_upload(
     })
 }
 
+/// Whether a top-level entry is a pesto-generated artifact that must never be
+/// treated as an independent `--each` release. A bare `.nfo`/`.nzb` sitting in
+/// the input directory is one of our own outputs (e.g. an orphan `.nfo` left by
+/// a failed run); uploading it as a standalone release is never intended.
+fn is_artifact_entry(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| ext == "nfo" || ext == "nzb")
+}
+
 /// Enumerate top-level entries of `dir` (files and subdirectories), sorted by
 /// name using natural lexical ordering (so `E02` comes before `E10`).
 fn top_level_entries(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -1299,6 +1313,7 @@ fn top_level_entries(dir: &Path) -> Result<Vec<PathBuf>> {
         .with_context(|| format!("reading directory `{}`", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
+        .filter(|p| !is_artifact_entry(p))
         .collect();
     entries.sort_by(|a, b| {
         lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
@@ -2544,5 +2559,41 @@ mod tests {
     fn season_key_no_season_returns_none() {
         assert_eq!(season_key("Random.Movie.2024.1080p"), None);
         assert_eq!(season_key("file"), None);
+    }
+
+    #[test]
+    fn is_artifact_entry_matches_nfo_and_nzb_case_insensitively() {
+        assert!(is_artifact_entry(Path::new("Show.nfo")));
+        assert!(is_artifact_entry(Path::new("Show.NZB")));
+        assert!(is_artifact_entry(Path::new("/a/b/c.NfO")));
+        assert!(!is_artifact_entry(Path::new("Show.mkv")));
+        assert!(!is_artifact_entry(Path::new("Show")));
+        assert!(!is_artifact_entry(Path::new("nfo")));
+    }
+
+    #[test]
+    fn top_level_entries_skips_generated_artifacts() {
+        let dir = std::env::temp_dir().join(format!(
+            "pesto_each_artifact_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ep01.mkv"), b"x").unwrap();
+        // Orphan artifacts left in the input directory by a previous run.
+        std::fs::write(dir.join("ep01.nfo"), b"x").unwrap();
+        std::fs::write(dir.join("ep01.nzb"), b"x").unwrap();
+
+        let names: Vec<String> = top_level_entries(&dir)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["ep01.mkv"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
