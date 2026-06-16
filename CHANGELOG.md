@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.23] — 2026-06-16
+
+### Fixed
+- **`--each` no longer emits or reposts orphan `.nfo`/`.nzb` files**: when a
+  segment failed during an `--each` upload, pesto still wrote the `.nfo` next to
+  the source files (no `.nzb` is produced on failure, so the path fell back to
+  the input directory). A later `pesto … --each --resume` then picked that
+  `.nfo` up as a new top-level entry and posted it as a standalone release.
+  The CLI now generates the `.nfo` only when the upload actually succeeded, and
+  `--each`/`--season`/watch enumeration skips any top-level `.nfo`/`.nzb` file
+  so a stray artifact is never reposted. `.nfo` files *inside* a release folder
+  (e.g. scene releases) are still uploaded as normal content. (#22)
+
 ### Added
 - **upapasta now writes verbose per-upload session logs**: pesto's internal
   DEBUG traces (NNTP connections, retries, per-segment results) are routed to a
