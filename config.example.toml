@@ -153,6 +153,11 @@ groups = ["alt.binaries.test"]
 # nzb_category — value for the <meta type="category"> element in the .nzb.
 # nzb_category = "TV > HD"
 
+# nzb_tags — values for multiple <meta type="tag"> elements in the .nzb.
+# Each entry becomes a separate <meta type="tag"> entry. If --nzb-tag is used
+# on the command line, it replaces this list entirely.
+# nzb_tags = ["hd", "2024", "dts"]
+
 # nzb_password — value for the <meta type="password"> element in the .nzb.
 # When --password is used, the archive password is stored here automatically.
 # Use this only to set a static password independently of --compress.

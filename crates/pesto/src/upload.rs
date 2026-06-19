@@ -354,6 +354,7 @@ pub async fn run_upload(
                 .clone()
                 .or_else(|| effective_password.clone()),
             category: config.nzb_category.clone(),
+            tags: config.nzb_tags.clone(),
         };
         let xml = crate::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
         match tokio::fs::write(&out, &xml).await {

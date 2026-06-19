@@ -230,6 +230,13 @@ struct Cli {
     #[arg(long, value_name = "CAT")]
     nzb_category: Option<String>,
 
+    /// Tag written to `<meta type="tag">` in the `.nzb`; can be repeated
+    /// multiple times [config: output.nzb_tags].
+    /// When this flag is used on the command line, it replaces any tags set in
+    /// the config file (they are not merged).
+    #[arg(long, value_name = "TAG", action = clap::ArgAction::Append)]
+    nzb_tag: Vec<String>,
+
     /// `Date:` header for each article: `now` (current time), `random`
     /// (random time within the last 2 hours), or a fixed RFC 2822 timestamp.
     /// Omit to let the server supply the date. When obfuscation is active
@@ -474,6 +481,7 @@ impl Cli {
             nzb_name: self.nzb_name.clone(),
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
+            nzb_tags: self.nzb_tag.clone(),
             nzb_dir: self
                 .nzb_dir
                 .as_ref()
@@ -1098,6 +1106,7 @@ async fn run_single_upload(
                         .clone()
                         .or_else(|| effective_password.clone()),
                     category: config.nzb_category.clone(),
+                    tags: config.nzb_tags.clone(),
                 };
                 let xml = pesto::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
                 tokio::fs::write(out, &xml)
@@ -1432,6 +1441,7 @@ async fn run_batch(
                     .clone()
                     .or_else(|| config.compress_password.clone()),
                 category: config.nzb_category.clone(),
+                tags: config.nzb_tags.clone(),
             };
             let xml = pesto::nzb::generate(&all_groups, &all_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
@@ -1828,6 +1838,7 @@ fn run_merge_season(dir: &Path, display_name: Option<&str>) -> Result<()> {
                 .or_else(|| Some(key.clone())),
             password: None,
             category: None,
+            tags: Vec::new(),
         };
         let xml = pesto::nzb::generate(&all_groups, &combined_segments, &meta);
 

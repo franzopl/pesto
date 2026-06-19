@@ -74,6 +74,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,
+        nzb_tags: vec![],
         indexer_url: None,
         indexer_api_key: None,
         notify_webhook: None,

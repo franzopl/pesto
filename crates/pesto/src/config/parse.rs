@@ -194,6 +194,11 @@ impl Config {
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: cli.nzb_category.or(file.output.nzb_category),
+            nzb_tags: if cli.nzb_tags.is_empty() {
+                file.output.nzb_tags
+            } else {
+                cli.nzb_tags
+            },
             nzb_dir: cli.nzb_dir.or(file.output.nzb_dir),
             indexer_url: file.output.indexer.url,
             indexer_api_key: file.output.indexer.api_key,
