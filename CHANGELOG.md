@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **`--no-hooks` no longer suppresses `--post-hook` / `--pre-hook`**: the flag
+  now disables only the directory scripts in `~/.config/pesto/hooks/`. Hooks
+  passed explicitly via `--post-hook` or `--pre-hook` are unaffected, so you
+  can combine `--no-hooks --post-hook <cmd>` to run a single explicit hook
+  without triggering the directory scripts.
+
 ### Fixed
 - **`435 Already exists` is no longer treated as a post failure**: when a
   connection dropped after the server had already accepted an article, the retry

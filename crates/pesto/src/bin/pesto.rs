@@ -291,8 +291,8 @@ struct Cli {
     #[arg(long, value_name = "CMD")]
     post_hook: Option<String>,
 
-    /// Skip all pre- and post-upload hooks for this run (both CLI flags and
-    /// scripts in ~/.config/pesto/hooks/).
+    /// Skip the hook scripts in ~/.config/pesto/hooks/ for this run.
+    /// The --post-hook and --pre-hook flags are unaffected and still execute.
     #[arg(long)]
     no_hooks: bool,
 

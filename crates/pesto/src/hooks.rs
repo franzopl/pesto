@@ -1,7 +1,8 @@
 //! Post-upload hook execution.
 //!
-//! Runs `config.post_hook` via `sh -c` (if set and `no_hooks` is false), then
-//! runs every executable file in `~/.config/pesto/hooks/` (sorted by name).
+//! Runs `config.post_hook` via `sh -c` (if set), then runs every executable
+//! file in `~/.config/pesto/hooks/` (sorted by name). `no_hooks` suppresses
+//! only the directory scripts — `post_hook` still runs regardless.
 //!
 //! Each hook receives the same environment variables:
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_SERVER`, `PESTO_GROUP`,
@@ -30,10 +31,6 @@ pub struct HookContext {
 /// This function is synchronous — wrap in `spawn_blocking` when calling
 /// from async code.
 pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
-    if config.no_hooks {
-        return vec!["Hooks disabled (no_hooks=true)".to_string()];
-    }
-
     let mut logs: Vec<String> = Vec::new();
 
     if let Some(ref cmd) = config.post_hook {
@@ -47,6 +44,11 @@ pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
             }
             Err(e) => logs.push(format!("post-hook error: {}", e)),
         }
+    }
+
+    if config.no_hooks {
+        logs.push("Directory hooks disabled (no_hooks=true)".to_string());
+        return logs;
     }
 
     if let Some(hooks_dir) = crate::config::config_dir().map(|d| d.join("hooks")) {
