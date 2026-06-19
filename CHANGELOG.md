@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.24] — 2026-06-19
+
+### Added
+- **nyuu-compatible short flags**: the most common connection flags now accept
+  the same single-letter aliases used by nyuu, making it easier to migrate
+  scripts and integrate with tools that target nyuu:
+  `-h` (`--host`), `-P` (`--port`), `-u` (`--username`), `-p` (`--auth-password`),
+  `-n` (`--connections`), `-g` (`--groups`), `-f` (`--from`).
+  The `-o` short form for `--out` was already present. Long-form flags are
+  unchanged.
+
 ### Changed
 - **`--no-hooks` no longer suppresses `--post-hook` / `--pre-hook`**: the flag
   now disables only the directory scripts in `~/.config/pesto/hooks/`. Hooks

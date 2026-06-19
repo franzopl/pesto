@@ -71,11 +71,11 @@ struct Cli {
     config: Option<Option<PathBuf>>,
 
     /// NNTP server hostname [config: server.host].
-    #[arg(long, value_name = "HOST")]
+    #[arg(short = 'h', long, value_name = "HOST")]
     host: Option<String>,
 
     /// NNTP server port [config: server.port, default 563].
-    #[arg(long, value_name = "PORT")]
+    #[arg(short = 'P', long, value_name = "PORT")]
     port: Option<u16>,
 
     /// Disable TLS; connect in plaintext [config: server.ssl].
@@ -83,24 +83,24 @@ struct Cli {
     no_ssl: bool,
 
     /// Number of parallel connections [config: server.connections, default 4].
-    #[arg(long, value_name = "N")]
+    #[arg(short = 'n', long, value_name = "N")]
     connections: Option<usize>,
 
     /// Authentication username [config: auth.username].
-    #[arg(long, value_name = "USER")]
+    #[arg(short = 'u', long, value_name = "USER")]
     username: Option<String>,
 
     /// Authentication password for the NNTP server [config: auth.password].
-    #[arg(long = "auth-password", value_name = "PASS")]
+    #[arg(short = 'p', long = "auth-password", value_name = "PASS")]
     password: Option<String>,
 
     /// `From` header for posted articles; omitted means a random identity
     /// [config: posting.from].
-    #[arg(long, value_name = "ADDRESS")]
+    #[arg(short = 'f', long, value_name = "ADDRESS")]
     from: Option<String>,
 
     /// Newsgroups to post to (repeat or comma-separate) [config: posting.groups].
-    #[arg(long, value_name = "GROUP", value_delimiter = ',')]
+    #[arg(short = 'g', long, value_name = "GROUP", value_delimiter = ',')]
     groups: Vec<String>,
 
     /// Target size of each article body, in bytes
