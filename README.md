@@ -567,6 +567,9 @@ pesto --nzb-name "My Movie (2024)" movie.mkv
 
 # Set a category and extraction password
 pesto --nzb-category "Movies" --nzb-password "archive_pass" movie.mkv
+
+# Add multiple tags (repeat --nzb-tag for each one)
+pesto --nzb-tag hd --nzb-tag 2024 --nzb-tag dts movie.mkv
 ```
 
 These values are written as `<meta>` elements in the `.nzb`:
@@ -575,7 +578,14 @@ These values are written as `<meta>` elements in the `.nzb`:
 <meta type="name">My Movie (2024)</meta>
 <meta type="category">Movies</meta>
 <meta type="password">archive_pass</meta>
+<meta type="tag">hd</meta>
+<meta type="tag">2024</meta>
+<meta type="tag">dts</meta>
 ```
+
+`--nzb-tag` can be repeated; each occurrence produces one `<meta type="tag">`.
+If `--nzb-tag` is used on the command line, it replaces any `nzb_tags` set in
+`config.toml`.
 
 ### NZB output path
 
@@ -771,6 +781,7 @@ post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\
 | `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="name">` in the `.nzb` |
 | `--nzb-password <PASS>` | `output.nzb_password` | — | `<meta type="password">` in the `.nzb` |
 | `--nzb-category <CAT>` | `output.nzb_category` | — | `<meta type="category">` in the `.nzb` |
+| `--nzb-tag <TAG>` | `output.nzb_tags` | — | `<meta type="tag">` in the `.nzb`; repeatable. Replaces config `nzb_tags` when used. |
 | `--nzb-conflict <MODE>` | `output.nzb_conflict` | overwrite | `overwrite`, `rename`, or `fail` on existing NZB |
 | `--no-overwrite` | — | — | Alias for `--nzb-conflict=rename` |
 | `-v`, `--verbose` | — | off | Increase log verbosity (`-v`=INFO, `-vv`=DEBUG, `-vvv`=TRACE) |

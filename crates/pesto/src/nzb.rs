@@ -23,6 +23,8 @@ pub struct NzbMeta {
     pub password: Option<String>,
     /// Indexer / downloader category (`<meta type="category">`).
     pub category: Option<String>,
+    /// Arbitrary tags emitted as multiple `<meta type="tag">` elements.
+    pub tags: Vec<String>,
 }
 
 /// Generate the contents of an `.nzb` file describing the posted segments.
@@ -57,6 +59,9 @@ pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -
     out.push_str("  <head>\n");
     for (k, v) in &metas {
         out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
+    }
+    for tag in &meta.tags {
+        out.push_str(&format!("    <meta type=\"tag\">{}</meta>\n", escape(tag)));
     }
     out.push_str("  </head>\n");
 
@@ -132,7 +137,7 @@ pub struct ParsedNzb {
     pub groups: Vec<String>,
     /// All segments, sorted by `(file_name, part)`.
     pub segments: Vec<PostedSegment>,
-    /// `<head>` metadata (`name`, `password`, `category`).
+    /// `<head>` metadata (`name`, `password`, `category`, `tags`).
     pub meta: NzbMeta,
 }
 
@@ -222,6 +227,7 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 "name" => meta.name = Some(value),
                 "password" => meta.password = Some(value),
                 "category" => meta.category = Some(value),
+                "tag" => meta.tags.push(value),
                 _ => {}
             }
         }
@@ -421,6 +427,7 @@ mod tests {
             name: Some("My Upload".into()),
             password: Some("s3cr3t".into()),
             category: Some("TV > HD".into()),
+            tags: Vec::new(),
         };
         let xml = generate(&["alt.test".into()], &[], &meta);
         assert!(xml.contains("<meta type=\"name\">My Upload</meta>"));
@@ -540,11 +547,44 @@ mod tests {
     }
 
     #[test]
+    fn tags_are_emitted_in_order() {
+        let meta = NzbMeta {
+            tags: vec!["hd".into(), "2024".into(), "dts".into()],
+            ..Default::default()
+        };
+        let xml = generate(&["alt.test".into()], &[], &meta);
+        assert!(xml.contains("<meta type=\"tag\">hd</meta>"));
+        assert!(xml.contains("<meta type=\"tag\">2024</meta>"));
+        assert!(xml.contains("<meta type=\"tag\">dts</meta>"));
+        let hd = xml.find("hd").unwrap();
+        let y2024 = xml.find("2024").unwrap();
+        let dts = xml.find("dts").unwrap();
+        assert!(hd < y2024 && y2024 < dts);
+    }
+
+    #[test]
+    fn tag_xml_special_characters_are_escaped() {
+        let meta = NzbMeta {
+            tags: vec!["a&b<c>".into()],
+            ..Default::default()
+        };
+        let xml = generate(&["alt.test".into()], &[], &meta);
+        assert!(xml.contains("<meta type=\"tag\">a&amp;b&lt;c&gt;</meta>"));
+    }
+
+    #[test]
+    fn empty_tags_emit_no_tag_meta() {
+        let xml = generate(&["alt.test".into()], &[], &no_meta());
+        assert!(!xml.contains("type=\"tag\""));
+    }
+
+    #[test]
     fn only_password_meta_emits_head_without_name_or_category() {
         let meta = NzbMeta {
             name: None,
             password: Some("hunter2".into()),
             category: None,
+            tags: Vec::new(),
         };
         let xml = generate(&["alt.test".into()], &[], &meta);
         assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
@@ -566,6 +606,7 @@ mod tests {
             name: Some("Test Show S01".into()),
             password: None,
             category: Some("TV".into()),
+            tags: vec!["hd".into(), "2024".into()],
         };
         let xml = generate(&groups, &segs, &meta);
         let parsed = parse(&xml).expect("parse must succeed");
@@ -574,6 +615,7 @@ mod tests {
         assert_eq!(parsed.groups, vec!["alt.binaries.test"]);
         assert_eq!(parsed.meta.name.as_deref(), Some("Test Show S01"));
         assert_eq!(parsed.meta.category.as_deref(), Some("TV"));
+        assert_eq!(parsed.meta.tags, vec!["hd", "2024"]);
         assert_eq!(parsed.segments.len(), 3);
         assert_eq!(parsed.segments[0].file_name, "ep01.mkv");
         assert_eq!(parsed.segments[0].part, 1);

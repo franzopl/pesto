@@ -260,6 +260,7 @@ fn optional_string_fields_default_to_none() {
     assert!(cfg.nzb_name.is_none());
     assert!(cfg.nzb_password.is_none());
     assert!(cfg.nzb_category.is_none());
+    assert!(cfg.nzb_tags.is_empty());
     assert!(cfg.nzb_dir.is_none());
     assert!(cfg.date.is_none());
     assert!(cfg.message_id_domain.is_none());
@@ -389,6 +390,7 @@ fn toml_output_section_sets_fields() {
         [output]
         nzb_name = "My Release"
         nzb_category = "TV > HD"
+        nzb_tags = ["hd", "2024", "dts"]
         nzb_dir = "/tmp/nzb"
         history = false
         resume = true
@@ -400,6 +402,7 @@ fn toml_output_section_sets_fields() {
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
     assert_eq!(cfg.nzb_name.as_deref(), Some("My Release"));
     assert_eq!(cfg.nzb_category.as_deref(), Some("TV > HD"));
+    assert_eq!(cfg.nzb_tags, vec!["hd", "2024", "dts"]);
     assert_eq!(cfg.nzb_dir.as_deref(), Some("/tmp/nzb"));
     assert!(!cfg.history);
     assert!(cfg.resume);
@@ -665,6 +668,7 @@ fn cli_overrides_nzb_metadata() {
             nzb_name: Some("My Show S01".into()),
             nzb_password: Some("abc".into()),
             nzb_category: Some("TV".into()),
+            nzb_tags: vec!["hd".into(), "2024".into()],
             nzb_dir: Some("/out".into()),
             ..Default::default()
         },
@@ -673,7 +677,49 @@ fn cli_overrides_nzb_metadata() {
     assert_eq!(cfg.nzb_name.as_deref(), Some("My Show S01"));
     assert_eq!(cfg.nzb_password.as_deref(), Some("abc"));
     assert_eq!(cfg.nzb_category.as_deref(), Some("TV"));
+    assert_eq!(cfg.nzb_tags, vec!["hd", "2024"]);
     assert_eq!(cfg.nzb_dir.as_deref(), Some("/out"));
+}
+
+#[test]
+fn cli_nzb_tags_replace_file_tags() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [output]
+        nzb_tags = ["file-a", "file-b"]
+        "#,
+    )
+    .unwrap();
+    let cfg = Config::resolve(
+        file,
+        Overrides {
+            nzb_tags: vec!["cli-only".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.nzb_tags, vec!["cli-only"]);
+}
+
+#[test]
+fn file_nzb_tags_used_when_cli_absent() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [output]
+        nzb_tags = ["config-a", "config-b"]
+        "#,
+    )
+    .unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert_eq!(cfg.nzb_tags, vec!["config-a", "config-b"]);
 }
 
 #[test]

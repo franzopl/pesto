@@ -179,6 +179,9 @@ pub struct OutputSection {
     pub nzb_password: Option<String>,
     /// Category emitted as `<meta type="category">` in the `.nzb`.
     pub nzb_category: Option<String>,
+    /// Tags emitted as multiple `<meta type="tag">` elements in the `.nzb`.
+    #[serde(default)]
+    pub nzb_tags: Vec<String>,
     /// Prowlarr connection settings (URL + API key for search/download).
     #[serde(default)]
     pub indexer: IndexerSection,
@@ -273,6 +276,7 @@ pub struct Overrides {
     pub nzb_name: Option<String>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
+    pub nzb_tags: Vec<String>,
     pub nzb_dir: Option<String>,
     pub history: Option<bool>,
     pub notify: Option<bool>,
@@ -330,6 +334,7 @@ pub struct Config {
     pub nzb_name: Option<String>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
+    pub nzb_tags: Vec<String>,
     pub indexer_url: Option<String>,
     pub indexer_api_key: Option<String>,
     pub nzb_dir: Option<String>,

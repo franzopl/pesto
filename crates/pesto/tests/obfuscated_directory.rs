@@ -42,6 +42,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,
+        nzb_tags: vec![],
         indexer_url: None,
         indexer_api_key: None,
         notify_webhook: None,

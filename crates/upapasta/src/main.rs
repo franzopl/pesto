@@ -1591,6 +1591,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                             .clone()
                             .or_else(|| config.compress_password.clone()),
                         category: config.nzb_category.clone(),
+                        tags: config.nzb_tags.clone(),
                     };
                     let xml = pesto::nzb::generate(&config.groups, &all_segments, &meta);
                     match std::fs::write(&out, xml) {
@@ -1687,6 +1688,7 @@ fn build_dry_run_config() -> Config {
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,
+        nzb_tags: Vec::new(),
         nzb_dir: None,
         indexer_url: None,
         indexer_api_key: None,
