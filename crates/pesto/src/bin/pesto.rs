@@ -71,7 +71,7 @@ struct Cli {
     config: Option<Option<PathBuf>>,
 
     /// NNTP server hostname [config: server.host].
-    #[arg(short = 'h', long, value_name = "HOST")]
+    #[arg(short = 's', long, value_name = "HOST")]
     host: Option<String>,
 
     /// NNTP server port [config: server.port, default 563].
