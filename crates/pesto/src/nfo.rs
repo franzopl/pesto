@@ -52,6 +52,39 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // Blu-ray disc structure: BDMV/index.bdmv
+        let bd_roots = find_bluray_disc_roots(dir);
+        if !bd_roots.is_empty() {
+            debug!(discs = bd_roots.len(), folder = %folder_name, "detected Blu-ray structure");
+            let mut sections: Vec<String> = Vec::new();
+            for root in &bd_roots {
+                let disc_label = root
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
+                match find_main_m2ts(root) {
+                    Some(m2ts) => {
+                        debug!(m2ts = %m2ts.display(), "running mediainfo on main M2TS");
+                        let mi = match run_mediainfo(&m2ts) {
+                            Ok(out) => out,
+                            Err(e) => {
+                                warn!(m2ts = %m2ts.display(), error = %e, "mediainfo failed for M2TS");
+                                format!("[mediainfo failed for {}: {}]", m2ts.display(), e)
+                            }
+                        };
+                        sections.push(format!("=== Blu-ray Disc: {disc_label} ===\n{mi}\n"));
+                    }
+                    None => {
+                        warn!(root = %root.display(), "no M2TS found in BDMV/STREAM");
+                        sections.push(format!(
+                            "=== Blu-ray Disc: {disc_label} ===\n[no M2TS stream found]\n"
+                        ));
+                    }
+                }
+            }
+            return Some(sections.join("\n"));
+        }
+
         // DVD disc structure: VIDEO_TS/ with IFO files.
         let disc_roots = find_dvd_disc_roots(dir);
         if !disc_roots.is_empty() {
@@ -197,6 +230,57 @@ fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(child);
         }
     }
+}
+
+/// Find Blu-ray disc roots by locating BDMV/index.bdmv anywhere under `path`.
+fn find_bluray_disc_roots(path: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    collect_bluray_roots(path, &mut roots);
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn collect_bluray_roots(dir: &Path, roots: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let child = entry.path();
+        if child.is_dir() {
+            collect_bluray_roots(&child, roots);
+        } else if child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("index.bdmv"))
+            .unwrap_or(false)
+        {
+            // index.bdmv -> BDMV/ -> disc root
+            if let Some(bdmv) = child.parent() {
+                if let Some(disc_root) = bdmv.parent() {
+                    roots.push(disc_root.to_path_buf());
+                }
+            }
+        }
+    }
+}
+
+/// Return the largest `.m2ts` file inside `disc_root/BDMV/STREAM/`.
+///
+/// The largest file is the main feature; extras and menus are much smaller.
+fn find_main_m2ts(disc_root: &Path) -> Option<PathBuf> {
+    let stream = disc_root.join("BDMV").join("STREAM");
+    std::fs::read_dir(&stream)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("m2ts"))
+                .unwrap_or(false)
+        })
+        .max_by_key(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
 }
 
 /// Find DVD disc roots by locating VIDEO_TS/VIDEO_TS.VOB anywhere under `path`.
@@ -709,6 +793,79 @@ mod tests {
         let nfo = result.unwrap();
         assert!(nfo.contains("GENERAL STATISTICS"));
         assert!(nfo.contains("notes.txt"));
+    }
+
+    // ── Blu-ray detection ────────────────────────────────────────────────────
+
+    fn make_bluray_structure(base: &Path) {
+        let bdmv = base.join("BDMV");
+        let stream = bdmv.join("STREAM");
+        let backup = bdmv.join("BACKUP");
+        fs::create_dir_all(&stream).unwrap();
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(bdmv.join("index.bdmv"), b"").unwrap();
+        fs::write(bdmv.join("MovieObject.bdmv"), b"").unwrap();
+        // Main feature (large) and a short extra (small).
+        fs::write(stream.join("00001.m2ts"), vec![0u8; 8000]).unwrap();
+        fs::write(stream.join("00002.m2ts"), vec![0u8; 100]).unwrap();
+    }
+
+    #[test]
+    fn find_bluray_disc_roots_detects_index_bdmv() {
+        let dir = TempDir::new().unwrap();
+        make_bluray_structure(dir.path());
+
+        let roots = find_bluray_disc_roots(dir.path());
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], dir.path());
+    }
+
+    #[test]
+    fn find_bluray_disc_roots_empty_for_non_bluray() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("movie.mkv"), b"").unwrap();
+
+        let roots = find_bluray_disc_roots(dir.path());
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn find_main_m2ts_picks_largest_file() {
+        let dir = TempDir::new().unwrap();
+        make_bluray_structure(dir.path());
+
+        let m2ts = find_main_m2ts(dir.path()).unwrap();
+        assert_eq!(m2ts.file_name().unwrap(), "00001.m2ts");
+    }
+
+    #[test]
+    fn generate_bluray_does_not_call_folder_nfo() {
+        let dir = TempDir::new().unwrap();
+        make_bluray_structure(dir.path());
+
+        let result = generate(&[dir.path().to_path_buf()]);
+        assert!(result.is_some());
+        let nfo = result.unwrap();
+        assert!(nfo.contains("=== Blu-ray Disc:"));
+        assert!(!nfo.contains("GENERAL STATISTICS"));
+    }
+
+    #[test]
+    fn bluray_detection_does_not_trigger_for_dvd() {
+        let dir = TempDir::new().unwrap();
+        make_dvd_structure(dir.path());
+
+        let bd_roots = find_bluray_disc_roots(dir.path());
+        assert!(bd_roots.is_empty());
+    }
+
+    #[test]
+    fn dvd_detection_does_not_trigger_for_bluray() {
+        let dir = TempDir::new().unwrap();
+        make_bluray_structure(dir.path());
+
+        let dvd_roots = find_dvd_disc_roots(dir.path());
+        assert!(dvd_roots.is_empty());
     }
 
     // ── DVD detection ─────────────────────────────────────────────────────────
