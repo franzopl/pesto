@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **PAR2 padding inflation on Blu-ray / DVD disc structures**: discs with many
+  small files (`.clpi`, `.mpls`, `BDMV` metadata, etc.) much smaller than the
+  computed slice size caused each such file to occupy a full slice of zeros,
+  inflating the effective parity ratio well beyond what the user requested (a
+  10% request could silently produce 20–30% parity). `calculate_geometry` now
+  detects this condition — when the padded-to-actual-data ratio exceeds 1.15 —
+  and iteratively halves the slice size until the ratio is acceptable or the
+  slice count approaches a CPU-cost ceiling (~6 000 slices). Peak memory usage
+  is unaffected: recovery buffer memory is proportional to
+  `total_slices × slice_size ≈ total_padded_bytes`, which is invariant to slice
+  size for a fixed input set.
+
 ---
 
 ## [0.3.24] — 2026-06-19
