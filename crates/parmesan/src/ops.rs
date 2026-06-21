@@ -145,6 +145,68 @@ pub fn calculate_geometry(
     Ok((slice_size, total_slices, recovery_count))
 }
 
+/// Ingests files into a PAR2 worker.
+pub async fn ingest_files(
+    files: &[InputFile],
+    worker: &Par2Worker,
+    slice_size: usize,
+) -> Result<()> {
+    for file_info in files {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+        let path = file_info.path.clone();
+
+        // Double-buffered reader task: fetch data while we process previous chunks.
+        let reader_handle = tokio::task::spawn_blocking(move || {
+            use std::fs::File;
+            use std::io::Read;
+            let mut file = File::open(&path)?;
+            loop {
+                let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MiB chunks
+                let n = file.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                buf.truncate(n);
+                if tx.blocking_send(buf).is_err() {
+                    break;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let mut slice_accum = worker.take_buffer(slice_size);
+        slice_accum.clear();
+
+        while let Some(chunk) = rx.recv().await {
+            let mut chunk_pos = 0;
+            while chunk_pos < chunk.len() {
+                let space = slice_size - slice_accum.len();
+                let take = space.min(chunk.len() - chunk_pos);
+                slice_accum.extend_from_slice(&chunk[chunk_pos..chunk_pos + take]);
+                chunk_pos += take;
+
+                if slice_accum.len() >= slice_size {
+                    let next = worker.take_buffer(slice_size);
+                    let padded = std::mem::replace(&mut slice_accum, next);
+                    tokio::task::block_in_place(|| {
+                        worker.send_slice(padded, slice_size, false);
+                    });
+                }
+            }
+        }
+
+        reader_handle.await??;
+
+        if !slice_accum.is_empty() {
+            let actual_len = slice_accum.len();
+            slice_accum.resize(slice_size, 0);
+            tokio::task::block_in_place(|| worker.send_slice(slice_accum, actual_len, true));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,66 +279,4 @@ mod tests {
         let (slice_size, _, _) = calculate_geometry(&files, &o).unwrap();
         assert_eq!(slice_size, 512 * 1024);
     }
-}
-
-/// Ingests files into a PAR2 worker.
-pub async fn ingest_files(
-    files: &[InputFile],
-    worker: &Par2Worker,
-    slice_size: usize,
-) -> Result<()> {
-    for file_info in files {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        let path = file_info.path.clone();
-
-        // Double-buffered reader task: fetch data while we process previous chunks.
-        let reader_handle = tokio::task::spawn_blocking(move || {
-            use std::fs::File;
-            use std::io::Read;
-            let mut file = File::open(&path)?;
-            loop {
-                let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MiB chunks
-                let n = file.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                buf.truncate(n);
-                if tx.blocking_send(buf).is_err() {
-                    break;
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-
-        let mut slice_accum = worker.take_buffer(slice_size);
-        slice_accum.clear();
-
-        while let Some(chunk) = rx.recv().await {
-            let mut chunk_pos = 0;
-            while chunk_pos < chunk.len() {
-                let space = slice_size - slice_accum.len();
-                let take = space.min(chunk.len() - chunk_pos);
-                slice_accum.extend_from_slice(&chunk[chunk_pos..chunk_pos + take]);
-                chunk_pos += take;
-
-                if slice_accum.len() >= slice_size {
-                    let next = worker.take_buffer(slice_size);
-                    let padded = std::mem::replace(&mut slice_accum, next);
-                    tokio::task::block_in_place(|| {
-                        worker.send_slice(padded, slice_size, false);
-                    });
-                }
-            }
-        }
-
-        reader_handle.await??;
-
-        if !slice_accum.is_empty() {
-            let actual_len = slice_accum.len();
-            slice_accum.resize(slice_size, 0);
-            tokio::task::block_in_place(|| worker.send_slice(slice_accum, actual_len, true));
-        }
-    }
-
-    Ok(())
 }
