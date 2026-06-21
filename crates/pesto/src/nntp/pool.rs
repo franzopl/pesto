@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::ServerEntry;
 use crate::nntp::Connection;
@@ -27,14 +27,25 @@ pub struct ConnectionSlot {
     conn: Option<Connection>,
     /// Index into `servers` of the server we will connect to next.
     server_idx: usize,
+    /// Opaque identifier for log correlation (worker index supplied by caller).
+    slot_id: usize,
 }
 
 impl ConnectionSlot {
     pub(crate) fn new(servers: Arc<Vec<ServerEntry>>, primary_idx: usize) -> Self {
+        ConnectionSlot::with_id(servers, primary_idx, 0)
+    }
+
+    pub(crate) fn with_id(
+        servers: Arc<Vec<ServerEntry>>,
+        primary_idx: usize,
+        slot_id: usize,
+    ) -> Self {
         ConnectionSlot {
             servers,
             conn: None,
             server_idx: primary_idx,
+            slot_id,
         }
     }
 
@@ -52,10 +63,19 @@ impl ConnectionSlot {
             let server = &self.servers[self.server_idx];
             let host = server.host.clone();
             let idx = self.server_idx;
-            info!(server = "<redacted>", server_idx = idx, "connecting");
+            info!(
+                server = "<redacted>",
+                server_idx = idx,
+                slot_id = self.slot_id,
+                "connecting"
+            );
             match connect_and_auth(server).await {
                 Ok(c) => {
-                    info!(server = "<redacted>", "connected and authenticated");
+                    info!(
+                        server = "<redacted>",
+                        slot_id = self.slot_id,
+                        "connected and authenticated"
+                    );
                     self.conn = Some(c);
                 }
                 Err(e) => {
@@ -72,10 +92,12 @@ impl ConnectionSlot {
     /// Call this after any network or protocol error so the next
     /// [`ensure_connected`][Self::ensure_connected] attempt targets a fresh
     /// server.
-    pub fn invalidate(&mut self) {
+    pub fn invalidate(&mut self, reason: &'static str) {
         if self.conn.is_some() {
-            info!(
+            warn!(
                 server = "<redacted>",
+                slot_id = self.slot_id,
+                reason,
                 "connection invalidated; rotating to next server"
             );
         }
@@ -117,7 +139,8 @@ impl ConnectionPool {
         let assignments = assign_workers(&servers, worker_count);
         let slots = assignments
             .into_iter()
-            .map(|si| ConnectionSlot::new(servers.clone(), si))
+            .enumerate()
+            .map(|(slot_id, si)| ConnectionSlot::with_id(servers.clone(), si, slot_id))
             .collect();
         ConnectionPool { slots }
     }
@@ -240,11 +263,11 @@ mod tests {
     #[test]
     fn slot_invalidate_rotates_to_next_server() {
         let mut slot = ConnectionSlot::new(arc(vec![server(1), server(1), server(1)]), 0);
-        slot.invalidate();
+        slot.invalidate("test");
         assert_eq!(slot.server_idx(), 1);
-        slot.invalidate();
+        slot.invalidate("test");
         assert_eq!(slot.server_idx(), 2);
-        slot.invalidate();
+        slot.invalidate("test");
         assert_eq!(slot.server_idx(), 0); // wraps around
     }
 
@@ -255,7 +278,7 @@ mod tests {
         servers[1].retry_delay = 10;
         let mut slot = ConnectionSlot::new(arc(servers), 0);
         assert_eq!(slot.retry_delay(), Duration::from_secs(5));
-        slot.invalidate();
+        slot.invalidate("test");
         assert_eq!(slot.retry_delay(), Duration::from_secs(10));
     }
 

@@ -52,6 +52,31 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // DVD disc structure: VIDEO_TS/ with IFO files.
+        let disc_roots = find_dvd_disc_roots(dir);
+        if !disc_roots.is_empty() {
+            debug!(discs = disc_roots.len(), folder = %folder_name, "detected DVD structure");
+            let mut sections: Vec<String> = Vec::new();
+            for root in &disc_roots {
+                let title_ifo = find_title_ifo(root)
+                    .unwrap_or_else(|| root.join("VIDEO_TS").join("VTS_01_0.IFO"));
+                debug!(ifo = %title_ifo.display(), "running mediainfo on title IFO");
+                let mi = match run_mediainfo(&title_ifo) {
+                    Ok(out) => out,
+                    Err(e) => {
+                        warn!(ifo = %title_ifo.display(), error = %e, "mediainfo failed for DVD IFO");
+                        format!("[mediainfo failed for {}: {}]", title_ifo.display(), e)
+                    }
+                };
+                let disc_label = root
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
+                sections.push(format!("=== DVD Disc: {disc_label} ===\n{mi}\n"));
+            }
+            return Some(sections.join("\n"));
+        }
+
         if is_series_folder(&folder_name) {
             debug!(folder = %folder_name, "detected series folder — looking for first video");
             if let Some(first_ep) = find_first_video(dir) {
@@ -172,6 +197,95 @@ fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(child);
         }
     }
+}
+
+/// Find DVD disc roots by locating VIDEO_TS/VIDEO_TS.VOB anywhere under `path`.
+fn find_dvd_disc_roots(path: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    collect_dvd_roots(path, &mut roots);
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn collect_dvd_roots(dir: &Path, roots: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let child = entry.path();
+        if child.is_dir() {
+            collect_dvd_roots(&child, roots);
+        } else if child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("VIDEO_TS.VOB"))
+            .unwrap_or(false)
+        {
+            // VIDEO_TS.VOB -> VIDEO_TS/ -> disc root
+            if let Some(video_ts) = child.parent() {
+                if let Some(disc_root) = video_ts.parent() {
+                    roots.push(disc_root.to_path_buf());
+                }
+            }
+        }
+    }
+}
+
+/// Return the VTS_*_0.IFO with the longest duration inside `disc_root/VIDEO_TS/`.
+///
+/// DVD title sets are numbered VTS_01..VTS_NN; the main feature is not always
+/// VTS_01 — on multi-angle or bonus-heavy discs the title with the longest
+/// duration is the actual feature. We query `mediainfo` with a minimal template
+/// to get each IFO's duration in milliseconds, then return the longest one.
+/// Falls back to alphabetical first if mediainfo is unavailable.
+fn find_title_ifo(disc_root: &Path) -> Option<PathBuf> {
+    let video_ts = disc_root.join("VIDEO_TS");
+    let mut ifos: Vec<PathBuf> = std::fs::read_dir(&video_ts)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    let u = n.to_uppercase();
+                    u.starts_with("VTS_") && u.ends_with("_0.IFO")
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    ifos.sort();
+
+    // Try to pick the IFO with the longest duration via a lightweight mediainfo query.
+    let best = ifos
+        .iter()
+        .filter_map(|p| {
+            let ms = mediainfo_duration_ms(p)?;
+            Some((ms, p.clone()))
+        })
+        .max_by_key(|(ms, _)| *ms)
+        .map(|(_, p)| p);
+
+    best.or_else(|| ifos.into_iter().next())
+}
+
+/// Run `mediainfo` with a minimal General template to obtain the duration in ms.
+/// Returns `None` if mediainfo is not available or the output cannot be parsed.
+fn mediainfo_duration_ms(path: &Path) -> Option<u64> {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let output = std::process::Command::new("mediainfo")
+        .arg("--Output=General;%Duration%")
+        .arg(&abs)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
 }
 
 fn run_mediainfo(path: &Path) -> std::io::Result<String> {
@@ -595,6 +709,67 @@ mod tests {
         let nfo = result.unwrap();
         assert!(nfo.contains("GENERAL STATISTICS"));
         assert!(nfo.contains("notes.txt"));
+    }
+
+    // ── DVD detection ─────────────────────────────────────────────────────────
+
+    fn make_dvd_structure(base: &Path) {
+        let vts = base.join("VIDEO_TS");
+        fs::create_dir_all(&vts).unwrap();
+        fs::write(vts.join("VIDEO_TS.IFO"), b"").unwrap();
+        fs::write(vts.join("VIDEO_TS.BUP"), b"").unwrap();
+        fs::write(vts.join("VIDEO_TS.VOB"), b"").unwrap();
+        fs::write(vts.join("VTS_01_0.IFO"), b"").unwrap();
+        fs::write(vts.join("VTS_01_0.BUP"), b"").unwrap();
+        fs::write(vts.join("VTS_01_1.VOB"), b"").unwrap();
+    }
+
+    #[test]
+    fn find_dvd_disc_roots_detects_video_ts_vob() {
+        let dir = TempDir::new().unwrap();
+        make_dvd_structure(dir.path());
+
+        let roots = find_dvd_disc_roots(dir.path());
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], dir.path());
+    }
+
+    #[test]
+    fn find_dvd_disc_roots_empty_for_non_dvd() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("movie.mkv"), b"").unwrap();
+
+        let roots = find_dvd_disc_roots(dir.path());
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn find_title_ifo_falls_back_to_alphabetical_without_mediainfo() {
+        // Without a real mediainfo binary producing parseable durations,
+        // find_title_ifo falls back to the alphabetically first VTS_*_0.IFO.
+        let dir = TempDir::new().unwrap();
+        make_dvd_structure(dir.path());
+        fs::write(dir.path().join("VIDEO_TS").join("VTS_02_0.IFO"), b"").unwrap();
+
+        let ifo = find_title_ifo(dir.path()).unwrap();
+        assert_eq!(ifo.file_name().unwrap(), "VTS_01_0.IFO");
+    }
+
+    #[test]
+    fn generate_dvd_does_not_call_folder_nfo() {
+        // With mediainfo absent, generate() should still return Some with a
+        // "[mediainfo failed …]" message rather than falling through to the
+        // generic folder NFO (which would contain "GENERAL STATISTICS").
+        let dir = TempDir::new().unwrap();
+        make_dvd_structure(dir.path());
+
+        let result = generate(&[dir.path().to_path_buf()]);
+        assert!(result.is_some());
+        let nfo = result.unwrap();
+        // Must mention the DVD disc header.
+        assert!(nfo.contains("=== DVD Disc:"));
+        // Must NOT contain the generic folder NFO banner.
+        assert!(!nfo.contains("GENERAL STATISTICS"));
     }
 
     #[test]

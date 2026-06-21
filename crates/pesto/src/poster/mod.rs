@@ -1480,12 +1480,12 @@ async fn worker(
                                         p.message_id
                                     );
                                     warn!(segment = %p.message_id, attempt, "STAT not found; retrying");
-                                    slot.invalidate();
+                                    slot.invalidate("stat_430");
                                 }
                                 Err(e) => {
                                     last_err = format!("STAT: {e:#}");
                                     warn!(segment = %p.message_id, error = %e, "STAT error; retrying");
-                                    slot.invalidate();
+                                    slot.invalidate("stat_err");
                                 }
                             }
                         } else {
@@ -1516,7 +1516,7 @@ async fn worker(
                         warn!(segment = %p.message_id, attempt, max_attempts,
                               error = %last_err, "post failed; rotating server");
                         shared.total_retries.fetch_add(1, Ordering::Relaxed);
-                        slot.invalidate();
+                        slot.invalidate("post_err");
                     }
                 }
                 if attempt < max_attempts {
@@ -1610,7 +1610,7 @@ async fn worker(
                     warn!(attempt, max_attempts, error = %pipe_err,
                           "pipeline failed; rotating server");
                     shared.total_retries.fetch_add(1, Ordering::Relaxed);
-                    slot.invalidate();
+                    slot.invalidate("post_err");
                     if attempt < max_attempts {
                         tokio::time::sleep(slot.retry_delay()).await;
                     }
@@ -1781,6 +1781,21 @@ fn commit_result(
     });
 }
 
+/// Add ±50 % jitter to `base` to prevent synchronized reconnect bursts.
+///
+/// Uses `slot_id` mixed with the current nanosecond timestamp as a cheap
+/// pseudo-random seed — no external crate required.
+fn jittered(base: Duration, slot_id: usize) -> Duration {
+    let ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as u64;
+    // 0..=999 range → [1.0, 1.5) multiplier
+    let noise = (ns.wrapping_add(slot_id as u64 * 2_654_435_761) % 1000) as u32;
+    let extra_ms = (base.as_millis() as u64 * noise as u64 / 2000) as u32;
+    base + Duration::from_millis(extra_ms as u64)
+}
+
 fn record_failure(
     shared: &Shared,
     meta: &FileMeta,
@@ -1910,7 +1925,7 @@ pub async fn repost_missing_segments(
                         break;
                     }
                     Err(e) => {
-                        slot.invalidate();
+                        slot.invalidate("post_err");
                         warn!(id = %seg.message_id, attempt, "repost attempt failed: {e}");
                         if let Some(tx) = events {
                             let _ = tx.send(ProgressEvent::Status {
@@ -2065,7 +2080,7 @@ pub async fn repost_failed_tasks(
                         break;
                     }
                     Err(e) => {
-                        slot.invalidate();
+                        slot.invalidate("post_err");
                         warn!(file = %task.file_name, part = task.part, attempt, "retry attempt failed: {e}");
                         if attempt < max_retries {
                             if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
@@ -2205,7 +2220,7 @@ pub async fn check_articles(
             } else {
                 worker_idx % servers.len()
             };
-            let mut slot = ConnectionSlot::new(Arc::clone(&servers), server_idx);
+            let mut slot = ConnectionSlot::with_id(Arc::clone(&servers), server_idx, worker_idx);
 
             for seg in &chunk {
                 if worker_cancel
@@ -2247,8 +2262,14 @@ pub async fn check_articles(
                                     tokio::time::sleep(Duration::from_secs(delay)).await;
                                 }
                             }
-                            Err(_) => {
-                                slot.invalidate();
+                            Err(e) => {
+                                warn!(
+                                    segment = %seg.message_id,
+                                    slot_id = worker_idx,
+                                    error = %e,
+                                    "STAT error; invalidating slot"
+                                );
+                                slot.invalidate("stat_err");
                                 if attempt < max_attempts {
                                     if worker_cancel
                                         .as_ref()
@@ -2256,11 +2277,19 @@ pub async fn check_articles(
                                     {
                                         break;
                                     }
-                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                    let base = slot.retry_delay();
+                                    tokio::time::sleep(jittered(base, worker_idx)).await;
                                 }
                             }
                         },
-                        Err(_) => {
+                        Err(e) => {
+                            warn!(
+                                segment = %seg.message_id,
+                                slot_id = worker_idx,
+                                error = %e,
+                                "connect error during check; invalidating slot"
+                            );
+                            slot.invalidate("connect_err");
                             if attempt < max_attempts {
                                 if worker_cancel
                                     .as_ref()
@@ -2268,7 +2297,8 @@ pub async fn check_articles(
                                 {
                                     break;
                                 }
-                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                let base = slot.retry_delay();
+                                tokio::time::sleep(jittered(base, worker_idx)).await;
                             }
                         }
                     }
