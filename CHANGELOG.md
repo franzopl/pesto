@@ -13,10 +13,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fork) over `bdinfo` (go-bdinfo). The tool is tried first; go-bdinfo is kept
   as a fallback. Download pre-built binaries from the
   [Releases page](https://github.com/tetrahydroc/BDInfoCLI/releases).
-- **Scan only the main playlist with BDInfoCLI-ng**: pesto now runs
-  `BDInfo -l` to identify the longest playlist (main feature), then
-  `BDInfo -m <playlist>` to scan only that one — avoiding the slow full-disc
-  scan that `-w` would perform across every playlist.
+- **Scan only the main playlist with BDInfoCLI-ng**: pesto passes the playlist
+  selected by `find_main_mpls` directly to `BDInfo -m`, scanning only the main
+  feature instead of the whole disc.
+
+### Fixed
+- **Wrong playlist passed to BDInfoCLI-ng on seamless-branch discs**: the
+  initial implementation relied on BDInfo's own playlist sorting (`-l`), which
+  orders by total duration and can put seamless-branch playlists ahead of the
+  actual main feature (e.g. Drive 2011 DUAL: 00006.MPLS at 3h17 vs 00000.MPLS
+  at 1h40). BDInfoCLI-ng now uses the same `find_main_mpls` heuristic as the
+  mediainfo fallback path, which selects by mediainfo-reported duration and is
+  already tested against this class of disc.
 
 ---
 
