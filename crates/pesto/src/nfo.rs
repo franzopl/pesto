@@ -1567,6 +1567,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_bdinfo_main_playlist_picks_longest() {
+        // Typical `BDInfo -l` output: fixed-width columns, sorted longest-first.
+        let output = "\
+Please wait while we scan the disc...\n\
+#   Group  Playlist File  Length    Estimated Bytes Measured Bytes  \n\
+\n\
+1   1      00800.MPLS     02:10:30  45,158,400,000  -               \n\
+2   1      00801.MPLS     02:10:30  45,073,920,000  -               \n\
+3   2      00300.MPLS     00:05:12  892,108,800     -               \n\
+4   3      00100.MPLS     00:00:08  12,288,000      -               \n\
+";
+        assert_eq!(
+            parse_bdinfo_main_playlist(output).as_deref(),
+            Some("00800.MPLS")
+        );
+    }
+
+    #[test]
+    fn parse_bdinfo_main_playlist_rejects_non_mpls() {
+        // If the first data line doesn't end with .MPLS, return None.
+        let output = "\
+#   Group  Playlist File  Length    Estimated Bytes Measured Bytes  \n\
+\n\
+1   1      garbage        02:10:30  45,158,400,000  -               \n\
+";
+        assert_eq!(parse_bdinfo_main_playlist(output), None);
+    }
+
+    #[test]
+    fn parse_bdinfo_main_playlist_empty_list() {
+        assert_eq!(parse_bdinfo_main_playlist(""), None);
+    }
+
+    #[test]
     fn find_media_file_returns_alphabetically_first() {
         let dir = TempDir::new().unwrap();
         let a = dir.path().join("ep02.mkv");
