@@ -95,10 +95,17 @@ self-contained. Some features require external tools:
 | `--compress` (7z / zip) | `p7zip` | `apt install p7zip-full` · `brew install p7zip` · [7-zip.org](https://www.7-zip.org) |
 | `--compress=rar` | `rar` | [rarlab.com/download.htm](https://www.rarlab.com/download.htm) (not redistributable) |
 | `--nfo` (video metadata) | `mediainfo` | `apt install mediainfo` · `brew install media-info` · [mediaarea.net](https://mediaarea.net/en/MediaInfo) |
+| `--nfo` (Blu-ray discs, recommended) | `bdinfo` | [github.com/autobrr/go-bdinfo](https://github.com/autobrr/go-bdinfo) — `go install github.com/autobrr/go-bdinfo/cmd/bdinfo@latest` |
 
 `pesto` will print a clear error if a required tool is missing. `mediainfo` is
 optional and its absence degrades gracefully — `--nfo` falls back to a
 directory listing instead.
+
+For Blu-ray disc structures, `bdinfo` is strongly recommended. When it is not
+found, pesto falls back to `mediainfo` with a binary MPLS parser, but that
+combination may produce incomplete or inaccurate results (wrong playlist
+selection, missing language tags). Install `bdinfo` and ensure it is in your
+`PATH` for reliable Blu-ray NFO generation.
 
 ---
 
@@ -693,6 +700,16 @@ Pass `--nfo` to generate a `.nfo` text file alongside the `.nzb`. pesto runs
 `mediainfo` on the first video file it finds; for generic folders it falls back
 to a recursive directory listing. The path is exposed as `PESTO_NFO` to every
 hook script.
+
+For Blu-ray disc structures (`BDMV/` layout), pesto will use `bdinfo` if it is
+available in `PATH`, producing accurate playlist selection, correct language
+tags, and a compact summary. If `bdinfo` is not found, a warning is printed and
+pesto falls back to `mediainfo` — results may be incomplete. Install
+[go-bdinfo](https://github.com/autobrr/go-bdinfo) for best results:
+
+```bash
+go install github.com/autobrr/go-bdinfo/cmd/bdinfo@latest
+```
 
 NFO generation is a local operation — it works with `--dry-run` just as it
 does in a full upload run.
