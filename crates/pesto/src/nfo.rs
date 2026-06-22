@@ -856,7 +856,7 @@ fn run_bdinfocli_ng(disc_root: &Path) -> Option<String> {
                     .to_string_lossy()
                     .to_uppercase()
                     .starts_with("BDINFO")
-                    && e.path().extension().map_or(false, |x| x == "txt")
+                    && e.path().extension().is_some_and(|x| x == "txt")
             })
             .and_then(|e| std::fs::read_to_string(e.path()).ok())
             .as_deref()
