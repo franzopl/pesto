@@ -7,7 +7,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.26] — 2026-06-22
+
+### Added
+- **BDInfo integration for Blu-ray NFO generation**: when
+  [`bdinfo`](https://github.com/autobrr/go-bdinfo) is installed and in `PATH`,
+  pesto uses it to generate Blu-ray NFO sections instead of `mediainfo`. BDInfo
+  automatically selects the main feature playlist, reports all audio and
+  subtitle streams with correct language tags, and produces a compact summary.
+  Install with `go install github.com/autobrr/go-bdinfo/cmd/bdinfo@latest`.
+- **Binary MPLS parser** (`parse_mpls`, `parse_stn_table`): when BDInfo is not
+  available, pesto parses the main `.mpls` file directly to extract PID→language
+  mappings and injects `Language` tags into the `mediainfo` output for any
+  stream that is missing them.
+- **Warning when BDInfo is absent**: if `bdinfo` is not found, pesto prints a
+  message to stderr advising installation for accurate Blu-ray NFO output.
+
 ### Fixed
+- **Phantom `=== Blu-ray Disc: BDMV ===` section**: `BDMV/BACKUP/index.bdmv`
+  (a mandatory copy required by the Blu-ray spec) was being treated as a second
+  disc root, producing a spurious `[no playable stream found]` section in every
+  Blu-ray NFO. The `BDMV/BACKUP/` subtree is now skipped during disc-root
+  detection.
+- **Missing `Language` tags on audio and subtitle streams**: NFOs were generated
+  by running `mediainfo` on the raw `.m2ts` stream file, which does not carry
+  language metadata. Language information on Blu-ray lives in the `.mpls`
+  playlist. pesto now runs `mediainfo` on the main feature `.mpls` (selected by
+  longest duration), and the MPLS parser supplements any remaining gaps.
+- **Wrong playlist selection by file size**: the previous heuristic picked the
+  largest `.mpls` by file size, which could select short looping playlists
+  (e.g. a 252-clip seamless-branch playlist on Top Gun: Maverick) over the
+  actual main feature. Selection is now based on duration via `mediainfo`,
+  matching the approach used for DVD title set selection.
+
+### Fixed (parmesan)
 - **PAR2 padding inflation on Blu-ray / DVD disc structures**: discs with many
   small files (`.clpi`, `.mpls`, `BDMV` metadata, etc.) much smaller than the
   computed slice size caused each such file to occupy a full slice of zeros,
