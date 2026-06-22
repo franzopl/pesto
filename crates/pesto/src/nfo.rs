@@ -828,14 +828,28 @@ fn run_go_bdinfo(disc_root: &Path) -> Option<String> {
 }
 
 fn run_bdinfocli_ng(disc_root: &Path) -> Option<String> {
-    let tmp = std::env::temp_dir().join(format!(
-        "pesto-bdinfo-{}",
-        std::process::id()
-    ));
+    // Step 1: list playlists to identify the main feature (longest = first entry).
+    // `-l` outputs a fixed-width table sorted by duration descending, then exits 0.
+    let list_out = std::process::Command::new("BDInfo")
+        .arg("-l")
+        .arg(disc_root)
+        .output()
+        .ok()?;
+
+    if !list_out.status.success() {
+        return None;
+    }
+
+    let main_playlist =
+        parse_bdinfo_main_playlist(&String::from_utf8_lossy(&list_out.stdout))?;
+
+    // Step 2: scan only the main playlist.
+    let tmp = std::env::temp_dir().join(format!("pesto-bdinfo-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).ok()?;
 
     let status = std::process::Command::new("BDInfo")
-        .arg("-w")
+        .arg("-m")
+        .arg(&main_playlist)
         .arg(disc_root)
         .arg(&tmp)
         .status()
@@ -861,6 +875,24 @@ fn run_bdinfocli_ng(disc_root: &Path) -> Option<String> {
 
     let _ = std::fs::remove_dir_all(&tmp);
     result
+}
+
+/// Parse the main (longest) playlist name from `BDInfo -l` output.
+///
+/// The table is sorted longest-first. Format is fixed-width columns:
+/// `{idx,-4}{group,-7}{name,-15}{length,-10}...`
+/// The playlist name occupies columns 11..26.
+fn parse_bdinfo_main_playlist(list_output: &str) -> Option<String> {
+    list_output
+        .lines()
+        .skip_while(|l| !l.contains("Playlist File"))
+        .nth(2) // skip header line + blank line after it
+        .and_then(|l| {
+            // Name starts at byte offset 11 (4-char index + 7-char group).
+            let name = if l.len() > 11 { &l[11..] } else { l };
+            name.split_whitespace().next().map(str::to_owned)
+        })
+        .filter(|s| s.to_uppercase().ends_with(".MPLS"))
 }
 
 /// Extract the QUICK SUMMARY block from a BDInfo report string (stdout or file).
