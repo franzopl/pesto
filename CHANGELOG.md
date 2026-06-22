@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **BDInfoCLI-ng is now the default BDInfo backend**: pesto now prefers
+  [`BDInfo`](https://github.com/tetrahydroc/BDInfoCLI) (tetrahydroc's .NET 8
+  fork) over `bdinfo` (go-bdinfo). The tool is tried first; go-bdinfo is kept
+  as a fallback. Download pre-built binaries from the
+  [Releases page](https://github.com/tetrahydroc/BDInfoCLI/releases).
+- **Scan only the main playlist with BDInfoCLI-ng**: pesto now runs
+  `BDInfo -l` to identify the longest playlist (main feature), then
+  `BDInfo -m <playlist>` to scan only that one — avoiding the slow full-disc
+  scan that `-w` would perform across every playlist.
+
 ---
 
 ## [0.3.26] — 2026-06-22
