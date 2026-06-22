@@ -67,7 +67,8 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
                     eprintln!(
                         "warning: bdinfo not found — Blu-ray NFO generated via mediainfo may \
                          have incorrect playlist selection or missing language tags.\n\
-                         Install bdinfo for accurate results: https://github.com/autobrr/go-bdinfo"
+                         Install one of: go-bdinfo (https://github.com/autobrr/go-bdinfo) \
+                         or BDInfoCLI-ng (https://github.com/tetrahydroc/BDInfoCLI)"
                     );
                 }
                 let mi = if let Some(bdinfo_out) = bdinfo_result {
@@ -793,10 +794,24 @@ fn run_mediainfo(path: &Path) -> std::io::Result<String> {
     Ok(replaced)
 }
 
-/// Run `bdinfo --stdout --main --summaryonly <disc_root>` and return the
-/// QUICK SUMMARY text if bdinfo is available. Returns None if bdinfo is not
-/// installed, fails, or produces empty output.
+/// Run bdinfo and return the QUICK SUMMARY text. Tries two implementations:
+///
+/// 1. `bdinfo --stdout --main --summaryonly` (go-bdinfo / autobrr fork) — stdout output.
+/// 2. `BDInfo -w <disc> <tmpdir>` (tetrahydroc/BDInfoCLI-ng, .NET 8) — writes
+///    `BDINFO.<label>.txt` to a temp directory; we read the QUICK SUMMARY section.
+///
+/// Returns None if neither tool is available or both fail.
 fn run_bdinfo(disc_root: &Path) -> Option<String> {
+    // --- attempt 1: BDInfoCLI-ng (.NET, file output) ---
+    if let Some(result) = run_bdinfocli_ng(disc_root) {
+        return Some(result);
+    }
+
+    // --- attempt 2: go-bdinfo (stdout) ---
+    run_go_bdinfo(disc_root)
+}
+
+fn run_go_bdinfo(disc_root: &Path) -> Option<String> {
     let output = std::process::Command::new("bdinfo")
         .arg("--stdout")
         .arg("--main")
@@ -809,16 +824,59 @@ fn run_bdinfo(disc_root: &Path) -> Option<String> {
         return None;
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout);
-    // Strip the "QUICK SUMMARY:" header line and surrounding blank lines.
-    let trimmed = raw
-        .lines()
-        .skip_while(|l| l.trim().is_empty() || l.trim() == "QUICK SUMMARY:")
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end()
-        .to_owned();
+    extract_quick_summary_from_str(&String::from_utf8_lossy(&output.stdout))
+}
 
+fn run_bdinfocli_ng(disc_root: &Path) -> Option<String> {
+    let tmp = std::env::temp_dir().join(format!(
+        "pesto-bdinfo-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&tmp).ok()?;
+
+    let status = std::process::Command::new("BDInfo")
+        .arg("-w")
+        .arg(disc_root)
+        .arg(&tmp)
+        .status()
+        .ok()?;
+
+    let result = if status.success() {
+        std::fs::read_dir(&tmp)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .to_uppercase()
+                    .starts_with("BDINFO")
+                    && e.path().extension().map_or(false, |x| x == "txt")
+            })
+            .and_then(|e| std::fs::read_to_string(e.path()).ok())
+            .as_deref()
+            .and_then(extract_quick_summary_from_str)
+    } else {
+        None
+    };
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    result
+}
+
+/// Extract the QUICK SUMMARY block from a BDInfo report string (stdout or file).
+fn extract_quick_summary_from_str(raw: &str) -> Option<String> {
+    // Find the line after "QUICK SUMMARY:" and collect until the next section
+    // header or end of input.
+    let after = raw
+        .lines()
+        .skip_while(|l| l.trim() != "QUICK SUMMARY:")
+        .skip(1) // skip the header itself
+        .skip_while(|l| l.trim().is_empty())
+        .take_while(|l| !l.starts_with('<') && l.trim() != "[/code]")
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let trimmed = after.trim_end().to_owned();
     if trimmed.is_empty() {
         None
     } else {
