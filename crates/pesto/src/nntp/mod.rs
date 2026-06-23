@@ -148,16 +148,16 @@ impl Connection {
 
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
-        self.stream.write_all(&stuffed_headers).await?;
+        self.write_all_timeout(&stuffed_headers).await?;
 
         // Write body directly; the BufWriter coalesces this with the headers
         // before the TLS flush.
-        self.stream.write_all(body).await?;
+        self.write_all_timeout(body).await?;
         if !body.ends_with(b"\r\n") {
-            self.stream.write_all(b"\r\n").await?;
+            self.write_all_timeout(b"\r\n").await?;
         }
-        self.stream.write_all(b".\r\n").await?;
-        self.stream.flush().await?;
+        self.write_all_timeout(b".\r\n").await?;
+        self.flush_timeout().await?;
 
         let resp = self.read_response().await?;
         match resp.code {
@@ -180,22 +180,22 @@ impl Connection {
     /// rejects POST with a non-340 code, [`read_post_response`] returns an
     /// error and the caller must invalidate the connection.
     pub async fn enqueue_post(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
-        self.stream.write_all(b"POST\r\n").await?;
+        self.write_all_timeout(b"POST\r\n").await?;
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
-        self.stream.write_all(&stuffed_headers).await?;
-        self.stream.write_all(body).await?;
+        self.write_all_timeout(&stuffed_headers).await?;
+        self.write_all_timeout(body).await?;
         if !body.ends_with(b"\r\n") {
-            self.stream.write_all(b"\r\n").await?;
+            self.write_all_timeout(b"\r\n").await?;
         }
-        self.stream.write_all(b".\r\n").await?;
+        self.write_all_timeout(b".\r\n").await?;
         Ok(())
     }
 
     /// Flush all enqueued articles to the server. Call once after all
     /// [`enqueue_post`] calls for a batch, before reading responses.
     pub async fn flush_pipeline(&mut self) -> Result<()> {
-        self.stream.flush().await.map_err(Into::into)
+        self.flush_timeout().await
     }
 
     /// Read one `(340, 240)` response pair for a pipelined POST.
@@ -244,8 +244,8 @@ impl Connection {
         }
         payload.extend_from_slice(b".\r\n");
 
-        self.stream.write_all(&payload).await?;
-        self.stream.flush().await?;
+        self.write_all_timeout(&payload).await?;
+        self.flush_timeout().await?;
 
         let resp = self.read_response().await?;
         match resp.code {
@@ -293,10 +293,10 @@ impl Connection {
     async fn send_command(&mut self, prefix: &str, suffix: &str) -> Result<Response> {
         let t0 = Instant::now();
         trace!(cmd = prefix.trim_end(), "→");
-        self.stream.write_all(prefix.as_bytes()).await?;
-        self.stream.write_all(suffix.as_bytes()).await?;
-        self.stream.write_all(b"\r\n").await?;
-        self.stream.flush().await?;
+        self.write_all_timeout(prefix.as_bytes()).await?;
+        self.write_all_timeout(suffix.as_bytes()).await?;
+        self.write_all_timeout(b"\r\n").await?;
+        self.flush_timeout().await?;
         let resp = self.read_response().await?;
         let elapsed_ms = t0.elapsed().as_millis();
         trace!(
@@ -306,6 +306,38 @@ impl Connection {
             "← RTT"
         );
         Ok(resp)
+    }
+
+    /// Write `buf` to the stream, bounded by `read_timeout`.
+    ///
+    /// A silent connection death stalls a bare `write_all` for the OS TCP
+    /// retransmission timeout (≈2 min on Windows, ≈15 min on Linux) rather
+    /// than the user-configured `timeout`. Wrapping writes in the same timeout
+    /// as reads ensures a dead connection is detected within `timeout` seconds
+    /// regardless of which direction stalls first.
+    async fn write_all_timeout(&mut self, buf: &[u8]) -> Result<()> {
+        tokio::time::timeout(self.read_timeout, self.stream.write_all(buf))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "NNTP write timed out after {}s (connection likely dead)",
+                    self.read_timeout.as_secs()
+                )
+            })?
+            .context("writing to NNTP stream")
+    }
+
+    /// Flush the stream, bounded by `read_timeout`. See [`write_all_timeout`].
+    async fn flush_timeout(&mut self) -> Result<()> {
+        tokio::time::timeout(self.read_timeout, self.stream.flush())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "NNTP write timed out after {}s (connection likely dead)",
+                    self.read_timeout.as_secs()
+                )
+            })?
+            .context("flushing NNTP stream")
     }
 
     /// Read one response line from the server.
