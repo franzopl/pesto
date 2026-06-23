@@ -9,6 +9,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.29] — 2026-06-23
+
+### Fixed
+- **Default pipeline depth changed from adaptive to 1**: pesto was pipelining
+  `POST` commands — sending `POST\r\n` plus the article body in one burst
+  without waiting for the server's `340` response. This violates RFC 3977 and
+  caused strict servers such as Newshosting to reject every pipelined article
+  with `441 Posting Failed. Article header field contains invalid characters`.
+  The first article (posted sequentially during the adaptive warm-up) always
+  succeeded, making the failure pattern hard to diagnose. The fix sets
+  `pipeline_depth = 1` as the new default: each connection posts one article at
+  a time in strict request-response order. Throughput is unchanged because it
+  comes from the pool of parallel connections, not from intra-connection
+  pipelining. Users who need higher depth for high-latency links can still set
+  `pipeline_depth` explicitly in `config.toml`. Thanks to **Brimm** for
+  reporting the issue and providing test credentials that isolated the root cause.
+
+---
+
 ## [0.3.28] — 2026-06-23
 
 ### Changed

@@ -25,8 +25,11 @@ pub const DEFAULT_RETRY_DELAY: u64 = 1;
 /// dropped TCP connection long before the OS keepalive would (~2 h on Linux,
 /// ~4.5 min on Windows). 120 s is a deliberately conservative middle ground.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
-/// Default pipeline depth: 0 = adaptive (auto-measure RTT and compute depth).
-pub const DEFAULT_PIPELINE_DEPTH: usize = 0;
+// 1 = one sequential POST per connection (RFC 3977-compliant). Throughput comes
+// from parallel connections, not intra-connection pipelining. Depth > 1 pipelines
+// POST commands without waiting for the server's 340, which violates RFC 3977 and
+// is rejected by strict servers (e.g. Newshosting returns 441 on pipelined POSTs).
+pub const DEFAULT_PIPELINE_DEPTH: usize = 1;
 /// Maximum depth the adaptive pipeline will auto-select.
 pub const MAX_AUTO_PIPELINE_DEPTH: usize = 8;
 /// Default percentage of PAR2 recovery data to generate.
