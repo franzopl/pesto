@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.30] — 2026-06-23
+
+### Fixed
+- **NNTP write operations now respect the configured `timeout`**: all
+  `write_all` and `flush` calls in `Connection` are now wrapped in
+  `tokio::time::timeout(read_timeout, …)`. Previously, when a server silently
+  dropped a TCP connection (no FIN/RST), writes would stall for the OS TCP
+  retransmission timeout — ~2 minutes on Windows, up to ~15 minutes on Linux —
+  regardless of the `[server].timeout` setting. The user-configured timeout now
+  bounds both reads and writes uniformly. A timed-out write surfaces as
+  `"NNTP write timed out after {N}s (connection likely dead)"`. Affected paths:
+  `enqueue_post`, `flush_pipeline`, `post_parts`, `post`, and `send_command`
+  (AUTHINFO / STAT / QUIT). Reported by **Johnmde** (issue #30).
+
+---
+
 ## [0.3.29] — 2026-06-23
 
 ### Fixed
