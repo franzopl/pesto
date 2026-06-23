@@ -40,6 +40,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 lexical-sort = "0.3"
+bdinfo-rs-core = { git = "https://github.com/agentjp/bdinfo-rs", tag = "v1.0.1" }
 
 [features]
 bench-internals = ["parmesan/bench-internals"]

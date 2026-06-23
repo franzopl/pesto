@@ -119,6 +119,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bdinfo-rs-core"
+version = "1.0.1"
+source = "git+https://github.com/agentjp/bdinfo-rs?tag=v1.0.1#7a69d5184fc2a53ee845fa9cbd3765656a424b0e"
+dependencies = [
+ "roxmltree",
+ "thiserror",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1270,9 +1279,10 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pesto-poster"
-version = "0.3.27"
+version = "0.3.28"
 dependencies = [
  "anyhow",
+ "bdinfo-rs-core",
  "chrono",
  "clap",
  "crc32fast",
@@ -1593,6 +1603,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

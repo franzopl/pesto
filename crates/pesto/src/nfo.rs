@@ -62,45 +62,40 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| root.display().to_string());
-                let bdinfo_result = run_bdinfo(root);
-                if bdinfo_result.is_none() {
-                    eprintln!(
-                        "warning: bdinfo not found — Blu-ray NFO generated via mediainfo may \
-                         have incorrect playlist selection or missing language tags.\n\
-                         Install one of: go-bdinfo (https://github.com/autobrr/go-bdinfo) \
-                         or BDInfoCLI-ng (https://github.com/tetrahydroc/BDInfoCLI)"
-                    );
-                }
-                let mi = if let Some(bdinfo_out) = bdinfo_result {
-                    debug!(root = %root.display(), "bdinfo succeeded for Blu-ray disc");
-                    bdinfo_out
-                } else {
-                    match find_main_mpls(root).or_else(|| find_main_m2ts(root)) {
-                        Some(media) => {
-                            debug!(media = %media.display(), "running mediainfo on Blu-ray main feature");
-                            let mi = match run_mediainfo(&media) {
-                                Ok(out) => out,
-                                Err(e) => {
-                                    warn!(media = %media.display(), error = %e, "mediainfo failed for Blu-ray main feature");
-                                    format!("[mediainfo failed for {}: {}]", media.display(), e)
+                let mi = match run_bdinfo(root) {
+                    Some(bdinfo_out) => {
+                        debug!(root = %root.display(), "bdinfo-rs-core succeeded for Blu-ray disc");
+                        bdinfo_out
+                    }
+                    None => {
+                        warn!(root = %root.display(), "bdinfo-rs-core failed — falling back to mediainfo");
+                        match find_main_mpls(root).or_else(|| find_main_m2ts(root)) {
+                            Some(media) => {
+                                debug!(media = %media.display(), "running mediainfo on Blu-ray main feature");
+                                let mi = match run_mediainfo(&media) {
+                                    Ok(out) => out,
+                                    Err(e) => {
+                                        warn!(media = %media.display(), error = %e, "mediainfo failed for Blu-ray main feature");
+                                        format!("[mediainfo failed for {}: {}]", media.display(), e)
+                                    }
+                                };
+                                let is_mpls = media
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .map(|e| e.eq_ignore_ascii_case("mpls"))
+                                    .unwrap_or(false);
+                                if is_mpls {
+                                    let lang_map = mpls_language_map(&media);
+                                    debug!(pid_count = lang_map.len(), "parsed MPLS language map");
+                                    inject_language_tags(&mi, &lang_map)
+                                } else {
+                                    mi
                                 }
-                            };
-                            let is_mpls = media
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .map(|e| e.eq_ignore_ascii_case("mpls"))
-                                .unwrap_or(false);
-                            if is_mpls {
-                                let lang_map = mpls_language_map(&media);
-                                debug!(pid_count = lang_map.len(), "parsed MPLS language map");
-                                inject_language_tags(&mi, &lang_map)
-                            } else {
-                                mi
                             }
-                        }
-                        None => {
-                            warn!(root = %root.display(), "no MPLS or M2TS found in BDMV");
-                            "[no playable stream found]\n".to_owned()
+                            None => {
+                                warn!(root = %root.display(), "no MPLS or M2TS found in BDMV");
+                                "[no playable stream found]\n".to_owned()
+                            }
                         }
                     }
                 };
@@ -794,89 +789,27 @@ fn run_mediainfo(path: &Path) -> std::io::Result<String> {
     Ok(replaced)
 }
 
-/// Run bdinfo and return the QUICK SUMMARY text. Tries two implementations:
-///
-/// 1. `bdinfo --stdout --main --summaryonly` (go-bdinfo / autobrr fork) — stdout output.
-/// 2. `BDInfo -w <disc> <tmpdir>` (tetrahydroc/BDInfoCLI-ng, .NET 8) — writes
-///    `BDINFO.<label>.txt` to a temp directory; we read the QUICK SUMMARY section.
-///
-/// Returns None if neither tool is available or both fail.
+/// Scan the Blu-ray disc at `disc_root` using `bdinfo-rs-core` and return
+/// the QUICK SUMMARY block from the generated report.
 fn run_bdinfo(disc_root: &Path) -> Option<String> {
-    // --- attempt 1: BDInfoCLI-ng (.NET, file output) ---
-    if let Some(result) = run_bdinfocli_ng(disc_root) {
-        return Some(result);
-    }
+    use bdinfo_rs_core::bdrom::disc::BdRom;
+    use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+    use bdinfo_rs_core::report::text;
+    use bdinfo_rs_core::vfs::fs::FsDir;
 
-    // --- attempt 2: go-bdinfo (stdout) ---
-    run_go_bdinfo(disc_root)
+    let vfs = FsDir::new(disc_root);
+    let scan = BdRom::open_resilient(&vfs, true).ok()?;
+    let order = scan.bdrom.presentation_order(&PlaylistFilter::default());
+    let report = text::render_with(&scan.bdrom, &order, &scan.errors);
+    extract_quick_summary_from_str(&report)
 }
 
-fn run_go_bdinfo(disc_root: &Path) -> Option<String> {
-    let output = std::process::Command::new("bdinfo")
-        .arg("--stdout")
-        .arg("--main")
-        .arg("--summaryonly")
-        .arg(disc_root)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    extract_quick_summary_from_str(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn run_bdinfocli_ng(disc_root: &Path) -> Option<String> {
-    // Use the same playlist selection logic as the mediainfo fallback path:
-    // find_main_mpls picks the playlist with the longest duration via mediainfo,
-    // which correctly handles seamless-branch playlists that appear longer than
-    // the actual main feature (e.g. Drive 2011: 00006.MPLS at 3h17 vs the real
-    // 00000.MPLS at 1h40).
-    let main_mpls = find_main_mpls(disc_root)?;
-    let playlist_name = main_mpls.file_name()?.to_string_lossy().into_owned();
-
-    let tmp = std::env::temp_dir().join(format!("pesto-bdinfo-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).ok()?;
-
-    let status = std::process::Command::new("BDInfo")
-        .arg("-m")
-        .arg(&playlist_name)
-        .arg(disc_root)
-        .arg(&tmp)
-        .status()
-        .ok()?;
-
-    let result = if status.success() {
-        std::fs::read_dir(&tmp)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .find(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .to_uppercase()
-                    .starts_with("BDINFO")
-                    && e.path().extension().is_some_and(|x| x == "txt")
-            })
-            .and_then(|e| std::fs::read_to_string(e.path()).ok())
-            .as_deref()
-            .and_then(extract_quick_summary_from_str)
-    } else {
-        None
-    };
-
-    let _ = std::fs::remove_dir_all(&tmp);
-    result
-}
-
-/// Extract the QUICK SUMMARY block from a BDInfo report string (stdout or file).
+/// Extract the QUICK SUMMARY block from a BDInfo report string.
 fn extract_quick_summary_from_str(raw: &str) -> Option<String> {
-    // Find the line after "QUICK SUMMARY:" and collect until the next section
-    // header or end of input.
     let after = raw
         .lines()
         .skip_while(|l| l.trim() != "QUICK SUMMARY:")
-        .skip(1) // skip the header itself
+        .skip(1)
         .skip_while(|l| l.trim().is_empty())
         .take_while(|l| !l.starts_with('<') && l.trim() != "[/code]")
         .collect::<Vec<_>>()

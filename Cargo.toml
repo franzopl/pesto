@@ -7,9 +7,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.27"
+version = "0.3.28"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.96"
 license = "MIT"
 repository = "https://github.com/franzopl/pesto"
 homepage = "https://github.com/franzopl/pesto"

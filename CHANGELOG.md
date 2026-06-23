@@ -7,6 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.28] — 2026-06-23
+
+### Changed
+- **BDInfo is now a pure Rust library dependency**: Blu-ray disc analysis is
+  now performed by [`bdinfo-rs-core`](https://github.com/agentjp/bdinfo-rs)
+  (LGPL-2.1) linked directly into pesto. The previous subprocess-based backends
+  — `go-bdinfo` and `BDInfoCLI-ng` (.NET 8) — have been removed entirely. No
+  external BDInfo tool needs to be installed.
+- **Minimum Rust version bumped to 1.96**: required by `bdinfo-rs-core 1.0.1`.
+
+### Removed
+- **`go-bdinfo` and `BDInfoCLI-ng` runtime dependencies**: pesto no longer
+  shells out to external BDInfo executables. Playlist selection, stream
+  analysis, and QUICK SUMMARY generation all happen in-process via
+  `bdinfo-rs-core`. The mediainfo fallback path is kept for the rare case where
+  the in-process scan fails (e.g. severely damaged disc structure).
+
+---
+
+## [0.3.27] — 2026-06-22
+
 ### Changed
 - **BDInfoCLI-ng is now the default BDInfo backend**: pesto now prefers
   [`BDInfo`](https://github.com/tetrahydroc/BDInfoCLI) (tetrahydroc's .NET 8
