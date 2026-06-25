@@ -110,8 +110,14 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
             debug!(discs = disc_roots.len(), folder = %folder_name, "detected DVD structure");
             let mut sections: Vec<String> = Vec::new();
             for root in &disc_roots {
-                let title_ifo = find_title_ifo(root)
-                    .unwrap_or_else(|| root.join("VIDEO_TS").join("VTS_01_0.IFO"));
+                let title_ifo = find_title_ifo(root).unwrap_or_else(|| {
+                    let video_ts = root.join("VIDEO_TS");
+                    if video_ts.is_dir() {
+                        video_ts.join("VTS_01_0.IFO")
+                    } else {
+                        root.join("VTS_01_0.IFO")
+                    }
+                });
                 debug!(ifo = %title_ifo.display(), "running mediainfo on title IFO");
                 let mi = match run_mediainfo(&title_ifo) {
                     Ok(out) => inject_dvd_language_tags(&out, &title_ifo),
@@ -973,7 +979,14 @@ fn inject_dvd_language_tags(mi_output: &str, ifo: &Path) -> String {
     out.join("\n")
 }
 
-/// Find DVD disc roots by locating VIDEO_TS/VIDEO_TS.VOB anywhere under `path`.
+/// Find DVD disc roots by locating DVD-Video marker files anywhere under `path`.
+///
+/// Accepts VIDEO_TS.IFO, VIDEO_TS.BUP, or VIDEO_TS.VOB as markers. Per the
+/// DVD-Video spec (ECMA-267 / DVD-Books Part 3), VIDEO_TS.IFO and VIDEO_TS.BUP
+/// are mandatory; VIDEO_TS.VOB (the Video Manager Menu) is optional and stripped
+/// on many scene releases. Handles both the standard layout
+/// (`<disc_root>/VIDEO_TS/VIDEO_TS.IFO`) and the flat layout where files sit
+/// directly in the disc root (`<disc_root>/VIDEO_TS.IFO`).
 fn find_dvd_disc_roots(path: &Path) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     collect_dvd_roots(path, &mut roots);
@@ -993,13 +1006,30 @@ fn collect_dvd_roots(dir: &Path, roots: &mut Vec<PathBuf>) {
         } else if child
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.eq_ignore_ascii_case("VIDEO_TS.VOB"))
+            .map(|n| {
+                let u = n.to_ascii_uppercase();
+                // VIDEO_TS.IFO and VIDEO_TS.BUP are mandatory per the DVD-Video
+                // spec; VIDEO_TS.VOB (the Video Manager Menu) is optional and
+                // stripped on many scene releases. Accept any of the three.
+                u == "VIDEO_TS.IFO" || u == "VIDEO_TS.BUP" || u == "VIDEO_TS.VOB"
+            })
             .unwrap_or(false)
         {
-            // VIDEO_TS.VOB -> VIDEO_TS/ -> disc root
-            if let Some(video_ts) = child.parent() {
-                if let Some(disc_root) = video_ts.parent() {
-                    roots.push(disc_root.to_path_buf());
+            // The marker file lives either inside a VIDEO_TS/ subfolder
+            // (standard layout) or directly in the disc root (flat layout).
+            if let Some(parent) = child.parent() {
+                let is_inside_video_ts = parent
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.eq_ignore_ascii_case("VIDEO_TS"))
+                    .unwrap_or(false);
+                let disc_root = if is_inside_video_ts {
+                    parent.parent().map(|p| p.to_path_buf())
+                } else {
+                    Some(parent.to_path_buf())
+                };
+                if let Some(root) = disc_root {
+                    roots.push(root);
                 }
             }
         }
@@ -1018,7 +1048,14 @@ fn collect_dvd_roots(dir: &Path, roots: &mut Vec<PathBuf>) {
 /// Falls back to alphabetical first if all sizes are zero.
 fn find_title_ifo(disc_root: &Path) -> Option<PathBuf> {
     let video_ts = disc_root.join("VIDEO_TS");
-    let mut ifos: Vec<PathBuf> = std::fs::read_dir(&video_ts)
+    // Standard layout: VIDEO_TS/ subfolder exists. Flat layout: IFOs are directly
+    // in disc_root (some scene releases skip the VIDEO_TS/ subfolder).
+    let search_dir = if video_ts.is_dir() {
+        &video_ts
+    } else {
+        disc_root
+    };
+    let mut ifos: Vec<PathBuf> = std::fs::read_dir(search_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -1120,6 +1157,18 @@ fn run_mediainfo(path: &Path) -> std::io::Result<String> {
                 output.status,
                 stderr.trim()
             )
+        };
+        return Err(std::io::Error::other(msg));
+    }
+    if output.stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() {
+            "mediainfo exited successfully but produced no output \
+             (verify that `mediainfo` on PATH is the real CLI binary and that \
+             the input file exists)"
+                .to_owned()
+        } else {
+            format!("mediainfo produced no output; stderr: {}", stderr.trim())
         };
         return Err(std::io::Error::other(msg));
     }
@@ -1684,6 +1733,54 @@ mod tests {
         let roots = find_dvd_disc_roots(dir.path());
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], dir.path());
+    }
+
+    #[test]
+    fn find_dvd_disc_roots_detects_menuless_disc() {
+        // Case B: standard VIDEO_TS/ layout but no VIDEO_TS.VOB (menu stripped).
+        let dir = TempDir::new().unwrap();
+        let vts = dir.path().join("VIDEO_TS");
+        fs::create_dir_all(&vts).unwrap();
+        fs::write(vts.join("VIDEO_TS.IFO"), b"").unwrap();
+        fs::write(vts.join("VIDEO_TS.BUP"), b"").unwrap();
+        // No VIDEO_TS.VOB intentionally.
+        fs::write(vts.join("VTS_01_0.IFO"), b"").unwrap();
+        fs::write(vts.join("VTS_01_1.VOB"), b"").unwrap();
+
+        let roots = find_dvd_disc_roots(dir.path());
+        assert_eq!(roots.len(), 1, "menuless disc must still be detected");
+        assert_eq!(roots[0], dir.path());
+    }
+
+    #[test]
+    fn find_dvd_disc_roots_detects_flat_layout() {
+        // Case A: IFO/BUP/VOB files directly in disc root (no VIDEO_TS/ subfolder).
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("VIDEO_TS.IFO"), b"").unwrap();
+        fs::write(dir.path().join("VIDEO_TS.BUP"), b"").unwrap();
+        fs::write(dir.path().join("VIDEO_TS.VOB"), b"").unwrap();
+        fs::write(dir.path().join("VTS_01_0.IFO"), b"").unwrap();
+        fs::write(dir.path().join("VTS_01_1.VOB"), b"").unwrap();
+
+        let roots = find_dvd_disc_roots(dir.path());
+        assert_eq!(roots.len(), 1, "flat layout must be detected");
+        assert_eq!(
+            roots[0],
+            dir.path(),
+            "disc root must be the release folder itself"
+        );
+    }
+
+    #[test]
+    fn find_title_ifo_handles_flat_layout() {
+        // Case A: VTS IFOs directly in disc root (no VIDEO_TS/ subfolder).
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("VIDEO_TS.IFO"), b"").unwrap();
+        fs::write(dir.path().join("VTS_01_0.IFO"), b"").unwrap();
+        fs::write(dir.path().join("VTS_01_1.VOB"), b"data").unwrap();
+
+        let ifo = find_title_ifo(dir.path()).unwrap();
+        assert_eq!(ifo.file_name().unwrap(), "VTS_01_0.IFO");
     }
 
     #[test]
