@@ -114,7 +114,7 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
                     .unwrap_or_else(|| root.join("VIDEO_TS").join("VTS_01_0.IFO"));
                 debug!(ifo = %title_ifo.display(), "running mediainfo on title IFO");
                 let mi = match run_mediainfo(&title_ifo) {
-                    Ok(out) => out,
+                    Ok(out) => inject_dvd_language_tags(&out, &title_ifo),
                     Err(e) => {
                         warn!(ifo = %title_ifo.display(), error = %e, "mediainfo failed for DVD IFO");
                         format!("[mediainfo failed for {}: {}]", title_ifo.display(), e)
@@ -661,6 +661,318 @@ fn find_main_m2ts(disc_root: &Path) -> Option<PathBuf> {
         .max_by_key(|p| p.metadata().map(|m| m.len()).unwrap_or(0))
 }
 
+/// Parse the ordered audio and subtitle language codes from `mediainfo --Details=1`
+/// output for a DVD IFO file.
+///
+/// The IFO VTSI_MAT table declares streams in index order. The Details output
+/// exposes them as consecutive "Audio (8 bytes)" / "Text (6 bytes)" blocks inside
+/// the "VTS (VTS for movie…)" section, each followed by a "Language code: XX" line.
+/// We collect only entries where `Language type` is `1` (2CC), which means a valid
+/// ISO 639-1 code is present; `Unknown` (type 0) entries produce an empty string
+/// placeholder so that index alignment with stream IDs is preserved.
+///
+/// Returns `(audio_langs, subtitle_langs)` where each vec is ordered by stream
+/// index (0-based).
+fn parse_ifo_language_tables(ifo: &Path) -> (Vec<String>, Vec<String>) {
+    let abs = ifo.canonicalize().unwrap_or_else(|_| ifo.to_path_buf());
+    let output = match std::process::Command::new("mediainfo")
+        .arg("--Details=1")
+        .arg(&abs)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return (vec![], vec![]),
+    };
+
+    // We only want the VTS section (movie content, not VTSM menus).
+    // It starts at the line containing "VTS (VTS for movie" and runs until the
+    // next top-level section (a line whose offset jumps significantly, but in
+    // practice we just scan forward and stop when we leave the 0x02xx block).
+    let mut in_vts = false;
+    let mut in_audio_block = false;
+    let mut in_text_block = false;
+
+    // current stream being accumulated
+    let mut current_lang_type: Option<u8> = None; // 0=Unknown, 1=2CC
+    let mut current_lang_code = String::new();
+
+    let mut audio_langs: Vec<String> = Vec::new();
+    let mut subtitle_langs: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Detect entry into the VTS movie section.
+        if trimmed.contains("VTS (VTS for movie") {
+            in_vts = true;
+            in_audio_block = false;
+            in_text_block = false;
+            continue;
+        }
+
+        if !in_vts {
+            continue;
+        }
+
+        // Detect the audio / subtitle count headers, which delimit the blocks.
+        if trimmed.contains("Audio streams -") && trimmed.contains("streams") {
+            // Flush any pending stream from a previous block.
+            in_audio_block = true;
+            in_text_block = false;
+            current_lang_type = None;
+            current_lang_code.clear();
+            continue;
+        }
+        if trimmed.contains("Text streams -") && trimmed.contains("streams") {
+            in_audio_block = false;
+            in_text_block = true;
+            current_lang_type = None;
+            current_lang_code.clear();
+            continue;
+        }
+
+        // Lines in --Details=1 output are prefixed with a hex offset, e.g.:
+        //   "00204    Language type:                       1 (0x1) - 2CC"
+        // Strip that prefix to get the semantic content.
+        let content = trimmed
+            .trim_start_matches(|c: char| c.is_ascii_hexdigit())
+            .trim_start();
+
+        // Leaving the stream attribute area: a line for a new top-level block.
+        if (in_audio_block || in_text_block)
+            && (content.starts_with("Reserved for Audio")
+                || content.starts_with("Reserved for Text")
+                || content.starts_with("Unknown:"))
+        {
+            // Flush the current stream (may be empty if no lang code seen yet).
+            if current_lang_type.is_some() {
+                let lang = if current_lang_type == Some(1) {
+                    current_lang_code.clone()
+                } else {
+                    String::new()
+                };
+                if in_audio_block {
+                    audio_langs.push(lang);
+                } else {
+                    subtitle_langs.push(lang);
+                }
+                current_lang_type = None;
+                current_lang_code.clear();
+            }
+            continue;
+        }
+
+        // Inside a stream attribute block, pick up Language type and code.
+        if in_audio_block || in_text_block {
+            if content.starts_with("Language type:") {
+                // Flush any previously accumulated stream.
+                if current_lang_type.is_some() {
+                    let lang = if current_lang_type == Some(1) {
+                        current_lang_code.clone()
+                    } else {
+                        String::new()
+                    };
+                    if in_audio_block {
+                        audio_langs.push(lang);
+                    } else {
+                        subtitle_langs.push(lang);
+                    }
+                    current_lang_code.clear();
+                }
+                // Parse type value: "Language type:                       1 (0x1) - 2CC"
+                current_lang_type = content
+                    .trim_start_matches("Language type:")
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u8>().ok());
+            } else if content.starts_with("Language code:") {
+                // "Language code:                       en"
+                current_lang_code = content
+                    .trim_start_matches("Language code:")
+                    .trim()
+                    .to_lowercase();
+            } else if content.starts_with("Audio (") {
+                // New audio stream sub-block; flush previous if any.
+                if current_lang_type.is_some() {
+                    let lang = if current_lang_type == Some(1) {
+                        current_lang_code.clone()
+                    } else {
+                        String::new()
+                    };
+                    audio_langs.push(lang);
+                    current_lang_type = None;
+                    current_lang_code.clear();
+                }
+            } else if content.starts_with("Text (") {
+                // New subtitle stream sub-block; flush previous if any.
+                if current_lang_type.is_some() {
+                    let lang = if current_lang_type == Some(1) {
+                        current_lang_code.clone()
+                    } else {
+                        String::new()
+                    };
+                    subtitle_langs.push(lang);
+                    current_lang_type = None;
+                    current_lang_code.clear();
+                }
+            }
+        }
+    }
+
+    // Flush the last pending stream.
+    if current_lang_type.is_some() {
+        let lang = if current_lang_type == Some(1) {
+            current_lang_code.clone()
+        } else {
+            String::new()
+        };
+        if in_audio_block {
+            audio_langs.push(lang);
+        } else {
+            subtitle_langs.push(lang);
+        }
+    }
+
+    (audio_langs, subtitle_langs)
+}
+
+/// Inject missing `Language` lines into `mediainfo` text output for a DVD IFO.
+///
+/// `mediainfo` sometimes omits language tags for audio and subtitle streams when
+/// the first entry in the IFO's VTSI_MAT language table has `Language type: 0
+/// (Unknown)`. The language data is present in the IFO binary; this function
+/// reads it via `--Details=1` and injects it into the normal output.
+///
+/// DVD stream ID mapping (sub-ID portion of "189 (0xBD)-NNN"):
+/// - Audio:    sub_id - 0x80 → audio_langs index
+/// - Subtitle: (sub_id - 0x20) % subtitle_langs.len() → subtitle_langs index
+///   (wide, letterbox and pan&scan variants share the same language table)
+fn inject_dvd_language_tags(mi_output: &str, ifo: &Path) -> String {
+    // Fast path: if every stream already has a Language line, do nothing.
+    let needs_injection = {
+        let mut in_av_section = false;
+        let mut has_lang = false;
+        let mut missing = false;
+        for line in mi_output.lines() {
+            let t = line.trim_start();
+            if t.starts_with("Audio") || t.starts_with("Text") {
+                if in_av_section && !has_lang {
+                    missing = true;
+                    break;
+                }
+                in_av_section = true;
+                has_lang = false;
+            } else if t.starts_with("Language") {
+                has_lang = true;
+            }
+        }
+        if in_av_section && !has_lang {
+            missing = true;
+        }
+        missing
+    };
+
+    if !needs_injection {
+        return mi_output.to_owned();
+    }
+
+    let (audio_langs, subtitle_langs) = parse_ifo_language_tables(ifo);
+    if audio_langs.is_empty() && subtitle_langs.is_empty() {
+        return mi_output.to_owned();
+    }
+
+    // Split output into sections (same logic as inject_language_tags for MPLS).
+    let mut sections: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in mi_output.lines() {
+        let is_header = !line.is_empty()
+            && !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && line
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+            && !line.contains(" : ");
+        if is_header && !current.is_empty() {
+            sections.push(std::mem::take(&mut current));
+        }
+        current.push(line.to_owned());
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(sections.len());
+
+    for mut section in sections {
+        // Skip sections that already have a Language line.
+        if section
+            .iter()
+            .any(|l| l.trim_start().starts_with("Language"))
+        {
+            out.push(section.join("\n"));
+            continue;
+        }
+
+        let header = section.first().map(|s| s.as_str()).unwrap_or("");
+        let is_audio = header.starts_with("Audio");
+        let is_text = header.starts_with("Text");
+
+        if !is_audio && !is_text {
+            out.push(section.join("\n"));
+            continue;
+        }
+
+        // Extract the sub-ID from "ID : 189 (0xBD)-130 (0x82)".
+        let sub_id: Option<u8> = section.iter().find_map(|line| {
+            let t = line.trim_start();
+            if !t.starts_with("ID ") && !t.starts_with("ID\t") {
+                return None;
+            }
+            // There may be two hex groups; we want the second one after '-'.
+            let after_dash = line
+                .rfind('-')
+                .map(|i| &line[i + 1..])
+                .unwrap_or(line.as_str());
+            let hex_start = after_dash.find("(0x")?;
+            let after = &after_dash[hex_start + 3..];
+            let end = after.find(')')?;
+            u8::from_str_radix(&after[..end], 16).ok()
+        });
+
+        let lang: Option<&str> = sub_id.and_then(|sid| {
+            if is_audio && sid >= 0x80 {
+                let idx = (sid - 0x80) as usize;
+                audio_langs.get(idx).map(|s| s.as_str())
+            } else if is_text && sid >= 0x20 && !subtitle_langs.is_empty() {
+                let idx = ((sid - 0x20) as usize) % subtitle_langs.len();
+                subtitle_langs.get(idx).map(|s| s.as_str())
+            } else {
+                None
+            }
+        });
+
+        if let Some(lang) = lang.filter(|s| !s.is_empty()) {
+            // Insert Language after the ID line.
+            let id_pos = section.iter().position(|l| {
+                let t = l.trim_start();
+                t.starts_with("ID ") || t.starts_with("ID\t")
+            });
+            if let Some(pos) = id_pos {
+                section.insert(
+                    pos + 1,
+                    format!("Language                                 : {lang}"),
+                );
+            }
+        }
+
+        out.push(section.join("\n"));
+    }
+
+    out.join("\n")
+}
+
 /// Find DVD disc roots by locating VIDEO_TS/VIDEO_TS.VOB anywhere under `path`.
 fn find_dvd_disc_roots(path: &Path) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -694,13 +1006,16 @@ fn collect_dvd_roots(dir: &Path, roots: &mut Vec<PathBuf>) {
     }
 }
 
-/// Return the VTS_*_0.IFO with the longest duration inside `disc_root/VIDEO_TS/`.
+/// Return the VTS_*_0.IFO whose title set has the largest total VOB byte size
+/// inside `disc_root/VIDEO_TS/`.
 ///
-/// DVD title sets are numbered VTS_01..VTS_NN; the main feature is not always
-/// VTS_01 — on multi-angle or bonus-heavy discs the title with the longest
-/// duration is the actual feature. We query `mediainfo` with a minimal template
-/// to get each IFO's duration in milliseconds, then return the longest one.
-/// Falls back to alphabetical first if mediainfo is unavailable.
+/// DVD title sets are numbered VTS_01..VTS_NN. IFO-reported duration is
+/// unreliable for picking the main feature: on widescreen+fullscreen discs
+/// (common on Fox DVD9s) the fullscreen title set can report the correct
+/// film duration while referencing the widescreen VOBs via seamless branching,
+/// causing the duration heuristic to select the wrong title set. Total VOB
+/// size is a more robust signal — the main feature always dominates in bytes.
+/// Falls back to alphabetical first if all sizes are zero.
 fn find_title_ifo(disc_root: &Path) -> Option<PathBuf> {
     let video_ts = disc_root.join("VIDEO_TS");
     let mut ifos: Vec<PathBuf> = std::fs::read_dir(&video_ts)
@@ -719,17 +1034,51 @@ fn find_title_ifo(disc_root: &Path) -> Option<PathBuf> {
         .collect();
     ifos.sort();
 
-    // Try to pick the IFO with the longest duration via a lightweight mediainfo query.
+    // `ifos` is sorted alphabetically; use the index as a tiebreaker so that
+    // the alphabetically first title set wins when VOB sizes are equal.
     let best = ifos
         .iter()
-        .filter_map(|p| {
-            let ms = mediainfo_duration_ms(p)?;
-            Some((ms, p.clone()))
-        })
-        .max_by_key(|(ms, _)| *ms)
-        .map(|(_, p)| p);
+        .enumerate()
+        .max_by_key(|(i, ifo)| (vob_set_total_size(ifo), usize::MAX - i))
+        .map(|(_, p)| p.clone());
 
     best.or_else(|| ifos.into_iter().next())
+}
+
+/// Sum the byte sizes of all VOBs belonging to the same title set as `ifo`.
+///
+/// `ifo` is expected to be named `VTS_NN_0.IFO`; we glob `VTS_NN_*.VOB` in
+/// the same directory to get the complete set including the `_0` menu VOB.
+fn vob_set_total_size(ifo: &Path) -> u64 {
+    let stem = match ifo.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return 0,
+    };
+    // "VTS_01_0" → prefix "VTS_01_"
+    let prefix = match stem.rfind('_') {
+        Some(i) => format!("{}_", &stem[..i]),
+        None => return 0,
+    };
+    let dir = match ifo.parent() {
+        Some(d) => d,
+        None => return 0,
+    };
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| {
+                    let u = n.to_uppercase();
+                    u.starts_with(&prefix.to_uppercase()) && u.ends_with(".VOB")
+                })
+                .unwrap_or(false)
+        })
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 /// Run `mediainfo` with a minimal General template to obtain the duration in ms.
@@ -1347,15 +1696,33 @@ mod tests {
     }
 
     #[test]
-    fn find_title_ifo_falls_back_to_alphabetical_without_mediainfo() {
-        // Without a real mediainfo binary producing parseable durations,
-        // find_title_ifo falls back to the alphabetically first VTS_*_0.IFO.
+    fn find_title_ifo_picks_largest_vob_set() {
+        // VTS_01 has one empty VOB; VTS_02 has no VOBs → VTS_01 wins by size.
+        // When sizes tie (both 0), alphabetically first wins.
         let dir = TempDir::new().unwrap();
         make_dvd_structure(dir.path());
         fs::write(dir.path().join("VIDEO_TS").join("VTS_02_0.IFO"), b"").unwrap();
 
         let ifo = find_title_ifo(dir.path()).unwrap();
         assert_eq!(ifo.file_name().unwrap(), "VTS_01_0.IFO");
+    }
+
+    #[test]
+    fn find_title_ifo_picks_vts_with_more_vob_bytes() {
+        // VTS_02 has a larger VOB than VTS_01 → VTS_02 should win.
+        let dir = TempDir::new().unwrap();
+        let vts = dir.path().join("VIDEO_TS");
+        fs::create_dir_all(&vts).unwrap();
+        fs::write(vts.join("VIDEO_TS.IFO"), b"").unwrap();
+        fs::write(vts.join("VIDEO_TS.BUP"), b"").unwrap();
+        fs::write(vts.join("VIDEO_TS.VOB"), b"").unwrap();
+        fs::write(vts.join("VTS_01_0.IFO"), b"").unwrap();
+        fs::write(vts.join("VTS_01_1.VOB"), b"small").unwrap();
+        fs::write(vts.join("VTS_02_0.IFO"), b"").unwrap();
+        fs::write(vts.join("VTS_02_1.VOB"), vec![0u8; 1024]).unwrap();
+
+        let ifo = find_title_ifo(dir.path()).unwrap();
+        assert_eq!(ifo.file_name().unwrap(), "VTS_02_0.IFO");
     }
 
     #[test]
@@ -1483,5 +1850,82 @@ mod tests {
 
         let result = find_first_video(dir.path());
         assert_eq!(result.unwrap().file_name().unwrap(), "ep01.mkv");
+    }
+
+    // ── DVD language injection ────────────────────────────────────────────────
+
+    /// Live integration test: requires the Voyage disc at the known path and
+    /// mediainfo in PATH. Skipped automatically when the IFO is absent.
+    #[test]
+    fn dvd_language_injection_voyage() {
+        let ifo = std::path::PathBuf::from(
+            "/media/ironwolf/downloads/Voyage.to.the.Bottom.of.the.Sea.1961.NTSC.DVD9.DD5.1-Win/VIDEO_TS/VTS_01_0.IFO",
+        );
+        if !ifo.exists() {
+            return; // disc not mounted — skip silently
+        }
+
+        let mi = match run_mediainfo(&ifo) {
+            Ok(s) => s,
+            Err(_) => return, // mediainfo not available — skip
+        };
+
+        // Baseline: no Language tags present before injection.
+        // Simple check: count Language lines in Audio/Text sections.
+        let lang_lines_before: usize = {
+            let mut in_av = false;
+            let mut count = 0;
+            for line in mi.lines() {
+                let t = line.trim_start();
+                if t.starts_with("Audio") || t.starts_with("Text") {
+                    in_av = true;
+                } else if !t.starts_with(' ') && !t.is_empty() && !t.contains(" : ") {
+                    in_av = false;
+                }
+                if in_av && t.starts_with("Language") {
+                    count += 1;
+                }
+            }
+            count
+        };
+        assert_eq!(
+            lang_lines_before, 0,
+            "expected no Language in raw mediainfo output"
+        );
+
+        let injected = inject_dvd_language_tags(&mi, &ifo);
+
+        // After injection: each audio stream should have a Language line.
+        let audio_sections: Vec<&str> = injected.split("\nAudio").collect();
+        for section in audio_sections.iter().skip(1) {
+            assert!(
+                section.contains("Language"),
+                "Audio section missing Language after injection:\n{section}"
+            );
+        }
+
+        // Spot-check known languages: en, es present for audio.
+        assert!(
+            injected.contains("Language                                 : en"),
+            "expected English audio"
+        );
+        assert!(
+            injected.contains("Language                                 : es"),
+            "expected Spanish audio"
+        );
+
+        // Subtitle sections should also carry Language.
+        let text_sections: Vec<&str> = injected.split("\nText").collect();
+        for section in text_sections.iter().skip(1) {
+            assert!(
+                section.contains("Language"),
+                "Text section missing Language after injection:\n{section}"
+            );
+        }
+        // pt (Portuguese) subtitle expected.
+        assert!(
+            injected.contains("Language                                 : pt"),
+            "expected Portuguese subtitle"
+        );
     }
 }

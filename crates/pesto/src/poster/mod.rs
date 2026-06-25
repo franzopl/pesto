@@ -27,7 +27,7 @@ use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::ResumeState;
 use crate::walk::InputFile;
 use crate::yenc;
-use parmesan::encoder::{FileHasher, RecoveryEncoder};
+use parmesan::encoder::{FileHasher, FileHashes, RecoveryEncoder};
 use parmesan::layout;
 use parmesan::packet::{self, SliceChecksum};
 
@@ -312,7 +312,10 @@ pub async fn post_files_with_progress_and_cancel(
         // `season01/ep01.mkv` for files found inside a directory argument.
         let real_name = input.name.clone();
         let (subject_name, yenc_name, from) = match config.obfuscate {
-            ObfuscateMode::None => (real_name.clone(), real_name.clone(), config.from.clone()),
+            ObfuscateMode::None => {
+                let wn = wire_name(&real_name).to_string();
+                (wn.clone(), wn, config.from.clone())
+            }
             ObfuscateMode::Full | ObfuscateMode::Paranoid => {
                 let obfuscated = obfuscated_name();
                 (obfuscated.clone(), obfuscated, random_from())
@@ -339,7 +342,9 @@ pub async fn post_files_with_progress_and_cancel(
         let mut keyed = Vec::with_capacity(metas.len());
         for meta in &metas {
             let md5_16k = file_md5_16k(&meta.path, meta.size).await?;
-            let file_id = packet::compute_file_id(&md5_16k, meta.size, &meta.real_name);
+            // Use wire_name so the File ID matches what the PAR2 packets will
+            // store — the sort order for recovery blocks must be consistent.
+            let file_id = packet::compute_file_id(&md5_16k, meta.size, wire_name(&meta.real_name));
             keyed.push((file_id, meta.clone()));
         }
         keyed.sort_by_key(|(file_id, _)| *file_id);
@@ -616,6 +621,13 @@ async fn par2_only_ingest(
             return Ok(());
         }
 
+        // Empty files contribute zero PAR2 input slices.
+        // Hash alignment is maintained by the caller (which inserts a known
+        // empty-file hash entry for any meta with size == 0 in final_hashes).
+        if meta.size == 0 {
+            continue;
+        }
+
         let mut file = File::open(&meta.path)
             .await
             .with_context(|| format!("opening `{}`", meta.path.display()))?;
@@ -704,6 +716,24 @@ fn par2_base(name: &str) -> &str {
     name.split('/').next().unwrap_or(name)
 }
 
+/// Strip the first path component (the release/top-level directory name).
+///
+/// The first component of a directory upload's `real_name` is the release
+/// folder itself (e.g. `"Season01"` in `"Season01/ep01.mkv"`). Download
+/// clients create a folder for the release, so only the path *within* that
+/// folder is meaningful for yEnc `name=` and PAR2 file descriptions. Matching
+/// both lets `par2 repair` find files when run from the release download dir.
+///
+/// `"Season01/ep01.mkv"` → `"ep01.mkv"`
+/// `"Release/VIDEO_TS/file.vob"` → `"VIDEO_TS/file.vob"`
+/// `"movie.mkv"` → `"movie.mkv"` (no slash → unchanged)
+fn wire_name(name: &str) -> &str {
+    match name.find('/') {
+        Some(pos) => &name[pos + 1..],
+        None => name,
+    }
+}
+
 /// MD5 of a file's first 16 KiB — the PAR2 "16k hash" half of a File ID.
 /// Read in a tiny pre-pass so files can be ordered before the encode pass.
 async fn file_md5_16k(path: &std::path::Path, size: u64) -> Result<[u8; 16]> {
@@ -745,9 +775,16 @@ async fn producer(
     let article_size = shared.config.article_size;
 
     // Article count per file — one article is one posted segment.
+    // Empty files (size == 0) contribute zero PAR2 input slices per spec;
+    // `yenc::segments(0, ..)` returns 1 to produce one (empty) article, but
+    // that must not be counted as a PAR2 input block.
     let mut per_file_articles = Vec::with_capacity(metas.len());
     for meta in &metas {
-        per_file_articles.push(yenc::segments(meta.size, article_size).len());
+        per_file_articles.push(if meta.size == 0 {
+            0
+        } else {
+            yenc::segments(meta.size, article_size).len()
+        });
     }
 
     // Choose the PAR2 slice size: groups consecutive articles into larger slices
@@ -1056,13 +1093,34 @@ async fn producer(
                 }
 
                 // Hashes were computed during the first read pass to avoid
-                // redundant I/O.
+                // redundant I/O.  Empty files are never fed to the worker
+                // (the hasher requires at least one slice to finalize), so
+                // `hashes` may have fewer entries than `metas`. Reconstruct
+                // the per-file hash sequence by inserting known-empty entries
+                // at positions where meta.size == 0.
+                let md5_empty: [u8; 16] = parmesan::packet::md5(b"");
                 let mut file_ids = Vec::new();
                 let mut final_hashes = Vec::new();
+                let mut worker_hash_iter = hashes.into_iter();
 
-                for (idx, fh) in hashes.into_iter().enumerate() {
+                for meta in &metas {
+                    let fh = if meta.size == 0 {
+                        FileHashes {
+                            md5_full: md5_empty,
+                            md5_16k: md5_empty,
+                            length: 0,
+                        }
+                    } else {
+                        worker_hash_iter
+                            .next()
+                            .expect("worker returned fewer hashes than non-empty files")
+                    };
+                    // PAR2 file descriptions use the path relative to the
+                    // release root (first component stripped). Download clients
+                    // create the release folder; `par2 repair` run from inside
+                    // it must find files without an extra path prefix.
                     let fid =
-                        packet::compute_file_id(&fh.md5_16k, fh.length, &metas[idx].real_name);
+                        packet::compute_file_id(&fh.md5_16k, fh.length, wire_name(&meta.real_name));
                     file_ids.push(fid);
                     final_hashes.push(fh);
                 }
@@ -1089,7 +1147,7 @@ async fn producer(
                             &fh.md5_full,
                             &fh.md5_16k,
                             fh.length,
-                            &metas[idx].real_name,
+                            wire_name(&metas[idx].real_name),
                         ),
                     );
                     let pkt_ifsc = packet::serialize_packet(
@@ -1178,11 +1236,10 @@ async fn push_par2_file(
     });
 
     let (subject_name, yenc_name, from) = match shared.config.obfuscate {
-        ObfuscateMode::None => (
-            real_name.clone(),
-            real_name.clone(),
-            shared.config.from.clone(),
-        ),
+        ObfuscateMode::None => {
+            let wn = wire_name(&real_name).to_string();
+            (wn.clone(), wn, shared.config.from.clone())
+        }
         ObfuscateMode::Full | ObfuscateMode::Paranoid => {
             let obfuscated = obfuscated_name();
             (obfuscated.clone(), obfuscated, random_from())
@@ -2352,6 +2409,29 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.contains('@'));
         assert!(!a.contains("blocknews") && !a.contains("pesto"));
+    }
+
+    // ── wire_name ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wire_name_strips_single_directory_prefix() {
+        assert_eq!(wire_name("Season01/ep01.mkv"), "ep01.mkv");
+    }
+
+    #[test]
+    fn wire_name_strips_only_first_component() {
+        assert_eq!(wire_name("Release/VIDEO_TS/file.vob"), "VIDEO_TS/file.vob");
+    }
+
+    #[test]
+    fn wire_name_no_slash_unchanged() {
+        assert_eq!(wire_name("movie.mkv"), "movie.mkv");
+        assert_eq!(wire_name("Release.par2"), "Release.par2");
+    }
+
+    #[test]
+    fn wire_name_empty_string() {
+        assert_eq!(wire_name(""), "");
     }
 
     // ── par2_base ─────────────────────────────────────────────────────────────
