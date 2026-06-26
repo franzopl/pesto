@@ -643,6 +643,10 @@ and `~/nzb/pesto/arquivo.nfo` on every run without any extra flags.
 pesto supports two hook points: **pre-upload** (runs before anything is posted,
 can abort the upload) and **post-upload** (runs after a successful upload).
 
+`--no-hooks` disables only the executable scripts found in `~/.config/pesto/hooks/`;
+explicit `--pre-hook` and `--post-hook` commands are unaffected. This lets you
+run a single explicit hook without triggering every directory script.
+
 ### Pre-upload hook
 
 A pre-upload hook runs **before compression, PAR2 generation, and NNTP
@@ -679,7 +683,10 @@ Environment variables available to the pre-hook:
 > pre-hook — the NZB and NFO don't exist yet, and the archive password is only
 > resolved after compression.
 
-The pre-hook is suppressed by `--no-hooks` and is not run during `--dry-run`.
+The pre-hook is suppressed by `--dry-run` (because nothing is uploaded) but
+still runs when combined with `--no-hooks` and `--pre-hook`. `--no-hooks`
+disables only the directory scripts in `~/.config/pesto/hooks/`; hooks passed
+explicitly via `--pre-hook` or `--post-hook` are unaffected.
 
 ### Post-upload hooks
 

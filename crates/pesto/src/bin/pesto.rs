@@ -568,7 +568,9 @@ async fn run_single_upload(
 
     // Run pre-hook before anything else (before compression, PAR2, or NNTP).
     // Non-zero exit aborts the upload immediately.
-    if !config.no_hooks && !config.dry_run {
+    // --no-hooks suppresses only the directory scripts in ~/.config/pesto/hooks/;
+    // an explicit --pre-hook still runs.
+    if !config.dry_run {
         if let Some(cmd) = &config.pre_hook {
             let input_paths_str = inputs
                 .iter()
@@ -1284,12 +1286,13 @@ async fn run_single_upload(
             tags: &post_tags_str,
         };
 
-        if !config.no_hooks {
-            // Run --post-hook command.
-            if let Some(cmd) = &config.post_hook {
-                run_post_hook(cmd, &hook_env);
-            }
+        // --no-hooks suppresses only the directory scripts in ~/.config/pesto/hooks/.
+        // An explicit --post-hook still runs.
+        if let Some(cmd) = &config.post_hook {
+            run_post_hook(cmd, &hook_env);
+        }
 
+        if !config.no_hooks {
             // Run every executable script found in ~/.config/pesto/hooks/.
             if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
                 run_hooks_dir(&hooks_dir, &hook_env);
@@ -1543,12 +1546,16 @@ async fn run_batch(
             };
             // Skip hooks for --dry-run / --par2-only, matching the per-entry
             // path: no real upload happened, so post-upload hooks must not fire.
-            if !config.no_hooks && !config.dry_run && !config.par2_only {
+            // --no-hooks suppresses only the directory scripts in ~/.config/pesto/hooks/;
+            // an explicit --post-hook still runs.
+            if !config.dry_run && !config.par2_only {
                 if let Some(cmd) = &config.post_hook {
                     run_post_hook(cmd, &hook_env);
                 }
-                if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
-                    run_hooks_dir(&hooks_dir, &hook_env);
+                if !config.no_hooks {
+                    if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
+                        run_hooks_dir(&hooks_dir, &hook_env);
+                    }
                 }
             }
         }

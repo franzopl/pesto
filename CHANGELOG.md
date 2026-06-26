@@ -20,6 +20,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `PESTO_PAR2` — PAR2 redundancy percentage (e.g. `10`).
   - `PESTO_TAGS` — space-separated list of NZB tags set via `--nzb-tag`
     (empty string when none).
+### Fixed
+- **`--no-hooks` now also leaves `--pre-hook` / `--post-hook` running in the
+  `pesto` CLI**: the library side was aligned in 0.3.31, but the CLI binary still
+  blocked both explicit hooks behind the `--no-hooks` guard. Explicit hooks now
+  always run; `--no-hooks` disables only the executable scripts in
+  `~/.config/pesto/hooks/`.
 
 ---
 
