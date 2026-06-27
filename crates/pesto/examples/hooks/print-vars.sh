@@ -8,15 +8,15 @@
 # pesto sets the following variables before running every hook:
 #   PESTO_NAME        — release name / entry label (derived from the input path)
 #   PESTO_BYTES       — total bytes posted (decimal)
-#   PESTO_INPUT_PATHS — space-separated list of input paths that were posted
+#   PESTO_INPUT_PATHS — colon-separated list of input paths that were posted
 #   PESTO_SERVER      — NNTP server hostname
 #   PESTO_GROUP       — first Usenet newsgroup
-#   PESTO_GROUPS      — space-separated list of all newsgroups
+#   PESTO_GROUPS      — colon-separated list of all newsgroups
 #   PESTO_PASSWORD    — archive password (empty when none)
 #   PESTO_CATEGORY    — NZB category (empty when none)
 #   PESTO_NZB_NAME    — value of --nzb-name, emitted as <meta type="name"> in the .nzb (empty when not set)
 #   PESTO_OBFUSCATE   — obfuscation mode in use
-#   PESTO_PAR2        — true/false — whether PAR2 recovery files were generated
+#   PESTO_PAR2        — PAR2 redundancy percentage (e.g. 10)
 #   PESTO_TAGS        — space-separated list of NZB tags (empty when none)
 #
 # Post-upload hooks additionally receive:

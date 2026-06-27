@@ -456,14 +456,30 @@ pub async fn run_upload(
         let hook_ctx = crate::hooks::HookContext {
             name: entry_label.to_string(),
             total_bytes,
+            input_paths: entry_paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":"),
             server: config.host.clone(),
             group: config.groups.first().cloned().unwrap_or_default(),
+            groups: config.groups.join(":"),
             password: config
                 .nzb_password
                 .as_deref()
                 .or(config.compress_password.as_deref())
                 .unwrap_or("")
                 .to_string(),
+            category: config.nzb_category.clone().unwrap_or_default(),
+            nzb_name: config.nzb_name.clone().unwrap_or_default(),
+            obfuscate: match config.obfuscate {
+                ObfuscateMode::None => "none",
+                ObfuscateMode::Full => "full",
+                ObfuscateMode::Paranoid => "paranoid",
+            }
+            .to_string(),
+            par2: config.par2,
+            tags: config.nzb_tags.join(" "),
             nzb_path: nzb_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())

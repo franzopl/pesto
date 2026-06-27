@@ -20,9 +20,16 @@ use crate::config::Config;
 pub struct HookContext {
     pub name: String,
     pub total_bytes: u64,
+    pub input_paths: String,
     pub server: String,
     pub group: String,
+    pub groups: String,
     pub password: String,
+    pub category: String,
+    pub nzb_name: String,
+    pub obfuscate: String,
+    pub par2: u8,
+    pub tags: String,
     pub nzb_path: String,
     pub nfo_path: String,
 }
@@ -115,9 +122,16 @@ pub fn run_one_hook(path: &Path, ctx: &HookContext) -> (bool, Vec<String>) {
 fn apply_env(cmd: &mut Command, ctx: &HookContext) {
     cmd.env("PESTO_NAME", &ctx.name)
         .env("PESTO_BYTES", ctx.total_bytes.to_string())
+        .env("PESTO_INPUT_PATHS", &ctx.input_paths)
         .env("PESTO_SERVER", &ctx.server)
         .env("PESTO_GROUP", &ctx.group)
+        .env("PESTO_GROUPS", &ctx.groups)
         .env("PESTO_PASSWORD", &ctx.password)
+        .env("PESTO_CATEGORY", &ctx.category)
+        .env("PESTO_NZB_NAME", &ctx.nzb_name)
+        .env("PESTO_OBFUSCATE", &ctx.obfuscate)
+        .env("PESTO_PAR2", ctx.par2.to_string())
+        .env("PESTO_TAGS", &ctx.tags)
         .env("PESTO_NZB", &ctx.nzb_path)
         .env("PESTO_NFO", &ctx.nfo_path);
 }

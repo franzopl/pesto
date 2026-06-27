@@ -17,9 +17,16 @@ LANGUAGE=""    # leave empty to auto-detect from the NFO (mediainfo output),
                # or set a fixed value (e.g. "Portuguese") to always send it
 
 # --- pesto variables ---
-# PESTO_NZB  — path to the generated .nzb
-# PESTO_NFO  — path to the .nfo (empty when --nfo was not used)
-# PESTO_NAME — release name
+# PESTO_NZB          — path to the generated .nzb
+# PESTO_NFO          — path to the .nfo (empty when --nfo was not used)
+# PESTO_NAME         — release name
+# PESTO_INPUT_PATHS  — colon-separated list of uploaded file paths
+# PESTO_BYTES        — total uploaded bytes
+# PESTO_SERVER       — server hostname
+# PESTO_GROUP        — first Usenet group
+# PESTO_GROUPS       — colon-separated list of all Usenet groups
+# PESTO_PASSWORD     — yEnc password (if any)
+# PESTO_TAGS         — space-separated list of NZB tags (empty when none)
 
 if [ -z "$PESTO_NZB" ] || [ ! -f "$PESTO_NZB" ]; then
     echo "[Indexer] Error: NZB not found (PESTO_NZB=$PESTO_NZB)."

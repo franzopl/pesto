@@ -1007,14 +1007,26 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         let ctx = pesto::hooks::HookContext {
             name: release_name.clone(),
             total_bytes,
+            input_paths: String::new(),
             server: cfg.host.clone(),
             group: cfg.groups.first().cloned().unwrap_or_default(),
+            groups: cfg.groups.join(":"),
             password: cfg
                 .nzb_password
                 .as_deref()
                 .or(cfg.compress_password.as_deref())
                 .unwrap_or("")
                 .to_string(),
+            category: cfg.nzb_category.clone().unwrap_or_default(),
+            nzb_name: cfg.nzb_name.clone().unwrap_or_default(),
+            obfuscate: match cfg.obfuscate {
+                ObfuscateMode::None => "none",
+                ObfuscateMode::Full => "full",
+                ObfuscateMode::Paranoid => "paranoid",
+            }
+            .to_string(),
+            par2: cfg.par2,
+            tags: cfg.nzb_tags.join(" "),
             nzb_path: nzb_path.to_string_lossy().into_owned(),
             nfo_path: nfo_path
                 .as_ref()
@@ -1763,14 +1775,26 @@ async fn run_season_hooks(
     let ctx = pesto::hooks::HookContext {
         name: label.to_string(),
         total_bytes,
+        input_paths: String::new(),
         server: config.host.clone(),
         group: config.groups.first().cloned().unwrap_or_default(),
+        groups: config.groups.join(":"),
         password: config
             .nzb_password
             .as_deref()
             .or(config.compress_password.as_deref())
             .unwrap_or("")
             .to_string(),
+        category: config.nzb_category.clone().unwrap_or_default(),
+        nzb_name: config.nzb_name.clone().unwrap_or_default(),
+        obfuscate: match config.obfuscate {
+            ObfuscateMode::None => "none",
+            ObfuscateMode::Full => "full",
+            ObfuscateMode::Paranoid => "paranoid",
+        }
+        .to_string(),
+        par2: config.par2,
+        tags: config.nzb_tags.join(" "),
         nzb_path: nzb_path.to_string_lossy().into_owned(),
         nfo_path: nfo_path
             .as_ref()

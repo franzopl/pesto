@@ -11,7 +11,7 @@
 # Dependencies: curl, ffmpeg (only required for video files), jq
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                      CONFIGURATION                          ║
+# ║                      CONFIGURATION                           ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 IMGBB_API_KEY="YOUR_IMGBB_API_KEY"   # https://api.imgbb.com/
@@ -22,18 +22,20 @@ INDEXER_API_KEY="YOUR_API_KEY"
 CATEGORY_ID=0  # Newznab category (0 = auto-detect). e.g. 5040 for TV/HD, 2040 for Movies/HD
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                   END OF CONFIGURATION                      ║
+# ║                   END OF CONFIGURATION                       ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 # --- pesto variables available in this hook ---
 # PESTO_NZB          — path to the generated .nzb
 # PESTO_NFO          — path to the .nfo (empty when --nfo was not used)
 # PESTO_NAME         — release name
-# PESTO_INPUT_PATHS  — newline-separated list of uploaded file paths
+# PESTO_INPUT_PATHS  — colon-separated list of uploaded file paths
 # PESTO_BYTES        — total uploaded bytes
 # PESTO_SERVER       — server hostname
-# PESTO_GROUP        — Usenet group
+# PESTO_GROUP        — first Usenet group
+# PESTO_GROUPS       — colon-separated list of all Usenet groups
 # PESTO_PASSWORD     — yEnc password (if any)
+# PESTO_TAGS         — space-separated list of NZB tags (empty when none)
 
 set -euo pipefail
 

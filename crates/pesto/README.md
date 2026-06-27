@@ -586,6 +586,12 @@ Environment variables available to the pre-hook:
 | `PESTO_INPUT_PATHS` | Colon-separated list of input file/directory paths |
 | `PESTO_SERVER` | NNTP server hostname |
 | `PESTO_GROUP` | First configured newsgroup |
+| `PESTO_GROUPS` | Colon-separated list of all configured newsgroups |
+| `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
+| `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
+| `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
+| `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 
 > `PESTO_NZB`, `PESTO_NFO`, and `PESTO_PASSWORD` are **not** available in the
 > pre-hook — the NZB and NFO don't exist yet, and the archive password is only
@@ -609,9 +615,15 @@ following environment variables:
 | `PESTO_NAME` | Release name / entry label |
 | `PESTO_BYTES` | Total bytes posted (decimal string) |
 | `PESTO_INPUT_PATHS` | Colon-separated list of input file/directory paths |
-| `PESTO_GROUP` | First Usenet newsgroup |
-| `PESTO_PASSWORD` | Archive password (empty when none) |
 | `PESTO_SERVER` | NNTP server hostname |
+| `PESTO_GROUP` | First Usenet newsgroup |
+| `PESTO_GROUPS` | Colon-separated list of all configured newsgroups |
+| `PESTO_PASSWORD` | Archive password (empty when none) |
+| `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
+| `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
+| `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
+| `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 
 Scripts must have the executable bit set on Unix (`chmod +x`). On Windows,
 files with `.exe`, `.cmd`, `.bat`, `.ps1`, or `.py` extensions are recognised
