@@ -1,9 +1,20 @@
 #!/bin/bash
-# Example pesto post-upload hook — prints all available environment variables.
+# Example hook — prints all available environment variables.
+# Works as both a pre-upload hook and a post-upload hook.
 #
-# Install:
+# Install as post-upload hook (non-fatal):
 #   cp print-vars.sh ~/.config/pesto/hooks/
 #   chmod +x ~/.config/pesto/hooks/print-vars.sh
+#
+# Install as pre-upload hook (fatal — aborts on non-zero exit):
+#   cp print-vars.sh ~/.config/pesto/pre-hooks/
+#   chmod +x ~/.config/pesto/pre-hooks/print-vars.sh
+#
+# Pre-upload hooks run before compression, PAR2, and NNTP. They receive the
+# same PESTO_* variables as post-upload hooks, except PESTO_NZB and PESTO_NFO
+# which are always empty (the NZB has not been written yet).
+# Scripts in pre-hooks/ are executed in alphabetical order; the first one that
+# exits non-zero aborts the upload immediately.
 #
 # pesto sets the following variables before running every hook:
 #   PESTO_NAME        — release name / entry label (derived from the input path)

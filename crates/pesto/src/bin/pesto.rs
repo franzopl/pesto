@@ -566,41 +566,50 @@ async fn run_single_upload(
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
 
-    // Run pre-hook before anything else (before compression, PAR2, or NNTP).
-    // Non-zero exit aborts the upload immediately.
-    // --no-hooks suppresses only the directory scripts in ~/.config/pesto/hooks/;
-    // an explicit --pre-hook still runs.
+    // Run pre-hook(s) before anything else (before compression, PAR2, or NNTP).
+    // Non-zero exit from any hook aborts the upload immediately.
+    // --no-hooks suppresses only the pre-hooks/ directory; --pre-hook always runs
+    // (matching the post-hook behaviour established in the PR that fixed no_hooks).
     if !config.dry_run {
+        let input_paths_str = inputs
+            .iter()
+            .map(|f| f.path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        let pre_obfuscate = match config.obfuscate {
+            ObfuscateMode::None => "none",
+            ObfuscateMode::Full => "full",
+            ObfuscateMode::Paranoid => "paranoid",
+        };
+        let pre_groups_str = config.groups.join(":");
+        let pre_tags_str = config.nzb_tags.join(" ");
+        let pre_env = HookEnv {
+            nzb_path: None,
+            nfo_path: None,
+            name: entry_label,
+            total_bytes,
+            input_paths: &input_paths_str,
+            group: config.groups.first().map(String::as_str),
+            groups: &pre_groups_str,
+            password: None,
+            server: &config.host,
+            category: config.nzb_category.as_deref(),
+            nzb_name: config.nzb_name.as_deref(),
+            obfuscate: pre_obfuscate,
+            par2: config.par2,
+            tags: &pre_tags_str,
+        };
+
+        // Explicit --pre-hook always runs (not suppressed by --no-hooks).
         if let Some(cmd) = &config.pre_hook {
-            let input_paths_str = inputs
-                .iter()
-                .map(|f| f.path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(":");
-            let pre_obfuscate = match config.obfuscate {
-                ObfuscateMode::None => "none",
-                ObfuscateMode::Full => "full",
-                ObfuscateMode::Paranoid => "paranoid",
-            };
-            let pre_groups_str = config.groups.join(":");
-            let pre_tags_str = config.nzb_tags.join(" ");
-            let pre_env = HookEnv {
-                nzb_path: None,
-                nfo_path: None,
-                name: entry_label,
-                total_bytes,
-                input_paths: &input_paths_str,
-                group: config.groups.first().map(String::as_str),
-                groups: &pre_groups_str,
-                password: None,
-                server: &config.host,
-                category: config.nzb_category.as_deref(),
-                nzb_name: config.nzb_name.as_deref(),
-                obfuscate: pre_obfuscate,
-                par2: config.par2,
-                tags: &pre_tags_str,
-            };
             run_pre_hook(cmd, &pre_env)?;
+        }
+
+        // Directory scripts are suppressed by --no-hooks.
+        if !config.no_hooks {
+            if let Some(pre_hooks_dir) = pesto::config::config_dir().map(|d| d.join("pre-hooks")) {
+                run_pre_hooks_dir(&pre_hooks_dir, &pre_env)?;
+            }
         }
     }
 
@@ -1286,14 +1295,13 @@ async fn run_single_upload(
             tags: &post_tags_str,
         };
 
-        // --no-hooks suppresses only the directory scripts in ~/.config/pesto/hooks/.
-        // An explicit --post-hook still runs.
+        // Explicit --post-hook always runs (not suppressed by --no-hooks).
         if let Some(cmd) = &config.post_hook {
             run_post_hook(cmd, &hook_env);
         }
 
+        // Directory scripts are suppressed by --no-hooks.
         if !config.no_hooks {
-            // Run every executable script found in ~/.config/pesto/hooks/.
             if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
                 run_hooks_dir(&hooks_dir, &hook_env);
             }
@@ -1544,14 +1552,13 @@ async fn run_batch(
                 par2: config.par2,
                 tags: &season_tags_str,
             };
-            // Skip hooks for --dry-run / --par2-only, matching the per-entry
-            // path: no real upload happened, so post-upload hooks must not fire.
-            // --no-hooks suppresses only the directory scripts in ~/.config/pesto/hooks/;
-            // an explicit --post-hook still runs.
+            // Skip hooks for --dry-run / --par2-only: no real upload happened.
             if !config.dry_run && !config.par2_only {
+                // Explicit --post-hook always runs (not suppressed by --no-hooks).
                 if let Some(cmd) = &config.post_hook {
                     run_post_hook(cmd, &hook_env);
                 }
+                // Directory scripts are suppressed by --no-hooks.
                 if !config.no_hooks {
                     if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
                         run_hooks_dir(&hooks_dir, &hook_env);
@@ -2429,6 +2436,39 @@ fn run_pre_hook(cmd: &str, env: &HookEnv<'_>) -> Result<()> {
         Ok(s) => anyhow::bail!("pre-hook exited with status {s} — upload aborted"),
         Err(e) => anyhow::bail!("pre-hook failed to start: {e} — upload aborted"),
     }
+}
+
+/// Run every executable file in `pre_hooks_dir` as a pre-upload hook, sorted by name.
+///
+/// Each script must exit 0 to allow the upload to proceed. The first non-zero
+/// exit aborts immediately — remaining scripts in the directory are skipped.
+fn run_pre_hooks_dir(pre_hooks_dir: &std::path::Path, env: &HookEnv<'_>) -> Result<()> {
+    let Ok(entries) = std::fs::read_dir(pre_hooks_dir) else {
+        return Ok(());
+    };
+    let mut scripts: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && is_executable(p))
+        .collect();
+    scripts.sort();
+    for script in &scripts {
+        println!("running pre-hook: {}", script.display());
+        let mut child = std::process::Command::new(script);
+        apply_hook_env(&mut child, env);
+        match child.status() {
+            Ok(s) if s.success() => println!("  pre-hook exited ok"),
+            Ok(s) => anyhow::bail!(
+                "pre-hook {} exited with status {s} — upload aborted",
+                script.display()
+            ),
+            Err(e) => anyhow::bail!(
+                "pre-hook {} failed to start: {e} — upload aborted",
+                script.display()
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Execute a shell command as a post-upload hook.

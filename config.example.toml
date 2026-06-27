@@ -180,6 +180,11 @@ groups = ["alt.binaries.test"]
 # Runs via `sh -c` on Unix or `cmd /c` on Windows. If the command exits with a
 # non-zero code the upload is aborted immediately — nothing is posted.
 #
+# You can also drop executable scripts into ~/.config/pesto/pre-hooks/ and they
+# will run in alphabetical order before every upload. Those directory scripts
+# are suppressed by --no-hooks; this config value and --pre-hook are not.
+# Neither runs during --dry-run.
+#
 # Available environment variables (NZB and NFO do not exist yet at this point):
 #   PESTO_NAME         — release name (entry label)
 #   PESTO_BYTES        — total size in bytes of all input files
@@ -196,8 +201,6 @@ groups = ["alt.binaries.test"]
 # Use case: query NZBHydra2 or Prowlarr before uploading to avoid duplicates.
 # Example (abort if the release is already indexed):
 # pre_hook = "~/.config/pesto/hooks/check-duplicate.sh"
-#
-# Suppressed by --no-hooks. Not run during --dry-run.
 # pre_hook = ""
 
 # post_hook — shell command executed after each successful upload.

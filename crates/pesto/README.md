@@ -564,18 +564,26 @@ immediately — nothing is posted and no state is written.
 **Use case:** query NZBHydra2 or Prowlarr to check for duplicates before
 uploading.
 
-Configure in `config.toml`:
+There are two ways to register a pre-upload hook:
 
-```toml
-[output]
-pre_hook = "~/.config/pesto/hooks/check-duplicate.sh"
-```
+- **`config.toml`** — runs for every upload:
+  ```toml
+  [output]
+  pre_hook = "~/.config/pesto/hooks/check-duplicate.sh"
+  ```
+- **`~/.config/pesto/pre-hooks/` directory** — every executable in this
+  directory is run in alphabetical order before the upload:
+  ```bash
+  chmod +x ~/.config/pesto/pre-hooks/check-duplicate.sh
+  ```
+- **`--pre-hook <CMD>`** — one-off command for a single run:
+  ```bash
+  pesto --pre-hook '~/.config/pesto/hooks/check-duplicate.sh' movie.mkv
+  ```
 
-Or for a single run:
-
-```bash
-pesto --pre-hook '~/.config/pesto/hooks/check-duplicate.sh' movie.mkv
-```
+`--no-hooks` suppresses the `pre-hooks/` directory scripts. The `--pre-hook`
+flag and `output.pre_hook` config value are **not** affected — they always run.
+Pre-hooks are never run during `--dry-run`.
 
 Environment variables available to the pre-hook:
 
@@ -596,11 +604,6 @@ Environment variables available to the pre-hook:
 > `PESTO_NZB`, `PESTO_NFO`, and `PESTO_PASSWORD` are **not** available in the
 > pre-hook — the NZB and NFO don't exist yet, and the archive password is only
 > resolved after compression.
-
-The pre-hook is suppressed by `--dry-run` (because nothing is uploaded) but
-still runs when combined with `--no-hooks` and `--pre-hook`. `--no-hooks`
-disables only the directory scripts in `~/.config/pesto/hooks/`; hooks passed
-explicitly via `--pre-hook` or `--post-hook` are unaffected.
 
 ### Post-upload hooks
 

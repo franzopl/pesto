@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.33] — 2026-06-27
+
 ### Added
 - **Hook environment variables expanded** — post-upload and pre-upload hooks
   now receive five additional variables alongside the existing set:
@@ -20,12 +24,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `PESTO_PAR2` — PAR2 redundancy percentage (e.g. `10`).
   - `PESTO_TAGS` — space-separated list of NZB tags set via `--nzb-tag`
     (empty string when none).
+
+- **Pre-upload hook directory** — executable scripts placed in
+  `~/.config/pesto/pre-hooks/` now run automatically before every upload in
+  alphabetical order, matching the post-hook directory behaviour. The directory
+  is suppressed by `--no-hooks`; the `--pre-hook` flag and `output.pre_hook`
+  config value are not affected.
+
 ### Fixed
 - **`--no-hooks` now also leaves `--pre-hook` / `--post-hook` running in the
   `pesto` CLI**: the library side was aligned in 0.3.31, but the CLI binary still
   blocked both explicit hooks behind the `--no-hooks` guard. Explicit hooks now
   always run; `--no-hooks` disables only the executable scripts in
-  `~/.config/pesto/hooks/`.
+  `~/.config/pesto/hooks/` and `~/.config/pesto/pre-hooks/`.
+
+### Docs
+- Pre-upload hook section updated: documents the `pre-hooks/` directory,
+  clarifies `--no-hooks` scope, and adds the full list of env vars available
+  to pre-hooks (`PESTO_GROUPS`, `PESTO_CATEGORY`, `PESTO_NZB_NAME`,
+  `PESTO_OBFUSCATE`, `PESTO_PAR2`, `PESTO_TAGS`).
 
 ---
 
@@ -996,7 +1013,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Phase 19** — Test coverage: unit tests for all modules; mock-NNTP
   integration tests for retry and resume logic.
 
-[Unreleased]: https://github.com/franzopl/pesto/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/franzopl/pesto/compare/v0.3.33...HEAD
+[0.3.33]: https://github.com/franzopl/pesto/compare/v0.3.32...v0.3.33
 [0.2.5]: https://github.com/franzopl/pesto/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/franzopl/pesto/compare/v0.2.2...v0.2.4
 [0.2.3]: https://github.com/franzopl/pesto/compare/v0.2.2...v0.2.3
