@@ -1378,18 +1378,54 @@ async fn worker(
     };
     let mut warmup_done = !is_adaptive; // true from the start when not adaptive
 
+    // Track when the connection was last used so we can send periodic keepalives
+    // on idle connections (prevents servers from closing them during long PAR2
+    // computations, check-phase waits, and --each transitions).
+    let keepalive_interval = shared.config.keepalive_interval;
+    let keepalive_enabled = keepalive_interval > 0;
+    // Short wakeup period while idle: cycle through all workers quickly enough
+    // that every connection gets its keepalive before the server's idle timeout.
+    // 2 s × 30 workers = 60 s worst-case round-trip, well within a 2-min timeout.
+    const IDLE_POLL: Duration = Duration::from_secs(2);
+    let mut last_used = Instant::now();
+
     loop {
         if shared.cancelled.load(Ordering::Relaxed) {
             break;
         }
 
-        // Blocking receive for the first task.
-        let first = {
-            let mut rx = rx.lock().await;
-            match rx.recv().await {
-                Some(t) => t,
-                None => break,
+        // Send keepalive if the connection has been idle past the configured
+        // interval. This fires before competing for the receive lock so each
+        // worker sends its own keepalive independently.
+        if keepalive_enabled && last_used.elapsed() >= Duration::from_secs(keepalive_interval) {
+            slot.keepalive().await;
+            last_used = Instant::now();
+        }
+
+        // Blocking receive for the first task, with a short wakeup so the
+        // keepalive check above can fire while the channel is empty.
+        enum Recv {
+            Task(PostTask),
+            Idle,
+            Closed,
+        }
+        let recv = {
+            let mut rx_guard = rx.lock().await;
+            tokio::select! {
+                task = rx_guard.recv() => match task {
+                    Some(t) => Recv::Task(t),
+                    None => Recv::Closed,
+                },
+                _ = tokio::time::sleep(IDLE_POLL), if keepalive_enabled => Recv::Idle,
             }
+        };
+        let first = match recv {
+            Recv::Task(t) => {
+                last_used = Instant::now();
+                t
+            }
+            Recv::Closed => break,
+            Recv::Idle => continue,
         };
         let mut batch = vec![first];
 
@@ -1921,6 +1957,7 @@ pub async fn repost_missing_segments(
     config: &Config,
     all_segments: &[PostedSegment],
     missing_ids: &[String],
+    groups: &[String],
     events: Option<&ProgressSender>,
     cancel: Option<&Arc<AtomicBool>>,
 ) -> Result<usize> {
@@ -1995,7 +2032,7 @@ pub async fn repost_missing_segments(
         let article = Article {
             message_id: seg.message_id.clone(),
             from: seg.from.clone(),
-            newsgroups: config.groups.clone(),
+            newsgroups: groups.to_vec(),
             subject: default_subject(&seg.subject_name, seg.part, seg.total),
             date: rfc_date.clone(),
             no_archive: config.no_archive,

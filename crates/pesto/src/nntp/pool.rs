@@ -118,6 +118,18 @@ impl ConnectionSlot {
         }
     }
 
+    /// Send `MODE READER` on the current connection to reset the server's idle
+    /// timer. If the command fails (connection silently dropped by the server),
+    /// the connection is discarded so `ensure_connected` will open a fresh one
+    /// on the next use. No-op when not connected.
+    pub async fn keepalive(&mut self) {
+        if let Some(conn) = self.conn.as_mut() {
+            if conn.mode_reader().await.is_err() {
+                self.conn = None;
+            }
+        }
+    }
+
     fn rotate(&mut self) {
         if !self.servers.is_empty() {
             self.server_idx = (self.server_idx + 1) % self.servers.len();

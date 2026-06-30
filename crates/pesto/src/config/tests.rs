@@ -264,7 +264,7 @@ fn optional_string_fields_default_to_none() {
     assert!(cfg.nzb_dir.is_none());
     assert!(cfg.date.is_none());
     assert!(cfg.message_id_domain.is_none());
-    assert!(cfg.post_hook.is_none());
+    assert!(cfg.post_hooks.is_empty());
     assert!(cfg.notify_webhook.is_none());
     assert!(cfg.notify_ntfy.is_none());
     assert!(cfg.notify.is_none());
@@ -406,7 +406,7 @@ fn toml_output_section_sets_fields() {
     assert_eq!(cfg.nzb_dir.as_deref(), Some("/tmp/nzb"));
     assert!(!cfg.history);
     assert!(cfg.resume);
-    assert_eq!(cfg.post_hook.as_deref(), Some("notify.sh"));
+    assert_eq!(cfg.post_hooks, vec!["notify.sh"]);
     assert!(cfg.nfo);
 }
 
@@ -729,14 +729,14 @@ fn cli_overrides_history_and_nfo_and_post_hook() {
         Overrides {
             history: Some(false),
             nfo: Some(true),
-            post_hook: Some("notify.sh".into()),
+            post_hooks: vec!["notify.sh".into()],
             ..Default::default()
         },
     )
     .unwrap();
     assert!(!cfg.history);
     assert!(cfg.nfo);
-    assert_eq!(cfg.post_hook.as_deref(), Some("notify.sh"));
+    assert_eq!(cfg.post_hooks, vec!["notify.sh"]);
 }
 
 #[test]

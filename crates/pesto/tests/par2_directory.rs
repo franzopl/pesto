@@ -83,8 +83,8 @@ async fn par2_zero_byte_file_verifies() {
         date: None,
         no_archive: false,
         message_id_domain: None,
-        pre_hook: None,
-        post_hook: None,
+        pre_hooks: vec![],
+        post_hooks: vec![],
         no_hooks: false,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
@@ -95,6 +95,7 @@ async fn par2_zero_byte_file_verifies() {
         check_retries: 2,
         check_connections: 1,
         pipeline_depth: 1,
+        keepalive_interval: 0,
     };
 
     let inputs = expand_inputs(std::slice::from_ref(&show)).unwrap();
@@ -208,8 +209,8 @@ async fn par2_only_directory_repair_recreates_tree() {
         date: None,
         no_archive: false,
         message_id_domain: None,
-        pre_hook: None,
-        post_hook: None,
+        pre_hooks: vec![],
+        post_hooks: vec![],
         no_hooks: false,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
@@ -220,6 +221,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         check_retries: 2,
         check_connections: 1,
         pipeline_depth: 1,
+        keepalive_interval: 0,
     };
 
     let inputs = expand_inputs(std::slice::from_ref(&show)).unwrap();

@@ -27,6 +27,10 @@ host = "news.example.com"
                       # fires (minutes on Windows, hours on Linux). Keep it well
                       # above the time a slow link needs to acknowledge one
                       # article, so it never trips a healthy upload. Default: 120.
+# keepalive = 60      # Send MODE READER on idle connections every this many
+                      # seconds to prevent the server closing them silently
+                      # during PAR2 computation, check-phase waits, and --each
+                      # transitions. Set to 0 to disable. Default: 60.
 
 [auth]
 # Credentials for the NNTP server. Omit the whole section for open servers.

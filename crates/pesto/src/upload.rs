@@ -255,6 +255,7 @@ pub async fn run_upload(
                     config,
                     &outcome.segments,
                     &missing,
+                    &outcome.groups,
                     progress_tx.as_ref(),
                     cancel.as_ref(),
                 )

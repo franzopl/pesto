@@ -288,9 +288,9 @@ struct Cli {
     /// `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_SERVER`,
     /// `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
     /// `PESTO_TAGS`
-    /// [config: output.pre_hook].
-    #[arg(long, value_name = "CMD")]
-    pre_hook: Option<String>,
+    /// Can be specified multiple times. [config: output.pre_hooks].
+    #[arg(long, value_name = "CMD", action = clap::ArgAction::Append)]
+    pre_hook: Vec<String>,
 
     /// Shell command to execute after each successful upload. The command
     /// receives upload details via environment variables:
@@ -298,9 +298,9 @@ struct Cli {
     /// `PESTO_INPUT_PATHS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`,
     /// `PESTO_SERVER`, `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`,
     /// `PESTO_PAR2`, `PESTO_TAGS`
-    /// [config: output.post_hook].
-    #[arg(long, value_name = "CMD")]
-    post_hook: Option<String>,
+    /// Can be specified multiple times. [config: output.post_hooks].
+    #[arg(long, value_name = "CMD", action = clap::ArgAction::Append)]
+    post_hook: Vec<String>,
 
     /// Skip the hook scripts in ~/.config/pesto/hooks/ for this run.
     /// The --post-hook and --pre-hook flags are unaffected and still execute.
@@ -501,8 +501,8 @@ impl Cli {
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
-            pre_hook: self.pre_hook.clone(),
-            post_hook: self.post_hook.clone(),
+            pre_hooks: self.pre_hook.clone(),
+            post_hooks: self.post_hook.clone(),
             no_hooks: self.no_hooks,
             nfo: if self.nfo { Some(true) } else { None },
             nzb_conflict: if self.no_overwrite {
@@ -601,7 +601,7 @@ async fn run_single_upload(
         };
 
         // Explicit --pre-hook always runs (not suppressed by --no-hooks).
-        if let Some(cmd) = &config.pre_hook {
+        for cmd in &config.pre_hooks {
             run_pre_hook(cmd, &pre_env)?;
         }
 
@@ -990,6 +990,7 @@ async fn run_single_upload(
             config,
             &outcome.segments,
             &check_missing,
+            &outcome.groups,
             Some(&repost_tx),
             cancel,
         )
@@ -1296,7 +1297,7 @@ async fn run_single_upload(
         };
 
         // Explicit --post-hook always runs (not suppressed by --no-hooks).
-        if let Some(cmd) = &config.post_hook {
+        for cmd in &config.post_hooks {
             run_post_hook(cmd, &hook_env);
         }
 
@@ -1555,7 +1556,7 @@ async fn run_batch(
             // Skip hooks for --dry-run / --par2-only: no real upload happened.
             if !config.dry_run && !config.par2_only {
                 // Explicit --post-hook always runs (not suppressed by --no-hooks).
-                if let Some(cmd) = &config.post_hook {
+                for cmd in &config.post_hooks {
                     run_post_hook(cmd, &hook_env);
                 }
                 // Directory scripts are suppressed by --no-hooks.
@@ -1792,7 +1793,7 @@ async fn run_watch(
 
 /// Group all `.nzb` files in `dir` by season, merge each group into one
 /// combined NZB, and write it beside the source files.
-fn run_merge_season(dir: &Path, display_name: Option<&str>) -> Result<()> {
+fn run_merge_season(dir: &Path, display_name: Option<&str>, nzb_tags: Vec<String>) -> Result<()> {
     use std::collections::BTreeMap;
 
     anyhow::ensure!(dir.is_dir(), "{} is not a directory", dir.display());
@@ -1895,7 +1896,7 @@ fn run_merge_season(dir: &Path, display_name: Option<&str>) -> Result<()> {
                 .or_else(|| Some(key.clone())),
             password: None,
             category: None,
-            tags: Vec::new(),
+            tags: nzb_tags.clone(),
         };
         let xml = pesto::nzb::generate(&all_groups, &combined_segments, &meta);
 
@@ -2074,7 +2075,18 @@ async fn main() -> Result<()> {
     if let Some(ref dir) = cli.merge_season {
         // No upload here, so no session log — just honour -v/--log-file.
         logging::init(cli.verbose, cli.log_file.as_deref(), None)?;
-        return run_merge_season(dir, cli.nzb_name.as_deref());
+        let nzb_tags = if !cli.nzb_tag.is_empty() {
+            cli.nzb_tag.clone()
+        } else {
+            let fc = match &cli.config {
+                Some(Some(path)) => FileConfig::load(path).ok(),
+                _ => config::default_config_path()
+                    .filter(|p| p.exists())
+                    .and_then(|p| FileConfig::load(&p).ok()),
+            };
+            fc.map(|c| c.output.nzb_tags).unwrap_or_default()
+        };
+        return run_merge_season(dir, cli.nzb_name.as_deref(), nzb_tags);
     }
 
     // `pesto` with nothing to post and no --watch: show the orientation screen.

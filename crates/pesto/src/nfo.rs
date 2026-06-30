@@ -135,6 +135,8 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
             return Some(sections.join("\n"));
         }
 
+        // Series folders (S01 / S01E01 pattern): run mediainfo on the first
+        // episode regardless of how episodes are organised inside the folder.
         if is_series_folder(&folder_name) {
             debug!(folder = %folder_name, "detected series folder — looking for first video");
             if let Some(first_ep) = find_first_video(dir) {
@@ -148,6 +150,29 @@ pub fn generate(paths: &[PathBuf]) -> Option<String> {
             } else {
                 debug!("no video file found in series folder; using folder NFO");
             }
+            return Some(build_folder_nfo(dir));
+        }
+
+        // If any subdirectory contains video files the folder is a course,
+        // collection, or multi-episode set — the tree structure is the useful
+        // output, not a mediainfo report for one arbitrary file.
+        if has_video_in_subdirs(dir) {
+            debug!("video files found in subdirectories — using folder NFO");
+            return Some(build_folder_nfo(dir));
+        }
+
+        // Flat folder (no videos inside subdirs): if there is a video at the
+        // root it is a movie or single-episode folder → run mediainfo on it.
+        if let Some(first_video) = find_root_video(dir) {
+            debug!(video = %first_video.display(), "running mediainfo on root video file");
+            match run_mediainfo(&first_video) {
+                Ok(out) => return Some(out),
+                Err(e) => {
+                    warn!(video = %first_video.display(), error = %e, "mediainfo failed; falling back to folder NFO")
+                }
+            }
+        } else {
+            debug!("no video file found; using folder NFO");
         }
 
         return Some(build_folder_nfo(dir));
@@ -223,7 +248,6 @@ fn is_series_folder(name: &str) -> bool {
             if prev_is_letter {
                 continue;
             }
-            // expect at least two digits after S
             let rest = &upper[i + 1..];
             let digits: usize = rest.chars().take_while(|c| c.is_ascii_digit()).count();
             if digits >= 2 {
@@ -232,6 +256,44 @@ fn is_series_folder(name: &str) -> bool {
         }
     }
     false
+}
+
+/// Return true when at least one direct subdirectory of `dir` contains a video file.
+///
+/// Used to distinguish movie folders (flat, one MKV at root) from course or
+/// collection folders where lesson/episode files are organised into subdirectories.
+fn has_video_in_subdirs(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let mut vids = Vec::new();
+            collect_videos(&entry.path(), &mut vids);
+            if !vids.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Return the alphabetically first video file directly inside `dir` (non-recursive).
+///
+/// Used for movie folders: the MKV is at the root alongside subtitle or NFO
+/// companions, not nested inside a subdirectory.
+fn find_root_video(dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| is_video(p))
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
 }
 
 /// Return the alphabetically first video file inside `dir`, recursing into sub-dirs.
@@ -1505,6 +1567,18 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    // ── is_series_folder ─────────────────────────────────────────────────────
+
+    #[test]
+    fn series_folder_detection() {
+        assert!(is_series_folder("Breaking.Bad.S01E01.mkv"));
+        assert!(is_series_folder("Show.S02"));
+        assert!(is_series_folder("My Series S03E05 720p"));
+        assert!(!is_series_folder("Curso Python Avancado"));
+        assert!(!is_series_folder("Documentary.2024"));
+        assert!(!is_series_folder("AS01.mkv")); // 'A' is an alpha prefix
+    }
+
     // ── is_video ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -1533,17 +1607,45 @@ mod tests {
         assert!(is_video(&PathBuf::from("clip.Mp4")));
     }
 
-    // ── is_series_folder ─────────────────────────────────────────────────────
+    // ── has_video_in_subdirs / find_root_video ────────────────────────────────
 
     #[test]
-    fn series_folder_detection() {
-        assert!(is_series_folder("Breaking.Bad.S01E01.mkv"));
-        assert!(is_series_folder("Show.S02"));
-        assert!(is_series_folder("My Series S03E05 720p"));
-        assert!(!is_series_folder("Curso Python Avancado"));
-        assert!(!is_series_folder("Documentary.2024"));
-        // "AS01" should not match — 'A' is an alpha prefix
-        assert!(!is_series_folder("AS01.mkv"));
+    fn movie_folder_flat_has_no_video_in_subdirs() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("movie.mkv"), b"fake").unwrap();
+        fs::write(dir.path().join("movie.srt"), b"sub").unwrap();
+        assert!(!has_video_in_subdirs(dir.path()));
+        assert!(find_root_video(dir.path()).is_some());
+    }
+
+    #[test]
+    fn course_folder_with_video_subdir_detected() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("01-intro");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("lesson1.mp4"), b"fake").unwrap();
+        assert!(has_video_in_subdirs(dir.path()));
+    }
+
+    #[test]
+    fn movie_folder_with_subtitle_subdir_not_flagged_as_course() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("movie.mkv"), b"fake").unwrap();
+        let subs = dir.path().join("Subs");
+        fs::create_dir(&subs).unwrap();
+        fs::write(subs.join("English.srt"), b"sub").unwrap(); // not a video
+        assert!(!has_video_in_subdirs(dir.path()));
+        assert!(find_root_video(dir.path()).is_some());
+    }
+
+    #[test]
+    fn find_root_video_ignores_subdirs() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("extras");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("bonus.mkv"), b"fake").unwrap(); // in subdir
+        // No video at root level
+        assert!(find_root_video(dir.path()).is_none());
     }
 
     // ── build_folder_nfo ─────────────────────────────────────────────────────

@@ -1709,8 +1709,8 @@ fn build_dry_run_config() -> Config {
         notify_webhook: None,
         notify_ntfy: None,
         notify: None,
-        pre_hook: None,
-        post_hook: None,
+        pre_hooks: vec![],
+        post_hooks: vec![],
         no_hooks: true,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
@@ -1721,6 +1721,7 @@ fn build_dry_run_config() -> Config {
         check_retries: 1,
         check_connections: 1,
         pipeline_depth: 0,
+        keepalive_interval: 60,
     }
 }
 

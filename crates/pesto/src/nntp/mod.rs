@@ -282,6 +282,20 @@ impl Connection {
         let _ = self.command("QUIT").await;
     }
 
+    /// Send `MODE READER` as a keepalive and return `Ok(())` on success.
+    ///
+    /// Used to reset the server's idle timer while connections are waiting for
+    /// new tasks (PAR2 computation, check-phase delays, `--each` transitions).
+    /// Returns an error if the command fails or the connection is dead, in
+    /// which case the caller should discard the connection.
+    pub async fn mode_reader(&mut self) -> Result<()> {
+        let resp = self.command("MODE READER").await?;
+        match resp.code {
+            200 | 201 => Ok(()),
+            _ => bail!("MODE READER: {} {}", resp.code, resp.text),
+        }
+    }
+
     /// Send a command line and read its response.
     async fn command(&mut self, cmd: &str) -> Result<Response> {
         self.send_command(cmd, "").await

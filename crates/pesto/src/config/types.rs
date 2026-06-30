@@ -8,6 +8,10 @@ use std::path::PathBuf;
 pub const DEFAULT_PORT: u16 = 563;
 /// Default number of parallel connections.
 pub const DEFAULT_CONNECTIONS: usize = 4;
+/// Default keepalive interval in seconds. Send `MODE READER` on idle connections
+/// every this many seconds to prevent the server from closing them silently.
+/// Set to 0 to disable.
+pub const DEFAULT_KEEPALIVE_SECS: u64 = 60;
 /// Default target size of each article body, in bytes.
 pub const DEFAULT_ARTICLE_SIZE: usize = 768_000;
 /// Default yEnc line length, in encoded characters.
@@ -109,6 +113,11 @@ pub struct ServerSection {
     pub retry_delay: Option<u64>,
     /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
     pub timeout: Option<u64>,
+    /// Keepalive interval in seconds. A `MODE READER` command is sent on idle
+    /// connections every this many seconds to prevent the server from closing
+    /// them silently during long PAR2 computations or check-phase waits.
+    /// Set to 0 to disable. See [`DEFAULT_KEEPALIVE_SECS`].
+    pub keepalive: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -189,9 +198,17 @@ pub struct OutputSection {
     #[serde(default)]
     pub indexer: IndexerSection,
     /// Shell command to execute before the upload begins. Non-zero exit aborts.
+    /// Kept for backward compatibility; prefer `pre_hooks`.
     pub pre_hook: Option<String>,
+    /// Shell commands to execute before the upload begins (one per entry).
+    #[serde(default)]
+    pub pre_hooks: Vec<String>,
     /// Shell command to execute after a successful upload.
+    /// Kept for backward compatibility; prefer `post_hooks`.
     pub post_hook: Option<String>,
+    /// Shell commands to execute after a successful upload (one per entry).
+    #[serde(default)]
+    pub post_hooks: Vec<String>,
     /// Generate a `.nfo` file alongside the `.nzb` after posting.
     pub nfo: Option<bool>,
     /// How to handle a conflict when the user-destination `.nzb` already exists.
@@ -286,8 +303,8 @@ pub struct Overrides {
     pub date: Option<String>,
     pub no_archive: Option<bool>,
     pub message_id_domain: Option<String>,
-    pub pre_hook: Option<String>,
-    pub post_hook: Option<String>,
+    pub pre_hooks: Vec<String>,
+    pub post_hooks: Vec<String>,
     pub no_hooks: bool,
     pub nfo: Option<bool>,
     pub nzb_conflict: Option<NzbConflict>,
@@ -346,8 +363,8 @@ pub struct Config {
     pub notify_webhook: Option<String>,
     pub notify_ntfy: Option<String>,
     pub notify: Option<bool>,
-    pub pre_hook: Option<String>,
-    pub post_hook: Option<String>,
+    pub pre_hooks: Vec<String>,
+    pub post_hooks: Vec<String>,
     pub no_hooks: bool,
     pub nfo: bool,
     pub nzb_conflict: NzbConflict,
@@ -358,6 +375,8 @@ pub struct Config {
     pub check_retries: u32,
     pub check_connections: usize,
     pub pipeline_depth: usize,
+    /// Keepalive interval in seconds; 0 = disabled. See [`DEFAULT_KEEPALIVE_SECS`].
+    pub keepalive_interval: u64,
 }
 
 impl Config {

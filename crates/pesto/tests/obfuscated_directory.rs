@@ -54,8 +54,8 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         date: None,
         no_archive: false,
         message_id_domain: None,
-        pre_hook: None,
-        post_hook: None,
+        pre_hooks: vec![],
+        post_hooks: vec![],
         no_hooks: false,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
@@ -66,6 +66,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         check_retries: 2,
         check_connections: 1,
         pipeline_depth: 1,
+        keepalive_interval: 0,
     }
 }
 

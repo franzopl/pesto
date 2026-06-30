@@ -468,6 +468,34 @@ everything in a new `pesto::upload::run_upload()` public API.
 
 ## Deferred / Intentionally Not Implemented
 
+### Connection pool reuse across `--each` episodes
+
+**Status:** Deferred — architectural refactor required.  
+**Context:** Issue #35 (Case D). In `--each` mode, each episode builds a fresh connection pool
+(30 connections × post + check phases = 60 TLS+AUTH cycles per episode). For a 26-episode run
+this produces ~1,560 TLS handshakes (~6 min overhead at 230 ms/cycle, ~18% of runtime).
+
+**Root cause:** the connection pool is owned by worker tasks that send `QUIT` when each
+episode's channel closes. Reusing connections across episodes requires decoupling the pool
+lifecycle from the episode lifecycle so workers can hold open connections and receive a new
+work channel for the next episode.
+
+**Complications:**
+- `--jobs N` runs episodes in parallel with independent pools — sharing adds contention.
+- Each episode creates its own `Shared` struct (buffer pool, cancel flag, result store);
+  connections are embedded in workers that are tightly coupled to that `Shared`.
+- A "connection broker" layer would centralise pool management but is a significant refactor
+  of the hot path.
+
+**Benefit when implemented:** reduces TLS handshakes from ~60/episode to ~30 for the entire
+sequential run; eliminates most TLS+AUTH overhead in `--each` mode.
+
+**Note:** the keepalive mechanism (Phase 35, `[server] keepalive`) already eliminates the
+*spurious* reconnect bursts caused by server idle timeouts. Case D is about the *intentional*
+teardown/rebuild, which remains.
+
+---
+
 ### Subject file counter `[N/M]`
 
 **Status:** Intentionally deferred.  

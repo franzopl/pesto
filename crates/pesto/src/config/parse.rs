@@ -226,8 +226,30 @@ impl Config {
             },
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
-            pre_hook: cli.pre_hook.or(file.output.pre_hook),
-            post_hook: cli.post_hook.or(file.output.post_hook),
+            pre_hooks: {
+                // CLI flags take precedence over config file; single `pre_hook`
+                // and array `pre_hooks` are merged so old configs still work.
+                if !cli.pre_hooks.is_empty() {
+                    cli.pre_hooks
+                } else {
+                    file.output
+                        .pre_hook
+                        .into_iter()
+                        .chain(file.output.pre_hooks)
+                        .collect()
+                }
+            },
+            post_hooks: {
+                if !cli.post_hooks.is_empty() {
+                    cli.post_hooks
+                } else {
+                    file.output
+                        .post_hook
+                        .into_iter()
+                        .chain(file.output.post_hooks)
+                        .collect()
+                }
+            },
             no_hooks: cli.no_hooks,
             nfo: cli.nfo.or(file.output.nfo).unwrap_or(false),
             nzb_conflict: cli
@@ -256,6 +278,7 @@ impl Config {
                 .pipeline_depth
                 .or(file.posting.pipeline_depth)
                 .unwrap_or(DEFAULT_PIPELINE_DEPTH),
+            keepalive_interval: file.server.keepalive.unwrap_or(DEFAULT_KEEPALIVE_SECS),
         })
     }
 }

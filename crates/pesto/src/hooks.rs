@@ -1,8 +1,8 @@
 //! Post-upload hook execution.
 //!
-//! Runs `config.post_hook` via `sh -c` (if set), then runs every executable
-//! file in `~/.config/pesto/hooks/` (sorted by name). `no_hooks` suppresses
-//! only the directory scripts — `post_hook` still runs regardless.
+//! Runs each command in `config.post_hooks` via `sh -c`, then runs every
+//! executable file in `~/.config/pesto/hooks/` (sorted by name). `no_hooks`
+//! suppresses only the directory scripts — `post_hooks` still run regardless.
 //!
 //! Each hook receives the same environment variables:
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
@@ -42,7 +42,7 @@ pub struct HookContext {
 pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
     let mut logs: Vec<String> = Vec::new();
 
-    if let Some(ref cmd) = config.post_hook {
+    for cmd in &config.post_hooks {
         logs.push(format!("Running post-hook: {}", cmd));
         match run_shell(cmd, ctx) {
             Ok(output) => {
