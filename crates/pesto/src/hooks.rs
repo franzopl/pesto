@@ -12,6 +12,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
+
+use tracing::info;
 
 use crate::config::Config;
 
@@ -44,14 +47,22 @@ pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
 
     for cmd in &config.post_hooks {
         logs.push(format!("Running post-hook: {}", cmd));
+        info!(cmd, "post-hook starting");
+        let t = Instant::now();
         match run_shell(cmd, ctx) {
             Ok(output) => {
+                let elapsed_ms = t.elapsed().as_millis();
                 for line in output.lines() {
                     logs.push(format!("  hook> {}", line));
                 }
                 logs.push("post-hook exited ok".to_string());
+                info!(cmd, exit_code = 0, elapsed_ms, "post-hook completed");
             }
-            Err(e) => logs.push(format!("post-hook error: {}", e)),
+            Err(e) => {
+                let elapsed_ms = t.elapsed().as_millis();
+                info!(cmd, elapsed_ms, error = %e, "post-hook failed");
+                logs.push(format!("post-hook error: {}", e));
+            }
         }
     }
 
@@ -65,14 +76,22 @@ pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
             for script in sorted_executables(&hooks_dir) {
                 let label = script.display().to_string();
                 logs.push(format!("Running hook script: {}", label));
+                info!(script = %label, "post-hook starting");
+                let t = Instant::now();
                 match run_script(&script, ctx) {
                     Ok(output) => {
+                        let elapsed_ms = t.elapsed().as_millis();
                         for line in output.lines() {
                             logs.push(format!("  hook> {}", line));
                         }
                         logs.push(format!("{}: exited ok", label));
+                        info!(script = %label, exit_code = 0, elapsed_ms, "post-hook completed");
                     }
-                    Err(e) => logs.push(format!("{}: error: {}", label, e)),
+                    Err(e) => {
+                        let elapsed_ms = t.elapsed().as_millis();
+                        info!(script = %label, elapsed_ms, error = %e, "post-hook failed");
+                        logs.push(format!("{}: error: {}", label, e));
+                    }
                 }
             }
         }
@@ -104,15 +123,21 @@ pub fn list_hook_scripts() -> Vec<PathBuf> {
 pub fn run_one_hook(path: &Path, ctx: &HookContext) -> (bool, Vec<String>) {
     let label = path.display().to_string();
     let mut logs = vec![format!("Running hook script: {label}")];
+    info!(script = %label, "post-hook starting");
+    let t = Instant::now();
     match run_script(path, ctx) {
         Ok(output) => {
+            let elapsed_ms = t.elapsed().as_millis();
             for line in output.lines() {
                 logs.push(format!("  hook> {line}"));
             }
             logs.push(format!("{label}: exited ok"));
+            info!(script = %label, exit_code = 0, elapsed_ms, "post-hook completed");
             (true, logs)
         }
         Err(e) => {
+            let elapsed_ms = t.elapsed().as_millis();
+            info!(script = %label, elapsed_ms, error = %e, "post-hook failed");
             logs.push(format!("{label}: error: {e}"));
             (false, logs)
         }

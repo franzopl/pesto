@@ -387,7 +387,7 @@ async fn resume_skips_already_posted_segments() {
         path: path.clone(),
         name: "resume_test.bin".to_string(),
     }];
-    let outcome = post_files_with_progress(&config, &inputs, None, Some(&state_path))
+    let outcome = post_files_with_progress(&config, &inputs, None, Some(&state_path), None)
         .await
         .unwrap();
 

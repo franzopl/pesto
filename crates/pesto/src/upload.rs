@@ -213,11 +213,18 @@ pub async fn run_upload(
             post_tx,
             resume_path.as_deref(),
             Some(cancel_flag.clone()),
+            Some(entry_label),
         )
         .await?
     } else {
-        crate::poster::post_files_with_progress(config, &inputs, post_tx, resume_path.as_deref())
-            .await?
+        crate::poster::post_files_with_progress(
+            config,
+            &inputs,
+            post_tx,
+            resume_path.as_deref(),
+            Some(entry_label),
+        )
+        .await?
     };
     // ─────────────────────────────────────────────────────────────────────────
 

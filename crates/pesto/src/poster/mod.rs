@@ -266,7 +266,7 @@ impl Shared {
 /// the run through a [`ProgressEvent`] channel. Build the [`InputFile`] list
 /// with [`crate::walk::expand_inputs`], which also expands directories.
 pub async fn post_files(config: &Config, files: &[InputFile]) -> Result<PostOutcome> {
-    post_files_with_progress(config, files, None, None).await
+    post_files_with_progress(config, files, None, None, None).await
 }
 
 /// Post every file in `files`, emitting [`ProgressEvent`]s on `events`.
@@ -281,8 +281,10 @@ pub async fn post_files_with_progress(
     files: &[InputFile],
     events: Option<ProgressSender>,
     resume_state_path: Option<&Path>,
+    entry_label: Option<&str>,
 ) -> Result<PostOutcome> {
-    post_files_with_progress_and_cancel(config, files, events, resume_state_path, None).await
+    post_files_with_progress_and_cancel(config, files, events, resume_state_path, None, entry_label)
+        .await
 }
 
 /// Like [`post_files_with_progress`] but accepts an external cancel flag.
@@ -296,6 +298,7 @@ pub async fn post_files_with_progress_and_cancel(
     events: Option<ProgressSender>,
     resume_state_path: Option<&Path>,
     external_cancel: Option<Arc<AtomicBool>>,
+    entry_label: Option<&str>,
 ) -> Result<PostOutcome> {
     configure_rayon(config.threads);
 
@@ -366,6 +369,7 @@ pub async fn post_files_with_progress_and_cancel(
     }
 
     info!(
+        entry = entry_label.unwrap_or(""),
         files = metas.len(),
         segments = initial_segments,
         article_size = config.article_size,
@@ -2285,6 +2289,26 @@ pub async fn check_articles(
         let _ = tx.send(ProgressEvent::CheckStarted { total });
     }
 
+    // Distribute segments across N parallel workers, each holding its own
+    // NNTP connection. 0 = match the upload connection count.
+    let n_workers = if config.check_connections == 0 {
+        config.total_connections()
+    } else {
+        config.check_connections
+    }
+    .max(1)
+    .min(segments.len());
+    let max_attempts = config.check_retries.max(1) as usize;
+
+    info!(
+        workers = n_workers,
+        segments = total,
+        delay_secs = config.check_delay_secs,
+        "check phase starting"
+    );
+
+    let check_start = std::time::Instant::now();
+
     // Wait for server propagation, emitting a per-second countdown so the
     // terminal shows a live "waiting N s remaining" notice.
     if config.check_delay_secs > 0 {
@@ -2302,17 +2326,6 @@ pub async fn check_articles(
             remaining -= 1;
         }
     }
-
-    // Distribute segments across N parallel workers, each holding its own
-    // NNTP connection. 0 = match the upload connection count.
-    let n_workers = if config.check_connections == 0 {
-        config.total_connections()
-    } else {
-        config.check_connections
-    }
-    .max(1)
-    .min(segments.len());
-    let max_attempts = config.check_retries.max(1) as usize;
 
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let missing_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2450,7 +2463,26 @@ pub async fn check_articles(
         .unwrap();
 
     let failed = missing.len() as u64;
+    let verified = total.saturating_sub(failed);
+    let elapsed_ms = check_start.elapsed().as_millis();
     let cancelled = cancel.is_some_and(|f| f.load(Ordering::Relaxed));
+
+    if cancelled {
+        info!(
+            verified,
+            missing = failed,
+            elapsed_ms,
+            "check phase cancelled"
+        );
+    } else {
+        info!(
+            verified,
+            missing = failed,
+            elapsed_ms,
+            "check phase complete"
+        );
+    }
+
     if let Some(tx) = events {
         if cancelled {
             let _ = tx.send(ProgressEvent::Interrupted);
@@ -2973,7 +3005,7 @@ mod tests {
         let mut config = dry_run_config();
         config.resume = true; // resume flag set but dry_run overrides it
 
-        let outcome = post_files_with_progress(&config, &files, None, Some(&state_path))
+        let outcome = post_files_with_progress(&config, &files, None, Some(&state_path), None)
             .await
             .unwrap();
 

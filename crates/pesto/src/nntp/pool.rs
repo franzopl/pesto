@@ -29,6 +29,8 @@ pub struct ConnectionSlot {
     server_idx: usize,
     /// Opaque identifier for log correlation (worker index supplied by caller).
     slot_id: usize,
+    /// Reason for the next connection attempt; "initial" until first invalidate.
+    next_connect_reason: &'static str,
 }
 
 impl ConnectionSlot {
@@ -46,6 +48,7 @@ impl ConnectionSlot {
             conn: None,
             server_idx: primary_idx,
             slot_id,
+            next_connect_reason: "initial",
         }
     }
 
@@ -63,10 +66,13 @@ impl ConnectionSlot {
             let server = &self.servers[self.server_idx];
             let host = server.host.clone();
             let idx = self.server_idx;
+            let reason = self.next_connect_reason;
+            self.next_connect_reason = "initial";
             info!(
                 server = "<redacted>",
                 server_idx = idx,
                 slot_id = self.slot_id,
+                reason,
                 "connecting"
             );
             match connect_and_auth(server).await {
@@ -102,6 +108,7 @@ impl ConnectionSlot {
             );
         }
         self.conn = None;
+        self.next_connect_reason = reason;
         self.rotate();
     }
 

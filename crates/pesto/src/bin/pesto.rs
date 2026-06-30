@@ -863,6 +863,7 @@ async fn run_single_upload(
         Some(progress_tx),
         resume_path.as_deref(),
         cancel.cloned(),
+        Some(entry_label),
     )
     .await?;
     let _ = renderer.await;
@@ -1411,8 +1412,9 @@ async fn run_batch(
     let mut any_cancelled = false;
     let mut any_failures = false;
 
+    let total_entries = entries.len();
     let mut handles = Vec::new();
-    for entry in &entries {
+    for (entry_idx, entry) in entries.iter().enumerate() {
         // Acquire the permit before spawning so uploads start in the sorted
         // order. With the permit inside the task, the scheduler decided which
         // upload ran first, making --each non-deterministic.
@@ -1427,6 +1429,13 @@ async fn run_batch(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "entry".to_string());
+
+        info!(
+            entry = entry_idx + 1,
+            total = total_entries,
+            name = %label,
+            "--each entry"
+        );
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
@@ -1465,11 +1474,14 @@ async fn run_batch(
         }
     }
 
+    info!(entries = total_entries, "--each complete");
+
     // Write consolidated season NZB (and matching .nfo + hooks) when requested.
     if let Some(season_path) = season_nzb {
         if any_cancelled {
             eprintln!("interrupted — skipping season nzb output");
         } else if !all_segments.is_empty() {
+            info!(entries = total_entries, path = %season_path.display(), "season merge starting");
             let config = &params.config;
             let season_name = config.nzb_name.clone().or_else(|| {
                 season_path

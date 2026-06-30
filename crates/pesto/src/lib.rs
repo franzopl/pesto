@@ -55,9 +55,15 @@ pub async fn post(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     cancel::spawn_listener(flag.clone());
-    let outcome =
-        poster::post_files_with_progress_and_cancel(&config, &files, Some(tx), None, Some(flag))
-            .await?;
+    let outcome = poster::post_files_with_progress_and_cancel(
+        &config,
+        &files,
+        Some(tx),
+        None,
+        Some(flag),
+        None,
+    )
+    .await?;
     Ok((outcome, rx))
 }
 
@@ -72,8 +78,14 @@ pub async fn post_cancelable(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<(poster::PostOutcome, progress::ProgressReceiver)> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let outcome =
-        poster::post_files_with_progress_and_cancel(&config, &files, Some(tx), None, Some(cancel))
-            .await?;
+    let outcome = poster::post_files_with_progress_and_cancel(
+        &config,
+        &files,
+        Some(tx),
+        None,
+        Some(cancel),
+        None,
+    )
+    .await?;
     Ok((outcome, rx))
 }
