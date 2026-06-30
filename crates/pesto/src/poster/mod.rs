@@ -2330,6 +2330,7 @@ pub async fn check_articles(
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let missing_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let done_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let retry_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Split segments into chunks — one per worker.
     let chunks: Vec<Vec<PostedSegment>> = {
@@ -2348,6 +2349,7 @@ pub async fn check_articles(
         let servers = Arc::clone(&servers);
         let missing_ids = Arc::clone(&missing_ids);
         let done_count = Arc::clone(&done_count);
+        let retry_count = Arc::clone(&retry_count);
         let tx = events_tx.clone();
         let worker_cancel = cancel_flag.clone();
 
@@ -2388,6 +2390,7 @@ pub async fn check_articles(
                                     {
                                         break;
                                     }
+                                    retry_count.fetch_add(1, Ordering::Relaxed);
                                     let delay = 20u64;
                                     if let Some(tx) = &tx {
                                         let _ = tx.send(ProgressEvent::CheckRetrying {
@@ -2414,6 +2417,7 @@ pub async fn check_articles(
                                     {
                                         break;
                                     }
+                                    retry_count.fetch_add(1, Ordering::Relaxed);
                                     let base = slot.retry_delay();
                                     tokio::time::sleep(jittered(base, worker_idx)).await;
                                 }
@@ -2434,6 +2438,7 @@ pub async fn check_articles(
                                 {
                                     break;
                                 }
+                                retry_count.fetch_add(1, Ordering::Relaxed);
                                 let base = slot.retry_delay();
                                 tokio::time::sleep(jittered(base, worker_idx)).await;
                             }
@@ -2464,6 +2469,7 @@ pub async fn check_articles(
 
     let failed = missing.len() as u64;
     let verified = total.saturating_sub(failed);
+    let retries = retry_count.load(Ordering::Relaxed);
     let elapsed_ms = check_start.elapsed().as_millis();
     let cancelled = cancel.is_some_and(|f| f.load(Ordering::Relaxed));
 
@@ -2471,6 +2477,7 @@ pub async fn check_articles(
         info!(
             verified,
             missing = failed,
+            retries,
             elapsed_ms,
             "check phase cancelled"
         );
@@ -2478,6 +2485,7 @@ pub async fn check_articles(
         info!(
             verified,
             missing = failed,
+            retries,
             elapsed_ms,
             "check phase complete"
         );
