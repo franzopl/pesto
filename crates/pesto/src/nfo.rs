@@ -1644,7 +1644,7 @@ mod tests {
         let sub = dir.path().join("extras");
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("bonus.mkv"), b"fake").unwrap(); // in subdir
-        // No video at root level
+                                                            // No video at root level
         assert!(find_root_video(dir.path()).is_none());
     }
 
