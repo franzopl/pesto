@@ -9,6 +9,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.34] — 2026-06-30
+
+### Added
+- **NNTP keepalive** — workers send `MODE READER` on idle connections to prevent
+  server-side disconnections during PAR2 computation, check-phase waits, and
+  `--each` transitions. Configurable via `[server] keepalive` (default 60 s;
+  set to `0` to disable). Workers poll independently so no connection blocks
+  another.
+
+- **Multi-hook support** — `pre_hook` / `post_hook` config fields now accept a
+  list of strings (`pre_hooks` / `post_hooks`). Single-value configs remain
+  fully backward-compatible (old scalar fields are merged into the array at
+  parse time). The CLI flags `--pre-hook` and `--post-hook` can be repeated to
+  register multiple hooks in one invocation.
+
+- **Newznab dedup hook example** — `examples/hooks/newznab-dedup.sh` added as a
+  reference implementation for checking an upload against a Newznab indexer
+  before posting.
+
+### Fixed
+- **NFO selection logic** — flat movie folders (single MKV at root alongside
+  subtitles/NFO) now run `mediainfo` on the root video instead of the generic
+  folder tree. Course and collection folders (videos nested in subdirectories)
+  continue to use the folder NFO. Series detection (`S01` / `S01E01` patterns)
+  still takes priority.
+
+- **Merged season NZB tags** — `run_merge_season` now reads `nzb_tags` from the
+  config file or `--nzb-tag` CLI flags instead of always writing an empty tag
+  list. Fixes silent tag omission in merged season NZBs (#26).
+
+- **Segment repost group targeting** — `repost_missing_segments` now posts to
+  the groups selected for the upload run (`outcome.groups`) instead of all
+  configured groups (`config.groups`). Previously timed-out segments retried
+  at end-of-run were cross-posted to every configured newsgroup, making the NZB
+  inconsistent with the articles actually on the server.
+
+### Changed
+- **Structured trace logging** — upload trace log now includes `file=`,
+  `segment=`, `conn=`, `attempt=`, and `retries=` fields for machine-readable
+  parsing.
+
+---
+
 ## [0.3.33] — 2026-06-27
 
 ### Added
