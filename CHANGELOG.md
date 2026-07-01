@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.35] — 2026-07-01
+
+### Fixed
+- **JSON progress output now matches the terminal renderer's accuracy**
+  (`--output-format json`):
+  - `progress_pct` is now computed from bytes (`done_bytes`/`total_bytes`)
+    instead of segment counts, and `total_bytes` is pre-seeded with the same
+    PAR2 byte estimate the terminal panel already used
+    (`Started.par2_bytes_hint`), absorbing the real PAR2 segments as they
+    arrive via `QueueExtended` instead of adding on top. Previously the JSON
+    stream tracked segments with no PAR2 pre-seed, so `progress_pct` visibly
+    dropped once PAR2 segments were queued.
+  - Added `par2_encode_started` / `par2_encode_progress` JSON events (mirrors
+    of `Par2EncodeStarted` / `Par2InputProgress`), which were previously only
+    rendered in the terminal UI and silently dropped in JSON mode. Consumers
+    can now show real progress for the PAR2 computation phase, not just the
+    write phase (`par2_write_started` / `par2_slice_written`).
+
+---
+
 ## [0.3.34] — 2026-06-30
 
 ### Added
