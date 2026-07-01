@@ -174,12 +174,16 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
     let mut done_bytes: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut failures: u64 = 0;
+    // PAR2 bytes hint pre-seeded into total_bytes at Started; absorbed as the
+    // real PAR2 segments arrive via QueueExtended so total_bytes (and thus
+    // progress_pct) never jumps when PAR2 posting starts. Mirrors terminal.rs.
+    let mut par2_hint_remaining: u64 = 0;
 
     loop {
         match rx.recv().await {
             None | Some(ProgressEvent::Finished) => {
-                let pct = if total_segments > 0 {
-                    (done_segments as f64 / total_segments as f64 * 100.0).min(100.0)
+                let pct = if total_bytes > 0 {
+                    (done_bytes as f64 / total_bytes as f64 * 100.0).min(100.0)
                 } else {
                     100.0
                 };
@@ -198,6 +202,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         files,
                         connections,
                         target,
+                        par2_bytes_hint,
                         ..
                     } => {
                         let target_json = target
@@ -208,6 +213,10 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                             total_segments += f.segments;
                             total_bytes += f.bytes;
                         }
+                        // Pre-seed with the PAR2 estimate so progress_pct never
+                        // goes backwards once QueueExtended arrives.
+                        total_bytes += par2_bytes_hint;
+                        par2_hint_remaining = par2_bytes_hint;
                         let _ = writeln!(
                             out,
                             r#"{{"type":"started","total_files":{nf},"total_bytes":{total_bytes},"total_segments":{total_segments},"connections":{connections},"target":{target_json}}}"#,
@@ -220,8 +229,8 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         if !ok {
                             failures += 1;
                         }
-                        let pct = if total_segments > 0 {
-                            (done_segments as f64 / total_segments as f64 * 100.0).min(100.0)
+                        let pct = if total_bytes > 0 {
+                            (done_bytes as f64 / total_bytes as f64 * 100.0).min(100.0)
                         } else {
                             0.0
                         };
@@ -237,7 +246,16 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         bytes,
                     } => {
                         total_segments += segments;
-                        total_bytes += bytes;
+                        // Absorb the real PAR2 bytes against the pre-seeded
+                        // hint; only grow total_bytes by any excess so the
+                        // running percentage doesn't dip.
+                        if bytes <= par2_hint_remaining {
+                            par2_hint_remaining -= bytes;
+                        } else {
+                            let excess = bytes - par2_hint_remaining;
+                            par2_hint_remaining = 0;
+                            total_bytes += excess;
+                        }
                         let file_esc = file.replace('"', "\\\"");
                         let _ = writeln!(
                             out,
@@ -268,8 +286,30 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::CompressDone => {
                         let _ = writeln!(out, r#"{{"type":"compress_done"}}"#);
                     }
-                    ProgressEvent::Par2EncodeStarted { .. } => {}
-                    ProgressEvent::Par2InputProgress { .. } => {}
+                    ProgressEvent::Par2EncodeStarted {
+                        input_bytes,
+                        input_slices,
+                        input_files,
+                        recovery_slices,
+                        slice_size,
+                        passes,
+                        chunk_size,
+                        simd_method,
+                        threads,
+                        memory_limit,
+                    } => {
+                        let simd_esc = simd_method.replace('"', "\\\"");
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"par2_encode_started","input_bytes":{input_bytes},"input_slices":{input_slices},"input_files":{input_files},"recovery_slices":{recovery_slices},"slice_size":{slice_size},"passes":{passes},"chunk_size":{chunk_size},"simd_method":"{simd_esc}","threads":{threads},"memory_limit":{memory_limit}}}"#
+                        );
+                    }
+                    ProgressEvent::Par2InputProgress { done, total } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"par2_encode_progress","done":{done},"total":{total}}}"#
+                        );
+                    }
                     ProgressEvent::Par2WriteStarted { total } => {
                         let _ = writeln!(out, r#"{{"type":"par2_write_started","total":{total}}}"#);
                     }
