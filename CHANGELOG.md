@@ -9,6 +9,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.37] — 2026-07-08
+
+### Fixed
+- **`.ps1` hooks still failing on Windows after 0.3.36** — the fix in 0.3.36
+  only touched the `pesto::hooks` library module. The `pesto` CLI binary has
+  its own separate `run_hooks_dir`/`run_pre_hooks_dir` functions that never
+  called into that module, so the CLI kept invoking `.ps1` scripts directly
+  and hitting `os error 193`. Applied the same `powershell.exe -File` wrapping
+  in `bin/pesto.rs`, where the CLI actually runs hook scripts.
+
+---
+
 ## [0.3.36] — 2026-07-08
 
 ### Fixed
