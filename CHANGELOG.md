@@ -9,6 +9,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.36] — 2026-07-08
+
+### Fixed
+- **`generic-indexer.bat` example hook** — the file was checked into the repo
+  with LF-only line endings, which breaks `cmd.exe`'s parser for multi-line
+  `if (...)`/`for (...)` blocks (`". was unexpected at this time."`). Added
+  `.gitattributes` forcing CRLF on checkout for `*.bat`/`*.ps1`.
+- **`.ps1` hook scripts failing to start on Windows** (`os error 193`, "%1 is
+  not a valid Win32 application") — `CreateProcess` has no association for
+  `.ps1` files, unlike `.exe`/`.bat`/`.cmd`. `run_script` now invokes `.ps1`
+  hooks through `powershell -NoProfile -ExecutionPolicy Bypass -File <path>`
+  on Windows.
+
+---
+
 ## [0.3.35] — 2026-07-01
 
 ### Fixed
