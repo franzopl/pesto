@@ -1,0 +1,5 @@
+# Windows batch files require CRLF line endings: cmd.exe's parser for
+# multi-line if/for ( ... ) blocks breaks on LF-only files, producing
+# "'.' was unexpected at this time." style errors.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
