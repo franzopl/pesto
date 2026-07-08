@@ -178,9 +178,37 @@ fn run_shell(cmd: &str, ctx: &HookContext) -> Result<String, String> {
 }
 
 fn run_script(path: &Path, ctx: &HookContext) -> Result<String, String> {
-    let mut c = Command::new(path);
+    let mut c = script_command(path);
     apply_env(&mut c, ctx);
     run_command(c)
+}
+
+/// Build the command used to launch a hook script.
+///
+/// On Windows, `CreateProcess` can launch `.exe`/`.bat`/`.cmd` directly, but
+/// has no knowledge of `.ps1` files (that association only exists in
+/// `ShellExecute`/Explorer). Running a `.ps1` via `Command::new(path)` fails
+/// with "%1 is not a valid Win32 application" (os error 193), so it must be
+/// invoked through `powershell.exe -File` explicitly.
+#[cfg(windows)]
+fn script_command(path: &Path) -> Command {
+    let is_ps1 = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ps1"));
+    if is_ps1 {
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+        c.arg(path);
+        c
+    } else {
+        Command::new(path)
+    }
+}
+
+#[cfg(not(windows))]
+fn script_command(path: &Path) -> Command {
+    Command::new(path)
 }
 
 fn run_command(mut cmd: Command) -> Result<String, String> {
