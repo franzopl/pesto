@@ -2478,7 +2478,7 @@ fn run_pre_hooks_dir(pre_hooks_dir: &std::path::Path, env: &HookEnv<'_>) -> Resu
     scripts.sort();
     for script in &scripts {
         println!("running pre-hook: {}", script.display());
-        let mut child = std::process::Command::new(script);
+        let mut child = hook_script_command(script);
         apply_hook_env(&mut child, env);
         match child.status() {
             Ok(s) if s.success() => println!("  pre-hook exited ok"),
@@ -2537,7 +2537,7 @@ fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
     scripts.sort();
     for script in &scripts {
         println!("running hook: {}", script.display());
-        let mut child = std::process::Command::new(script);
+        let mut child = hook_script_command(script);
         apply_hook_env(&mut child, env);
         match child.status() {
             Ok(s) if s.success() => println!("  hook exited ok"),
@@ -2545,6 +2545,34 @@ fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
             Err(e) => eprintln!("  hook failed to start: {e}"),
         }
     }
+}
+
+/// Build the command used to launch a pre/post hook script.
+///
+/// On Windows, `CreateProcess` can launch `.exe`/`.bat`/`.cmd` directly, but
+/// has no knowledge of `.ps1` files (that association only exists in
+/// `ShellExecute`/Explorer). Running a `.ps1` via `Command::new(path)` fails
+/// with "%1 is not a valid Win32 application" (os error 193), so it must be
+/// invoked through `powershell.exe -File` explicitly.
+#[cfg(windows)]
+fn hook_script_command(path: &std::path::Path) -> std::process::Command {
+    let is_ps1 = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("ps1"));
+    if is_ps1 {
+        let mut c = std::process::Command::new("powershell");
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+        c.arg(path);
+        c
+    } else {
+        std::process::Command::new(path)
+    }
+}
+
+#[cfg(not(windows))]
+fn hook_script_command(path: &std::path::Path) -> std::process::Command {
+    std::process::Command::new(path)
 }
 
 #[cfg(unix)]
