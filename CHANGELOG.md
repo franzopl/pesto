@@ -9,6 +9,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.38] — 2026-07-09
+
+### Fixed
+- **Hook scripts in `hooks/` could run twice, with no way to disable a
+  backup copy** — the v0.3.36/v0.3.37 `.ps1` fix made scripts in
+  `~/.config/pesto/hooks/` actually start on Windows, which surfaced a
+  latent gap: `post_hooks` entries and the `hooks/` directory scan never
+  checked against each other, so a script referenced by both ran twice per
+  upload, and any backup/legacy script left in `hooks/` ran silently on
+  every upload (#40).
+  - pesto now warns when a `post_hooks` entry resolves to a script inside
+    `hooks/`, since it will also be picked up by the directory scan.
+  - Files ending in `.disabled`, `.off`, `.bak`, or `.old` (or living in a
+    `disabled/` subfolder) are now skipped by the directory scan, so old
+    copies can safely sit next to the active script.
+  - The directory scan now logs a summary (`discovered N hook script(s) in
+    <dir>`) before running anything, instead of only showing each script as
+    it runs.
+  - The bundled `generic-indexer` example hooks no longer instruct users to
+    both copy the script into `hooks/` and reference it via `post_hook`.
+
+---
+
 ## [0.3.37] — 2026-07-08
 
 ### Fixed
