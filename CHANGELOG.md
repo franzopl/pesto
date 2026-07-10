@@ -9,6 +9,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.41] — 2026-07-10
+
+### Added
+- **Round-aware progress events for post-check repost**: consumers had no way
+  to tell which `--check-post-retries` round was in flight or how many
+  articles it actually recovered — the JSON stream only carried a generic
+  `check_done{failed}` per round, indistinguishable from the initial check,
+  and the terminal UI had no equivalent status at all. Added
+  `repost_round_started{round,max_rounds,missing}` and
+  `repost_round_done{round,max_rounds,reposted,still_missing}` JSON events,
+  and matching terminal check-bar status text
+  (`↻ reposting N missing article(s) — round X/Y`).
+
+---
+
 ## [0.3.40] — 2026-07-10
 
 ### Fixed
