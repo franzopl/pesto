@@ -7,6 +7,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Post-check repost couldn't find the source file off a flat working
+  directory**: `repost_missing_segments` rebuilt the path to re-read from with
+  `PathBuf::from(&seg.file_name)` — the *published* name, not a real path —
+  the same bug already fixed for the end-of-run retry path (`FailedTask`) in
+  0.3.24 (#23), but never applied here. Whenever the process CWD didn't happen
+  to match the source layout (direct CLI use outside the upload directory,
+  directory-mode uploads), the repost silently failed to open the file and
+  the article stayed missing, failing the whole upload even though nothing
+  was actually wrong with the source data. `PostedSegment` now carries the
+  absolute `file_path` alongside `file_name`, populated at every construction
+  site, and the repost path reads from it directly.
+
+### Added
+- **`--check-post-retries`** [config: `posting.check_post_retries`, default
+  `1`]: the post-check repost/reverify cycle now loops up to this many rounds
+  instead of giving up after a single repost + reverify pass. Mirrors nyuu's
+  `check-post-tries`. Raise this on providers with slower or less reliable
+  propagation where one repost round isn't enough to clear transient misses.
+  As part of this, the reverify pass after each round now re-checks only the
+  segments that were actually reposted instead of the full article set, so
+  cost scales with the shrinking missing set instead of the total upload
+  size.
+
 ---
 
 ## [0.3.38] — 2026-07-09

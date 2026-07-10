@@ -94,6 +94,7 @@ async fn par2_zero_byte_file_verifies() {
         check_delay_secs: 30,
         check_retries: 2,
         check_connections: 1,
+        check_post_retries: 1,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };
@@ -220,6 +221,7 @@ async fn par2_only_directory_repair_recreates_tree() {
         check_delay_secs: 30,
         check_retries: 2,
         check_connections: 1,
+        check_post_retries: 1,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };

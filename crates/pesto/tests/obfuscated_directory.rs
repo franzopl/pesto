@@ -65,6 +65,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         check_delay_secs: 30,
         check_retries: 2,
         check_connections: 1,
+        check_post_retries: 1,
         pipeline_depth: 1,
         keepalive_interval: 0,
     }

@@ -4,6 +4,7 @@
 //! `.nzb` XML document (newzbin NZB 1.1). Segments are expected pre-sorted by
 //! file name then part number, as [`crate::poster::post_files`] returns them.
 
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::article::default_subject;
@@ -211,6 +212,12 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
             };
             segments.push(PostedSegment {
                 file_name: current_file_name.clone(),
+                // Segments parsed back from an existing `.nzb` (e.g. for
+                // `--merge-season`) have no known source file on this
+                // machine; `file_path` is only meaningful for segments
+                // produced by a live upload, which is the only place a
+                // post-check repost can use it.
+                file_path: PathBuf::from(&current_file_name),
                 subject_name: current_subject_name.clone(),
                 file_size: 0,
                 part,
@@ -329,6 +336,7 @@ mod tests {
     fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         PostedSegment {
             file_name: name.to_string(),
+            file_path: PathBuf::from(name),
             subject_name: name.to_string(),
             file_size: 1000,
             part,
@@ -375,6 +383,7 @@ mod tests {
     fn obfuscated_subject_keeps_real_name_in_attribute() {
         let segment = PostedSegment {
             file_name: "secret-movie.mkv".to_string(),
+            file_path: PathBuf::from("secret-movie.mkv"),
             subject_name: "deadbeefcafe0000".to_string(),
             file_size: 1000,
             part: 1,
@@ -395,6 +404,7 @@ mod tests {
     fn full_obfuscation_preserves_real_name_in_nzb() {
         let segment = PostedSegment {
             file_name: "secret-movie.mkv".to_string(),
+            file_path: PathBuf::from("secret-movie.mkv"),
             subject_name: "deadbeefcafe0000".to_string(),
             file_size: 1000,
             part: 1,

@@ -273,6 +273,10 @@ impl Config {
                 .check_connections
                 .or(file.posting.check_connections)
                 .unwrap_or(0),
+            check_post_retries: cli
+                .check_post_retries
+                .or(file.posting.check_post_retries)
+                .unwrap_or(1),
             // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth

@@ -387,6 +387,14 @@ struct Cli {
     #[arg(long, value_name = "N")]
     check_connections: Option<usize>,
 
+    /// Number of times to re-post an article the STAT pass still can't find,
+    /// each followed by another full STAT pass over the remaining missing
+    /// articles. A single round (the default) covers a transient drop; raise
+    /// this on providers with slower or less reliable propagation
+    /// [config: posting.check_post_retries, default 1].
+    #[arg(long, value_name = "N")]
+    check_post_retries: Option<u32>,
+
     /// Name to use when reading from stdin (`-`). Required when a `-` path is
     /// given; determines the filename in the NZB and PAR2 metadata.
     #[arg(long, value_name = "NAME")]
@@ -514,6 +522,7 @@ impl Cli {
             check_delay_secs: self.check_delay,
             check_retries: self.check_retries,
             check_connections: self.check_connections,
+            check_post_retries: self.check_post_retries,
             pipeline_depth: self.pipeline_depth,
         }
     }
@@ -972,78 +981,96 @@ async fn run_single_upload(
         }
     }
     let check_missing = if !cancelled && !check_missing.is_empty() {
-        eprintln!(
-            "check: {} article(s) not found — reposting…",
-            check_missing.len()
-        );
-        warn!(
-            count = check_missing.len(),
-            "check: articles not found on server"
-        );
+        let max_rounds = config.check_post_retries.max(1);
+        let mut still_missing = check_missing;
 
-        let (repost_tx, repost_renderer) = if params.json_mode {
-            pesto::progress::spawn_json_emitter()
-        } else {
-            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-        };
+        for round in 1..=max_rounds {
+            eprintln!(
+                "check: {} article(s) not found — reposting… (round {round}/{max_rounds})",
+                still_missing.len()
+            );
+            warn!(
+                count = still_missing.len(),
+                round, max_rounds, "check: articles not found on server"
+            );
 
-        let reposted = pesto::poster::repost_missing_segments(
-            config,
-            &outcome.segments,
-            &check_missing,
-            &outcome.groups,
-            Some(&repost_tx),
-            cancel,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("check: repost error: {e:#}");
-            error!(error = %e, "check: repost_missing_segments failed");
-            0
-        });
+            let (repost_tx, repost_renderer) = if params.json_mode {
+                pesto::progress::spawn_json_emitter()
+            } else {
+                pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+            };
 
-        drop(repost_tx);
-        let _ = repost_renderer.await;
+            let reposted = pesto::poster::repost_missing_segments(
+                config,
+                &outcome.segments,
+                &still_missing,
+                &outcome.groups,
+                Some(&repost_tx),
+                cancel,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("check: repost error: {e:#}");
+                error!(error = %e, "check: repost_missing_segments failed");
+                0
+            });
 
-        eprintln!(
-            "check: reposted {reposted}/{} article(s)",
-            check_missing.len()
-        );
+            drop(repost_tx);
+            let _ = repost_renderer.await;
 
-        cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
+            eprintln!(
+                "check: reposted {reposted}/{} article(s)",
+                still_missing.len()
+            );
 
-        // Second STAT pass to confirm reposts landed (no extra delay — they
-        // were just posted so propagation should be immediate).
-        if cancelled {
-            eprintln!("check: interrupted — skipping verify after repost");
-            check_missing
-        } else {
+            cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
+
+            if cancelled {
+                eprintln!("check: interrupted — skipping verify after repost");
+                break;
+            }
+
+            // Re-verify only the segments that were just reposted, not the
+            // whole upload — the rest were already confirmed by the first
+            // STAT pass and re-checking them again every round scales with
+            // the total article count instead of the (shrinking) missing set.
+            let missing_set: std::collections::HashSet<&str> =
+                still_missing.iter().map(String::as_str).collect();
+            let to_verify: Vec<pesto::poster::PostedSegment> = outcome
+                .segments
+                .iter()
+                .filter(|s| missing_set.contains(s.message_id.as_str()))
+                .cloned()
+                .collect();
+
             let (verify_tx, verify_renderer) = if params.json_mode {
                 pesto::progress::spawn_json_emitter()
             } else {
                 pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
             };
-            let still_missing =
-                pesto::poster::check_articles(config, &outcome.segments, Some(&verify_tx), cancel)
+            let after_verify =
+                pesto::poster::check_articles(config, &to_verify, Some(&verify_tx), cancel)
                     .await
                     .unwrap_or_else(|e| {
                         eprintln!("check: verify after repost failed: {e:#}");
-                        error!(error = %e, "check: second STAT pass (post-repost verify) failed");
-                        check_missing.clone()
+                        error!(error = %e, "check: post-repost STAT pass failed");
+                        still_missing.clone()
                     });
             cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
             drop(verify_tx);
             let _ = verify_renderer.await;
 
+            still_missing = after_verify;
+
             if cancelled {
                 eprintln!("check: interrupted during verify after repost");
-                still_missing
+                break;
             } else if still_missing.is_empty() {
                 eprintln!("check: all article(s) confirmed after repost");
-                still_missing
-            } else {
+                break;
+            } else if round == max_rounds {
                 eprintln!(
-                    "check: {} article(s) still missing after repost:",
+                    "check: {} article(s) still missing after {max_rounds} repost round(s):",
                     still_missing.len()
                 );
                 for id in &still_missing {
@@ -1052,11 +1079,18 @@ async fn run_single_upload(
                 error!(
                     count = still_missing.len(),
                     ids = ?still_missing,
-                    "check: articles still missing after repost"
+                    max_rounds,
+                    "check: articles still missing after all repost rounds"
                 );
-                still_missing
+            } else {
+                eprintln!(
+                    "check: {} article(s) still missing — trying another round…",
+                    still_missing.len()
+                );
             }
         }
+
+        still_missing
     } else {
         if config.check
             && !config.dry_run

@@ -114,6 +114,12 @@ fn optimal_par2_slice_size(
 #[derive(Debug, Clone)]
 pub struct PostedSegment {
     pub file_name: String,
+    /// Absolute filesystem path of the source file, preserved so a post-check
+    /// repost can re-read the segment regardless of the current working
+    /// directory. `file_name` alone (the published/relative name) is
+    /// insufficient — see `FailedTask::file_path` (issue #23), which this
+    /// mirrors for the `--check` repost path.
+    pub file_path: PathBuf,
     pub subject_name: String,
     pub file_size: u64,
     pub part: u32,
@@ -1475,6 +1481,7 @@ async fn worker(
                 {
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
+                        file_path: task.meta.path.clone(),
                         subject_name: task.subject_name.clone(),
                         file_size: task.meta.size,
                         part: task.part,
@@ -1542,6 +1549,7 @@ async fn worker(
             for p in pending {
                 shared.results.lock().unwrap().push(PostedSegment {
                     file_name: p.task.meta.real_name.clone(),
+                    file_path: p.task.meta.path.clone(),
                     subject_name: p.task.subject_name.clone(),
                     file_size: p.task.meta.size,
                     part: p.task.part,
@@ -1887,6 +1895,7 @@ fn commit_result(
         }
         shared.results.lock().unwrap().push(PostedSegment {
             file_name: task.meta.real_name.clone(),
+            file_path: task.meta.path.clone(),
             subject_name: task.subject_name.clone(),
             file_size: task.meta.size,
             part: task.part,
@@ -1993,12 +2002,9 @@ pub async fn repost_missing_segments(
         if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
             break;
         }
-        // Derive the file path from the segment's file_name relative to the
-        // working directory. This matches how InputFile paths are resolved.
-        let path = PathBuf::from(&seg.file_name);
         let offset = (seg.part as u64 - 1) * article_size as u64;
 
-        let mut file = match File::open(&path).await {
+        let mut file = match File::open(&seg.file_path).await {
             Ok(f) => f,
             Err(e) => {
                 warn!(file = %seg.file_name, "repost: cannot open file: {e}");
@@ -2230,6 +2236,7 @@ pub async fn repost_failed_tasks(
         if ok {
             recovered.push(PostedSegment {
                 file_name: task.file_name.clone(),
+                file_path: task.file_path.clone(),
                 subject_name: task.subject_name.clone(),
                 file_size: task.file_size,
                 part: task.part,
