@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.39] — 2026-07-10
+
 ### Fixed
 - **Post-check repost couldn't find the source file off a flat working
   directory**: `repost_missing_segments` rebuilt the path to re-read from with
