@@ -134,6 +134,22 @@ pub enum ProgressEvent {
         max_attempts: u32,
         delay_secs: u64,
     },
+    /// A post-check repost round is starting. `missing` is how many articles
+    /// are being reposted this round, out of at most `max_rounds` rounds.
+    RepostRoundStarted {
+        round: u32,
+        max_rounds: u32,
+        missing: u64,
+    },
+    /// A post-check repost round finished and was reverified. `reposted` is
+    /// how many articles were successfully reposted this round;
+    /// `still_missing` is how many remain unconfirmed after reverifying.
+    RepostRoundDone {
+        round: u32,
+        max_rounds: u32,
+        reposted: u64,
+        still_missing: u64,
+    },
     /// Worker connection `conn` is authenticating with the server.
     ConnectionAuth { conn: usize },
     /// Worker connection `conn` failed an attempt and is retrying.
@@ -343,6 +359,27 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ = writeln!(
                             out,
                             r#"{{"type":"check_retrying","attempt":{attempt},"max_attempts":{max_attempts},"delay_secs":{delay_secs}}}"#
+                        );
+                    }
+                    ProgressEvent::RepostRoundStarted {
+                        round,
+                        max_rounds,
+                        missing,
+                    } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"repost_round_started","round":{round},"max_rounds":{max_rounds},"missing":{missing}}}"#
+                        );
+                    }
+                    ProgressEvent::RepostRoundDone {
+                        round,
+                        max_rounds,
+                        reposted,
+                        still_missing,
+                    } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"repost_round_done","round":{round},"max_rounds":{max_rounds},"reposted":{reposted},"still_missing":{still_missing}}}"#
                         );
                     }
                     // Connection and pool events are noisy and not useful to consumers.

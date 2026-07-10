@@ -423,6 +423,31 @@ impl RenderState {
                 self.check_retry_msg = None;
                 self.check_waiting_secs = None;
             }
+            ProgressEvent::RepostRoundStarted {
+                round,
+                max_rounds,
+                missing,
+            } => {
+                self.started = true;
+                self.check_active = true;
+                self.check_retry_msg = Some(format!(
+                    "↻ reposting {missing} missing article(s) — round {round}/{max_rounds}",
+                ));
+            }
+            ProgressEvent::RepostRoundDone {
+                round,
+                max_rounds,
+                reposted,
+                still_missing,
+            } => {
+                self.check_retry_msg = if still_missing > 0 {
+                    Some(format!(
+                        "reposted {reposted} article(s), {still_missing} still missing — round {round}/{max_rounds} done",
+                    ))
+                } else {
+                    None
+                };
+            }
         }
     }
 

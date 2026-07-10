@@ -999,6 +999,11 @@ async fn run_single_upload(
             } else {
                 pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
             };
+            let _ = repost_tx.send(pesto::progress::ProgressEvent::RepostRoundStarted {
+                round,
+                max_rounds,
+                missing: still_missing.len() as u64,
+            });
 
             let reposted = pesto::poster::repost_missing_segments(
                 config,
@@ -1057,10 +1062,17 @@ async fn run_single_upload(
                         still_missing.clone()
                     });
             cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
-            drop(verify_tx);
-            let _ = verify_renderer.await;
 
             still_missing = after_verify;
+
+            let _ = verify_tx.send(pesto::progress::ProgressEvent::RepostRoundDone {
+                round,
+                max_rounds,
+                reposted: reposted as u64,
+                still_missing: still_missing.len() as u64,
+            });
+            drop(verify_tx);
+            let _ = verify_renderer.await;
 
             if cancelled {
                 eprintln!("check: interrupted during verify after repost");
