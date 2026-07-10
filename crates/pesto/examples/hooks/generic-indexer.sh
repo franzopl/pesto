@@ -7,6 +7,11 @@
 #   cp generic-indexer.sh ~/.config/pesto/hooks/
 #   chmod +x ~/.config/pesto/hooks/generic-indexer.sh
 #
+# Any script placed in that folder runs automatically after every upload, so
+# this is all you need to do — do NOT also add a `post_hook` entry pointing
+# at this same file in config.toml, or it will run twice per upload (once
+# from post_hook, once from the directory scan). Pick exactly one mechanism.
+#
 # Edit the variables below before use.
 # Dependencies: curl, ffmpeg (only required for video files), jq
 

@@ -1,8 +1,12 @@
 //! Post-upload hook execution.
 //!
 //! Runs each command in `config.post_hooks` via `sh -c`, then runs every
-//! executable file in `~/.config/pesto/hooks/` (sorted by name). `no_hooks`
-//! suppresses only the directory scripts — `post_hooks` still run regardless.
+//! executable file in `~/.config/pesto/hooks/` (sorted by name), skipping
+//! disabled ones (see [`is_disabled`]). `no_hooks` suppresses only the
+//! directory scripts — `post_hooks` still run regardless. A `post_hooks`
+//! entry that resolves to a script inside the hooks directory would run
+//! twice (once from each phase); [`post_hook_targets_hooks_dir`] detects that
+//! and logs a warning (issue #40).
 //!
 //! Each hook receives the same environment variables:
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
@@ -44,8 +48,25 @@ pub struct HookContext {
 /// from async code.
 pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
     let mut logs: Vec<String> = Vec::new();
+    let hooks_dir = crate::config::config_dir().map(|d| d.join("hooks"));
 
     for cmd in &config.post_hooks {
+        // A post_hooks entry that also lives in hooks_dir would run twice:
+        // once here, once more during the directory scan below. See issue #40.
+        if !config.no_hooks {
+            if let Some(dir) = &hooks_dir {
+                if post_hook_targets_hooks_dir(cmd, dir) {
+                    let warning = format!(
+                        "post_hooks entry targets a script inside {}; it will also be executed by the directory scan. Set no_hooks = true to suppress the directory scan, or move this script out of {} to rely on post_hooks alone.",
+                        dir.display(),
+                        dir.display()
+                    );
+                    tracing::warn!(cmd, hooks_dir = %dir.display(), "{}", warning);
+                    logs.push(warning);
+                }
+            }
+        }
+
         logs.push(format!("Running post-hook: {}", cmd));
         info!(cmd, "post-hook starting");
         let t = Instant::now();
@@ -71,9 +92,19 @@ pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
         return logs;
     }
 
-    if let Some(hooks_dir) = crate::config::config_dir().map(|d| d.join("hooks")) {
+    if let Some(hooks_dir) = &hooks_dir {
         if hooks_dir.is_dir() {
-            for script in sorted_executables(&hooks_dir) {
+            let scripts = sorted_executables(hooks_dir);
+            if !scripts.is_empty() {
+                let summary = format!(
+                    "discovered {} hook script(s) in {}; running in alphabetical order",
+                    scripts.len(),
+                    hooks_dir.display()
+                );
+                info!(dir = %hooks_dir.display(), count = scripts.len(), "hooks directory scan");
+                logs.push(summary);
+            }
+            for script in scripts {
                 let label = script.display().to_string();
                 logs.push(format!("Running hook script: {}", label));
                 info!(script = %label, "post-hook starting");
@@ -102,6 +133,46 @@ pub fn run_hooks(config: &Config, ctx: &HookContext) -> Vec<String> {
     }
 
     logs
+}
+
+/// True when `cmd` looks like it invokes a script that lives directly inside
+/// `hooks_dir` — meaning the same script would also be picked up by the
+/// directory scan, running twice per upload (issue #40).
+///
+/// This is a heuristic string match, not a shell parse: it normalizes path
+/// separators and looks for the resolved `hooks_dir` path inside `cmd`, then
+/// falls back to matching the `<parent>/<hooks>` suffix so unresolved
+/// placeholders like Windows' `%APPDATA%\pesto\hooks\...` still match even
+/// though the literal env var was never expanded.
+pub fn post_hook_targets_hooks_dir(cmd: &str, hooks_dir: &Path) -> bool {
+    let normalized_cmd = cmd.replace('\\', "/").to_lowercase();
+
+    let normalized_dir = hooks_dir
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
+    if !normalized_dir.is_empty() && normalized_cmd.contains(&normalized_dir) {
+        return true;
+    }
+
+    if let (Some(hooks_name), Some(parent_name)) = (
+        hooks_dir.file_name().and_then(|n| n.to_str()),
+        hooks_dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str()),
+    ) {
+        let suffix = format!(
+            "{}/{}/",
+            parent_name.to_lowercase(),
+            hooks_name.to_lowercase()
+        );
+        if normalized_cmd.contains(&suffix) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// List the executable hook scripts in `~/.config/pesto/hooks/`, sorted by name.
@@ -242,10 +313,36 @@ fn sorted_executables(dir: &Path) -> Vec<PathBuf> {
     let mut scripts: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_file() && is_executable(p))
+        .filter(|p| p.is_file() && is_executable(p) && !is_disabled(p))
         .collect();
     scripts.sort();
     scripts
+}
+
+/// True when a hook script should be skipped despite being executable: a
+/// backup copy (`foo.ps1.bak`, `foo.old`), an explicitly disabled script
+/// (`foo.disabled`, `foo.off`), or any file inside a `disabled/` subfolder.
+/// Lets users keep old copies of a hook script next to the active one
+/// without them being auto-executed (see issue #40).
+pub fn is_disabled(path: &Path) -> bool {
+    let in_disabled_dir = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("disabled"));
+    if in_disabled_dir {
+        return true;
+    }
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".disabled")
+        || name.ends_with(".off")
+        || name.ends_with(".bak")
+        || name.ends_with(".old")
 }
 
 #[cfg(unix)]
@@ -262,4 +359,84 @@ fn is_executable(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("exe" | "cmd" | "bat" | "ps1")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_disabled_matches_known_suffixes() {
+        assert!(is_disabled(Path::new("/hooks/foo.disabled")));
+        assert!(is_disabled(Path::new("/hooks/foo.off")));
+        assert!(is_disabled(Path::new("/hooks/foo.ps1.bak")));
+        assert!(is_disabled(Path::new("/hooks/foo.ps1.old")));
+        assert!(is_disabled(Path::new("/hooks/FOO.DISABLED")));
+    }
+
+    #[test]
+    fn is_disabled_matches_disabled_subfolder() {
+        assert!(is_disabled(Path::new("/hooks/disabled/foo.ps1")));
+        assert!(is_disabled(Path::new("/hooks/Disabled/foo.sh")));
+    }
+
+    #[test]
+    fn is_disabled_false_for_active_scripts() {
+        assert!(!is_disabled(Path::new("/hooks/foo.ps1")));
+        assert!(!is_disabled(Path::new("/hooks/foo.sh")));
+        assert!(!is_disabled(Path::new("/hooks/foo-backup.ps1")));
+    }
+
+    #[test]
+    fn post_hook_targets_hooks_dir_matches_resolved_path() {
+        let dir = Path::new("/home/user/.config/pesto/hooks");
+        assert!(post_hook_targets_hooks_dir(
+            "/home/user/.config/pesto/hooks/pesto-hook.sh",
+            dir
+        ));
+        assert!(!post_hook_targets_hooks_dir(
+            "curl https://example.com/notify",
+            dir
+        ));
+    }
+
+    // `Path` parses separators per the compilation target, so a Windows-style
+    // path only behaves as expected (`.parent()`/`.file_name()` split on `\`)
+    // when actually compiled for Windows.
+    #[cfg(windows)]
+    #[test]
+    fn post_hook_targets_hooks_dir_matches_unexpanded_windows_placeholder() {
+        let dir = Path::new(r"C:\Users\alice\AppData\Roaming\pesto\hooks");
+        assert!(post_hook_targets_hooks_dir(
+            r#"pwsh -ExecutionPolicy Bypass -File %APPDATA%\pesto\hooks\pesto-hook.ps1 -ManualInput"#,
+            dir
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_hook_targets_hooks_dir_false_for_unrelated_command() {
+        let dir = Path::new(r"C:\Users\alice\AppData\Roaming\pesto\hooks");
+        assert!(!post_hook_targets_hooks_dir(
+            r#"pwsh -File C:\Scripts\notify.ps1"#,
+            dir
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_hook_targets_hooks_dir_matches_unexpanded_unix_placeholder() {
+        let dir = Path::new("/home/alice/.config/pesto/hooks");
+        assert!(post_hook_targets_hooks_dir(
+            "sh -c $HOME/.config/pesto/hooks/pesto-hook.sh",
+            dir
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_hook_targets_hooks_dir_false_for_unrelated_command() {
+        let dir = Path::new("/home/alice/.config/pesto/hooks");
+        assert!(!post_hook_targets_hooks_dir("curl -X POST https://x", dir));
+    }
 }

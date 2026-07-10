@@ -5,8 +5,10 @@
 # Install:
 #   Copy-Item generic-indexer.ps1 "$env:APPDATA\pesto\hooks\"
 #
-# In config.toml set:
-#   post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\\generic-indexer.ps1\""
+# Any script placed in that folder runs automatically after every upload, so
+# this is all you need to do — do NOT also add a `post_hook` entry pointing
+# at this same file in config.toml, or it will run twice per upload (once
+# from post_hook, once from the directory scan). Pick exactly one mechanism.
 #
 # Edit the variables below before use.
 # Dependencies: curl (Windows 10 1803+), ffmpeg (only required for video files)

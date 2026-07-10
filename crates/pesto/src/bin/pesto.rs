@@ -1297,17 +1297,7 @@ async fn run_single_upload(
             tags: &post_tags_str,
         };
 
-        // Explicit --post-hook always runs (not suppressed by --no-hooks).
-        for cmd in &config.post_hooks {
-            run_post_hook(cmd, &hook_env);
-        }
-
-        // Directory scripts are suppressed by --no-hooks.
-        if !config.no_hooks {
-            if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
-                run_hooks_dir(&hooks_dir, &hook_env);
-            }
-        }
+        run_all_hooks(config, &hook_env);
     }
 
     // Cleanup temp dirs.
@@ -1567,16 +1557,7 @@ async fn run_batch(
             };
             // Skip hooks for --dry-run / --par2-only: no real upload happened.
             if !config.dry_run && !config.par2_only {
-                // Explicit --post-hook always runs (not suppressed by --no-hooks).
-                for cmd in &config.post_hooks {
-                    run_post_hook(cmd, &hook_env);
-                }
-                // Directory scripts are suppressed by --no-hooks.
-                if !config.no_hooks {
-                    if let Some(hooks_dir) = pesto::config::config_dir().map(|d| d.join("hooks")) {
-                        run_hooks_dir(&hooks_dir, &hook_env);
-                    }
-                }
+                run_all_hooks(config, &hook_env);
             }
         }
     }
@@ -2520,7 +2501,37 @@ fn run_post_hook(cmd: &str, env: &HookEnv<'_>) {
     }
 }
 
-/// Run every executable file in `hooks_dir`, sorted by name.
+/// Run `config.post_hooks`, then every executable script in the hooks
+/// directory (skipped when `config.no_hooks` is set). Warns when a
+/// `post_hooks` entry resolves to a script inside the hooks directory, since
+/// it would then run a second time during the directory scan (issue #40).
+fn run_all_hooks(config: &Config, env: &HookEnv<'_>) {
+    let hooks_dir = pesto::config::config_dir().map(|d| d.join("hooks"));
+
+    for cmd in &config.post_hooks {
+        if !config.no_hooks {
+            if let Some(dir) = &hooks_dir {
+                if pesto::hooks::post_hook_targets_hooks_dir(cmd, dir) {
+                    tracing::warn!(
+                        cmd,
+                        hooks_dir = %dir.display(),
+                        "post_hooks entry targets a script inside the hooks directory; it will also be executed by the directory scan. Set no_hooks = true to suppress the directory scan, or move this script out of the hooks directory to rely on post_hooks alone."
+                    );
+                }
+            }
+        }
+        run_post_hook(cmd, env);
+    }
+
+    if !config.no_hooks {
+        if let Some(dir) = &hooks_dir {
+            run_hooks_dir(dir, env);
+        }
+    }
+}
+
+/// Run every executable file in `hooks_dir`, sorted by name, skipping
+/// disabled ones (see [`pesto::hooks::is_disabled`]).
 ///
 /// Each script is executed directly (not via a shell) so it must have a
 /// shebang line on Unix or a registered extension on Windows. Errors per
@@ -2532,9 +2543,16 @@ fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
     let mut scripts: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_file() && is_executable(p))
+        .filter(|p| p.is_file() && is_executable(p) && !pesto::hooks::is_disabled(p))
         .collect();
     scripts.sort();
+    if !scripts.is_empty() {
+        println!(
+            "discovered {} hook script(s) in {}; running in alphabetical order",
+            scripts.len(),
+            hooks_dir.display()
+        );
+    }
     for script in &scripts {
         println!("running hook: {}", script.display());
         let mut child = hook_script_command(script);
