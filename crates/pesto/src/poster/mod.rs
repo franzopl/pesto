@@ -2018,8 +2018,13 @@ pub async fn repost_missing_segments(
             continue;
         }
 
-        let len = seg.bytes as usize;
-        let mut buf = vec![0u8; len];
+        // `seg.bytes` is the wire size (headers + yEnc-encoded body) used for
+        // the NZB `<segment bytes="...">` attribute — reading that many raw
+        // bytes here always overruns, since yEnc encoding only grows data.
+        // The raw slice length must be derived from the original file size
+        // the same way `repost_failed_tasks` does.
+        let read_len = (seg.file_size - offset).min(article_size as u64) as usize;
+        let mut buf = vec![0u8; read_len];
         if let Err(e) = file.read_exact(&mut buf).await {
             warn!(file = %seg.file_name, "repost: read failed: {e}");
             continue;
