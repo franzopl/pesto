@@ -2096,10 +2096,7 @@ pub async fn repost_missing_segments(
             warn!(id = %seg.message_id, "repost: gave up after all retries");
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::Status {
-                    text: format!(
-                        "repost failed: {} (check logs for details)",
-                        &seg.message_id
-                    ),
+                    text: format!("repost failed: {} (check logs for details)", seg.message_id),
                 });
             }
         }
