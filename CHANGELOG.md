@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.40] — 2026-07-10
+
+### Fixed
+- **Post-check repost always failed with a premature EOF**: `repost_missing_segments`
+  read `seg.bytes` (the wire size — headers + yEnc-encoded body, only meant for
+  the NZB `<segment bytes="...">` attribute) as if it were the number of raw
+  bytes to re-read from the source file. yEnc encoding only grows data, so this
+  always over-read past the actual segment and failed with "early eof",
+  meaning **every** post-check repost silently failed regardless of the
+  0.3.39 `file_path` fix — the two bugs were stacked on the same code path.
+  The raw read length is now derived from `seg.file_size` and the configured
+  article size, the same way the already-correct `repost_failed_tasks`
+  (end-of-run retry) computes it. Caught by a new end-to-end test
+  (`tests/check_post_retries.rs`) that runs the actual compiled binary
+  against a mock NNTP server and drives a real repost.
+
+---
+
 ## [0.3.39] — 2026-07-10
 
 ### Fixed
