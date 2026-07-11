@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.42] — 2026-07-11
+
 ### Added
 - **`output.no_hooks` config field**: every other `--no-*` flag had a matching
   `config.toml` field (`--no-history` ↔ `output.history`, `--no-archive` ↔
