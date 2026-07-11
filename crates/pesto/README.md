@@ -555,6 +555,14 @@ can abort the upload) and **post-upload** (runs after a successful upload).
 explicit `--pre-hook` and `--post-hook` commands are unaffected. This lets you
 run a single explicit hook without triggering every directory script.
 
+To make this the permanent default instead of passing `--no-hooks` on every
+run, set it once in `config.toml`:
+
+```toml
+[output]
+no_hooks = true
+```
+
 ### Pre-upload hook
 
 A pre-upload hook runs **before compression, PAR2 generation, and NNTP

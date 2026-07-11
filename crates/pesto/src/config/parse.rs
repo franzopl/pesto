@@ -250,7 +250,7 @@ impl Config {
                         .collect()
                 }
             },
-            no_hooks: cli.no_hooks,
+            no_hooks: cli.no_hooks.or(file.output.no_hooks).unwrap_or(false),
             nfo: cli.nfo.or(file.output.nfo).unwrap_or(false),
             nzb_conflict: cli
                 .nzb_conflict

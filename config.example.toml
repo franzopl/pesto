@@ -216,6 +216,12 @@ groups = ["alt.binaries.test"]
 #
 # See examples/hooks/ for ready-made hook scripts (curupira.sh, generic-indexer.sh, etc.).
 
+# no_hooks — skip the executable scripts in ~/.config/pesto/hooks/ and
+# ~/.config/pesto/pre-hooks/. The pre_hook/pre_hooks and post_hook/post_hooks
+# values above are unaffected — only the directory scan is suppressed.
+# Also settable per-run with --no-hooks. Default: false.
+# no_hooks = false
+
 # history — write a record to history.jsonl after each upload. Default: true.
 # history = true
 

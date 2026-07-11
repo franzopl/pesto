@@ -511,7 +511,7 @@ impl Cli {
             message_id_domain: self.message_id_domain.clone(),
             pre_hooks: self.pre_hook.clone(),
             post_hooks: self.post_hook.clone(),
-            no_hooks: self.no_hooks,
+            no_hooks: if self.no_hooks { Some(true) } else { None },
             nfo: if self.nfo { Some(true) } else { None },
             nzb_conflict: if self.no_overwrite {
                 Some(pesto::config::NzbConflict::Rename)

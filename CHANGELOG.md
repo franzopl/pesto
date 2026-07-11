@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`output.no_hooks` config field**: every other `--no-*` flag had a matching
+  `config.toml` field (`--no-history` ↔ `output.history`, `--no-archive` ↔
+  `posting.no_archive`, …) except `--no-hooks`, which previously had to be
+  passed on every single CLI invocation. Setting `no_hooks = true` under
+  `[output]` now makes it the persistent default; the CLI flag still works
+  and overrides the config value. (#42)
+
 ---
 
 ## [0.3.41] — 2026-07-10

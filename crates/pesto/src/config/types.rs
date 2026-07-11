@@ -213,6 +213,11 @@ pub struct OutputSection {
     /// Shell commands to execute after a successful upload (one per entry).
     #[serde(default)]
     pub post_hooks: Vec<String>,
+    /// Skip the executable scripts in `~/.config/pesto/hooks/` and
+    /// `~/.config/pesto/pre-hooks/`. The `post_hooks` and `pre_hooks` config
+    /// values are unaffected — only the directory scan is suppressed.
+    /// Default: false. Also settable via `--no-hooks`.
+    pub no_hooks: Option<bool>,
     /// Generate a `.nfo` file alongside the `.nzb` after posting.
     pub nfo: Option<bool>,
     /// How to handle a conflict when the user-destination `.nzb` already exists.
@@ -309,7 +314,7 @@ pub struct Overrides {
     pub message_id_domain: Option<String>,
     pub pre_hooks: Vec<String>,
     pub post_hooks: Vec<String>,
-    pub no_hooks: bool,
+    pub no_hooks: Option<bool>,
     pub nfo: Option<bool>,
     pub nzb_conflict: Option<NzbConflict>,
     pub check: Option<bool>,
