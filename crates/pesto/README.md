@@ -691,6 +691,12 @@ To install a hook on Windows, copy the `.bat` or `.ps1` file to `%APPDATA%\pesto
 post_hook = "powershell -ExecutionPolicy Bypass -File \"%APPDATA%\\pesto\\hooks\\generic-indexer.ps1\""
 ```
 
+`.ps1` scripts run via `pwsh` (PowerShell 7+) when it is on `PATH`, falling back
+to the built-in `powershell` (Windows PowerShell 5.1) otherwise. If you write
+your own `.ps1` hooks using syntax that only exists in PowerShell 6+, install
+[PowerShell 7](https://github.com/PowerShell/PowerShell/releases) to have it
+picked up automatically — no config change needed.
+
 ---
 
 ## All flags

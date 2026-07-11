@@ -122,9 +122,11 @@ for %%O in (10 24 38 52 66 80) do (
     ffmpeg -ss !SEEK! -i "%VIDEO_FILE%" -vframes 1 -q:v 2 "!SHOT_FILE!" -y -loglevel error >nul 2>&1
 
     if exist "!SHOT_FILE!" (
-        :: Upload to ImgBB via PowerShell (curl multipart is fragile in .bat)
-        for /f "delims=" %%U in ('powershell -NoProfile -Command ^
-            "try { $r = Invoke-RestMethod -Method Post -Uri 'https://api.imgbb.com/1/upload' -Form @{ key='%IMGBB_API_KEY%'; image=Get-Item '!SHOT_FILE!' }; $r.data.url } catch { '' }"') do (
+        :: Upload to ImgBB. curl handles the multipart POST itself --
+        :: Invoke-RestMethod's -Form parameter needs PowerShell 6+, which is
+        :: not guaranteed to be installed (issue #41); PowerShell is only used
+        :: afterwards, to parse the (nested) JSON response reliably.
+        for /f "delims=" %%U in ('curl -s -X POST "https://api.imgbb.com/1/upload" -F "key=%IMGBB_API_KEY%" -F "image=@!SHOT_FILE!" ^| powershell -NoProfile -Command "($input | Out-String | ConvertFrom-Json).data.url"') do (
             set "IMG_URL=%%U"
         )
         if defined IMG_URL (

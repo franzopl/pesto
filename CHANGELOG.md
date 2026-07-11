@@ -15,6 +15,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `[output]` now makes it the persistent default; the CLI flag still works
   and overrides the config value. (#42)
 
+### Fixed
+- **`.ps1` hook scripts hardcoded Windows PowerShell 5.1, breaking the bundled
+  `generic-indexer.ps1` example**: the hook runner always launched `.ps1`
+  scripts via `powershell` (PS 5.1), which does not support the `-Form`
+  parameter of `Invoke-RestMethod` (added in PS 6.0). The bundled example uses
+  `-Form` for both the ImgBB screenshot upload and the indexer submission, so
+  every upload on a stock Windows install (no `pwsh` installed) failed with a
+  misleading "cannot find a parameter that matches parameter name 'Form'"
+  error — with all 6 screenshots silently dropped. Fixed two ways: pesto now
+  prefers `pwsh` (PowerShell 7+) when it is on `PATH`, falling back to
+  `powershell` otherwise; and the bundled `generic-indexer.ps1` /
+  `generic-indexer.bat` examples no longer depend on `-Form` at all, so they
+  work correctly on a stock Windows install with no optional PowerShell
+  version. (#41)
+
 ---
 
 ## [0.3.41] — 2026-07-10

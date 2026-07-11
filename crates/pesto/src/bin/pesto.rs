@@ -2617,7 +2617,8 @@ fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
 /// has no knowledge of `.ps1` files (that association only exists in
 /// `ShellExecute`/Explorer). Running a `.ps1` via `Command::new(path)` fails
 /// with "%1 is not a valid Win32 application" (os error 193), so it must be
-/// invoked through `powershell.exe -File` explicitly.
+/// invoked through an explicit PowerShell executable with `-File`. See
+/// [`pesto::hooks::windows_powershell_exe`] for which one.
 #[cfg(windows)]
 fn hook_script_command(path: &std::path::Path) -> std::process::Command {
     let is_ps1 = path
@@ -2625,7 +2626,7 @@ fn hook_script_command(path: &std::path::Path) -> std::process::Command {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("ps1"));
     if is_ps1 {
-        let mut c = std::process::Command::new("powershell");
+        let mut c = std::process::Command::new(pesto::hooks::windows_powershell_exe());
         c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
         c.arg(path);
         c

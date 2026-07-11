@@ -260,7 +260,8 @@ fn run_script(path: &Path, ctx: &HookContext) -> Result<String, String> {
 /// has no knowledge of `.ps1` files (that association only exists in
 /// `ShellExecute`/Explorer). Running a `.ps1` via `Command::new(path)` fails
 /// with "%1 is not a valid Win32 application" (os error 193), so it must be
-/// invoked through `powershell.exe -File` explicitly.
+/// invoked through an explicit PowerShell executable with `-File`. See
+/// [`windows_powershell_exe`] for which one.
 #[cfg(windows)]
 fn script_command(path: &Path) -> Command {
     let is_ps1 = path
@@ -268,12 +269,34 @@ fn script_command(path: &Path) -> Command {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("ps1"));
     if is_ps1 {
-        let mut c = Command::new("powershell");
+        let mut c = Command::new(windows_powershell_exe());
         c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
         c.arg(path);
         c
     } else {
         Command::new(path)
+    }
+}
+
+/// Name of the PowerShell executable to use for `.ps1` hook scripts.
+///
+/// Prefers `pwsh` (PowerShell 7+) when it is on `PATH`, since it supports
+/// syntax (e.g. `Invoke-RestMethod -Form`) unavailable in Windows PowerShell
+/// 5.1. Falls back to `powershell`, which always ships with Windows. The
+/// `where pwsh` probe runs once per process and is cached (issue #41).
+#[cfg(windows)]
+pub fn windows_powershell_exe() -> &'static str {
+    static PWSH_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let available = *PWSH_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("where")
+            .arg("pwsh")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    });
+    if available {
+        "pwsh"
+    } else {
+        "powershell"
     }
 }
 

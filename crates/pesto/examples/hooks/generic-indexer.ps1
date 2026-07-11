@@ -43,6 +43,42 @@ $ErrorActionPreference = "Stop"
 function Log   { param($msg) Write-Host "[Indexer] $msg" }
 function Warn  { param($msg) Write-Host "[Indexer] WARNING: $msg" }
 
+# Multipart POST helper. `Invoke-RestMethod -Form` only exists on PowerShell
+# 6.0+ (https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/invoke-restmethod)
+# and pesto's hook runner falls back to Windows PowerShell 5.1 when `pwsh` is
+# not installed (issue #41), so this uses System.Net.Http directly instead —
+# available on both PS 5.1 (.NET Framework) and PS 7+ (.NET).
+# $Fields values that are [System.IO.FileInfo] are sent as file parts; every
+# other value is sent as a plain text field.
+function Invoke-MultipartUpload {
+    param([string]$Uri, [hashtable]$Fields)
+
+    Add-Type -AssemblyName System.Net.Http
+    $client  = New-Object System.Net.Http.HttpClient
+    $content = New-Object System.Net.Http.MultipartFormDataContent
+    try {
+        foreach ($key in $Fields.Keys) {
+            $value = $Fields[$key]
+            if ($value -is [System.IO.FileInfo]) {
+                $stream = [System.IO.File]::OpenRead($value.FullName)
+                $part   = New-Object System.Net.Http.StreamContent($stream)
+                $content.Add($part, $key, [System.IO.Path]::GetFileName($value.FullName))
+            } else {
+                $content.Add((New-Object System.Net.Http.StringContent([string]$value)), $key)
+            }
+        }
+        $resp = $client.PostAsync($Uri, $content).GetAwaiter().GetResult()
+        $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $resp.IsSuccessStatusCode) {
+            throw "HTTP $([int]$resp.StatusCode): $body"
+        }
+        return $body | ConvertFrom-Json
+    } finally {
+        $content.Dispose()
+        $client.Dispose()
+    }
+}
+
 # ── sanity checks ─────────────────────────────────────────────────────────────
 
 $nzb  = $env:PESTO_NZB
@@ -110,9 +146,10 @@ if ($videoFile) {
                     if (Test-Path $shotFile) {
                         # Upload to ImgBB
                         try {
-                            $response = Invoke-RestMethod -Method Post `
-                                -Uri "https://api.imgbb.com/1/upload" `
-                                -Form @{ key = $ImgbbApiKey; image = Get-Item $shotFile }
+                            $response = Invoke-MultipartUpload -Uri "https://api.imgbb.com/1/upload" -Fields @{
+                                key   = $ImgbbApiKey
+                                image = Get-Item $shotFile
+                            }
 
                             if ($response.data.url) {
                                 $screenshotUrls += $response.data.url
@@ -162,9 +199,7 @@ if ($screenshotUrls.Count -gt 0) {
 # ── submit ────────────────────────────────────────────────────────────────────
 
 try {
-    $response = Invoke-RestMethod -Method Post `
-        -Uri "${IndexerApiUrl}?apikey=${IndexerApiKey}" `
-        -Form $form
+    $response = Invoke-MultipartUpload -Uri "${IndexerApiUrl}?apikey=${IndexerApiKey}" -Fields $form
 } catch {
     Write-Error "[Indexer] FAILED: $_"
     exit 1
