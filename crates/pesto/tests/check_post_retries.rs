@@ -114,7 +114,12 @@ fn handle_connection(stream: TcpStream, posts: Arc<Mutex<HashMap<String, u32>>>,
 /// Runs `pesto` against the mock server for one small file, isolated from any
 /// real `~/.config/pesto` (which may hold real credentials and hooks) via a
 /// scratch `XDG_CONFIG_HOME`.
-fn run_pesto(port: u16, check_post_retries: u32, input: &std::path::Path, out: &std::path::Path) -> std::process::Output {
+fn run_pesto(
+    port: u16,
+    check_post_retries: u32,
+    input: &std::path::Path,
+    out: &std::path::Path,
+) -> std::process::Output {
     let xdg_home = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_pesto"))
         .env("XDG_CONFIG_HOME", xdg_home.path())
