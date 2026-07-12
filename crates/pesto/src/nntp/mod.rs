@@ -385,11 +385,14 @@ impl Connection {
 /// When a connection drops after the server accepted an article but before we
 /// read its `240`, a retry re-sends the same Message-ID. The server then
 /// answers `441` wrapping a `435 Already exists in history` (RFC 3977 §6.2.2:
-/// code 435 = "article not wanted; already have it"). Treating that as success
-/// avoids a pointless retry storm over segments that are already posted.
+/// code 435 = "article not wanted; already have it"). Some servers instead
+/// phrase the same rejection as a non-unique Message-ID (e.g. "Message-ID is
+/// not unique") without the `435` code or that exact wording. Treating either
+/// phrasing as success avoids a pointless retry storm over segments that are
+/// already posted.
 fn already_exists(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("already exists") || lower.contains("435")
+    lower.contains("already exists") || lower.contains("435") || lower.contains("not unique")
 }
 
 /// Apply NNTP dot-stuffing: any line that begins with `.` gets an extra `.`
@@ -629,6 +632,18 @@ mod tests {
         )
         .await;
         conn.read_post_response().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn post_441_not_unique_is_treated_as_success() {
+        // Some servers phrase the same "already have it" rejection without the
+        // 435 code, as a non-unique Message-ID instead.
+        let (mut conn, _server) = mock_conn(
+            b"340 Send article\r\n\
+              441 Posting Failed. Message-ID is not unique\r\n",
+        )
+        .await;
+        conn.post(b"article").await.unwrap();
     }
 
     #[tokio::test]
