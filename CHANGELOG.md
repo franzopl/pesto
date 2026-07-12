@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.43] — 2026-07-12
+
+### Fixed
+- **`441` rejection with "Message-ID is not unique" wording treated as a hard
+  failure**: when a connection drops right after the server accepts an
+  article but before the `240` confirmation is read, a retry re-sends the
+  same article and gets rejected as a duplicate. Pesto already recognized
+  this as an already-posted success when the server's `441` text mentioned
+  `435`/"already exists" (#23), but some servers instead phrase it as a
+  non-unique Message-ID with neither of those. That variant was retried
+  against the same rejection until attempts were exhausted, marking an
+  already-successful segment as failed. `already_exists()` now also matches
+  "not unique".
+
+---
+
 ## [0.3.42] — 2026-07-11
 
 ### Added
