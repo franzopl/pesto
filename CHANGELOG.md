@@ -7,6 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`--allow-incomplete-nzb` / `posting.allow_incomplete_nzb`**: `pesto`
+  already refused to write the `.nzb` when a segment failed to POST after
+  all retries, but that guard never covered the separate case of an article
+  `--check` confirmed missing on the server after every
+  `--check-post-retries` round — the `.nzb` was written anyway, post-upload
+  hooks ran, and any indexer/notification wired to those hooks reported the
+  release as complete even though it referenced content the server never
+  confirmed was retrievable. `pesto` now refuses to write the `.nzb` and
+  skips post-upload hooks in that case too, unless `--allow-incomplete-nzb`
+  is explicitly passed (e.g. when PAR2 recovery is expected to cover the
+  gap); the process still exits non-zero either way.
+
+### Fixed
+- **A `441` "already exists" rejection on repost was wrongly counted as
+  success**: `--check`'s repost pass re-posts a confirmed-missing article
+  under its original `Message-ID`, and (like the original post's own retry
+  logic) treated a `441` duplicate rejection as proof the article was
+  already there. That assumption doesn't hold here — the server's dedup
+  history can remember a Message-ID from an accept that never actually
+  landed in the readable spool (a "ghost" article), in which case every
+  repost attempt gets rejected as a duplicate of nothing, forever, while
+  being misreported as "reposted successfully". `--check`'s repost path now
+  requires a genuine `240` accept; only the original post and the
+  connection-drop retry (`repost_failed_tasks`) still treat `441` as success,
+  since that assumption is correct for them.
+
 ---
 
 ## [0.3.43] — 2026-07-12

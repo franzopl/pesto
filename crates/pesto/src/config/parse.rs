@@ -277,6 +277,10 @@ impl Config {
                 .check_post_retries
                 .or(file.posting.check_post_retries)
                 .unwrap_or(1),
+            allow_incomplete_nzb: cli
+                .allow_incomplete_nzb
+                .or(file.posting.allow_incomplete_nzb)
+                .unwrap_or(false),
             // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth

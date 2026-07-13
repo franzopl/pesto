@@ -140,6 +140,7 @@ async fn posts_every_segment_to_a_mock_server() {
         check_retries: 2,
         check_connections: 1,
         check_post_retries: 1,
+        allow_incomplete_nzb: false,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };
@@ -298,6 +299,7 @@ fn make_config(port: u16) -> Config {
         check_retries: 2,
         check_connections: 1,
         check_post_retries: 1,
+        allow_incomplete_nzb: false,
         pipeline_depth: 1,
         keepalive_interval: 0,
     }

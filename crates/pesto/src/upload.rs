@@ -228,7 +228,12 @@ pub async fn run_upload(
     };
     // ─────────────────────────────────────────────────────────────────────────
 
-    let mut had_failures = !outcome.failures.is_empty();
+    let has_post_failures = !outcome.failures.is_empty();
+    // Set when a STAT pass still can't find some articles after every
+    // repost attempt. Kept separate from `has_post_failures` because
+    // `--allow-incomplete-nzb` only opts back into publishing past *this*
+    // kind of gap, not a genuine POST failure.
+    let mut has_confirmed_missing = false;
     let mut cancelled = outcome.cancelled;
 
     // ── Post-check STAT pass ──────────────────────────────────────────────────
@@ -314,7 +319,7 @@ pub async fn run_upload(
                                 ids = ?still_missing,
                                 "check: articles still missing after repost"
                             );
-                            had_failures = true;
+                            has_confirmed_missing = true;
                         }
                         Err(e) => {
                             emit_status(
@@ -322,7 +327,7 @@ pub async fn run_upload(
                                 format!("check: verify after repost failed: {e:#}"),
                             );
                             tracing::error!(error = %e, "check: second STAT pass failed");
-                            had_failures = true;
+                            has_confirmed_missing = true;
                         }
                     }
                     cancelled =
@@ -340,12 +345,20 @@ pub async fn run_upload(
     }
     // ─────────────────────────────────────────────────────────────────────────
 
+    // If some articles are still confirmed missing after every repost round,
+    // refuse to write the NZB (and skip NFO/hooks below) unless the caller
+    // explicitly opted into publishing anyway via `allow_incomplete_nzb`
+    // (e.g. relying on PAR2 recovery). A genuine POST failure always blocks,
+    // regardless of the flag.
+    let write_blocked =
+        has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+
     // ── Write NZB ────────────────────────────────────────────────────────────
     let nzb_path: Option<PathBuf> = if (cancelled && !config.resume)
         || outcome.segments.is_empty()
         || config.dry_run
         || config.par2_only
-        || had_failures
+        || write_blocked
     {
         None
     } else if let Some(base) = nzb_base {
@@ -421,14 +434,17 @@ pub async fn run_upload(
             total_bytes,
             group: config.groups.first().map(String::as_str),
             category: config.nzb_category.as_deref(),
-            ok: !had_failures,
+            // Reflects true completeness, independent of `allow_incomplete_nzb`
+            // — the notification should say "not fully ok" even when the
+            // caller chose to publish anyway.
+            ok: !(has_post_failures || has_confirmed_missing),
         })
         .await;
     }
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── NFO + post-upload hooks ──────────────────────────────────────────────
-    if !cancelled && !had_failures && !config.par2_only && !config.dry_run {
+    if !cancelled && !write_blocked && !config.par2_only && !config.dry_run {
         // Generate .nfo next to the .nzb (or next to the source files).
         let nfo_path: Option<PathBuf> = if config.nfo {
             let base = nzb_path
@@ -516,7 +532,10 @@ pub async fn run_upload(
         segments: outcome.segments,
         groups: outcome.groups,
         cancelled,
-        had_failures,
+        // True completeness, independent of `allow_incomplete_nzb` — the
+        // caller (e.g. upapasta's catalog) should still be able to tell an
+        // upload with confirmed-missing articles apart from a clean one.
+        had_failures: has_post_failures || has_confirmed_missing,
         nzb_path,
         total_bytes,
     })

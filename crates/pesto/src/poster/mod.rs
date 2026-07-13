@@ -1965,7 +1965,22 @@ fn record_failure(
 ///
 /// Each missing segment is located by path and byte offset, re-encoded as
 /// yEnc, and posted with its **original** `Message-ID` so the existing `.nzb`
-/// remains valid. Returns the number of segments successfully reposted.
+/// remains valid, and so a server that only recognizes an article as
+/// STAT-findable after receiving it more than once can catch up across
+/// `check_post_retries` rounds (mirrors nyuu's `check-post-tries`).
+///
+/// Because these segments were already confirmed absent by a full STAT pass,
+/// this uses [`Connection::repost_parts_confirmed`] rather than
+/// [`Connection::post_parts`]: a `441`/"already exists" rejection here is
+/// *not* trusted as proof the article is retrievable (unlike the original
+/// post or a connection-drop retry in [`repost_failed_tasks`]) — it only
+/// proves the ID is present in the server's dedup history, which can happen
+/// even when the underlying article was never actually committed (a "ghost"
+/// article that would otherwise report itself as "reposted" every round
+/// forever without ever becoming readable). Only a genuine `240` counts as
+/// success; the caller's own STAT re-verification remains the real arbiter.
+///
+/// Returns the number of segments successfully reposted.
 pub async fn repost_missing_segments(
     config: &Config,
     all_segments: &[PostedSegment],
@@ -2058,7 +2073,7 @@ pub async fn repost_missing_segments(
         let max_retries = config.retries.max(1);
         for attempt in 1..=max_retries {
             match slot.ensure_connected().await {
-                Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
+                Ok(conn) => match conn.repost_parts_confirmed(&headers, &encoded.body).await {
                     Ok(()) => {
                         ok = true;
                         break;
@@ -2122,8 +2137,9 @@ pub async fn repost_missing_segments(
     Ok(reposted)
 }
 
-/// Post a fresh copy of each segment in `failed`, generating a new
-/// `Message-ID` for each one. Returns the `PostedSegment`s that were
+/// Post a fresh copy of each segment in `failed`, re-posting under the
+/// *same* `Message-ID` the in-run attempt used (see the comment on
+/// `message_id` below for why). Returns the `PostedSegment`s that were
 /// successfully posted; tasks that exhaust all retries are silently dropped
 /// (the caller can compare lengths to detect persistent failures).
 pub async fn repost_failed_tasks(

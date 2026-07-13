@@ -140,7 +140,39 @@ impl Connection {
     /// The headers are dot-stuffed for RFC 3977 compliance. The body is written
     /// directly without dot-stuffing because the yEnc encoder already escapes
     /// any `'.'` that would appear at a line start (yEnc spec §4).
+    ///
+    /// A `441` duplicate rejection (`already_exists`) is treated as success —
+    /// see [`already_exists`] for why that's the right call when we don't yet
+    /// know whether the article actually reached the server.
     pub async fn post_parts(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+        self.post_parts_inner(headers, body, true).await
+    }
+
+    /// Like [`post_parts`], but for re-posting an article a STAT pass already
+    /// *confirmed* missing.
+    ///
+    /// In that situation a `441` duplicate rejection must **not** be trusted
+    /// as proof the article is now retrievable: it only proves the
+    /// Message-ID is present in the server's dedup history, which can happen
+    /// even when the underlying article was never actually committed (a
+    /// "ghost" article — e.g. the frontend registered the ID but the backend
+    /// spool write never completed). Since the repost reuses the same ID as
+    /// the confirmed-missing original, a same-ID repost genuinely cannot
+    /// distinguish "already have it, ID is fine" from "ID is poisoned,
+    /// content still isn't there" — treating either as success would let a
+    /// poisoned ID report itself as "reposted" every round forever without
+    /// ever becoming readable. Only an explicit `240` accept counts here;
+    /// the caller's own STAT re-verification remains the real arbiter.
+    pub async fn repost_parts_confirmed(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+        self.post_parts_inner(headers, body, false).await
+    }
+
+    async fn post_parts_inner(
+        &mut self,
+        headers: &[u8],
+        body: &[u8],
+        dedup_as_success: bool,
+    ) -> Result<()> {
         let resp = self.command("POST").await?;
         if resp.code != 340 {
             bail!("POST not permitted: {} {}", resp.code, resp.text);
@@ -162,7 +194,7 @@ impl Connection {
         let resp = self.read_response().await?;
         match resp.code {
             240 => Ok(()),
-            441 if already_exists(&resp.text) => {
+            441 if dedup_as_success && already_exists(&resp.text) => {
                 debug!("article already on server (441/435); treating as posted");
                 Ok(())
             }

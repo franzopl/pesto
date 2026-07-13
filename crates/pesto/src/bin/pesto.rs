@@ -395,6 +395,13 @@ struct Cli {
     #[arg(long, value_name = "N")]
     check_post_retries: Option<u32>,
 
+    /// Publish the NZB (and run post-upload hooks) even if some articles are
+    /// still confirmed missing after every --check-post-retries round.
+    /// Without this, pesto refuses to write an NZB it never confirmed is
+    /// fully retrievable [config: posting.allow_incomplete_nzb, default false].
+    #[arg(long)]
+    allow_incomplete_nzb: bool,
+
     /// Name to use when reading from stdin (`-`). Required when a `-` path is
     /// given; determines the filename in the NZB and PAR2 metadata.
     #[arg(long, value_name = "NAME")]
@@ -523,6 +530,11 @@ impl Cli {
             check_retries: self.check_retries,
             check_connections: self.check_connections,
             check_post_retries: self.check_post_retries,
+            allow_incomplete_nzb: if self.allow_incomplete_nzb {
+                Some(true)
+            } else {
+                None
+            },
             pipeline_depth: self.pipeline_depth,
         }
     }
@@ -1118,9 +1130,17 @@ async fn run_single_upload(
     // If segments still failed after retry, refuse to write the NZB — it
     // would be incomplete. The resume state already has all successfully
     // posted segments so the user can continue with --resume.
-    let has_unrecoverable_failures =
+    let has_post_failures =
         !outcome.failed_tasks.is_empty() && !config.dry_run && !config.par2_only;
-    if has_unrecoverable_failures {
+    // Set when a STAT pass still can't find some articles after every
+    // --check-post-retries round — a *different* kind of incompleteness
+    // than a POST that never got acknowledged at all. `--allow-incomplete-nzb`
+    // opts back into publishing only this kind of gap (e.g. relying on PAR2
+    // recovery); a genuine POST failure always blocks regardless of the flag.
+    let has_confirmed_missing = !check_missing.is_empty() && !config.dry_run && !config.par2_only;
+    let has_unrecoverable_failures =
+        has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+    if has_post_failures {
         let n = outcome.failed_tasks.len();
         eprintln!();
         eprintln!("error: {n} segment(s) could not be posted after all retries.");
@@ -1137,6 +1157,23 @@ async fn run_single_upload(
                 .join(" ");
             eprintln!("To retry the missing segments and finish the upload, run:");
             eprintln!("  pesto {files_str} --resume");
+        }
+        eprintln!();
+    }
+    if has_confirmed_missing {
+        let n = check_missing.len();
+        eprintln!();
+        if config.allow_incomplete_nzb {
+            eprintln!(
+                "warning: {n} article(s) still missing on the server after all repost rounds."
+            );
+            eprintln!("Publishing anyway — --allow-incomplete-nzb was set.");
+        } else {
+            eprintln!("error: {n} article(s) still missing on the server after all repost rounds.");
+            eprintln!(
+                "The NZB will NOT be written — pass --allow-incomplete-nzb to publish anyway \
+                 (e.g. relying on PAR2 recovery)."
+            );
         }
         eprintln!();
     }
@@ -1260,7 +1297,11 @@ async fn run_single_upload(
     let notify_enabled = config.notify.unwrap_or(true)
         && (config.notify_webhook.is_some() || config.notify_ntfy.is_some());
     if notify_enabled && !config.par2_only && !config.dry_run && !cancelled {
-        let had_failures = !outcome.failures.is_empty() || has_unrecoverable_failures;
+        // Reflects true completeness, independent of --allow-incomplete-nzb —
+        // the notification should say "not fully ok" even when the user
+        // chose to publish anyway.
+        let had_failures =
+            !outcome.failures.is_empty() || has_post_failures || has_confirmed_missing;
         pesto::notify::send_all(&pesto::notify::NotifyConfig {
             webhook_url: config.notify_webhook.as_deref(),
             ntfy_topic: config.notify_ntfy.as_deref(),

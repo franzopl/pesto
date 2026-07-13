@@ -163,6 +163,11 @@ pub struct PostingSection {
     /// find, each followed by another full STAT pass. Mirrors nyuu's
     /// `check-post-tries`. Default: 1.
     pub check_post_retries: Option<u32>,
+    /// Publish the NZB (and run post-upload hooks) even when some articles
+    /// are still confirmed missing on the server after every
+    /// `check_post_retries` round. Default: false — pesto refuses to write
+    /// an NZB that references content it never confirmed is retrievable.
+    pub allow_incomplete_nzb: Option<bool>,
     /// Number of articles to send per connection before reading responses.
     /// Values > 1 enable NNTP pipelining, which cuts per-article RTT cost.
     /// Incompatible with `verify = true`. Default: 1.
@@ -322,6 +327,7 @@ pub struct Overrides {
     pub check_retries: Option<u32>,
     pub check_connections: Option<usize>,
     pub check_post_retries: Option<u32>,
+    pub allow_incomplete_nzb: Option<bool>,
     pub pipeline_depth: Option<usize>,
 }
 
@@ -385,6 +391,7 @@ pub struct Config {
     pub check_retries: u32,
     pub check_connections: usize,
     pub check_post_retries: u32,
+    pub allow_incomplete_nzb: bool,
     pub pipeline_depth: usize,
     /// Keepalive interval in seconds; 0 = disabled. See [`DEFAULT_KEEPALIVE_SECS`].
     pub keepalive_interval: u64,

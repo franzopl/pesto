@@ -469,6 +469,30 @@ pesto --verify movie.mkv
 Failed STAT checks trigger automatic reposts. Off by default because it adds
 one round-trip per article.
 
+### Post-upload check and repost
+
+```bash
+# After the whole upload finishes, STAT every article and repost any that are missing
+pesto --check movie.mkv
+
+# Give a flaky provider more chances: 3 repost rounds, each followed by a fresh STAT pass
+pesto --check --check-post-retries 3 movie.mkv
+```
+
+`--check` waits `--check-delay` seconds (default `30`) for propagation, then
+STATs every posted article. Anything missing is reposted under its original
+`Message-ID` and re-verified; `--check-post-retries` controls how many
+repost-then-verify rounds to try (default `1`) before giving up — some
+providers only make an article STAT-findable after receiving it more than
+once.
+
+If articles are still confirmed missing after every round, `pesto` refuses to
+write the `.nzb` and skips post-upload hooks — it never ships a release it
+couldn't confirm is fully retrievable. Pass `--allow-incomplete-nzb` to
+publish anyway (e.g. when PAR2 recovery is expected to cover the gap); the
+process still exits non-zero so scripts and hooks can tell the upload wasn't
+fully clean.
+
 ### Rate limiting
 
 ```bash
@@ -740,6 +764,8 @@ picked up automatically — no config change needed.
 | `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before STAT pass; implies `--check` |
 | `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article during check pass |
 | `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for STAT pass |
+| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost-then-verify rounds for articles still missing after `--check` |
+| `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` and run hooks even if some articles are still confirmed missing after `--check-post-retries` |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
