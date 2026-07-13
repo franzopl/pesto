@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.44] — 2026-07-13
+
 ### Added
 - **`--allow-incomplete-nzb` / `posting.allow_incomplete_nzb`**: `pesto`
   already refused to write the `.nzb` when a segment failed to POST after
