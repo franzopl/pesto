@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.45] — 2026-07-13
+
 ### Fixed
 - **Windows users following `--help` couldn't find their config file** (#43):
   `--help` unconditionally told everyone to use `~/.config/pesto/config.toml`,
