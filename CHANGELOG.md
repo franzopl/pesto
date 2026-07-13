@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.49] — 2026-07-14
+
 ### Fixed
 - **Articles genuinely posted but never findable via `STAT`**: found by
   comparing against `nyuu` on Newshosting, some servers substitute their own
