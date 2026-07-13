@@ -32,9 +32,11 @@ tree is posted as one upload, with the folder structure preserved in the .nzb
 and PAR2 metadata.
 
 Server and credentials are read from a TOML config file. If --config is not
-given, pesto loads $XDG_CONFIG_HOME/pesto/config.toml (or, failing that,
-~/.config/pesto/config.toml) so a single setup serves every run. Create that
-file interactively with `pesto --config`.
+given, pesto loads it from the OS-standard location: $XDG_CONFIG_HOME/pesto/config.toml
+(or, failing that, ~/.config/pesto/config.toml) on Linux/macOS, or
+%APPDATA%\\pesto\\config.toml on Windows — NOT ~/.config, which the Windows
+build never checks. Create that file interactively with `pesto --config`,
+which prints the exact path it wrote to.
 
 Any config value can be overridden by the matching flag below.";
 
@@ -2181,15 +2183,35 @@ async fn main() -> Result<()> {
     // Resolve config file.
     let (file_config, nzb_default) = match &cli.config {
         Some(Some(path)) => (FileConfig::load(path)?, None),
-        _ => match config::default_config_path().filter(|p| p.exists()) {
-            Some(path) => {
-                eprintln!("using config: {}", path.display());
-                let fc = FileConfig::load(&path)?;
-                let nzb = fc.output.nzb.clone();
-                (fc, nzb)
+        _ => {
+            let default_path = config::default_config_path();
+            match default_path.as_deref().filter(|p| p.exists()) {
+                Some(path) => {
+                    eprintln!("using config: {}", path.display());
+                    let fc = FileConfig::load(path)?;
+                    let nzb = fc.output.nzb.clone();
+                    (fc, nzb)
+                }
+                // Nothing found at the OS-standard location: say exactly where
+                // pesto looked, so a config placed at the wrong path (e.g.
+                // ~/.config on Windows, which pesto never checks — see #43)
+                // doesn't look like it's being silently ignored.
+                None => {
+                    match &default_path {
+                        Some(path) => eprintln!(
+                            "no config found at {} — using CLI flags/built-in defaults only. \
+                             Run `pesto --config` to create one there.",
+                            path.display()
+                        ),
+                        None => eprintln!(
+                            "no config directory could be determined for this OS — using CLI \
+                             flags/built-in defaults only."
+                        ),
+                    }
+                    (FileConfig::default(), None)
+                }
             }
-            None => (FileConfig::default(), None),
-        },
+        }
     };
     let nzb_default = nzb_default.or_else(|| file_config.output.nzb.clone());
     // Read before `file_config` is consumed by `Config::resolve`.

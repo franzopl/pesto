@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Windows users following `--help` couldn't find their config file** (#43):
+  `--help` unconditionally told everyone to use `~/.config/pesto/config.toml`,
+  but the Windows build only ever checks `%APPDATA%\pesto\config.toml` — a
+  config placed at the documented path was silently ignored there. `--help`
+  now states the correct path per OS, and when no config is found at the
+  resolved default location, `pesto` prints exactly which path it checked
+  instead of silently falling back to CLI-only defaults.
+- **History, NZB archiving and session logs silently did nothing on native
+  Windows**: `catalog_dir()` re-derived the default catalog directory from
+  `$HOME`, which native Windows (cmd/PowerShell) doesn't set — it uses
+  `%APPDATA%` instead, same as the config file's own default path. It now
+  reuses that shared resolution instead of drifting from it.
+
 ---
 
 ## [0.3.44] — 2026-07-13

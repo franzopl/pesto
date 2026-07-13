@@ -40,15 +40,16 @@ pub struct UploadRecord<'a> {
 /// Returns the history catalog directory, creating it (and `nzb/`) if necessary.
 ///
 /// Uses `override_dir` when provided; otherwise falls back to
-/// `$XDG_CONFIG_HOME/pesto` or `~/.config/pesto`.
+/// [`crate::config::config_dir`] (`$XDG_CONFIG_HOME/pesto` / `~/.config/pesto`
+/// on Unix, `%APPDATA%\pesto` on Windows). This used to re-derive the default
+/// itself via `$HOME`, which is typically unset on native Windows (it uses
+/// `%APPDATA%`, not `HOME`) — silently disabling history, NZB archiving and
+/// session logs there. Delegating to `config_dir` keeps this in sync with the
+/// config file's own default location instead of drifting again.
 fn catalog_dir(override_dir: Option<&Path>) -> Option<PathBuf> {
-    let dir = if let Some(d) = override_dir {
-        d.to_path_buf()
-    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        PathBuf::from(xdg).join("pesto")
-    } else {
-        let home = std::env::var_os("HOME")?;
-        PathBuf::from(home).join(".config").join("pesto")
+    let dir = match override_dir {
+        Some(d) => d.to_path_buf(),
+        None => crate::config::config_dir()?,
     };
     fs::create_dir_all(dir.join("nzb")).ok()?;
     Some(dir)
