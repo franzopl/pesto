@@ -144,7 +144,11 @@ impl Connection {
     /// A `441` duplicate rejection (`already_exists`) is treated as success —
     /// see [`already_exists`] for why that's the right call when we don't yet
     /// know whether the article actually reached the server.
-    pub async fn post_parts(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+    ///
+    /// Returns `Some(message_id)` when the server echoed a (possibly
+    /// different) Message-ID in its `240` response — see
+    /// [`extract_returned_message_id`] — or `None` when it didn't say.
+    pub async fn post_parts(&mut self, headers: &[u8], body: &[u8]) -> Result<Option<String>> {
         self.post_parts_inner(headers, body, true).await
     }
 
@@ -163,7 +167,11 @@ impl Connection {
     /// poisoned ID report itself as "reposted" every round forever without
     /// ever becoming readable. Only an explicit `240` accept counts here;
     /// the caller's own STAT re-verification remains the real arbiter.
-    pub async fn repost_parts_confirmed(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+    pub async fn repost_parts_confirmed(
+        &mut self,
+        headers: &[u8],
+        body: &[u8],
+    ) -> Result<Option<String>> {
         self.post_parts_inner(headers, body, false).await
     }
 
@@ -172,7 +180,7 @@ impl Connection {
         headers: &[u8],
         body: &[u8],
         dedup_as_success: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let resp = self.command("POST").await?;
         if resp.code != 340 {
             bail!("POST not permitted: {} {}", resp.code, resp.text);
@@ -193,10 +201,10 @@ impl Connection {
 
         let resp = self.read_response().await?;
         match resp.code {
-            240 => Ok(()),
+            240 => Ok(extract_returned_message_id(&resp.text)),
             441 if dedup_as_success && already_exists(&resp.text) => {
                 debug!("article already on server (441/435); treating as posted");
-                Ok(())
+                Ok(None)
             }
             441 => bail!("article rejected by server (441): {}", resp.text),
             _ => bail!("unexpected POST response: {} {}", resp.code, resp.text),
@@ -232,9 +240,11 @@ impl Connection {
 
     /// Read one `(340, 240)` response pair for a pipelined POST.
     ///
-    /// Returns `Ok(())` on 240, or an error describing the rejection. On any
-    /// error the caller should invalidate the connection.
-    pub async fn read_post_response(&mut self) -> Result<()> {
+    /// Returns `Ok(Some(message_id))` on a `240` that echoes a (possibly
+    /// different) Message-ID — see [`extract_returned_message_id`] — `Ok(None)`
+    /// on a `240` that doesn't say, or an error describing the rejection. On
+    /// any error the caller should invalidate the connection.
+    pub async fn read_post_response(&mut self) -> Result<Option<String>> {
         let r340 = self.read_response().await?;
         if r340.code != 340 {
             bail!(
@@ -245,10 +255,10 @@ impl Connection {
         }
         let r240 = self.read_response().await?;
         match r240.code {
-            240 => Ok(()),
+            240 => Ok(extract_returned_message_id(&r240.text)),
             441 if already_exists(&r240.text) => {
                 debug!("article already on server (441/435); treating as posted");
-                Ok(())
+                Ok(None)
             }
             441 => bail!("article rejected by server (441): {}", r240.text),
             _ => bail!(
@@ -263,7 +273,7 @@ impl Connection {
     ///
     /// The payload is dot-stuffed and terminated per RFC 3977.
     /// Production code uses [`post_parts`] to avoid copying the body buffer.
-    pub async fn post(&mut self, article: &[u8]) -> Result<()> {
+    pub async fn post(&mut self, article: &[u8]) -> Result<Option<String>> {
         let resp = self.command("POST").await?;
         if resp.code != 340 {
             bail!("POST not permitted: {} {}", resp.code, resp.text);
@@ -281,10 +291,10 @@ impl Connection {
 
         let resp = self.read_response().await?;
         match resp.code {
-            240 => Ok(()),
+            240 => Ok(extract_returned_message_id(&resp.text)),
             441 if already_exists(&resp.text) => {
                 debug!("article already on server (441/435); treating as posted");
-                Ok(())
+                Ok(None)
             }
             441 => bail!("article rejected by server (441): {}", resp.text),
             _ => bail!("unexpected POST response: {} {}", resp.code, resp.text),
@@ -425,6 +435,28 @@ impl Connection {
 fn already_exists(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("already exists") || lower.contains("435") || lower.contains("not unique")
+}
+
+/// Extract a `<message-id>` echoed at the start of a successful POST
+/// response's text, if present.
+///
+/// RFC 3977 §6.3.1.3 does not require a server to echo a Message-ID in its
+/// `240` response, but some do — and at least some of those substitute a
+/// *different* ID than the one the client sent, at their own discretion
+/// (e.g. deduplication or canonicalization applied at accept time). A client
+/// that keeps tracking the ID it generated in that case will never find the
+/// article again via `STAT`, because that ID was never the one actually
+/// used to store it — the server's response is the only place this shows
+/// up. `nyuu` has handled this since 2016 (its `RE_POST` matcher); this
+/// mirrors that behavior so `pesto` trusts whichever ID the server says it
+/// used.
+fn extract_returned_message_id(text: &str) -> Option<String> {
+    let text = text.trim_start();
+    if !text.starts_with('<') {
+        return None;
+    }
+    let end = text.find('>')?;
+    Some(text[..=end].to_string())
 }
 
 /// Apply NNTP dot-stuffing: any line that begins with `.` gets an extra `.`

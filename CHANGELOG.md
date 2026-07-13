@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Articles genuinely posted but never findable via `STAT`**: found by
+  comparing against `nyuu` on Newshosting, some servers substitute their own
+  Message-ID at accept time and echo the *actual* one used in the `240`
+  response text instead of confirming the client-supplied one. `pesto` only
+  checked the response code, ignored the text, and kept tracking the ID it
+  generated — meaning `STAT` (and the `.nzb`) referenced an ID the server
+  never actually stored anything under. This wasn't a server-side drop; it
+  was `pesto` tracking the wrong ID. `nyuu` has handled this since 2016 (its
+  `RE_POST` matcher). `pesto` now parses the `240` response and adopts the
+  server's returned Message-ID whenever it differs from the one sent, across
+  every post path (initial post, pipelined post, `--check`'s repost pass,
+  and the end-of-run failed-task retry).
+
 ---
 
 ## [0.3.48] — 2026-07-13

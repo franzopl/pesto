@@ -1608,7 +1608,23 @@ async fn worker(
                 };
                 let t_post = Instant::now();
                 match conn.post_parts(&p.headers, &p.encoded.body).await {
-                    Ok(()) => {
+                    Ok(returned_id) => {
+                        // Some servers substitute their own Message-ID at
+                        // accept time and echo it back in the 240 response
+                        // instead of the one we sent — nyuu has handled this
+                        // since 2016. Tracking our own ID after that would
+                        // mean STAT (and the .nzb) reference an ID the
+                        // server never actually stored anything under.
+                        if let Some(server_id) = returned_id {
+                            if server_id != p.message_id {
+                                warn!(
+                                    sent = %p.message_id,
+                                    returned = %server_id,
+                                    "server returned a different Message-ID than sent; adopting it"
+                                );
+                                p.message_id = server_id;
+                            }
+                        }
                         if shared.config.verify {
                             match conn.stat(&p.message_id).await {
                                 Ok(true) => {
@@ -1750,7 +1766,20 @@ async fn worker(
                     let mut fail_at: Option<(usize, String)> = None;
                     for (i, result) in pipe_results.iter_mut().enumerate() {
                         match conn.read_post_response().await {
-                            Ok(()) => {
+                            Ok(returned_id) => {
+                                // See the sequential path above for why: some
+                                // servers substitute their own Message-ID at
+                                // accept time.
+                                if let Some(server_id) = returned_id {
+                                    if server_id != pending[i].message_id {
+                                        warn!(
+                                            sent = %pending[i].message_id,
+                                            returned = %server_id,
+                                            "server returned a different Message-ID than sent; adopting it"
+                                        );
+                                        pending[i].message_id = server_id;
+                                    }
+                                }
                                 debug!(segment = %pending[i].message_id, "posted (pipelined)");
                                 *result = Ok(());
                             }
@@ -2156,7 +2185,7 @@ pub async fn repost_missing_segments(
                 // Deliberately a fresh ID, not `seg.message_id` — see the
                 // function doc comment for why reusing the confirmed-missing
                 // ID is unsafe.
-                let message_id = generate_message_id(message_id_domain.as_deref());
+                let mut message_id = generate_message_id(message_id_domain.as_deref());
                 let article = Article {
                     message_id: message_id.clone(),
                     from: seg.from.clone(),
@@ -2173,7 +2202,20 @@ pub async fn repost_missing_segments(
                     match slot.ensure_connected().await {
                         Ok(conn) => {
                             match conn.repost_parts_confirmed(&headers, &encoded.body).await {
-                                Ok(()) => {
+                                Ok(returned_id) => {
+                                    // See the sequential post path for why:
+                                    // some servers substitute their own
+                                    // Message-ID at accept time.
+                                    if let Some(server_id) = returned_id {
+                                        if server_id != message_id {
+                                            warn!(
+                                                sent = %message_id,
+                                                returned = %server_id,
+                                                "server returned a different Message-ID than sent; adopting it"
+                                            );
+                                            message_id = server_id;
+                                        }
+                                    }
                                     ok = true;
                                     break;
                                 }
@@ -2345,7 +2387,7 @@ pub async fn repost_failed_tasks(
         // server that already has the article (lost `240` ack) deduplicates it
         // via `435 Already exists` instead of accepting a duplicate under a
         // fresh ID. See [`FailedTask::message_id`].
-        let message_id = task.message_id.clone();
+        let mut message_id = task.message_id.clone();
         let (rfc_date, _ts) = &task.date;
         let article = Article {
             message_id: message_id.clone(),
@@ -2362,7 +2404,19 @@ pub async fn repost_failed_tasks(
         for attempt in 1..=max_retries {
             match slot.ensure_connected().await {
                 Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
-                    Ok(()) => {
+                    Ok(returned_id) => {
+                        // See the main post path for why: some servers
+                        // substitute their own Message-ID at accept time.
+                        if let Some(server_id) = returned_id {
+                            if server_id != message_id {
+                                warn!(
+                                    sent = %message_id,
+                                    returned = %server_id,
+                                    "server returned a different Message-ID than sent; adopting it"
+                                );
+                                message_id = server_id;
+                            }
+                        }
                         ok = true;
                         break;
                     }
