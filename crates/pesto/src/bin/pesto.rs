@@ -908,7 +908,7 @@ async fn run_single_upload(
             pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
         };
 
-        let recovered = pesto::poster::repost_failed_tasks(
+        let mut recovered = pesto::poster::repost_failed_tasks(
             config,
             &outcome.failed_tasks,
             &outcome.groups,
@@ -924,6 +924,54 @@ async fn run_single_upload(
 
         drop(retry_tx);
         let _ = retry_renderer.await;
+
+        // `repost_failed_tasks` treats a `240`/`441` POST response as
+        // "recovered" (correct for the ordinary connection-drop case it's
+        // designed for), but --verify specifically asked for STAT
+        // confirmation — a segment that landed here because verify's own
+        // inline retries were exhausted needs that same confirmation before
+        // counting as recovered, or this blind retry would silently defeat
+        // --verify's guarantee for exactly the segments it flagged as
+        // suspect.
+        if config.verify
+            && !recovered.is_empty()
+            && !cancel.is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            let (verify_tx, verify_renderer) = if params.json_mode {
+                pesto::progress::spawn_json_emitter()
+            } else {
+                pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+            };
+            // Skip check_articles' propagation-delay wait and multi-attempt,
+            // 20s-spaced retries: --verify is about fast, inline confirmation,
+            // not --check's patient end-of-run pass, and repost_failed_tasks
+            // already gave this segment its best shot. A single quick STAT is
+            // enough to tell whether the blind repost actually landed —
+            // anyone wanting more patience already has --check for that.
+            let mut verify_config = (**config).clone();
+            verify_config.check_delay_secs = 0;
+            verify_config.check_retries = 1;
+            let still_missing =
+                pesto::poster::check_articles(&verify_config, &recovered, Some(&verify_tx), cancel)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("retry: verify after retry failed: {e:#}");
+                        error!(error = %e, "retry: post-recovery STAT pass failed");
+                        recovered.iter().map(|s| s.message_id.clone()).collect()
+                    });
+            drop(verify_tx);
+            let _ = verify_renderer.await;
+            if !still_missing.is_empty() {
+                eprintln!(
+                    "retry: {}/{} recovered segment(s) failed STAT verification",
+                    still_missing.len(),
+                    recovered.len()
+                );
+                let missing_set: std::collections::HashSet<&str> =
+                    still_missing.iter().map(String::as_str).collect();
+                recovered.retain(|s| !missing_set.contains(s.message_id.as_str()));
+            }
+        }
 
         let r = recovered.len();
         eprintln!("retry: {r}/{n} segment(s) recovered");

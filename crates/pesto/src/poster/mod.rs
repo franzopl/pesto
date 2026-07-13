@@ -1581,7 +1581,7 @@ async fn worker(
 
         if pending.len() == 1 {
             // ── Sequential path (depth 1 or only one task left) ──────────────
-            let p = pending.remove(0);
+            let mut p = pending.remove(0);
             let mut posted = false;
             let mut last_err = String::from("unknown error");
 
@@ -1616,6 +1616,34 @@ async fn worker(
                                     );
                                     warn!(segment = %p.message_id, attempt, "STAT not found; retrying");
                                     slot.invalidate("stat_430");
+                                    // A genuine `240` accept followed by a STAT
+                                    // miss means the server may have already
+                                    // cursed this exact Message-ID in its dedup
+                                    // history without ever storing the body (see
+                                    // `repost_missing_segments`) — retrying under
+                                    // the same ID could loop forever. Generate a
+                                    // fresh one for the next attempt so it gets
+                                    // an independent chance.
+                                    if attempt < max_attempts {
+                                        let new_id = generate_message_id(
+                                            shared.config.message_id_domain.as_deref(),
+                                        );
+                                        let (rfc_date, _ts) = &p.date;
+                                        let article = Article {
+                                            message_id: new_id.clone(),
+                                            from: p.task.from.clone(),
+                                            newsgroups: shared.post_group.clone(),
+                                            subject: default_subject(
+                                                &p.task.meta.subject_name,
+                                                p.task.part,
+                                                p.task.total,
+                                            ),
+                                            date: rfc_date.clone(),
+                                            no_archive: shared.config.no_archive,
+                                        };
+                                        p.headers = article.build_headers();
+                                        p.message_id = new_id;
+                                    }
                                 }
                                 Err(e) => {
                                     last_err = format!("STAT: {e:#}");

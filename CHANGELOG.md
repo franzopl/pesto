@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`--verify` had the same cursed-Message-ID risk as `--check`'s repost
+  pass**: its inline per-article retry, triggered when a `STAT` right after
+  posting comes back empty, reused the original Message-ID. Now generates a
+  fresh one on every retry, same reasoning as the `--check` fix in 0.3.46.
+- **The end-of-run retry could silently defeat `--verify`'s guarantee**:
+  `repost_failed_tasks` (which runs for *any* segment left failed after the
+  main post pass, including ones `--verify` gave up on) treats a `240`/`441`
+  POST response as proof of success, with no `STAT` check of its own — that's
+  correct for its original connection-drop use case, but for a segment that
+  landed here specifically because `--verify` couldn't confirm it, silently
+  counting the blind repost as "recovered" would ship it into the `.nzb`
+  without ever actually confirming it. When `--verify` is set, recovered
+  segments now get a quick single-attempt `STAT` check before counting as
+  recovered; anything still missing stays a real failure instead.
+
 ---
 
 ## [0.3.46] — 2026-07-13
