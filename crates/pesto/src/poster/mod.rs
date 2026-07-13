@@ -544,12 +544,15 @@ pub async fn post_files_with_progress_and_cancel(
     }
 
     // The PAR2 files posted in normal mode are written to a per-process temp
-    // directory purely as an intermediate; remove it once posting is done.
-    // (`--par2-only` writes next to the source files and must be kept.)
-    if !config.par2_only {
-        let _ = tokio::fs::remove_dir_all(par2_temp_dir()).await;
-    }
-
+    // directory purely as an intermediate. Cleanup is deliberately *not* done
+    // here: `--check`'s repost pass and the end-of-run `repost_failed_tasks`
+    // retry both run after this function returns and may need to re-read a
+    // PAR2 file's bytes to repost a missing segment. Deleting the directory
+    // this early made any PAR2 segment that came up missing permanently
+    // unrepostable ("cannot open file: No such file or directory"),
+    // regardless of how many repost rounds were configured. The caller is
+    // responsible for removing `par2_temp_dir()` once it's truly done with
+    // the run (see `run_single_upload` / `run_upload`).
     cancel_handle.abort();
     shared.emit(ProgressEvent::Finished);
 
@@ -580,8 +583,12 @@ pub async fn post_files_with_progress_and_cancel(
 }
 
 /// Per-process temp directory holding the intermediate PAR2 files written
-/// during a normal posting run. Removed once posting finishes.
-fn par2_temp_dir() -> PathBuf {
+/// during a normal posting run. Callers should remove it (when
+/// `!config.par2_only`) once the *entire* run is done — including any
+/// `--check` repost pass or end-of-run failed-task retry — not right after
+/// the main post loop finishes, since both of those may still need to
+/// re-read a PAR2 file's bytes from disk.
+pub fn par2_temp_dir() -> PathBuf {
     std::env::temp_dir().join(format!("parmesan_{}", std::process::id()))
 }
 

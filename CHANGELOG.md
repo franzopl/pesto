@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A PAR2 segment that came up missing during `--check` could never be
+  reposted**: the PAR2 temp directory (holding the intermediate `.par2`
+  files generated for a normal, non-`--par2-only` run) was deleted as soon
+  as the main post loop finished — before `--check`'s repost pass and the
+  end-of-run failed-task retry, both of which run afterward and need to
+  re-read a segment's source file from disk to repost it. Any PAR2-file
+  segment that STAT couldn't find was therefore permanently unrepostable
+  ("cannot open file: No such file or directory"), regardless of
+  `--check-post-retries`. Confirmed via `-vvv --log-file` trace on a real
+  upload. Cleanup now happens once the entire run — including all repost
+  passes — is done. `.7z`/`.zip`/`.rar` compression temp files were never
+  affected; their cleanup was already correctly placed at the end of the
+  run.
+
 ---
 
 ## [0.3.47] — 2026-07-13

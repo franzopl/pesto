@@ -552,6 +552,13 @@ pub async fn run_upload(
     if let Some(dir) = compress_temp_dir {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
+    // Only now — after the check repost pass and the end-of-run failed-task
+    // retry above have both had every chance to re-read a PAR2 file's bytes —
+    // is it safe to remove the PAR2 temp dir. See `poster::par2_temp_dir`'s
+    // doc comment for why this used to happen too early.
+    if !config.par2_only {
+        let _ = tokio::fs::remove_dir_all(crate::poster::par2_temp_dir()).await;
+    }
 
     Ok(UploadOutcome {
         segments: outcome.segments,

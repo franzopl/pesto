@@ -1485,6 +1485,13 @@ async fn run_single_upload(
     if let Some(dir) = compress_temp_dir {
         let _ = std::fs::remove_dir_all(&dir);
     }
+    // Only now — after the --check repost pass and the end-of-run failed-task
+    // retry above have both had every chance to re-read a PAR2 file's bytes —
+    // is it safe to remove the PAR2 temp dir. See `par2_temp_dir`'s doc
+    // comment for why this used to happen too early.
+    if !config.par2_only {
+        let _ = tokio::fs::remove_dir_all(pesto::poster::par2_temp_dir()).await;
+    }
 
     // 26g — per-phase timing summary (only when -v is active)
     if tracing::enabled!(tracing::Level::INFO) {
