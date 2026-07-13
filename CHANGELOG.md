@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.48] — 2026-07-13
+
 ### Fixed
 - **A PAR2 segment that came up missing during `--check` could never be
   reposted**: the PAR2 temp directory (holding the intermediate `.par2`
