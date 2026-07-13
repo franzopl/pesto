@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.46] — 2026-07-13
+
 ### Fixed
 - **A repost could get permanently stuck on the same cursed Message-ID**:
   `--check`'s repost pass reused the original Message-ID on every attempt.
