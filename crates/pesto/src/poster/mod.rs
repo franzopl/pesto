@@ -1964,23 +1964,38 @@ fn record_failure(
 /// in `missing_ids`.
 ///
 /// Each missing segment is located by path and byte offset, re-encoded as
-/// yEnc, and posted with its **original** `Message-ID` so the existing `.nzb`
-/// remains valid, and so a server that only recognizes an article as
-/// STAT-findable after receiving it more than once can catch up across
-/// `check_post_retries` rounds (mirrors nyuu's `check-post-tries`).
+/// yEnc, and posted under a **freshly generated** `Message-ID` — deliberately
+/// *not* the original one. These segments were already confirmed absent by a
+/// full STAT pass, and real-world observation shows some servers register a
+/// Message-ID in their dedup history at `240`-accept time regardless of
+/// whether the article body actually lands in the readable spool: once that
+/// happens, the ID is permanently cursed — every future repost under the
+/// *same* ID gets a genuine-looking `240` again (the server just isn't
+/// bothering to re-store a "duplicate" of an ID it already has on file), yet
+/// the article never becomes STAT-findable, not even hours later. A fresh ID
+/// sidesteps the cursed dedup entry entirely, giving each attempt an
+/// independent chance of landing correctly.
 ///
-/// Because these segments were already confirmed absent by a full STAT pass,
-/// this uses [`Connection::repost_parts_confirmed`] rather than
-/// [`Connection::post_parts`]: a `441`/"already exists" rejection here is
-/// *not* trusted as proof the article is retrievable (unlike the original
-/// post or a connection-drop retry in [`repost_failed_tasks`]) — it only
-/// proves the ID is present in the server's dedup history, which can happen
-/// even when the underlying article was never actually committed (a "ghost"
-/// article that would otherwise report itself as "reposted" every round
-/// forever without ever becoming readable). Only a genuine `240` counts as
-/// success; the caller's own STAT re-verification remains the real arbiter.
+/// This also still uses [`Connection::repost_parts_confirmed`] rather than
+/// [`Connection::post_parts`] as a second line of defense: a `441`/"already
+/// exists" rejection is *not* trusted as proof of success here (unlike the
+/// original post or a connection-drop retry in [`repost_failed_tasks`]),
+/// since even a freshly generated ID could in principle collide with
+/// something the server already has. Only a genuine `240` counts; the
+/// caller's own STAT re-verification remains the real arbiter.
 ///
-/// Returns the number of segments successfully reposted.
+/// Distributes the missing segments across the same number of parallel
+/// connections as [`check_articles`] (`check_connections`, or the upload
+/// connection count) instead of a single sequential connection: reposting a
+/// large batch one article at a time can eat most of `check_delay_secs`
+/// itself, leaving little of that window for the server to actually store
+/// the article before the follow-up STAT pass runs.
+///
+/// Returns the [`PostedSegment`]s that were successfully (re)posted, each
+/// carrying its new `message_id`. The caller must splice these back into its
+/// own segment list — matched by `file_name` + `part`, since the old
+/// Message-ID is no longer valid — before writing the `.nzb` or re-verifying
+/// via STAT.
 pub async fn repost_missing_segments(
     config: &Config,
     all_segments: &[PostedSegment],
@@ -1988,143 +2003,228 @@ pub async fn repost_missing_segments(
     groups: &[String],
     events: Option<&ProgressSender>,
     cancel: Option<&Arc<AtomicBool>>,
-) -> Result<usize> {
+) -> Result<Vec<PostedSegment>> {
     if missing_ids.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let missing_set: std::collections::HashSet<&str> =
         missing_ids.iter().map(String::as_str).collect();
-    let to_repost: Vec<&PostedSegment> = all_segments
+    let to_repost: Vec<PostedSegment> = all_segments
         .iter()
         .filter(|s| missing_set.contains(s.message_id.as_str()))
+        .cloned()
         .collect();
 
     if to_repost.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    let server = config
-        .all_servers()
-        .next()
-        .expect("at least one server is configured");
-    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
+    let n_workers = if config.check_connections == 0 {
+        config.total_connections()
+    } else {
+        config.check_connections
+    }
+    .max(1)
+    .min(to_repost.len());
 
+    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let article_size = config.article_size;
-    let mut reposted = 0usize;
+    let line_length = config.line_length;
+    let no_archive = config.no_archive;
+    let max_retries = config.retries.max(1);
+    let message_id_domain = config.message_id_domain.clone();
+    let groups: Arc<Vec<String>> = Arc::new(groups.to_vec());
+    let total = to_repost.len();
+    let reposted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    for seg in &to_repost {
-        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
-            break;
+    // Split into chunks — one per worker — the same way `check_articles` does.
+    let chunks: Vec<Vec<PostedSegment>> = {
+        let mut v: Vec<Vec<PostedSegment>> = (0..n_workers).map(|_| Vec::new()).collect();
+        for (i, seg) in to_repost.into_iter().enumerate() {
+            v[i % n_workers].push(seg);
         }
-        let offset = (seg.part as u64 - 1) * article_size as u64;
+        v
+    };
 
-        let mut file = match File::open(&seg.file_path).await {
-            Ok(f) => f,
-            Err(e) => {
-                warn!(file = %seg.file_name, "repost: cannot open file: {e}");
-                continue;
-            }
-        };
+    let events_tx: Option<ProgressSender> = events.cloned();
+    let cancel_flag: Option<Arc<AtomicBool>> = cancel.map(Arc::clone);
 
-        use tokio::io::AsyncSeekExt;
-        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-            warn!(file = %seg.file_name, offset, "repost: seek failed: {e}");
-            continue;
-        }
+    let mut handles = Vec::with_capacity(n_workers);
+    for (worker_idx, chunk) in chunks.into_iter().enumerate() {
+        let servers = Arc::clone(&servers);
+        let groups = Arc::clone(&groups);
+        let reposted_count = Arc::clone(&reposted_count);
+        let tx = events_tx.clone();
+        let worker_cancel = cancel_flag.clone();
+        let message_id_domain = message_id_domain.clone();
 
-        // `seg.bytes` is the wire size (headers + yEnc-encoded body) used for
-        // the NZB `<segment bytes="...">` attribute — reading that many raw
-        // bytes here always overruns, since yEnc encoding only grows data.
-        // The raw slice length must be derived from the original file size
-        // the same way `repost_failed_tasks` does.
-        let read_len = (seg.file_size - offset).min(article_size as u64) as usize;
-        let mut buf = vec![0u8; read_len];
-        if let Err(e) = file.read_exact(&mut buf).await {
-            warn!(file = %seg.file_name, "repost: read failed: {e}");
-            continue;
-        }
+        handles.push(tokio::spawn(async move {
+            let server_idx = if servers.is_empty() {
+                0
+            } else {
+                worker_idx % servers.len()
+            };
+            let mut slot = ConnectionSlot::with_id(Arc::clone(&servers), server_idx, worker_idx);
+            let mut reposted: Vec<PostedSegment> = Vec::new();
 
-        let spec = yenc::PartSpec {
-            number: seg.part,
-            total: seg.total,
-            offset,
-        };
-        let encoded = yenc::encode_part(
-            &seg.subject_name,
-            seg.file_size,
-            spec,
-            &buf,
-            config.line_length,
-            None,
-        );
-        let (rfc_date, _ts) = &seg.date;
-        let article = Article {
-            message_id: seg.message_id.clone(),
-            from: seg.from.clone(),
-            newsgroups: groups.to_vec(),
-            subject: default_subject(&seg.subject_name, seg.part, seg.total),
-            date: rfc_date.clone(),
-            no_archive: config.no_archive,
-        };
-        let headers = article.build_headers();
+            for seg in &chunk {
+                if worker_cancel
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Relaxed))
+                {
+                    break;
+                }
+                let offset = (seg.part as u64 - 1) * article_size as u64;
 
-        let mut ok = false;
-        let max_retries = config.retries.max(1);
-        for attempt in 1..=max_retries {
-            match slot.ensure_connected().await {
-                Ok(conn) => match conn.repost_parts_confirmed(&headers, &encoded.body).await {
-                    Ok(()) => {
-                        ok = true;
-                        break;
-                    }
+                let mut file = match File::open(&seg.file_path).await {
+                    Ok(f) => f,
                     Err(e) => {
-                        slot.invalidate("post_err");
-                        warn!(id = %seg.message_id, attempt, "repost attempt failed: {e}");
-                        if let Some(tx) = events {
-                            let _ = tx.send(ProgressEvent::Status {
-                                text: format!("repost attempt {attempt}/{max_retries} failed: {e}"),
-                            });
-                        }
-                        if attempt < max_retries {
-                            if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
-                                break;
+                        warn!(file = %seg.file_name, "repost: cannot open file: {e}");
+                        continue;
+                    }
+                };
+
+                use tokio::io::AsyncSeekExt;
+                if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                    warn!(file = %seg.file_name, offset, "repost: seek failed: {e}");
+                    continue;
+                }
+
+                // `seg.bytes` is the wire size (headers + yEnc-encoded body)
+                // used for the NZB `<segment bytes="...">` attribute —
+                // reading that many raw bytes here always overruns, since
+                // yEnc encoding only grows data. The raw slice length must be
+                // derived from the original file size the same way
+                // `repost_failed_tasks` does.
+                let read_len = (seg.file_size - offset).min(article_size as u64) as usize;
+                let mut buf = vec![0u8; read_len];
+                if let Err(e) = file.read_exact(&mut buf).await {
+                    warn!(file = %seg.file_name, "repost: read failed: {e}");
+                    continue;
+                }
+
+                let spec = yenc::PartSpec {
+                    number: seg.part,
+                    total: seg.total,
+                    offset,
+                };
+                let encoded = yenc::encode_part(
+                    &seg.subject_name,
+                    seg.file_size,
+                    spec,
+                    &buf,
+                    line_length,
+                    None,
+                );
+                let (rfc_date, _ts) = &seg.date;
+                // Deliberately a fresh ID, not `seg.message_id` — see the
+                // function doc comment for why reusing the confirmed-missing
+                // ID is unsafe.
+                let message_id = generate_message_id(message_id_domain.as_deref());
+                let article = Article {
+                    message_id: message_id.clone(),
+                    from: seg.from.clone(),
+                    newsgroups: (*groups).clone(),
+                    subject: default_subject(&seg.subject_name, seg.part, seg.total),
+                    date: rfc_date.clone(),
+                    no_archive,
+                };
+                let headers = article.build_headers();
+                let wire_bytes = (headers.len() + encoded.body.len()) as u64;
+
+                let mut ok = false;
+                for attempt in 1..=max_retries {
+                    match slot.ensure_connected().await {
+                        Ok(conn) => {
+                            match conn.repost_parts_confirmed(&headers, &encoded.body).await {
+                                Ok(()) => {
+                                    ok = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    slot.invalidate("post_err");
+                                    warn!(id = %message_id, slot_id = worker_idx, attempt,
+                                        "repost attempt failed: {e}");
+                                    if let Some(tx) = &tx {
+                                        let _ = tx.send(ProgressEvent::Status {
+                                            text: format!(
+                                                "repost attempt {attempt}/{max_retries} failed: {e}"
+                                            ),
+                                        });
+                                    }
+                                    if attempt < max_retries {
+                                        if worker_cancel
+                                            .as_ref()
+                                            .is_some_and(|f| f.load(Ordering::Relaxed))
+                                        {
+                                            break;
+                                        }
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                    }
+                                }
                             }
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        Err(e) => {
+                            warn!(attempt, slot_id = worker_idx, "repost: connect failed: {e}");
+                            if let Some(tx) = &tx {
+                                let _ = tx.send(ProgressEvent::Status {
+                                    text: format!("repost connect failed (attempt {attempt}): {e}"),
+                                });
+                            }
+                            if attempt < max_retries {
+                                if worker_cancel
+                                    .as_ref()
+                                    .is_some_and(|f| f.load(Ordering::Relaxed))
+                                {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
                         }
                     }
-                },
-                Err(e) => {
-                    warn!(attempt, "repost: connect failed: {e}");
-                    if let Some(tx) = events {
+                }
+
+                if ok {
+                    reposted.push(PostedSegment {
+                        file_name: seg.file_name.clone(),
+                        file_path: seg.file_path.clone(),
+                        subject_name: seg.subject_name.clone(),
+                        file_size: seg.file_size,
+                        part: seg.part,
+                        total: seg.total,
+                        message_id,
+                        bytes: wire_bytes,
+                        from: seg.from.clone(),
+                        date: seg.date.clone(),
+                    });
+                    let done = reposted_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(tx) = &tx {
                         let _ = tx.send(ProgressEvent::Status {
-                            text: format!("repost connect failed (attempt {attempt}): {e}"),
+                            text: format!("reposted {done}/{total} missing article(s)"),
                         });
                     }
-                    if attempt < max_retries {
-                        if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    warn!(id = %seg.message_id, "repost: gave up after all retries");
+                    if let Some(tx) = &tx {
+                        let _ = tx.send(ProgressEvent::Status {
+                            text: format!(
+                                "repost failed: {} (check logs for details)",
+                                seg.message_id
+                            ),
+                        });
                     }
                 }
             }
-        }
 
-        if ok {
-            reposted += 1;
-            if let Some(tx) = events {
-                let _ = tx.send(ProgressEvent::Status {
-                    text: format!("reposted {reposted}/{} missing article(s)", to_repost.len()),
-                });
-            }
-        } else {
-            warn!(id = %seg.message_id, "repost: gave up after all retries");
-            if let Some(tx) = events {
-                let _ = tx.send(ProgressEvent::Status {
-                    text: format!("repost failed: {} (check logs for details)", seg.message_id),
-                });
-            }
+            reposted
+        }));
+    }
+
+    let mut reposted = Vec::new();
+    for handle in handles {
+        if let Ok(v) = handle.await {
+            reposted.extend(v);
         }
     }
 

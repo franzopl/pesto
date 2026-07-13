@@ -206,7 +206,7 @@ pub async fn run_upload(
 
     // ── Post ─────────────────────────────────────────────────────────────────
     let post_tx = progress_tx.clone();
-    let outcome = if let Some(ref cancel_flag) = cancel {
+    let mut outcome = if let Some(ref cancel_flag) = cancel {
         crate::poster::post_files_with_progress_and_cancel(
             config,
             &inputs,
@@ -263,7 +263,7 @@ pub async fn run_upload(
                 );
                 tracing::warn!(count = missing.len(), "check: articles not found on server");
 
-                let reposted = crate::poster::repost_missing_segments(
+                let reposted_segments = crate::poster::repost_missing_segments(
                     config,
                     &outcome.segments,
                     &missing,
@@ -275,15 +275,40 @@ pub async fn run_upload(
                 .unwrap_or_else(|e| {
                     emit_status(&progress_tx, format!("check: repost error: {e:#}"));
                     tracing::error!(error = %e, "check: repost_missing_segments failed");
-                    0
+                    Vec::new()
                 });
 
                 emit_status(
                     &progress_tx,
-                    format!("check: reposted {reposted}/{} article(s)", missing.len()),
+                    format!(
+                        "check: reposted {}/{} article(s)",
+                        reposted_segments.len(),
+                        missing.len()
+                    ),
                 );
 
                 cancelled = cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
+
+                // Splice the freshly reposted segments (fresh Message-IDs)
+                // back into `outcome.segments` before re-verifying.
+                // `repost_missing_segments` deliberately never reuses a
+                // confirmed-missing ID (see its doc comment) — the second
+                // STAT pass below must check the new IDs, not the old ones
+                // we already proved the server doesn't have.
+                let mut reposted_by_key: std::collections::HashMap<
+                    (String, u32),
+                    crate::poster::PostedSegment,
+                > = reposted_segments
+                    .into_iter()
+                    .map(|s| ((s.file_name.clone(), s.part), s))
+                    .collect();
+                for seg in outcome.segments.iter_mut() {
+                    if let Some(new_seg) =
+                        reposted_by_key.remove(&(seg.file_name.clone(), seg.part))
+                    {
+                        *seg = new_seg;
+                    }
+                }
 
                 // Second STAT pass to confirm reposts landed (only if not cancelled).
                 if cancelled {

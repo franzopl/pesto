@@ -1,9 +1,24 @@
-//! End-to-end CLI test for `--check-post-retries`: a mock NNTP server that
-//! only starts answering `STAT` with "found" once a given article has been
-//! *posted* a set number of times, so a single repost round is provably not
-//! enough and a second round is provably required. This exercises the actual
-//! compiled `pesto` binary against a real TCP connection, the same way
+//! End-to-end CLI test for `--check-post-retries` against the actual
+//! compiled `pesto` binary over a real TCP connection, the same way
 //! `batch_order.rs` does.
+//!
+//! `repost_missing_segments` posts each repost attempt under a **freshly
+//! generated** Message-ID rather than the original one (see its doc comment
+//! in `poster/mod.rs`): real-world observation is that some servers register
+//! a Message-ID in their dedup history at `240`-accept time regardless of
+//! whether the article body actually lands in the readable spool, so
+//! reposting under the *same* ID can get permanently stuck — every future
+//! attempt gets a genuine-looking `240` again without the article ever
+//! becoming STAT-findable, not even hours later. `spawn_flaky_dedup_server`
+//! models a server that drops a *run* of distinct IDs before one lands
+//! correctly, proving that retrying with fresh IDs (not the same one) is
+//! what actually recovers the article across `--check-post-retries` rounds.
+//!
+//! `spawn_always_reject_server` covers a different, simpler failure mode: a
+//! server that rejects every repost as a duplicate (`441`) no matter what ID
+//! is used. That must never be mistaken for proof of success — see
+//! `Connection::repost_parts_confirmed` — regardless of whether the ID is
+//! fresh or reused.
 //!
 //! Also guards against the regression this feature shipped alongside: before
 //! the fix, `repost_missing_segments` reconstructed the source file path from
@@ -12,41 +27,65 @@
 //! repost here only succeeds if pesto can actually re-read `movie.bin` from
 //! disk, so a regression on that front would show up as the "enough retries"
 //! case unexpectedly failing too.
-//!
-//! A second mock server (`spawn_poisoned_id_server`) covers a different
-//! failure mode: a server whose dedup history remembers a Message-ID from an
-//! accept that never actually landed in the readable spool. Reposting under
-//! that same ID gets rejected as a `441` duplicate forever, which must not be
-//! mistaken for proof the article now exists — see
-//! `repost_never_trusts_a_441_duplicate_rejection_as_proof_of_success` and
-//! `Connection::repost_parts_confirmed`.
 
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-/// Starts a background mock NNTP server. `STAT` reports an article as found
-/// only once it has been `POST`ed at least `threshold` times, simulating a
-/// server that keeps "losing" the article until it's been sent enough times.
-fn spawn_mock_server(threshold: u32) -> SocketAddr {
+/// Reads one full POSTed article (headers + body, up to the `.\r\n`
+/// terminator) from `reader` and returns its `Message-ID` header value, if
+/// present. Shared by every mock server below.
+fn read_posted_message_id(reader: &mut BufReader<TcpStream>) -> Option<String> {
+    let mut article = Vec::new();
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
+        }
+        if raw == b".\r\n" {
+            break;
+        }
+        article.extend_from_slice(&raw);
+    }
+    let text = String::from_utf8_lossy(&article);
+    text.lines()
+        .find_map(|l| l.strip_prefix("Message-ID: "))
+        .map(str::trim)
+        .map(str::to_string)
+}
+
+/// Starts a background mock NNTP server that accepts every `POST` with a
+/// plain `240`, but only makes an article `STAT`-findable once its
+/// Message-ID is not among the first `cursed_count` *distinct* IDs the
+/// server has ever seen (in first-seen order). Models a server that
+/// genuinely, silently drops a run of articles at accept time — each still
+/// gets an honest `240` — before recovering. Since `repost_missing_segments`
+/// posts a fresh ID on every attempt, recovering requires exactly
+/// `cursed_count` reposts (one per cursed ID) before a "lucky" ID lands.
+fn spawn_flaky_dedup_server(cursed_count: usize) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let posts: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let posts = Arc::clone(&posts);
-            std::thread::spawn(move || handle_connection(stream, posts, threshold));
+            let seen = Arc::clone(&seen);
+            std::thread::spawn(move || handle_flaky_dedup_connection(stream, seen, cursed_count));
         }
     });
 
     addr
 }
 
-fn handle_connection(stream: TcpStream, posts: Arc<Mutex<HashMap<String, u32>>>, threshold: u32) {
+fn handle_flaky_dedup_connection(
+    stream: TcpStream,
+    seen: Arc<Mutex<Vec<String>>>,
+    cursed_count: usize,
+) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -69,34 +108,24 @@ fn handle_connection(stream: TcpStream, posts: Arc<Mutex<HashMap<String, u32>>>,
             if writer.write_all(b"340 send article\r\n").is_err() {
                 return;
             }
-            let mut article = Vec::new();
-            let mut raw = Vec::new();
-            loop {
-                raw.clear();
-                match reader.read_until(b'\n', &mut raw) {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) => {}
-                }
-                if raw == b".\r\n" {
-                    break;
-                }
-                article.extend_from_slice(&raw);
-            }
-            let text = String::from_utf8_lossy(&article);
-            let id = text
-                .lines()
-                .find_map(|l| l.strip_prefix("Message-ID: "))
-                .map(str::trim)
-                .map(str::to_string);
+            let id = read_posted_message_id(&mut reader);
             if let Some(id) = id {
-                *posts.lock().unwrap().entry(id).or_insert(0) += 1;
+                let mut seen = seen.lock().unwrap();
+                if !seen.contains(&id) {
+                    seen.push(id);
+                }
             }
             if writer.write_all(b"240 article received\r\n").is_err() {
                 return;
             }
         } else if let Some(id) = command.strip_prefix("STAT ") {
-            let count = *posts.lock().unwrap().get(id).unwrap_or(&0);
-            let resp = if count >= threshold {
+            let found = {
+                let seen = seen.lock().unwrap();
+                seen.iter()
+                    .position(|x| x == id)
+                    .is_some_and(|ord| ord >= cursed_count)
+            };
+            let resp = if found {
                 format!("223 0 {id} article exists\r\n")
             } else {
                 "430 No such article\r\n".to_string()
@@ -111,39 +140,32 @@ fn handle_connection(stream: TcpStream, posts: Arc<Mutex<HashMap<String, u32>>>,
         } else if command == "QUIT" {
             let _ = writer.write_all(b"205 bye\r\n");
             return;
-        } else {
-            if writer.write_all(b"500 unknown command\r\n").is_err() {
-                return;
-            }
+        } else if writer.write_all(b"500 unknown command\r\n").is_err() {
+            return;
         }
     }
 }
 
-/// Starts a background mock NNTP server that simulates a "ghost" article: the
-/// very first `POST` of a given Message-ID is accepted with a plain `240`,
-/// but the article is never actually retrievable — `STAT` always answers
-/// "not found", regardless of how many times it's posted. Any *repost* of
-/// the same ID (i.e. every `POST` after the first for that ID) is rejected
-/// with `441 ... Article not wanted - Already have it`, mimicking a server
-/// whose dedup history still remembers the ID from the original accept even
-/// though the article body was never actually committed to the spool.
-fn spawn_poisoned_id_server() -> SocketAddr {
+/// Starts a background mock NNTP server that rejects every `POST` as a
+/// duplicate (`441`), regardless of the Message-ID used, and never lets
+/// `STAT` find anything. Models a server that can't be talked out of a stuck
+/// dedup entry no matter how it's approached — used to confirm a `441`
+/// rejection is never mistaken for a successful repost.
+fn spawn_always_reject_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let posts: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let posts = Arc::clone(&posts);
-            std::thread::spawn(move || handle_poisoned_id_connection(stream, posts));
+            std::thread::spawn(move || handle_always_reject_connection(stream));
         }
     });
 
     addr
 }
 
-fn handle_poisoned_id_connection(stream: TcpStream, posts: Arc<Mutex<HashMap<String, u32>>>) {
+fn handle_always_reject_connection(stream: TcpStream) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -166,44 +188,14 @@ fn handle_poisoned_id_connection(stream: TcpStream, posts: Arc<Mutex<HashMap<Str
             if writer.write_all(b"340 send article\r\n").is_err() {
                 return;
             }
-            let mut article = Vec::new();
-            let mut raw = Vec::new();
-            loop {
-                raw.clear();
-                match reader.read_until(b'\n', &mut raw) {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) => {}
-                }
-                if raw == b".\r\n" {
-                    break;
-                }
-                article.extend_from_slice(&raw);
-            }
-            let text = String::from_utf8_lossy(&article);
-            let id = text
-                .lines()
-                .find_map(|l| l.strip_prefix("Message-ID: "))
-                .map(str::trim)
-                .map(str::to_string);
-            let count = if let Some(id) = &id {
-                let mut posts = posts.lock().unwrap();
-                let c = posts.entry(id.clone()).or_insert(0);
-                *c += 1;
-                *c
-            } else {
-                1
-            };
-            let resp: &[u8] = if count <= 1 {
-                b"240 article received\r\n"
-            } else {
-                b"441 435 Article not wanted - Already have it\r\n"
-            };
-            if writer.write_all(resp).is_err() {
+            let _ = read_posted_message_id(&mut reader);
+            if writer
+                .write_all(b"441 435 Already exists in history\r\n")
+                .is_err()
+            {
                 return;
             }
-        } else if let Some(_id) = command.strip_prefix("STAT ") {
-            // The ghost article is never retrievable, no matter how many
-            // times it's (re)posted.
+        } else if command.starts_with("STAT ") {
             if writer.write_all(b"430 No such article\r\n").is_err() {
                 return;
             }
@@ -263,9 +255,10 @@ fn run_pesto_with_args(
 
 #[test]
 fn one_repost_round_is_not_enough_when_the_server_keeps_losing_the_article() {
-    // The mock only considers the article found after 3 successful POSTs:
-    // the original post (1) + one repost (2) still isn't enough.
-    let addr = spawn_mock_server(3);
+    // The first 2 distinct Message-IDs the server ever sees are cursed: the
+    // original post (1st) and the round-1 repost's fresh ID (2nd) both fail
+    // STAT. A single round only gets one repost attempt, so it's not enough.
+    let addr = spawn_flaky_dedup_server(2);
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
     std::fs::write(&input, vec![0xABu8; 64]).unwrap();
@@ -286,11 +279,11 @@ fn one_repost_round_is_not_enough_when_the_server_keeps_losing_the_article() {
 
 #[test]
 fn a_second_repost_round_recovers_an_article_the_first_round_missed() {
-    // Same flaky server, but this time pesto gets a second round: original
-    // post (1) + repost round 1 (2, still not enough) + repost round 2 (3,
-    // now enough) — recovers exactly because the loop doesn't give up after
-    // a single round.
-    let addr = spawn_mock_server(3);
+    // Same flaky server: original post (1st distinct ID, cursed) + round-1
+    // repost (2nd distinct ID, still cursed) + round-2 repost (3rd distinct
+    // ID, past `cursed_count` — lucky) recovers exactly because the loop
+    // doesn't give up after a single round, and each round tries a fresh ID.
+    let addr = spawn_flaky_dedup_server(2);
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
     std::fs::write(&input, vec![0xABu8; 64]).unwrap();
@@ -313,23 +306,21 @@ fn a_second_repost_round_recovers_an_article_the_first_round_missed() {
     );
 
     // Also confirms the file_path fix: repost had to actually re-open
-    // `movie.bin` from disk (via the mock server's POST count) rather than
+    // `movie.bin` from disk (to re-encode it under the fresh ID) rather than
     // failing to find it, which is what made the recovery possible at all.
     let nzb = std::fs::read_to_string(&out).unwrap();
     assert!(nzb.contains("movie.bin"), "nzb:\n{nzb}");
 }
 
 /// Guards against the false-positive "reposted successfully" bug: a server
-/// whose dedup history remembers a Message-ID from an original accept that
-/// never actually landed in the readable spool must not have its `441`
-/// duplicate rejection on repost mistaken for proof the article now exists.
-/// Without `Connection::repost_parts_confirmed` (a genuine `240` required),
-/// `already_exists()` would treat the `441` as success, pesto would report
-/// the article as "reposted", and the NZB would ship 12 forever-unreadable
-/// segments exactly like the real-world case this test is modeled on.
+/// that rejects every repost as a duplicate (`441`), no matter what
+/// Message-ID is used, must never have that rejection mistaken for proof the
+/// article now exists. Without `Connection::repost_parts_confirmed` (a
+/// genuine `240` required), `already_exists()` would treat the `441` as
+/// success and the NZB would ship a segment that was never actually stored.
 #[test]
 fn repost_never_trusts_a_441_duplicate_rejection_as_proof_of_success() {
-    let addr = spawn_poisoned_id_server();
+    let addr = spawn_always_reject_server();
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
     std::fs::write(&input, vec![0xABu8; 64]).unwrap();
@@ -362,7 +353,7 @@ fn repost_never_trusts_a_441_duplicate_rejection_as_proof_of_success() {
 /// it from blocking the NZB and post-hooks.
 #[test]
 fn allow_incomplete_nzb_publishes_despite_confirmed_missing_articles() {
-    let addr = spawn_poisoned_id_server();
+    let addr = spawn_always_reject_server();
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
     std::fs::write(&input, vec![0xABu8; 64]).unwrap();

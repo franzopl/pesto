@@ -1019,7 +1019,7 @@ async fn run_single_upload(
                 missing: still_missing.len() as u64,
             });
 
-            let reposted = pesto::poster::repost_missing_segments(
+            let reposted_segments = pesto::poster::repost_missing_segments(
                 config,
                 &outcome.segments,
                 &still_missing,
@@ -1031,14 +1031,15 @@ async fn run_single_upload(
             .unwrap_or_else(|e| {
                 eprintln!("check: repost error: {e:#}");
                 error!(error = %e, "check: repost_missing_segments failed");
-                0
+                Vec::new()
             });
 
             drop(repost_tx);
             let _ = repost_renderer.await;
 
             eprintln!(
-                "check: reposted {reposted}/{} article(s)",
+                "check: reposted {}/{} article(s)",
+                reposted_segments.len(),
                 still_missing.len()
             );
 
@@ -1049,16 +1050,59 @@ async fn run_single_upload(
                 break;
             }
 
-            // Re-verify only the segments that were just reposted, not the
-            // whole upload — the rest were already confirmed by the first
-            // STAT pass and re-checking them again every round scales with
-            // the total article count instead of the (shrinking) missing set.
-            let missing_set: std::collections::HashSet<&str> =
+            let reposted_count = reposted_segments.len() as u64;
+
+            // Splice the freshly reposted segments (fresh Message-IDs) back
+            // into `outcome.segments`, replacing the stale, confirmed-missing
+            // entries. `repost_missing_segments` deliberately does not reuse
+            // the original ID (see its doc comment) — a server that silently
+            // curses a Message-ID at accept time would otherwise report the
+            // same segment as "reposted" every round without it ever
+            // becoming readable.
+            let missing_before: std::collections::HashSet<&str> =
                 still_missing.iter().map(String::as_str).collect();
+            let mut reposted_by_key: std::collections::HashMap<
+                (String, u32),
+                pesto::poster::PostedSegment,
+            > = reposted_segments
+                .into_iter()
+                .map(|s| ((s.file_name.clone(), s.part), s))
+                .collect();
+            // Captured before the splice loop drains `reposted_by_key` below.
+            let new_ids: std::collections::HashSet<String> = reposted_by_key
+                .values()
+                .map(|s| s.message_id.clone())
+                .collect();
+            for seg in outcome.segments.iter_mut() {
+                if missing_before.contains(seg.message_id.as_str()) {
+                    if let Some(new_seg) =
+                        reposted_by_key.remove(&(seg.file_name.clone(), seg.part))
+                    {
+                        *seg = new_seg;
+                    }
+                }
+            }
+
+            // Segments still carrying an old, confirmed-missing ID never got
+            // a fresh one this round (file re-open failed, or every POST
+            // retry was exhausted) — they stay missing without wasting a
+            // STAT call on an ID we already know is unchanged.
+            let carried_over: Vec<String> = outcome
+                .segments
+                .iter()
+                .filter(|s| missing_before.contains(s.message_id.as_str()))
+                .map(|s| s.message_id.clone())
+                .collect();
+
+            // Re-verify only the segments that were just reposted (now under
+            // their new IDs), not the whole upload — the rest were already
+            // confirmed by the first STAT pass and re-checking them again
+            // every round scales with the total article count instead of the
+            // (shrinking) missing set.
             let to_verify: Vec<pesto::poster::PostedSegment> = outcome
                 .segments
                 .iter()
-                .filter(|s| missing_set.contains(s.message_id.as_str()))
+                .filter(|s| new_ids.contains(s.message_id.as_str()))
                 .cloned()
                 .collect();
 
@@ -1073,16 +1117,16 @@ async fn run_single_upload(
                     .unwrap_or_else(|e| {
                         eprintln!("check: verify after repost failed: {e:#}");
                         error!(error = %e, "check: post-repost STAT pass failed");
-                        still_missing.clone()
+                        to_verify.iter().map(|s| s.message_id.clone()).collect()
                     });
             cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
 
-            still_missing = after_verify;
+            still_missing = carried_over.into_iter().chain(after_verify).collect();
 
             let _ = verify_tx.send(pesto::progress::ProgressEvent::RepostRoundDone {
                 round,
                 max_rounds,
-                reposted: reposted as u64,
+                reposted: reposted_count,
                 still_missing: still_missing.len() as u64,
             });
             drop(verify_tx);

@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A repost could get permanently stuck on the same cursed Message-ID**:
+  `--check`'s repost pass reused the original Message-ID on every attempt.
+  Real-world observation shows some servers register an ID in their dedup
+  history at `240`-accept time regardless of whether the article body
+  actually lands in the readable spool — if that happens, every future
+  repost under the *same* ID gets a genuine-looking `240` again without the
+  article ever becoming `STAT`-findable, not even hours later. Reposts now
+  use a freshly generated Message-ID on every attempt instead, giving each
+  one an independent chance of landing correctly.
+
+### Changed
+- **Repost is now parallelized** across the same number of connections as
+  the STAT check pass (`--check-connections`, default: the upload connection
+  count) instead of a single sequential connection. Reposting a large batch
+  one article at a time could eat most of `--check-delay` by itself, leaving
+  little of that window for the server to actually store the article before
+  the follow-up STAT pass ran.
+
 ---
 
 ## [0.3.45] — 2026-07-13
