@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.47] — 2026-07-13
+
 ### Fixed
 - **`--verify` had the same cursed-Message-ID risk as `--check`'s repost
   pass**: its inline per-article retry, triggered when a `STAT` right after
