@@ -145,17 +145,23 @@ impl CheckCoordinatorHandle {
 }
 
 /// Spawn the streaming check coordinator: a feeder task that queues incoming
-/// segments with a per-article delay, and `config.effective_check_connections()`
-/// worker tasks that drain the queue via dedicated NNTP connections.
+/// segments with a per-article delay, and `check_connections` worker tasks
+/// that drain the queue via dedicated NNTP connections. `check_connections`
+/// is the caller's responsibility to size — see
+/// `post_files_with_progress_and_cancel`, which carves it out of the
+/// configured total connection count so the run never exceeds what the user
+/// asked for (e.g. `-n 50` means 50 connections total, split between
+/// posting and checking, not 50 + a check pool on top).
 pub fn spawn_check_coordinator(
     config: Config,
     groups: Vec<String>,
     results: Arc<Mutex<Vec<PostedSegment>>>,
     events: Option<ProgressSender>,
     cancel: Option<Arc<AtomicBool>>,
+    check_connections: usize,
 ) -> CheckCoordinatorHandle {
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
-    let n_workers = config.effective_check_connections();
+    let n_workers = check_connections;
 
     let inner = Arc::new(Inner {
         heap: Mutex::new(BinaryHeap::new()),

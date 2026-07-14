@@ -58,6 +58,9 @@ pub struct UploadProgress {
     /// Bytes pre-seeded from par2_bytes_hint; consumed as QueueExtended arrives
     /// so total_bytes never jumps backwards.
     pub par2_hint_remaining: u64,
+    /// Segments pre-seeded from par2_segments_hint; consumed as QueueExtended
+    /// arrives, mirroring par2_hint_remaining for bytes.
+    pub par2_segment_hint_remaining: u64,
 
     /// Compression progress (tracked separately for the three-bar display)
     pub compress_total_bytes: u64,
@@ -168,6 +171,7 @@ impl UploadProgress {
         self.check_checked = 0;
         self.check_failed = 0;
         self.par2_hint_remaining = 0;
+        self.par2_segment_hint_remaining = 0;
         self.compress_total_bytes = 0;
         self.compress_done_bytes = 0;
         self.compress_finished = false;
@@ -193,15 +197,22 @@ impl UploadProgress {
 
     pub fn apply(&mut self, update: &ProgressUpdate) {
         if let Some((seg, bytes)) = update.queue_extended {
-            self.total_segments += seg;
-            // Absorb real PAR2 bytes against the pre-seeded hint so the bar
-            // never goes backwards (same logic as pesto's terminal renderer).
+            // Absorb the real PAR2 bytes/segments against the pre-seeded
+            // hints so neither total jumps (same logic as pesto's terminal
+            // renderer) — only the excess over the hint grows the total.
             if bytes <= self.par2_hint_remaining {
                 self.par2_hint_remaining -= bytes;
             } else {
                 let excess = bytes - self.par2_hint_remaining;
                 self.par2_hint_remaining = 0;
                 self.total_bytes += excess;
+            }
+            if seg <= self.par2_segment_hint_remaining {
+                self.par2_segment_hint_remaining -= seg;
+            } else {
+                let excess = seg - self.par2_segment_hint_remaining;
+                self.par2_segment_hint_remaining = 0;
+                self.total_segments += excess;
             }
             return;
         }
@@ -254,6 +265,9 @@ impl UploadProgress {
         }
         if update.par2_hint_bytes > 0 {
             self.par2_hint_remaining = update.par2_hint_bytes;
+        }
+        if update.par2_segment_hint > 0 {
+            self.par2_segment_hint_remaining = update.par2_segment_hint;
         }
         if update.par2_complete {
             self.par2_finished = true;
@@ -2955,6 +2969,7 @@ url = \"http://old:9696\"
                 check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: 0,
+                par2_segment_hint: 0,
                 par2_complete: false,
             }
         }

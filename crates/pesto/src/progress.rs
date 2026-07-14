@@ -52,10 +52,16 @@ pub enum ProgressEvent {
         connections: usize,
         /// `host:port` of the NNTP server, or `None` when not posting.
         target: Option<String>,
-        /// Best-effort estimate of PAR2 bytes that will be added to the queue
-        /// later via `QueueExtended`. Pre-seeded into `total_bytes` so the bar
-        /// never goes backwards when PAR2 files arrive.
+        /// Exact PAR2 recovery-data size that will be added to the queue
+        /// later via `QueueExtended`, computed with the same geometry the
+        /// encoder itself uses (not an estimate). Pre-seeded into
+        /// `total_bytes` so the bar never jumps when PAR2 files arrive.
         par2_bytes_hint: u64,
+        /// Segment count derived from `par2_bytes_hint`, pre-seeded into
+        /// `total_segments` for the same reason — without this the
+        /// segment-based progress percentage (not the byte one) is what
+        /// visibly jumps once PAR2 volumes are queued.
+        par2_segments_hint: u64,
     },
     /// Worker connection `conn` started posting a segment of `file`.
     ConnectionBusy { conn: usize, file: String },

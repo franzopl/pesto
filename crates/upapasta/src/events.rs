@@ -59,6 +59,11 @@ pub struct ProgressUpdate {
     /// apply() stores it so QueueExtended can absorb against it.
     pub par2_hint_bytes: u64,
 
+    /// PAR2 segments pre-seeded into total_segments from par2_segments_hint
+    /// (Started event only), mirroring par2_hint_bytes — without this the
+    /// segment-based progress percentage jumps once PAR2 volumes are queued.
+    pub par2_segment_hint: u64,
+
     /// When true, PAR2 encode+write is fully complete. apply() marks par2_finished.
     pub par2_complete: bool,
 }

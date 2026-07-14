@@ -107,8 +107,10 @@ groups = ["alt.binaries.test"]
 # check_retries = 3
 
 # check_connections — number of dedicated parallel NNTP connections for the
-# streaming check queue. Default: 0 (a small pool sized to the upload
-# connection count).
+# streaming check queue, carved out of the connections above (not opened on
+# top of them, so the total connections used never exceeds what you
+# configured). Default: 0 (a small pool, e.g. connections=50 uses 46 for
+# posting and 4 for checking).
 # check_connections = 0
 
 # check_post_retries — number of times to re-post an article the check queue

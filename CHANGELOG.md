@@ -9,6 +9,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.52] — 2026-07-14
+
+### Changed
+- **The streaming check queue now gets its own bordered box in the terminal
+  panel, right under the upload box**, instead of a single unboxed line near
+  the bottom of the screen. It now also shows how many posted articles are
+  still waiting on a STAT confirmation (`N verified · M pending`), so it's
+  visible that the queue is keeping up with the upload rather than falling
+  behind.
+- **`--check-connections`'s auto-derived default is now carved out of
+  `--connections`, not opened on top of it** — `-n 50` means 50 connections
+  to the server total (46 for posting, 4 for checking), since that total is
+  frequently a hard provider-enforced cap. An *explicit* `--check-connections`
+  is still additive, since that's a deliberate separate budget the user
+  stated on purpose. If `--connections` is too small to spare any for
+  checking (e.g. `-n 1`), checking is silently skipped for that run rather
+  than exceeding the configured total.
+
+### Fixed
+- **The upload progress percentage visibly jumped backwards partway through
+  a PAR2-enabled upload**, once PAR2 encoding finished and its recovery
+  volumes were queued as additional segments to post. The byte total was
+  already pre-seeded with a rough PAR2 size estimate to avoid this, but the
+  *segment* total (which the percentage is actually based on) had no such
+  estimate and simply jumped by the real PAR2 segment count. Both totals are
+  now seeded with an exact (not estimated) PAR2 geometry computed up front
+  with the same slice-sizing formula the encoder itself uses — since the
+  PAR2 redundancy percentage and input sizes are already known before
+  encoding starts, the real numbers don't need to wait for the encoder to
+  finish to be known.
+
+---
+
 ## [0.3.51] — 2026-07-14
 
 ### Changed

@@ -1885,6 +1885,7 @@ async fn run_real_upload(
         check_progress: None,
         queue_extended: None,
         par2_hint_bytes: 0,
+        par2_segment_hint: 0,
         par2_complete: false,
     };
 
@@ -1951,6 +1952,7 @@ async fn run_real_upload(
             check_progress: None,
                         queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
                     };
                     last_update = done.clone();
@@ -2101,9 +2103,11 @@ fn extract_progress_update(
         E::Started {
             files,
             par2_bytes_hint,
+            par2_segments_hint,
             ..
         } => {
-            let total_segments: u64 = files.iter().map(|f| f.segments).sum();
+            let total_segments: u64 =
+                files.iter().map(|f| f.segments).sum::<u64>() + par2_segments_hint;
             let total_bytes: u64 = files.iter().map(|f| f.bytes).sum::<u64>() + par2_bytes_hint;
             Some(ProgressUpdate {
                 done_segments: 0,
@@ -2118,6 +2122,7 @@ fn extract_progress_update(
                 check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: *par2_bytes_hint,
+                par2_segment_hint: *par2_segments_hint,
                 par2_complete: false,
             })
         }
@@ -2137,6 +2142,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         E::CompressProgress { bytes_written } => Some(ProgressUpdate {
@@ -2158,6 +2164,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         E::CompressDone => Some(ProgressUpdate {
@@ -2173,6 +2180,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         // Par2EncodeStarted is a config announcement, NOT a sequential phase.
@@ -2193,6 +2201,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         E::Par2InputProgress { done, total } => Some(ProgressUpdate {
@@ -2208,6 +2217,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         // PAR2 volumes are written to disk after encoding completes (sequential).
@@ -2227,6 +2237,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         E::Par2SliceWritten => {
@@ -2248,6 +2259,7 @@ fn extract_progress_update(
                 check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: 0,
+                par2_segment_hint: 0,
                 par2_complete: all_written,
             })
         }
@@ -2271,6 +2283,7 @@ fn extract_progress_update(
                 check_progress: Some((*checked, failed)),
                 queue_extended: None,
                 par2_hint_bytes: 0,
+                par2_segment_hint: 0,
                 par2_complete: false,
             })
         }
@@ -2290,6 +2303,7 @@ fn extract_progress_update(
             )),
             queue_extended: None,
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         E::SegmentDone { file, bytes, ok } => {
@@ -2314,6 +2328,7 @@ fn extract_progress_update(
                 check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: 0,
+                par2_segment_hint: 0,
                 par2_complete: false,
             })
         }
@@ -2332,6 +2347,7 @@ fn extract_progress_update(
             check_progress: None,
             queue_extended: Some((*segments, *bytes)),
             par2_hint_bytes: 0,
+            par2_segment_hint: 0,
             par2_complete: false,
         }),
         _ => None,

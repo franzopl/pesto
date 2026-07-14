@@ -422,10 +422,12 @@ impl Config {
                 .sum::<usize>()
     }
 
-    /// Number of dedicated connections for the streaming check queue. These
-    /// run *concurrently* with the upload connections, so `0` resolves to a
-    /// small fixed pool rather than the full upload connection count (which
-    /// would double the connections held against the server's limit).
+    /// Desired number of dedicated connections for the streaming check
+    /// queue, before the caller bounds it against the configured total
+    /// (`post_files_with_progress_and_cancel` carves this out of
+    /// `total_connections()` rather than opening it on top — see there for
+    /// why). `0` resolves to a small fixed pool rather than the full upload
+    /// connection count, since the two run *concurrently*.
     pub fn effective_check_connections(&self) -> usize {
         if self.check_connections == 0 {
             self.total_connections().clamp(1, 4)

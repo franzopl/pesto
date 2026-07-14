@@ -1137,17 +1137,21 @@ fn draw_check_bar(f: &mut Frame, app: &App, area: Rect) {
     let checked = app.progress.check_checked;
     let failed = app.progress.check_failed;
     let verified = checked.saturating_sub(failed);
+    let pending = app.progress.done_segments.saturating_sub(checked);
     let pct = (verified * 100)
         .checked_div(checked)
         .unwrap_or(100)
         .min(100) as u16;
     let (label, color) = if failed > 0 {
         (
-            format!("{verified} verified · {failed} missing"),
+            format!("{verified} verified · {pending} pending · {failed} missing"),
             Color::Red,
         )
     } else {
-        (format!("{verified} verified"), Color::Cyan)
+        (
+            format!("{verified} verified · {pending} pending"),
+            Color::Cyan,
+        )
     };
 
     let gauge = Gauge::default()

@@ -384,7 +384,8 @@ struct Cli {
     check_retries: Option<u32>,
 
     /// Number of dedicated parallel NNTP connections for the streaming check
-    /// queue; defaults to a small pool sized to the upload connection count
+    /// queue, carved out of --connections (not opened on top of it, so the
+    /// total never exceeds what you configured); defaults to a small pool
     /// [config: posting.check_connections].
     #[arg(long, value_name = "N")]
     check_connections: Option<usize>,

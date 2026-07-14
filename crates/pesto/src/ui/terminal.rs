@@ -127,6 +127,9 @@ struct RenderState {
     buf_free: usize,
     /// PAR2 bytes hint included in total_bytes upfront; reduced as QueueExtended arrives.
     par2_hint_remaining: u64,
+    /// PAR2 segments hint included in total_segments upfront; reduced as
+    /// QueueExtended arrives, mirroring `par2_hint_remaining` for bytes.
+    par2_segment_hint_remaining: u64,
     /// Whether any QueueExtended event was received (PAR2 files being posted).
     posting_par2: bool,
     // Process resource stats (polled from /proc/self on Linux)
@@ -224,6 +227,7 @@ impl RenderState {
             buf_total: 0,
             buf_free: 0,
             par2_hint_remaining: 0,
+            par2_segment_hint_remaining: 0,
             posting_par2: false,
         }
     }
@@ -236,6 +240,7 @@ impl RenderState {
                 connections,
                 target,
                 par2_bytes_hint,
+                par2_segments_hint,
             } => {
                 self.started = true;
                 self.mode = mode;
@@ -248,10 +253,12 @@ impl RenderState {
                     self.total_bytes += f.bytes;
                     self.files.insert(f.name, (0, f.segments));
                 }
-                // Pre-seed total with the PAR2 estimate so the bar never
-                // goes backwards when QueueExtended arrives.
+                // Pre-seed totals with the exact PAR2 geometry so neither
+                // bar jumps when QueueExtended arrives with the real files.
                 self.total_bytes += par2_bytes_hint;
                 self.par2_hint_remaining = par2_bytes_hint;
+                self.total_segments += par2_segments_hint;
+                self.par2_segment_hint_remaining = par2_segments_hint;
             }
             ProgressEvent::ConnectionBusy { conn, file } => {
                 if let Some(slot) = self.conn_files.get_mut(conn) {
@@ -299,10 +306,11 @@ impl RenderState {
                 bytes,
             } => {
                 self.posting_par2 = true;
-                self.total_segments += segments;
-                // Absorb the real bytes against the pre-seeded hint so the bar
-                // does not jump backwards. If real PAR2 is larger than the hint,
-                // we expand total_bytes by the excess only.
+                // Absorb the real bytes/segments against the pre-seeded hints
+                // so neither total jumps. If the real PAR2 geometry somehow
+                // differs from the hint (slice-size/count overrides changing
+                // between the estimate and the run shouldn't happen, but stay
+                // defensive), only the excess grows the total.
                 if bytes <= self.par2_hint_remaining {
                     self.par2_hint_remaining -= bytes;
                     // total_bytes already includes this; no change needed.
@@ -310,6 +318,13 @@ impl RenderState {
                     let excess = bytes - self.par2_hint_remaining;
                     self.par2_hint_remaining = 0;
                     self.total_bytes += excess;
+                }
+                if segments <= self.par2_segment_hint_remaining {
+                    self.par2_segment_hint_remaining -= segments;
+                } else {
+                    let excess = segments - self.par2_segment_hint_remaining;
+                    self.par2_segment_hint_remaining = 0;
+                    self.total_segments += excess;
                 }
                 self.files.entry(file).or_insert((0, 0)).1 += segments;
             }
@@ -767,6 +782,39 @@ impl RenderState {
             }
             lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
 
+            // --- streaming check queue box ---------------------------------
+            // Runs concurrently with the upload above (its own dedicated
+            // connections, started a few seconds after the first segment
+            // posts), so — unlike upload/compress — it has no fixed total or
+            // bar: just a running tally of articles resolved so far, plus how
+            // many posted segments are still waiting in the check queue.
+            if self.check_active || (final_draw && self.check_checked > 0) {
+                let verified = self.check_checked.saturating_sub(self.check_failed);
+                let pending = self.done_segments.saturating_sub(self.check_checked);
+                let line1 = if self.check_failed > 0 {
+                    format!(
+                        "{verified} verified · {pending} pending · {} missing",
+                        self.check_failed
+                    )
+                } else if !self.check_active {
+                    format!("{verified} verified · all confirmed")
+                } else {
+                    format!("{verified} verified · {pending} pending")
+                };
+                let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
+                let line2 = if !self.check_active {
+                    format!("elapsed {}", format_duration(elapsed))
+                } else if let Some(msg) = &self.check_retry_msg {
+                    msg.clone()
+                } else {
+                    format!("elapsed {}", format_duration(elapsed))
+                };
+                lines.push(format!("┌─ check {}┐", "─".repeat(BODY_W + 2 - 8)));
+                lines.push(box_line(&line1));
+                lines.push(box_line(&line2));
+                lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
+            }
+
             // --- per-connection activity with colour codes (phase 21b) ----
             let conns = self.conn_files.len();
             if conns > 0 && conns <= GRID_LIMIT {
@@ -938,39 +986,6 @@ impl RenderState {
             lines.push(ansi(&res_line, "2")); // dim — informational, not critical
         }
 
-        // --- streaming check queue -----------------------------------------
-        // Runs concurrently with the upload above, so this has no fixed
-        // total or progress bar — just a running count of articles resolved
-        // so far (verified, or reposted-and-still-missing).
-        if self.check_active || (final_draw && self.check_checked > 0) {
-            let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
-            let elapsed_str = if !self.check_active {
-                format!(" · elapsed {}", format_duration(elapsed))
-            } else {
-                String::new()
-            };
-            let verified = self.check_checked.saturating_sub(self.check_failed);
-            let line = if self.check_failed > 0 {
-                let line = format!(
-                    "▸ check  {} verified · {} missing{}",
-                    verified, self.check_failed, elapsed_str
-                );
-                ansi(&line, "31") // red — articles missing
-            } else if !self.check_active {
-                let line = format!(
-                    "▸ check  {} verified · all confirmed{}",
-                    verified, elapsed_str
-                );
-                ansi(&line, "32") // green — all good
-            } else {
-                format!("▸ check  {} verified{}", verified, elapsed_str)
-            };
-            lines.push(line);
-            if let Some(msg) = &self.check_retry_msg {
-                lines.push(ansi(&format!("  {msg}"), "33")); // yellow retry notice
-            }
-        }
-
         // --- optional status / interrupt note ----------------------------
         if self.interrupted {
             lines.push("⚠ interrupt received — finishing in-flight segments".to_string());
@@ -1028,7 +1043,11 @@ impl RenderState {
         // suppresses it.
         let check_suffix = if self.check_active || (final_draw && self.check_checked > 0) {
             let verified = self.check_checked.saturating_sub(self.check_failed);
-            format!(" · check {verified} verified/{} missing", self.check_failed)
+            let pending = self.done_segments.saturating_sub(self.check_checked);
+            format!(
+                " · check {verified} verified/{} missing/{pending} pending",
+                self.check_failed
+            )
         } else {
             String::new()
         };

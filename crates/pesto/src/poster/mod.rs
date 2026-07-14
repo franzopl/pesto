@@ -113,6 +113,74 @@ fn optimal_par2_slice_size(
     (a * article_size, count_for(a))
 }
 
+/// Compute the PAR2 recovery-set geometry `(slice_size_bytes,
+/// total_input_slices, recovery_block_count)` that `producer` will use for
+/// this batch of files, given the current config. Pure and cheap — only
+/// reads file sizes already collected in `metas`, no I/O — so it can be
+/// called before encoding actually starts to seed an exact (not estimated)
+/// progress total. Mirrors the geometry logic in `producer` exactly; keep
+/// the two in sync.
+fn par2_geometry(metas: &[Arc<FileMeta>], config: &Config) -> (usize, usize, usize) {
+    let article_size = config.article_size;
+    let per_file_articles: Vec<usize> = metas
+        .iter()
+        .map(|m| {
+            if m.size == 0 {
+                0
+            } else {
+                yenc::segments(m.size, article_size).len()
+            }
+        })
+        .collect();
+
+    let (par2_slice_size, total_slices) = if let Some(size) = config.par2_slice_size {
+        let s = (size / 64 * 64).max(64);
+        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
+        (s, n)
+    } else if let Some(count) = config.par2_slice_count {
+        let total_bytes: u64 = metas.iter().map(|m| m.size).sum();
+        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 64 * 64).max(64);
+        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
+        (s, n)
+    } else {
+        optimal_par2_slice_size(&per_file_articles, article_size, config.par2)
+    };
+
+    let recovery_count = if let Some(n) = config.par2_recovery_count {
+        n
+    } else {
+        (total_slices * config.par2 as usize) / 100
+    };
+
+    (par2_slice_size, total_slices, recovery_count)
+}
+
+/// Split the configured total connection count between upload workers and
+/// the check queue. An auto-derived check pool (`check_connections == 0`)
+/// is carved out of the total so `-n 50` always means 50 connections to
+/// the server, not 50 + a check pool on top — that total is frequently a
+/// hard provider-enforced cap. An *explicit* `--check-connections` is a
+/// deliberate, separate budget the user stated on purpose, so it's honored
+/// additively instead of eating into `--connections`. Returns
+/// `(check_conns, upload_conns)`.
+fn split_connections(config: &Config, check_enabled: bool) -> (usize, usize) {
+    let total_conns = config.total_connections();
+    if !check_enabled {
+        return (0, total_conns);
+    }
+    if config.check_connections == 0 {
+        // Reserve at least 1 connection for uploading; if the total is too
+        // small to spare any for checking (e.g. `-n 1`), checking is
+        // silently skipped for this run rather than exceeding the budget.
+        let check = config
+            .effective_check_connections()
+            .min(total_conns.saturating_sub(1));
+        (check, total_conns.saturating_sub(check))
+    } else {
+        (config.check_connections, total_conns)
+    }
+}
+
 /// A posted segment, retained for later `.nzb` generation.
 #[derive(Debug, Clone)]
 pub struct PostedSegment {
@@ -409,13 +477,17 @@ pub async fn post_files_with_progress_and_cancel(
     let servers: Arc<Vec<crate::config::ServerEntry>> = Arc::new(config.all_servers().collect());
     let total_conns = config.total_connections();
 
+    let check_enabled = config.check && !config.dry_run && !config.par2_only;
+    let (check_conns, upload_conns) = split_connections(config, check_enabled);
+
     let worker_count = if config.par2_only {
         0
     } else {
-        total_conns.max(1).min(initial_segments.max(1) as usize)
+        upload_conns.max(1).min(initial_segments.max(1) as usize)
     };
     info!(
         workers = worker_count,
+        check_workers = check_conns,
         connections = total_conns,
         "connection pool"
     );
@@ -475,16 +547,25 @@ pub async fn post_files_with_progress_and_cancel(
         )
     };
     let _ = &target; // used below
-    let total_source_bytes: u64 = metas.iter().map(|m| m.size).sum();
-    // Rough PAR2 size estimate: recovery data ≈ par2% of source bytes, plus
-    // a small fixed overhead per file for PAR2 packet headers (~1 KiB/file).
-    let par2_bytes_hint = if config.par2 > 0 && !config.par2_only && !config.dry_run {
-        let data_est = total_source_bytes * config.par2 as u64 / 100;
-        let header_est = metas.len() as u64 * 1024;
-        data_est + header_est
-    } else {
-        0
-    };
+                     // Exact PAR2 recovery-set geometry, computed with the same formula
+                     // `producer` will actually use — not an estimate. This lets the total
+                     // segment/byte counts be seeded correctly up front instead of jumping
+                     // once PAR2 encoding finishes and its volumes get queued for posting.
+    let (par2_bytes_hint, par2_segments_hint) =
+        if config.par2 > 0 && !config.par2_only && !config.dry_run {
+            let (slice_size, _total_slices, recovery_count) = par2_geometry(&metas, config);
+            let recovery_bytes = recovery_count as u64 * slice_size as u64;
+            let packet_overhead = recovery_count as u64 * packet::HEADER_LEN as u64;
+            // Small fixed overhead for the index file's Main/FileDesc/IFSC
+            // packets — negligible next to recovery_bytes, not worth
+            // computing exactly for a progress estimate.
+            let index_est = metas.len() as u64 * 128 + 4096;
+            let bytes_hint = recovery_bytes + packet_overhead + index_est;
+            let segments_hint = yenc::segments(bytes_hint, config.article_size).len() as u64;
+            (bytes_hint, segments_hint)
+        } else {
+            (0, 0)
+        };
     let file_entries = metas
         .iter()
         .map(|m| FileEntry {
@@ -499,6 +580,7 @@ pub async fn post_files_with_progress_and_cancel(
         connections: worker_count,
         target,
         par2_bytes_hint,
+        par2_segments_hint,
     });
 
     // Warn when the release contains 0-byte files: download clients identify
@@ -543,13 +625,14 @@ pub async fn post_files_with_progress_and_cancel(
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
-    let check_coordinator = if config.check && !config.dry_run && !config.par2_only {
+    let check_coordinator = if check_enabled && check_conns > 0 {
         Some(spawn_check_coordinator(
             config.clone(),
             shared.post_group.clone(),
             Arc::clone(&shared.results),
             shared.events.clone(),
             Some(Arc::clone(&shared.cancelled)),
+            check_conns,
         ))
     } else {
         None
@@ -926,28 +1009,10 @@ async fn producer(
 
     // Choose the PAR2 slice size: groups consecutive articles into larger slices
     // to keep input-block count near TARGET_PAR2_SLICES while satisfying both
-    // PAR2 spec limits (32 768 input blocks, 65 535 recovery blocks).
-    let (par2_slice_size, total_slices) = if let Some(size) = shared.config.par2_slice_size {
-        // Align to 64 bytes so SIMD kernels (Shuffle2x, ALTMAP) can operate
-        // without a scalar tail on every chunk boundary.
-        let s = (size / 64 * 64).max(64);
-        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
-        (s, n)
-    } else if let Some(count) = shared.config.par2_slice_count {
-        // Target a specific number of input slices (64-byte aligned).
-        let total_bytes: u64 = metas.iter().map(|m| m.size).sum();
-        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 64 * 64).max(64);
-        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
-        (s, n)
-    } else {
-        optimal_par2_slice_size(&per_file_articles, article_size, shared.config.par2)
-    };
-
-    let recovery_count = if let Some(n) = shared.config.par2_recovery_count {
-        n
-    } else {
-        (total_slices * shared.config.par2 as usize) / 100
-    };
+    // PAR2 spec limits (32 768 input blocks, 65 535 recovery blocks). Same
+    // geometry `par2_geometry` already computed to seed the progress totals
+    // at `Started` — kept in sync by sharing this one function.
+    let (par2_slice_size, total_slices, recovery_count) = par2_geometry(&metas, &shared.config);
 
     // Validate PAR2 spec limits.
     if total_slices > 32768 {
@@ -2480,6 +2545,61 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    // ── connection splitting (upload vs. streaming check) ─────────────────────
+
+    #[test]
+    fn split_connections_carves_auto_check_pool_out_of_the_total() {
+        let mut config = dry_run_config();
+        config.connections = 50;
+        config.check_connections = 0; // auto
+        let (check, upload) = split_connections(&config, true);
+        assert_eq!(check, 4);
+        assert_eq!(upload, 46);
+        assert_eq!(check + upload, 50);
+    }
+
+    #[test]
+    fn split_connections_disabled_uses_the_whole_total_for_upload() {
+        let mut config = dry_run_config();
+        config.connections = 50;
+        let (check, upload) = split_connections(&config, false);
+        assert_eq!(check, 0);
+        assert_eq!(upload, 50);
+    }
+
+    #[test]
+    fn split_connections_never_starves_upload_of_its_last_connection() {
+        let mut config = dry_run_config();
+        config.connections = 1;
+        config.check_connections = 0; // auto
+        let (check, upload) = split_connections(&config, true);
+        assert_eq!(check, 0, "no connection left to spare for checking");
+        assert_eq!(upload, 1);
+    }
+
+    #[test]
+    fn split_connections_explicit_check_connections_is_additive() {
+        let mut config = dry_run_config();
+        config.connections = 1;
+        config.check_connections = 1; // explicit, deliberate
+        let (check, upload) = split_connections(&config, true);
+        assert_eq!(check, 1);
+        assert_eq!(
+            upload, 1,
+            "explicit --check-connections must not shrink upload"
+        );
+    }
+
+    #[test]
+    fn split_connections_small_total_leaves_upload_at_least_one() {
+        let mut config = dry_run_config();
+        config.connections = 2;
+        config.check_connections = 0; // auto
+        let (check, upload) = split_connections(&config, true);
+        assert_eq!(check, 1);
+        assert_eq!(upload, 1);
     }
 
     #[tokio::test]
