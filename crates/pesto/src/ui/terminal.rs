@@ -419,7 +419,7 @@ impl RenderState {
                 delay_secs,
             } => {
                 self.check_retry_msg = Some(format!(
-                    "⏳ article not found — retry {attempt}/{max_attempts} in {delay_secs}s",
+                    "article not found — retry {attempt}/{max_attempts} in {delay_secs}s",
                 ));
             }
             ProgressEvent::CheckDone { failed } => {
@@ -717,7 +717,15 @@ impl RenderState {
                 0.0
             };
             let pct = (frac * 100.0).round() as u64;
-            let bar = render_bar(frac, 26);
+            // Trailing band: how much of the plan the streaming check queue
+            // has already confirmed, on the same 0..=total_segments scale as
+            // the upload's own leading edge — see `render_dual_bar`.
+            let checked_frac = if self.total_segments > 0 {
+                (self.check_checked as f64 / self.total_segments as f64).clamp(0.0, frac)
+            } else {
+                0.0
+            };
+            let bar = render_dual_bar(checked_frac, frac, 26);
             // Line 1: bar + percentage + segment count
             let line1 = format!(
                 "[{bar}] {pct:>3}%  {}/{} seg",
@@ -791,15 +799,21 @@ impl RenderState {
             if self.check_active || (final_draw && self.check_checked > 0) {
                 let verified = self.check_checked.saturating_sub(self.check_failed);
                 let pending = self.done_segments.saturating_sub(self.check_checked);
+                // Colour-match the upload bar's two bands: "verified" in the
+                // checked band's colour, "pending" in the upload band's —
+                // a legend for the bar that lives right next to the numbers
+                // it explains instead of a separate line or header colouring.
+                let verified_str = ansi(&format!("{verified} verified"), CHECK_BAND_COLOR);
+                let pending_str = ansi(&format!("{pending} pending"), UPLOAD_BAND_COLOR);
                 let line1 = if self.check_failed > 0 {
                     format!(
-                        "{verified} verified · {pending} pending · {} missing",
-                        self.check_failed
+                        "{verified_str} · {pending_str} · {}",
+                        ansi(&format!("{} missing", self.check_failed), "31")
                     )
                 } else if !self.check_active {
-                    format!("{verified} verified · all confirmed")
+                    format!("{verified_str} · all confirmed")
                 } else {
-                    format!("{verified} verified · {pending} pending")
+                    format!("{verified_str} · {pending_str}")
                 };
                 let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
                 let line2 = if !self.check_active {
@@ -1147,6 +1161,78 @@ fn render_bar(frac: f64, width: usize) -> String {
     s
 }
 
+// Colours for the two upload-bar bands: the leading edge (segments posted,
+// not yet check-confirmed) and the trailing edge (segments the streaming
+// check queue has already resolved). Kept distinct from every other colour
+// in use (see the `ansi(` call sites above) so the two meanings never blur
+// into an existing one.
+const UPLOAD_BAND_COLOR: &str = "32"; // green — matches the "posting data" phase label
+const CHECK_BAND_COLOR: &str = "34"; // blue — segments confirmed retrievable via STAT
+
+/// Draw a two-colour proportional bar: a `checked_frac` portion in
+/// [`CHECK_BAND_COLOR`] (how much of the upload the streaming check queue has
+/// already confirmed), followed by the rest of the `total_frac` portion in
+/// [`UPLOAD_BAND_COLOR`] (posted but not yet confirmed), followed by the
+/// unfilled `░` remainder — unchanged from [`render_bar`], so the bar's empty
+/// state looks exactly as it always has.
+///
+/// `checked_frac` is always `<= total_frac` in practice (the check queue can
+/// only confirm what has already been posted); this is enforced defensively
+/// with `clamp` so an out-of-order event can never render a checked band
+/// past the upload band's own leading edge.
+fn render_dual_bar(checked_frac: f64, total_frac: f64, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let checked_frac = checked_frac.clamp(0.0, 1.0);
+    let total_frac = total_frac.clamp(checked_frac, 1.0);
+
+    // The checked/upload split renders at whole-cell granularity; only the
+    // outer (upload) leading edge gets the smooth sub-character treatment,
+    // exactly like the single-colour bar.
+    let checked_cells = ((checked_frac * width as f64).round() as usize).min(width);
+
+    let total_eighths = (total_frac * width as f64 * 8.0).round() as usize;
+    let total_full = (total_eighths / 8).min(width).max(checked_cells);
+    let remainder = if total_full < width {
+        total_eighths % 8
+    } else {
+        0
+    };
+
+    let mut checked_part = String::with_capacity(checked_cells * 3);
+    for _ in 0..checked_cells {
+        checked_part.push('█');
+    }
+
+    let mut upload_part = String::with_capacity((total_full - checked_cells + 1) * 3);
+    for _ in checked_cells..total_full {
+        upload_part.push('█');
+    }
+    if remainder > 0 {
+        upload_part.push(SUBCHAR[remainder - 1]);
+    }
+
+    let filled_cells = if remainder > 0 {
+        total_full + 1
+    } else {
+        total_full
+    };
+    let pending_cells = width.saturating_sub(filled_cells);
+
+    let mut s = String::new();
+    if !checked_part.is_empty() {
+        s.push_str(&ansi(&checked_part, CHECK_BAND_COLOR));
+    }
+    if !upload_part.is_empty() {
+        s.push_str(&ansi(&upload_part, UPLOAD_BAND_COLOR));
+    }
+    for _ in 0..pending_cells {
+        s.push('░');
+    }
+    s
+}
+
 // Nine-level sparkline characters (phase 21c).
 const SPARK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -1231,25 +1317,81 @@ fn ansi(s: &str, code: &str) -> String {
     }
 }
 
-/// Pad `s` with spaces (or truncate it) to exactly `width` characters.
+/// Count of *visible* characters in `s`, skipping ANSI SGR escape sequences
+/// (`\x1b[...m`) so width math reflects what's actually drawn on screen —
+/// see `ansi()`, whose invisible colour codes would otherwise inflate a
+/// plain `.chars().count()` and desync box borders from colored content.
+fn visible_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_escape = false;
+    for c in s.chars() {
+        if in_escape {
+            if c == 'm' {
+                in_escape = false;
+            }
+        } else if c == '\x1b' {
+            in_escape = true;
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+/// Pad `s` with spaces (or truncate it) to exactly `width` *visible*
+/// characters. ANSI escape sequences pass through untouched and don't count
+/// against `width`.
 fn pad(s: &str, width: usize) -> String {
     let s = truncate(s, width);
-    let len = s.chars().count();
-    let mut out = String::with_capacity(width);
+    let len = visible_len(&s);
+    let mut out = String::with_capacity(s.len() + width.saturating_sub(len));
     out.push_str(&s);
-    for _ in 0..width - len {
+    for _ in 0..width.saturating_sub(len) {
         out.push(' ');
     }
     out
 }
 
-/// Truncate `s` to at most `width` characters, marking a cut with `…`.
+/// Truncate `s` to at most `width` *visible* characters, marking a cut with
+/// `…`. ANSI escape sequences are preserved rather than being sliced
+/// through; if truncation cuts off before a colour's closing `\x1b[0m`, a
+/// reset is appended so colour never bleeds past the truncated line.
 fn truncate(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
+    if visible_len(s) <= width {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(width.saturating_sub(1)).collect();
+    let budget = width.saturating_sub(1);
+    let mut out = String::new();
+    let mut visible = 0;
+    let mut escape_buf = String::new();
+    let mut in_escape = false;
+    let mut color_active = false;
+    for c in s.chars() {
+        if in_escape {
+            escape_buf.push(c);
+            if c == 'm' {
+                in_escape = false;
+                color_active = escape_buf != "\x1b[0m";
+                out.push_str(&escape_buf);
+                escape_buf.clear();
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            in_escape = true;
+            escape_buf.push(c);
+            continue;
+        }
+        if visible >= budget {
+            break;
+        }
+        out.push(c);
+        visible += 1;
+    }
     out.push('…');
+    if color_active {
+        out.push_str("\x1b[0m");
+    }
     out
 }
 
