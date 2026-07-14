@@ -1221,7 +1221,19 @@ async fn producer(
                     if let Some(worker) = &worker_opt {
                         // Append the article to the current PAR2 slice.
                         par2_accum.extend_from_slice(&buf);
-                        while par2_accum.len() >= par2_slice_size {
+                        // Strictly `>`, not `>=`: draining to exactly 0 here would
+                        // send the file's true last slice with `is_last_of_file:
+                        // false` whenever the file size is an exact multiple of
+                        // `par2_slice_size`, since the trailing flush below (the
+                        // only call site that passes `true`) is skipped once
+                        // `par2_accum` is empty. That left the worker's hasher
+                        // (crates/parmesan/src/worker.rs) never finalized for that
+                        // file — silently folding its bytes into the next file's
+                        // hash, or panicking on `hashes.len()` mismatch if it was
+                        // the last file in the set. Keeping at least one byte
+                        // buffered here always routes the file's final slice
+                        // through the trailing flush instead.
+                        while par2_accum.len() > par2_slice_size {
                             feed_par2_slice(&mut par2_accum, par2_slice_size, worker, false);
                             par2_slices_fed += 1;
                             shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
