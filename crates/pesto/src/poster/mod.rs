@@ -130,6 +130,10 @@ pub struct PostedSegment {
     /// Date header as `(rfc_string, unix_timestamp)`. Both parts are preserved
     /// so fixed dates survive round-trips and retries.
     pub date: (Option<String>, Option<u64>),
+    /// CRC-32 of the whole file this segment belongs to. Only meaningful (and
+    /// only ever emitted on the `=yend` line) when `part == total` — see
+    /// `FileMeta::full_crc32`.
+    pub full_crc32: u32,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -158,6 +162,9 @@ pub struct FailedTask {
     /// Date header as `(rfc_string, unix_timestamp)`. Both are preserved so
     /// fixed dates (which have `Some` RFC but `None` timestamp) are not lost.
     pub date: (Option<String>, Option<u64>),
+    /// CRC-32 of the whole file this segment belongs to — see
+    /// `PostedSegment::full_crc32`.
+    pub full_crc32: u32,
 }
 
 /// The result of a posting run.
@@ -187,6 +194,11 @@ struct FileMeta {
     /// Fixed dates have `Some` RFC but `None` timestamp.
     date: (Option<String>, Option<u64>),
     size: u64,
+    /// CRC-32 of the whole file, appended (as `crc32=`) to the `=yend` line
+    /// of a multi-part file's *last* segment, alongside the per-part
+    /// `pcrc32=` every segment already carries — see the yEnc draft §4 and
+    /// `nyuu`'s `MultiEncoder` (`lib/article.js`), which always includes it.
+    full_crc32: u32,
 }
 
 struct PostTask {
@@ -340,6 +352,7 @@ pub async fn post_files_with_progress_and_cancel(
             }
         };
         let date = resolve_date(config.date.as_deref());
+        let full_crc32 = compute_file_crc32(path).await?;
         metas.push(Arc::new(FileMeta {
             path: path.clone(),
             real_name,
@@ -348,6 +361,7 @@ pub async fn post_files_with_progress_and_cancel(
             from,
             date,
             size: md.len(),
+            full_crc32,
         }));
     }
 
@@ -1293,6 +1307,7 @@ async fn push_par2_file(
         }
     };
     let date = resolve_date(shared.config.date.as_deref());
+    let full_crc32 = compute_file_crc32(path).await?;
 
     let meta = Arc::new(FileMeta {
         path: path.clone(),
@@ -1302,6 +1317,7 @@ async fn push_par2_file(
         from,
         date,
         size,
+        full_crc32,
     });
 
     let mut file = tokio::fs::File::open(path).await?;
@@ -1497,6 +1513,7 @@ async fn worker(
                         bytes: 0,
                         from: task.from.clone(),
                         date: task.date.clone(),
+                        full_crc32: task.meta.full_crc32,
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1510,6 +1527,7 @@ async fn worker(
             }
 
             let t_enc = Instant::now();
+            let file_crc32 = (task.part == task.total).then_some(task.meta.full_crc32);
             let encoded = yenc::encode_part(
                 &task.meta.yenc_name,
                 task.meta.size,
@@ -1520,7 +1538,7 @@ async fn worker(
                 },
                 &task.data,
                 shared.config.line_length,
-                None,
+                file_crc32,
             );
             let encode_time = t_enc.elapsed();
             let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
@@ -1565,6 +1583,7 @@ async fn worker(
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
                     from: p.task.from.clone(),
                     date: p.date.clone(),
+                    full_crc32: p.task.meta.full_crc32,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1889,6 +1908,30 @@ fn pick_post_group(groups: &[String]) -> Vec<String> {
     }
 }
 
+/// Compute the CRC-32 of an entire file, streamed in fixed-size chunks so
+/// memory use stays flat regardless of file size.
+///
+/// Used once per file, up front, so every segment's `encode_part` call can
+/// pass it for the file's *last* part — see [`FileMeta::full_crc32`].
+async fn compute_file_crc32(path: &std::path::Path) -> Result<u32> {
+    let mut file = File::open(path)
+        .await
+        .with_context(|| format!("opening `{}`", path.display()))?;
+    let mut hasher = yenc::Crc32::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1 MiB chunks
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .with_context(|| format!("reading `{}`", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize())
+}
+
 /// Compute the `Date:` header value and its Unix timestamp from the config
 /// `date` option.
 ///
@@ -1968,6 +2011,7 @@ fn commit_result(
             bytes: wire_bytes as u64,
             from: task.from.clone(),
             date,
+            full_crc32: task.meta.full_crc32,
         });
     } else {
         record_failure(shared, &task.meta, &task, message_id, last_err);
@@ -2021,6 +2065,7 @@ fn record_failure(
         total: task.total,
         from: task.from.clone(),
         date: task.date.clone(),
+        full_crc32: meta.full_crc32,
     });
 }
 
@@ -2173,13 +2218,14 @@ pub async fn repost_missing_segments(
                     total: seg.total,
                     offset,
                 };
+                let file_crc32 = (seg.part == seg.total).then_some(seg.full_crc32);
                 let encoded = yenc::encode_part(
                     &seg.subject_name,
                     seg.file_size,
                     spec,
                     &buf,
                     line_length,
-                    None,
+                    file_crc32,
                 );
                 let (rfc_date, _ts) = &seg.date;
                 // Deliberately a fresh ID, not `seg.message_id` — see the
@@ -2274,6 +2320,7 @@ pub async fn repost_missing_segments(
                         bytes: wire_bytes,
                         from: seg.from.clone(),
                         date: seg.date.clone(),
+                        full_crc32: seg.full_crc32,
                     });
                     let done = reposted_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(tx) = &tx {
@@ -2375,13 +2422,14 @@ pub async fn repost_failed_tasks(
             total: task.total,
             offset,
         };
+        let file_crc32 = (task.part == task.total).then_some(task.full_crc32);
         let encoded = yenc::encode_part(
             &task.subject_name,
             task.file_size,
             spec,
             &buf,
             config.line_length,
-            None,
+            file_crc32,
         );
         // Re-post with the *same* Message-ID the in-run attempts used, so a
         // server that already has the article (lost `240` ack) deduplicates it
@@ -2455,6 +2503,7 @@ pub async fn repost_failed_tasks(
                 bytes: wire_bytes,
                 from: task.from.clone(),
                 date: task.date.clone(),
+                full_crc32: task.full_crc32,
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::Status {
@@ -2986,6 +3035,7 @@ mod tests {
             from: String::new(),
             date: (None, None),
             size: 0,
+            full_crc32: 0,
         }
     }
 

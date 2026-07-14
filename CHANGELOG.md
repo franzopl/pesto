@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **A multi-part file's last segment never carried the whole-file CRC-32**:
+  found by comparing `pesto`'s yEnc article construction against `nyuu`'s,
+  which always includes a `crc32=` field (the aggregate CRC-32 of the entire
+  file) on the `=yend` line of the last part, alongside the per-part
+  `pcrc32=` every segment already carries — `pesto` passed `None` for this
+  unconditionally, on all three post/repost paths. This wasn't the cause of
+  the missing-article investigation (at most one segment per posted file can
+  be "the last one", far fewer than the simultaneous failures observed
+  across many uploads), but it's a real yEnc spec-completeness gap, now
+  closed: the whole-file CRC-32 is computed once per file and carried
+  through every post and repost path.
+
 ---
 
 ## [0.3.49] — 2026-07-14

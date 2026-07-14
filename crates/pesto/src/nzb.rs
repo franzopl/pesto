@@ -226,6 +226,11 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 bytes,
                 from: current_poster.clone(),
                 date: (None, current_date),
+                // Not recoverable from an .nzb (it only exists on the
+                // `=yend` line of the last segment's body, which the .nzb
+                // never carries) — harmless, since a segment parsed back
+                // from an .nzb (--merge-season) is never re-encoded.
+                full_crc32: 0,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
@@ -345,6 +350,7 @@ mod tests {
             bytes: 500,
             from: "poster <p@x>".to_string(),
             date: (None, None),
+            full_crc32: 0,
         }
     }
 
@@ -392,6 +398,7 @@ mod tests {
             bytes: 500,
             from: String::new(),
             date: (None, None),
+            full_crc32: 0,
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // The wire subject is obfuscated; the NZB always carries the real filename.
@@ -413,6 +420,7 @@ mod tests {
             bytes: 500,
             from: String::new(),
             date: (None, None),
+            full_crc32: 0,
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // Subject on the wire is obfuscated; NZB name= always uses the real filename.
