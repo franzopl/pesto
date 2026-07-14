@@ -9,6 +9,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.54] — 2026-07-14
+
+### Fixed
+- **`PESTO_GROUP`/`PESTO_GROUPS` (post-upload hooks), history records, and
+  completion notifications always reported the *first* entry of the
+  configured `groups` list**, even though `pick_post_group` actually posts
+  every run to one group chosen at random from that list (by design, so a
+  single upload stays together in one group while the footprint spreads
+  across groups over many runs). Hooks, `history.jsonl`, and Discord/ntfy
+  notifications now report `outcome.groups` — the group(s) actually posted
+  to — instead of re-reading the static config. A consolidated `--season`
+  NZB's post-hook reports the union of groups actually used across its
+  episodes instead of the config's static list, for the same reason.
+- **The streaming `--check` queue could `STAT` an article against the wrong
+  server in a multi-server (failover) config**, since `check_worker` picked
+  a server purely from `worker_idx % servers.len()` — with no relation to
+  which server actually accepted that article's `POST` — and
+  `PostedSegment` never recorded that in the first place. With more
+  failover servers configured than `check_retries` (default 3), or simply
+  an unlucky worker/server pairing, this could permanently miss the server
+  that actually has the article: it gets reported "missing" (surfaced to
+  the user as unconfirmed) and reposted as a needless duplicate, even
+  though the original is sitting on the network untouched.
+  `PostedSegment` now carries `server_idx` (the server actually used, set
+  at the point of a real `POST`), and the check queue retargets its
+  connection to that exact server before every `STAT` — falling back to
+  the existing rotate-and-retry behavior only if that server turns out to
+  be genuinely unreachable.
+
+---
+
 ## [0.3.53] — 2026-07-14
 
 ### Changed

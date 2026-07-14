@@ -302,7 +302,10 @@ pub async fn run_upload(
                             },
                             password: effective_password.as_deref(),
                             total_bytes,
-                            group: config.groups.first().map(String::as_str),
+                            // The group actually posted to (`pick_post_group`
+                            // chose one at random from `config.groups`), not
+                            // the configured list's static first entry.
+                            group: outcome.groups.first().map(String::as_str),
                             server: Some(config.host.as_str()),
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
@@ -334,7 +337,7 @@ pub async fn run_upload(
             ntfy_topic: config.notify_ntfy.as_deref(),
             name: entry_label,
             total_bytes,
-            group: config.groups.first().map(String::as_str),
+            group: outcome.groups.first().map(String::as_str),
             category: config.nzb_category.as_deref(),
             // Reflects true completeness, independent of `allow_incomplete_nzb`
             // — the notification should say "not fully ok" even when the
@@ -388,8 +391,10 @@ pub async fn run_upload(
                 .collect::<Vec<_>>()
                 .join(":"),
             server: config.host.clone(),
-            group: config.groups.first().cloned().unwrap_or_default(),
-            groups: config.groups.join(":"),
+            // The group(s) actually posted to, not the static configured
+            // list — see the analogous comment on the history record above.
+            group: outcome.groups.first().cloned().unwrap_or_default(),
+            groups: outcome.groups.join(":"),
             password: config
                 .nzb_password
                 .as_deref()

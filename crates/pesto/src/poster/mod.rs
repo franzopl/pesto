@@ -205,6 +205,17 @@ pub struct PostedSegment {
     /// only ever emitted on the `=yend` line) when `part == total` — see
     /// `PostTask::file_crc32`.
     pub full_crc32: u32,
+    /// Index into this run's server list (`Config::all_servers()` order) of
+    /// the server that actually accepted this article's `240`. The
+    /// streaming check queue (`poster::check`) uses this to `STAT` the same
+    /// server the article was posted to, instead of guessing — with a
+    /// multi-server failover config, different articles from the same run
+    /// can legitimately land on different servers, and a provider that
+    /// never received an article obviously can't confirm it. Meaningless
+    /// (left as `0`) for segments that never go through the check queue:
+    /// resume-skipped segments (already confirmed in a prior run) and
+    /// dry-run segments (nothing was actually posted).
+    pub server_idx: usize,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -1693,6 +1704,9 @@ async fn worker(
                         from: task.from.clone(),
                         date: task.date.clone(),
                         full_crc32: task.file_crc32.unwrap_or(0),
+                        // Resumed from a prior run's state, not re-entered
+                        // into the check queue this run — see the field doc.
+                        server_idx: 0,
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1763,6 +1777,9 @@ async fn worker(
                     from: p.task.from.clone(),
                     date: p.date.clone(),
                     full_crc32: p.task.file_crc32.unwrap_or(0),
+                    // Nothing was actually posted in dry-run mode, so there's
+                    // no real server and no check queue — see the field doc.
+                    server_idx: 0,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1866,6 +1883,7 @@ async fn worker(
                 posted,
                 &last_err,
                 p.date,
+                slot.server_idx(),
             );
         } else {
             // ── Pipelined path ───────────────────────────────────────────────
@@ -1968,6 +1986,9 @@ async fn worker(
                 break;
             }
 
+            // The whole batch shares one connection/flush, so every article in
+            // it — success or failure — was attempted against the same server.
+            let batch_server_idx = slot.server_idx();
             for (p, result) in pending.into_iter().zip(pipe_results) {
                 let posted = pipeline_ok && result.is_ok();
                 let last_err = result.err().unwrap_or_else(|| "pipeline failed".into());
@@ -1980,6 +2001,7 @@ async fn worker(
                     posted,
                     &last_err,
                     p.date,
+                    batch_server_idx,
                 );
             }
         }
@@ -2101,6 +2123,7 @@ fn commit_result(
     posted: bool,
     last_err: &str,
     date: (Option<String>, Option<u64>),
+    server_idx: usize,
 ) {
     if posted {
         if let Some(resume) = &shared.resume {
@@ -2122,6 +2145,7 @@ fn commit_result(
             from: task.from.clone(),
             date,
             full_crc32: task.file_crc32.unwrap_or(0),
+            server_idx,
         };
         if let Some(tx) = check_tx {
             let _ = tx.send(seg.clone());
@@ -2323,6 +2347,10 @@ pub async fn repost_failed_tasks(
                 total: task.total,
                 message_id,
                 bytes: wire_bytes,
+                // `slot` only ever targets the primary server (index 0 in
+                // `config.all_servers()` too — see its "primary first" order),
+                // since this blind end-of-run retry doesn't fail over.
+                server_idx: slot.server_idx(),
                 from: task.from.clone(),
                 date: task.date.clone(),
                 full_crc32: task.full_crc32,

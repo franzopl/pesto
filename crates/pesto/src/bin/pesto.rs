@@ -1108,7 +1108,10 @@ async fn run_single_upload(
                             obfuscated_name: obf_name,
                             password: effective_password.as_deref(),
                             total_bytes,
-                            group: config.groups.first().map(String::as_str),
+                            // The group actually posted to (`pick_post_group`
+                            // chose one at random from `config.groups`), not
+                            // the configured list's static first entry.
+                            group: outcome.groups.first().map(String::as_str),
                             server: Some(config.host.as_str()),
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
@@ -1142,7 +1145,7 @@ async fn run_single_upload(
             ntfy_topic: config.notify_ntfy.as_deref(),
             name: entry_label,
             total_bytes,
-            group: config.groups.first().map(String::as_str),
+            group: outcome.groups.first().map(String::as_str),
             category: config.nzb_category.as_deref(),
             ok: !had_failures,
         })
@@ -1200,7 +1203,11 @@ async fn run_single_upload(
             ObfuscateMode::Full => "full",
             ObfuscateMode::Paranoid => "paranoid",
         };
-        let post_groups_str = config.groups.join(":");
+        // PESTO_GROUP/PESTO_GROUPS report the group(s) actually posted to
+        // (`outcome.groups`, chosen at random by `pick_post_group` from the
+        // full configured list), not the static configured list itself —
+        // this is a post-upload hook, so the real destination is known.
+        let post_groups_str = outcome.groups.join(":");
         let post_tags_str = config.nzb_tags.join(" ");
         let hook_env = HookEnv {
             nzb_path: nzb_reported_path.as_deref(),
@@ -1208,7 +1215,7 @@ async fn run_single_upload(
             name: entry_label,
             total_bytes,
             input_paths: &post_input_paths,
-            group: config.groups.first().map(String::as_str),
+            group: outcome.groups.first().map(String::as_str),
             groups: &post_groups_str,
             password: effective_password.as_deref(),
             server: &config.host,
@@ -1463,7 +1470,10 @@ async fn run_batch(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Paranoid => "paranoid",
             };
-            let season_groups_str = config.groups.join(":");
+            // The union of groups actually used across every episode in the
+            // season (each picked its own at random — see `all_groups`
+            // above), not the static configured list.
+            let season_groups_str = all_groups.join(":");
             let season_tags_str = config.nzb_tags.join(" ");
             let hook_env = HookEnv {
                 nzb_path: Some(&season_path),
@@ -1471,7 +1481,7 @@ async fn run_batch(
                 name: &season_label,
                 total_bytes,
                 input_paths: "",
-                group: config.groups.first().map(String::as_str),
+                group: all_groups.first().map(String::as_str),
                 groups: &season_groups_str,
                 password: effective_password.as_deref(),
                 server: &config.host,

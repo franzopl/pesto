@@ -285,6 +285,15 @@ async fn process_item(
 ) {
     let max_stat_attempts = inner.config.check_retries.max(1);
 
+    // Always start from the server this article was actually posted to
+    // (see `PostedSegment::server_idx`) rather than whichever server this
+    // worker's slot happens to be on — a multi-server failover config can
+    // legitimately land different articles on different servers, and only
+    // the server that has the article can confirm it. `retarget` is a no-op
+    // when already pointed there, so this doesn't churn the connection for
+    // the common case of consecutive items on the same server.
+    slot.retarget(item.seg.server_idx);
+
     let stat_result = match slot.ensure_connected().await {
         Ok(conn) => conn.stat(&item.seg.message_id).await,
         Err(e) => Err(e),
@@ -480,6 +489,7 @@ async fn repost_one(
                         from: seg.from.clone(),
                         date: seg.date.clone(),
                         full_crc32: seg.full_crc32,
+                        server_idx: slot.server_idx(),
                     });
                 }
                 Err(e) => {

@@ -112,6 +112,27 @@ impl ConnectionSlot {
         self.rotate();
     }
 
+    /// Point this slot at a specific server (by index into the list it was
+    /// built with), so the next [`ensure_connected`][Self::ensure_connected]
+    /// targets exactly that server instead of whichever one the slot
+    /// currently happens to be on.
+    ///
+    /// A no-op when `idx` is already the current target (or out of range) —
+    /// the existing connection, if any, is kept, so retargeting to the same
+    /// server repeatedly (the common case: consecutive items destined for
+    /// the same server) never pays for a reconnect. Used by the streaming
+    /// check queue, which must `STAT` the same server an article was
+    /// actually posted to (see `PostedSegment::server_idx`), not just
+    /// whichever server this slot's worker happened to start on.
+    pub fn retarget(&mut self, idx: usize) {
+        if idx >= self.servers.len() || idx == self.server_idx {
+            return;
+        }
+        self.conn = None;
+        self.server_idx = idx;
+        self.next_connect_reason = "retarget";
+    }
+
     /// Retry delay of the server the slot is currently targeting. Used by the
     /// worker to back off before reconnecting after a failure.
     pub fn retry_delay(&self) -> Duration {
