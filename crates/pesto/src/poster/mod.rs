@@ -203,7 +203,7 @@ pub struct PostedSegment {
     pub date: (Option<String>, Option<u64>),
     /// CRC-32 of the whole file this segment belongs to. Only meaningful (and
     /// only ever emitted on the `=yend` line) when `part == total` — see
-    /// `FileMeta::full_crc32`.
+    /// `PostTask::file_crc32`.
     pub full_crc32: u32,
 }
 
@@ -234,7 +234,7 @@ pub struct FailedTask {
     /// fixed dates (which have `Some` RFC but `None` timestamp) are not lost.
     pub date: (Option<String>, Option<u64>),
     /// CRC-32 of the whole file this segment belongs to — see
-    /// `PostedSegment::full_crc32`.
+    /// `PostedSegment::full_crc32`. Only meaningful when `part == total`.
     pub full_crc32: u32,
 }
 
@@ -271,11 +271,6 @@ struct FileMeta {
     /// Fixed dates have `Some` RFC but `None` timestamp.
     date: (Option<String>, Option<u64>),
     size: u64,
-    /// CRC-32 of the whole file, appended (as `crc32=`) to the `=yend` line
-    /// of a multi-part file's *last* segment, alongside the per-part
-    /// `pcrc32=` every segment already carries — see the yEnc draft §4 and
-    /// `nyuu`'s `MultiEncoder` (`lib/article.js`), which always includes it.
-    full_crc32: u32,
 }
 
 struct PostTask {
@@ -294,6 +289,13 @@ struct PostTask {
     /// In paranoid mode each article gets a unique value; otherwise this
     /// mirrors `meta.date`.
     date: (Option<String>, Option<u64>),
+    /// CRC-32 of the whole file, appended (as `crc32=`) to the `=yend` line —
+    /// see the yEnc draft §4 and `nyuu`'s `MultiEncoder` (`lib/article.js`),
+    /// which always includes it. `Some` only on the file's *last* part;
+    /// computed by the reader task as it streams the file for upload (the
+    /// same read the article body comes from), so no separate whole-file
+    /// pre-pass is needed before posting can start.
+    file_crc32: Option<u32>,
 }
 
 struct Shared {
@@ -429,7 +431,6 @@ pub async fn post_files_with_progress_and_cancel(
             }
         };
         let date = resolve_date(config.date.as_deref());
-        let full_crc32 = compute_file_crc32(path).await?;
         metas.push(Arc::new(FileMeta {
             path: path.clone(),
             real_name,
@@ -438,7 +439,6 @@ pub async fn post_files_with_progress_and_cancel(
             from,
             date,
             size: md.len(),
-            full_crc32,
         }));
     }
 
@@ -1169,21 +1169,32 @@ async fn producer(
                 // disk into a bounded channel of capacity 2. This lets the OS
                 // begin fetching article N+1 while the producer is processing
                 // article N (PAR2 accumulation, channel send, or block_in_place).
-                let (read_tx, mut read_rx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>)>(2);
+                //
+                // The whole-file CRC-32 (needed on the `=yend` line of the
+                // last segment) is accumulated here, article by article, over
+                // the exact bytes already being read for upload — this avoids
+                // a separate whole-file pre-pass that would otherwise block
+                // the first progress event on reading a multi-GB file twice.
+                let (read_tx, mut read_rx) =
+                    tokio::sync::mpsc::channel::<(u64, Vec<u8>, Option<u32>)>(2);
 
                 let reader_path = meta.path.clone();
                 let reader_shared = shared.clone();
                 let reader_segs = segments.clone();
                 let reader_handle = tokio::spawn(async move {
                     let mut file = File::open(&reader_path).await?;
-                    for (offset, len) in reader_segs {
+                    let mut crc = yenc::Crc32::new();
+                    let last_idx = reader_segs.len().saturating_sub(1);
+                    for (idx, (offset, len)) in reader_segs.into_iter().enumerate() {
                         // Phase 12b: acquire a buffer from the shared pool if
                         // available, otherwise allocate. Workers return buffers
                         // to the same pool after yEnc encoding.
                         let buf = reader_shared.acquire_buffer(len);
                         let mut buf = buf;
                         file.read_exact(&mut buf).await?;
-                        if read_tx.send((offset, buf)).await.is_err() {
+                        crc.update(&buf);
+                        let full_crc32 = (idx == last_idx).then(|| crc.finalize());
+                        if read_tx.send((offset, buf, full_crc32)).await.is_err() {
                             break; // producer dropped its end (cancelled)
                         }
                     }
@@ -1199,7 +1210,7 @@ async fn producer(
                 };
 
                 let mut i: u32 = 0;
-                while let Some((offset, buf)) = read_rx.recv().await {
+                while let Some((offset, buf, file_crc32)) = read_rx.recv().await {
                     if shared.cancelled.load(Ordering::Relaxed) {
                         drop(read_rx);
                         let _ = reader_handle.await;
@@ -1232,6 +1243,7 @@ async fn producer(
                                     total_parts,
                                     offset,
                                     buf,
+                                    file_crc32,
                                     &shared.config,
                                 ))
                                 .await
@@ -1456,7 +1468,6 @@ async fn push_par2_file(
         }
     };
     let date = resolve_date(shared.config.date.as_deref());
-    let full_crc32 = compute_file_crc32(path).await?;
 
     let meta = Arc::new(FileMeta {
         path: path.clone(),
@@ -1466,13 +1477,19 @@ async fn push_par2_file(
         from,
         date,
         size,
-        full_crc32,
     });
 
+    // Whole-file CRC-32 accumulated as this same loop reads the file for
+    // upload, rather than in a separate pre-pass — see the reader task in
+    // `producer` for the equivalent path used by the main input files.
+    let mut crc = yenc::Crc32::new();
+    let last_idx = total.saturating_sub(1);
     let mut file = tokio::fs::File::open(path).await?;
     for (i, (offset, len)) in segments.into_iter().enumerate() {
         let mut buf = vec![0u8; len];
         file.read_exact(&mut buf).await?;
+        crc.update(&buf);
+        let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
         if tx
             .send(make_task(
                 meta.clone(),
@@ -1480,6 +1497,7 @@ async fn push_par2_file(
                 total,
                 offset,
                 buf,
+                file_crc32,
                 &shared.config,
             ))
             .await
@@ -1662,7 +1680,7 @@ async fn worker(
                         bytes: 0,
                         from: task.from.clone(),
                         date: task.date.clone(),
-                        full_crc32: task.meta.full_crc32,
+                        full_crc32: task.file_crc32.unwrap_or(0),
                     });
                     let bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -1676,7 +1694,7 @@ async fn worker(
             }
 
             let t_enc = Instant::now();
-            let file_crc32 = (task.part == task.total).then_some(task.meta.full_crc32);
+            let file_crc32 = task.file_crc32;
             let encoded = yenc::encode_part(
                 &task.meta.yenc_name,
                 task.meta.size,
@@ -1732,7 +1750,7 @@ async fn worker(
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
                     from: p.task.from.clone(),
                     date: p.date.clone(),
-                    full_crc32: p.task.meta.full_crc32,
+                    full_crc32: p.task.file_crc32.unwrap_or(0),
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -1972,6 +1990,7 @@ fn make_task(
     total: u32,
     offset: u64,
     data: Vec<u8>,
+    file_crc32: Option<u32>,
     config: &Config,
 ) -> PostTask {
     let (subject_name, from, date) = if config.obfuscate == ObfuscateMode::Paranoid {
@@ -1993,6 +2012,7 @@ fn make_task(
         subject_name,
         from,
         date,
+        file_crc32,
     }
 }
 
@@ -2006,30 +2026,6 @@ fn pick_post_group(groups: &[String]) -> Vec<String> {
             vec![groups[idx].clone()]
         }
     }
-}
-
-/// Compute the CRC-32 of an entire file, streamed in fixed-size chunks so
-/// memory use stays flat regardless of file size.
-///
-/// Used once per file, up front, so every segment's `encode_part` call can
-/// pass it for the file's *last* part — see [`FileMeta::full_crc32`].
-async fn compute_file_crc32(path: &std::path::Path) -> Result<u32> {
-    let mut file = File::open(path)
-        .await
-        .with_context(|| format!("opening `{}`", path.display()))?;
-    let mut hasher = yenc::Crc32::new();
-    let mut buf = vec![0u8; 1 << 20]; // 1 MiB chunks
-    loop {
-        let n = file
-            .read(&mut buf)
-            .await
-            .with_context(|| format!("reading `{}`", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize())
 }
 
 /// Compute the `Date:` header value and its Unix timestamp from the config
@@ -2113,7 +2109,7 @@ fn commit_result(
             bytes: wire_bytes as u64,
             from: task.from.clone(),
             date,
-            full_crc32: task.meta.full_crc32,
+            full_crc32: task.file_crc32.unwrap_or(0),
         };
         if let Some(tx) = check_tx {
             let _ = tx.send(seg.clone());
@@ -2171,7 +2167,7 @@ fn record_failure(
         total: task.total,
         from: task.from.clone(),
         date: task.date.clone(),
-        full_crc32: meta.full_crc32,
+        full_crc32: task.file_crc32.unwrap_or(0),
     });
 }
 
@@ -2691,7 +2687,6 @@ mod tests {
             from: String::new(),
             date: (None, None),
             size: 0,
-            full_crc32: 0,
         }
     }
 
@@ -2831,6 +2826,7 @@ mod tests {
             subject_name: "ep.mkv".into(),
             from: String::new(),
             date: (None, None),
+            file_crc32: None,
         };
         record_failure(&shared, &task.meta, &task, "<mid@host>".into(), "timeout");
         let failures = shared.failures.lock().unwrap();
