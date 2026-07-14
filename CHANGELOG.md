@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.53] — 2026-07-14
+
+### Changed
+- **The check queue reuses the upload's connections once posting finishes**,
+  instead of leaving them idle while a small dedicated pool drains whatever
+  backlog is left on its own. The dedicated pool is sized for running
+  *alongside* an active upload (where POST dominates the cost and STAT is
+  comparatively cheap); a fast upload or a slow/high-latency check path can
+  leave a real backlog once posting is done, and there's no reason not to
+  reuse connections that just went idle to clear it quickly.
+- **Fixed the auto-derived check pool taking a disproportionate share of a
+  small `--connections` total.** It was a flat "up to 4", which is a
+  sensible ~8% at a real-world `connections=50` but tried to reserve 3 out
+  of a 4-connection total — starving the upload that actually matters. The
+  pool now scales as a fraction of the total (~8%, still capped at 4)
+  instead of a flat number, so `-n 4` reserves 1 for checking (not 3), while
+  `-n 50`/`-n 200` behave the same as before (4).
+
+---
+
 ## [0.3.52] — 2026-07-14
 
 ### Changed

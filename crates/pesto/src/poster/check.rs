@@ -127,6 +127,24 @@ impl CheckCoordinatorHandle {
         self.tx.clone().expect("sender available before drain")
     }
 
+    /// Spawn `additional` more check workers on the same queue, reusing
+    /// connections that just freed up — e.g. once the upload's own worker
+    /// pool has finished and would otherwise sit idle while a small
+    /// dedicated check pool drains whatever backlog is left. Safe to call
+    /// any time, including when the queue is already empty or draining has
+    /// finished: idle workers just poll harmlessly and exit once there's
+    /// nothing left, without ever opening a connection (connections are
+    /// opened lazily, only when a worker actually has an article to check).
+    pub fn scale_up(&mut self, additional: usize) {
+        let base_idx = self.workers.len();
+        for i in 0..additional {
+            let inner = Arc::clone(&self.inner);
+            self.workers.push(tokio::spawn(async move {
+                check_worker(inner, base_idx + i).await;
+            }));
+        }
+    }
+
     /// Close the input (no more segments will be queued) and wait for every
     /// queued/in-flight article to resolve — verified, reposted-and-verified,
     /// or given up on. Returns the Message-IDs that could never be confirmed.

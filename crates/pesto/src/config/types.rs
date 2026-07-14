@@ -426,11 +426,25 @@ impl Config {
     /// queue, before the caller bounds it against the configured total
     /// (`post_files_with_progress_and_cancel` carves this out of
     /// `total_connections()` rather than opening it on top — see there for
-    /// why). `0` resolves to a small fixed pool rather than the full upload
-    /// connection count, since the two run *concurrently*.
+    /// why). `0` resolves to a small pool sized as a *fraction* of the
+    /// total (roughly 8%, capped at 4) rather than a flat number — a flat
+    /// cap of 4 is a sensible ~8% at a real-world `connections=50` (checked
+    /// against production traffic: STAT's cost is small enough relative to
+    /// POST that 4 dedicated connections comfortably keep up with 46
+    /// posting connections), but at a low total like `connections=4` a flat
+    /// 4 would try to reserve the *entire* pool for checking and leave
+    /// nothing for uploading. Scaling with the total avoids that: checking
+    /// gets at least 1 connection once there's more than one to spare, and
+    /// tops out at 4 once the total is large enough that 4 is already a
+    /// small slice of it.
     pub fn effective_check_connections(&self) -> usize {
         if self.check_connections == 0 {
-            self.total_connections().clamp(1, 4)
+            let total = self.total_connections();
+            if total < 2 {
+                0
+            } else {
+                (total / 12).clamp(1, 4)
+            }
         } else {
             self.check_connections
         }

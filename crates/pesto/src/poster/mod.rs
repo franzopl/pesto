@@ -625,7 +625,7 @@ pub async fn post_files_with_progress_and_cancel(
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
-    let check_coordinator = if check_enabled && check_conns > 0 {
+    let mut check_coordinator = if check_enabled && check_conns > 0 {
         Some(spawn_check_coordinator(
             config.clone(),
             shared.post_group.clone(),
@@ -669,6 +669,14 @@ pub async fn post_files_with_progress_and_cancel(
 
     for handle in handles {
         let _ = handle.await;
+    }
+
+    // The upload's own connections are now idle — reuse that budget to
+    // drain any remaining check backlog faster instead of leaving it to a
+    // handful of dedicated connections that were sized for running
+    // *alongside* the upload, not for a burst catch-up at the end.
+    if let Some(coordinator) = check_coordinator.as_mut() {
+        coordinator.scale_up(upload_conns);
     }
 
     cancel_handle.abort();
@@ -2600,6 +2608,30 @@ mod tests {
         let (check, upload) = split_connections(&config, true);
         assert_eq!(check, 1);
         assert_eq!(upload, 1);
+    }
+
+    #[test]
+    fn split_connections_low_max_favors_upload_not_check() {
+        // Regression guard: a flat "up to 4" auto check pool used to try to
+        // reserve 3 out of a 4-connection total for checking, leaving
+        // upload — the operation that actually matters — with just 1. The
+        // auto pool must scale down with the total instead of staying flat.
+        let mut config = dry_run_config();
+        config.connections = 4;
+        config.check_connections = 0; // auto
+        let (check, upload) = split_connections(&config, true);
+        assert_eq!(check, 1);
+        assert_eq!(upload, 3);
+    }
+
+    #[test]
+    fn split_connections_high_max_caps_the_auto_check_pool() {
+        let mut config = dry_run_config();
+        config.connections = 200;
+        config.check_connections = 0; // auto
+        let (check, upload) = split_connections(&config, true);
+        assert_eq!(check, 4);
+        assert_eq!(upload, 196);
     }
 
     #[tokio::test]
