@@ -139,8 +139,6 @@ pub struct PostingSection {
     pub retries: Option<u32>,
     pub obfuscate: Option<ObfuscateMode>,
     pub par2: Option<u8>,
-    /// Confirm each posted article via STAT after posting.
-    pub verify: Option<bool>,
     /// Maximum upload rate as a human-readable string, e.g. `"50 MiB/s"`.
     pub upload_rate: Option<String>,
     /// `Date:` header mode: `"now"`, `"random"`, or an RFC 2822 timestamp.
@@ -150,18 +148,21 @@ pub struct PostingSection {
     /// Fixed domain for `Message-ID` generation. When absent a random domain
     /// is generated per article.
     pub message_id_domain: Option<String>,
-    /// Run a deferred STAT check on every posted article after upload finishes.
+    /// Confirm every posted article via a streaming STAT check that runs
+    /// concurrently with the upload (each article is checked a few seconds
+    /// after it posts; misses are reposted automatically). Default: true.
     pub check: Option<bool>,
-    /// Seconds to wait before running the post-check STAT pass. Default: 30.
+    /// Seconds to wait after an article posts before its first STAT check.
+    /// Default: 5.
     pub check_delay: Option<u64>,
-    /// Number of STAT attempts per article during post-check. Default: 2.
+    /// Number of STAT attempts per posted copy before triggering a repost.
+    /// Default: 3.
     pub check_retries: Option<u32>,
-    /// Number of parallel NNTP connections for the post-check STAT pass.
-    /// Default: 0 (match the upload connection count).
+    /// Number of dedicated parallel NNTP connections for the streaming check
+    /// queue. Default: 0 (a small pool sized `min(4, connections)`).
     pub check_connections: Option<usize>,
-    /// Number of times to re-post an article that the STAT pass still can't
-    /// find, each followed by another full STAT pass. Mirrors nyuu's
-    /// `check-post-tries`. Default: 1.
+    /// Number of times to re-post an article the check queue still can't
+    /// find. Mirrors nyuu's `check-post-tries`. Default: 1.
     pub check_post_retries: Option<u32>,
     /// Publish the NZB (and run post-upload hooks) even when some articles
     /// are still confirmed missing on the server after every
@@ -170,7 +171,7 @@ pub struct PostingSection {
     pub allow_incomplete_nzb: Option<bool>,
     /// Number of articles to send per connection before reading responses.
     /// Values > 1 enable NNTP pipelining, which cuts per-article RTT cost.
-    /// Incompatible with `verify = true`. Default: 1.
+    /// Default: 1.
     pub pipeline_depth: Option<usize>,
     /// Maximum RAM for PAR2 recovery buffers as a human-readable string,
     /// e.g. `"512 MiB"`. When the total buffer size would exceed this limit
@@ -303,7 +304,6 @@ pub struct Overrides {
     pub threads: Option<usize>,
     pub simd: Option<SimdPath>,
     pub resume: Option<bool>,
-    pub verify: Option<bool>,
     pub upload_rate: Option<u64>,
     pub compress_format: Option<String>,
     pub compress_password: Option<String>,
@@ -362,7 +362,6 @@ pub struct Config {
     pub par2_only: bool,
     pub threads: usize,
     pub simd: SimdPath,
-    pub verify: bool,
     pub resume: bool,
     pub upload_rate: u64,
     pub compress_format: Option<String>,
@@ -421,6 +420,18 @@ impl Config {
                 .iter()
                 .map(|s| s.connections)
                 .sum::<usize>()
+    }
+
+    /// Number of dedicated connections for the streaming check queue. These
+    /// run *concurrently* with the upload connections, so `0` resolves to a
+    /// small fixed pool rather than the full upload connection count (which
+    /// would double the connections held against the server's limit).
+    pub fn effective_check_connections(&self) -> usize {
+        if self.check_connections == 0 {
+            self.total_connections().clamp(1, 4)
+        } else {
+            self.check_connections
+        }
     }
 }
 

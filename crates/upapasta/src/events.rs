@@ -24,19 +24,6 @@ pub enum UploadPhase {
         written: u32,
         total: u32,
     },
-    Verifying {
-        checked: u64,
-        total: u64,
-    },
-    /// Post-upload STAT check pass.
-    Checking {
-        checked: u64,
-        total: u64,
-    },
-    /// Reposting articles that failed the check.
-    Reposting {
-        missing: u64,
-    },
     Done,
 }
 
@@ -58,6 +45,11 @@ pub struct ProgressUpdate {
 
     /// PAR2 encoding progress (concurrent with NNTP posting); None = no change
     pub par2_slices: Option<(usize, usize)>, // (done, total)
+
+    /// Streaming check queue progress (concurrent with NNTP posting, runs
+    /// for the lifetime of the upload rather than as its own phase);
+    /// `(checked, failed)`. None = no change.
+    pub check_progress: Option<(u64, u64)>,
 
     /// When set, this update extends the queue by the given bytes/segments.
     /// apply() absorbs it against par2_hint_remaining instead of blindly adding.

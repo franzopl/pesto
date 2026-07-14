@@ -117,38 +117,21 @@ pub enum ProgressEvent {
     Par2WriteStarted { total: u32 },
     /// One PAR2 recovery slice was written to disk.
     Par2SliceWritten,
-    /// Post-upload consistency check (STAT) started. `total` is the number of
-    /// articles to check.
-    CheckStarted { total: u64 },
-    /// Progress update for the post-upload check. `checked` is the number of
-    /// articles processed; `ok` is true if the article exists on the server.
+    /// A posted article was STAT-checked by the streaming check queue.
+    /// `checked` is a running count of articles resolved so far this run
+    /// (verified, or given up on after every repost attempt); `ok` is true
+    /// if this particular article was confirmed. Fires continuously,
+    /// concurrently with the upload — there is no separate "check phase".
     CheckProgress { checked: u64, ok: bool },
-    /// Post-upload check finished. `failed` is the number of missing articles.
+    /// The streaming check queue has fully drained (all articles resolved).
+    /// `failed` is the number of articles that were never confirmed even
+    /// after every repost attempt.
     CheckDone { failed: u64 },
-    /// Waiting for server propagation before the STAT pass. `remaining_secs`
-    /// counts down to zero each second.
-    CheckWaiting { remaining_secs: u64 },
     /// An article was not found on attempt `attempt`; retrying after `delay_secs`.
     CheckRetrying {
         attempt: u32,
         max_attempts: u32,
         delay_secs: u64,
-    },
-    /// A post-check repost round is starting. `missing` is how many articles
-    /// are being reposted this round, out of at most `max_rounds` rounds.
-    RepostRoundStarted {
-        round: u32,
-        max_rounds: u32,
-        missing: u64,
-    },
-    /// A post-check repost round finished and was reverified. `reposted` is
-    /// how many articles were successfully reposted this round;
-    /// `still_missing` is how many remain unconfirmed after reverifying.
-    RepostRoundDone {
-        round: u32,
-        max_rounds: u32,
-        reposted: u64,
-        still_missing: u64,
     },
     /// Worker connection `conn` is authenticating with the server.
     ConnectionAuth { conn: usize },
@@ -332,9 +315,6 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::Par2SliceWritten => {
                         let _ = writeln!(out, r#"{{"type":"par2_slice_written"}}"#);
                     }
-                    ProgressEvent::CheckStarted { total } => {
-                        let _ = writeln!(out, r#"{{"type":"check_started","total":{total}}}"#);
-                    }
                     ProgressEvent::CheckProgress { checked, ok } => {
                         let ok_str = if ok { "true" } else { "false" };
                         let _ = writeln!(
@@ -345,12 +325,6 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::CheckDone { failed } => {
                         let _ = writeln!(out, r#"{{"type":"check_done","failed":{failed}}}"#);
                     }
-                    ProgressEvent::CheckWaiting { remaining_secs } => {
-                        let _ = writeln!(
-                            out,
-                            r#"{{"type":"check_waiting","remaining_secs":{remaining_secs}}}"#
-                        );
-                    }
                     ProgressEvent::CheckRetrying {
                         attempt,
                         max_attempts,
@@ -359,27 +333,6 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ = writeln!(
                             out,
                             r#"{{"type":"check_retrying","attempt":{attempt},"max_attempts":{max_attempts},"delay_secs":{delay_secs}}}"#
-                        );
-                    }
-                    ProgressEvent::RepostRoundStarted {
-                        round,
-                        max_rounds,
-                        missing,
-                    } => {
-                        let _ = writeln!(
-                            out,
-                            r#"{{"type":"repost_round_started","round":{round},"max_rounds":{max_rounds},"missing":{missing}}}"#
-                        );
-                    }
-                    ProgressEvent::RepostRoundDone {
-                        round,
-                        max_rounds,
-                        reposted,
-                        still_missing,
-                    } => {
-                        let _ = writeln!(
-                            out,
-                            r#"{{"type":"repost_round_done","round":{round},"max_rounds":{max_rounds},"reposted":{reposted},"still_missing":{still_missing}}}"#
                         );
                     }
                     // Connection and pool events are noisy and not useful to consumers.
@@ -421,7 +374,7 @@ pub struct UploadFlags<'a> {
     pub password: Option<&'a str>,
     pub par2: u8,
     pub resume: bool,
-    pub verify: bool,
+    pub check: bool,
 }
 
 /// Print a compact settings block after the file tree.
@@ -451,8 +404,8 @@ pub fn print_upload_flags(flags: &UploadFlags<'_>) {
     if flags.resume {
         lines.push(("resume", "on".to_string()));
     }
-    if flags.verify {
-        lines.push(("verify", "on".to_string()));
+    if !flags.check {
+        lines.push(("check", "off".to_string()));
     }
 
     if lines.is_empty() {

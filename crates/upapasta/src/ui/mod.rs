@@ -897,11 +897,10 @@ fn draw_dashboard_idle(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_upload_progress_screen(f: &mut Frame, app: &mut App, area: Rect) {
-    use crate::events::UploadPhase;
-    let is_checking = matches!(
-        app.progress.phase,
-        UploadPhase::Checking { .. } | UploadPhase::Reposting { .. }
-    );
+    // The streaming check queue runs concurrently with the upload rather
+    // than as its own phase, so its bar shows up as soon as the first
+    // article has been checked and stays up alongside the upload bar.
+    let is_checking = app.progress.check_checked > 0;
 
     // Layout: three progress bars + optional check bar + sparkline on top; per-file + log below.
     let vchunks = Layout::default()
@@ -1129,27 +1128,26 @@ fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_check_bar(f: &mut Frame, app: &App, area: Rect) {
-    use crate::events::UploadPhase;
-
-    let (pct, label, color) = match app.progress.phase {
-        UploadPhase::Checking { checked, total } => {
-            let pct = checked
-                .checked_mul(100)
-                .and_then(|v| v.checked_div(total))
-                .unwrap_or(0)
-                .min(100) as u16;
-            let label = format!("{}%  {}/{} articles", pct, checked, total);
-            (pct, label, Color::Cyan)
-        }
-        UploadPhase::Reposting { missing } => {
-            let label = if missing > 0 {
-                format!("Reposting {} missing article(s)…", missing)
-            } else {
-                "Reposting…".into()
-            };
-            (100, label, Color::Yellow)
-        }
-        _ => return,
+    // The streaming check queue has no fixed total known upfront (it runs
+    // concurrently with, and for the lifetime of, the upload), so this
+    // shows a running count instead of a total-based percentage. The bar
+    // fraction reflects the verified share of articles checked so far —
+    // it stays full and green under normal conditions, dipping only when
+    // articles actually go missing.
+    let checked = app.progress.check_checked;
+    let failed = app.progress.check_failed;
+    let verified = checked.saturating_sub(failed);
+    let pct = (verified * 100)
+        .checked_div(checked)
+        .unwrap_or(100)
+        .min(100) as u16;
+    let (label, color) = if failed > 0 {
+        (
+            format!("{verified} verified · {failed} missing"),
+            Color::Red,
+        )
+    } else {
+        (format!("{verified} verified"), Color::Cyan)
     };
 
     let gauge = Gauge::default()
@@ -1321,7 +1319,6 @@ fn draw_upload_settings_summary(f: &mut Frame, app: &App, area: Rect) {
         Line::from(" Groups      : ".to_string() + &s.groups),
         Line::from(" From        : ".to_string() + &s.from),
         Line::from(" Article     : ".to_string() + &s.article_size),
-        Line::from(" Verify      : ".to_string() + &s.verify),
         Line::from(" Check       : ".to_string() + &s.check),
     ];
 
@@ -1723,25 +1720,14 @@ fn build_config_fields(app: &App) -> Vec<ConfigField> {
             has_override: ov.article_size_kb.is_some(),
         },
         ConfigField {
-            label: "Verify",
-            value: ov
-                .verify
-                .map(on_off)
-                .or_else(|| cfg.map(|c| on_off(c.verify)))
-                .unwrap_or("Off")
-                .to_string(),
-            hint: "Enter/e toggles: STAT-check each article after posting",
-            has_override: ov.verify.is_some(),
-        },
-        ConfigField {
             label: "Check",
             value: ov
                 .check
                 .map(on_off)
                 .or_else(|| cfg.map(|c| on_off(c.check)))
-                .unwrap_or("Off")
+                .unwrap_or("On")
                 .to_string(),
-            hint: "Enter/e toggles: STAT all articles after upload completes",
+            hint: "Enter/e toggles: streaming STAT check during upload",
             has_override: ov.check.is_some(),
         },
         ConfigField {
@@ -1948,7 +1934,6 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
             ov.obfuscate.is_some(),
             ov.par2.is_some(),
             ov.article_size_kb.is_some(),
-            ov.verify.is_some(),
             ov.check.is_some(),
             ov.nzb_password.is_some(),
             ov.nzb_category.is_some(),

@@ -130,7 +130,6 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
         extra_servers: vec![],
-        verify: false,
         resume: false,
         upload_rate: 0,
         compress_format: None,
@@ -157,8 +156,13 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
         quiet: false,
         bell: false,
-        check: true,
-        check_delay_secs: 30,
+        // This test never checks or reposts (see module doc comment); the
+        // mock server doesn't implement STAT at all. The streaming check
+        // now runs inside `post_files` itself, so leaving it on would make
+        // this test slowly retry STAT against a server that always answers
+        // "500 unknown command" for it.
+        check: false,
+        check_delay_secs: 5,
         check_retries: 2,
         check_connections: 1,
         check_post_retries: 1,

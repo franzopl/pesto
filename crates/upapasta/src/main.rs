@@ -1692,7 +1692,6 @@ fn build_dry_run_config() -> Config {
         par2_only: false,
         threads: 0,
         simd: parmesan::SimdPath::Auto,
-        verify: false,
         resume: false,
         upload_rate: 0,
         compress_format: None,
@@ -1883,6 +1882,7 @@ async fn run_real_upload(
         file_update: None,
         phase: None,
         par2_slices: None,
+        check_progress: None,
         queue_extended: None,
         par2_hint_bytes: 0,
         par2_complete: false,
@@ -1948,6 +1948,7 @@ async fn run_real_upload(
                         file_update: None,
                         phase: last_update.phase.clone(),
                         par2_slices: None,
+            check_progress: None,
                         queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2075,17 +2076,15 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
         E::Finished => "=== Pesto run finished ===".into(),
         E::Failed { description } => format!("FAILED: {}", description),
         E::Interrupted => "Interrupted by user".into(),
-        E::CheckStarted { total } => format!("Checking {total} articles via STAT…"),
         E::CheckDone { failed } if *failed == 0 => "✓ Check: all articles verified".into(),
-        E::CheckDone { failed } => format!("✗ Check: {failed} article(s) missing — reposting…"),
+        E::CheckDone { failed } => {
+            format!("✗ Check: {failed} article(s) still missing after every repost attempt")
+        }
         E::CheckRetrying {
             attempt,
             max_attempts,
             delay_secs,
         } => format!("Check retry {attempt}/{max_attempts} (waiting {delay_secs}s)…"),
-        E::CheckWaiting { remaining_secs } => {
-            format!("Check: waiting {remaining_secs}s before retry…")
-        }
         _ => String::new(), // many low-level events are too noisy for the TUI log
     }
 }
@@ -2116,6 +2115,7 @@ fn extract_progress_update(
                 file_update: None,
                 phase: Some(UploadPhase::Uploading),
                 par2_slices: None,
+                check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: *par2_bytes_hint,
                 par2_complete: false,
@@ -2134,6 +2134,7 @@ fn extract_progress_update(
                 total_bytes: *total_bytes,
             }),
             par2_slices: None,
+            check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2154,6 +2155,7 @@ fn extract_progress_update(
                 },
             }),
             par2_slices: None,
+            check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2168,6 +2170,7 @@ fn extract_progress_update(
             file_update: None,
             phase: Some(UploadPhase::Preparing),
             par2_slices: None,
+            check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2187,6 +2190,7 @@ fn extract_progress_update(
             file_update: None,
             phase: Some(UploadPhase::Uploading),
             par2_slices: Some((0, *recovery_slices)),
+            check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2201,6 +2205,7 @@ fn extract_progress_update(
             file_update: None,
             phase: None, // phase stays Uploading
             par2_slices: Some((*done, *total)),
+            check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2219,6 +2224,7 @@ fn extract_progress_update(
                 total: *total,
             }),
             par2_slices: None,
+            check_progress: None,
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2239,81 +2245,49 @@ fn extract_progress_update(
                 file_update: None,
                 phase: Some(UploadPhase::WritingPar2 { written, total }),
                 par2_slices: None,
+                check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: 0,
                 par2_complete: all_written,
             })
         }
-        E::CheckStarted { total } => Some(ProgressUpdate {
-            done_segments: previous.done_segments,
-            total_segments: previous.total_segments,
-            done_bytes: previous.done_bytes,
-            total_bytes: previous.total_bytes,
-            current_speed_mbps: 0.0,
-            message: None,
-            file_update: None,
-            phase: Some(UploadPhase::Checking {
-                checked: 0,
-                total: *total,
-            }),
-            par2_slices: None,
-            queue_extended: None,
-            par2_hint_bytes: 0,
-            par2_complete: false,
-        }),
-        E::CheckProgress { checked, .. } => Some(ProgressUpdate {
-            done_segments: previous.done_segments,
-            total_segments: previous.total_segments,
-            done_bytes: previous.done_bytes,
-            total_bytes: previous.total_bytes,
-            current_speed_mbps: 0.0,
-            message: None,
-            file_update: None,
-            phase: Some(UploadPhase::Checking {
-                checked: *checked,
-                total: match &previous.phase {
-                    Some(UploadPhase::Checking { total, .. }) => *total,
-                    _ => 0,
-                },
-            }),
-            par2_slices: None,
-            queue_extended: None,
-            par2_hint_bytes: 0,
-            par2_complete: false,
-        }),
+        // The streaming check queue runs concurrently with the upload rather
+        // than as its own phase, so it only updates `check_progress`
+        // (rendered as a suffix alongside whatever `phase` already is)
+        // instead of replacing `phase` the way the old end-of-run sweep did.
+        E::CheckProgress { checked, ok } => {
+            let prev_failed = previous.check_progress.map(|(_, f)| f).unwrap_or(0);
+            let failed = if *ok { prev_failed } else { prev_failed + 1 };
+            Some(ProgressUpdate {
+                done_segments: previous.done_segments,
+                total_segments: previous.total_segments,
+                done_bytes: previous.done_bytes,
+                total_bytes: previous.total_bytes,
+                current_speed_mbps: previous.current_speed_mbps,
+                message: None,
+                file_update: None,
+                phase: None,
+                par2_slices: None,
+                check_progress: Some((*checked, failed)),
+                queue_extended: None,
+                par2_hint_bytes: 0,
+                par2_complete: false,
+            })
+        }
         E::CheckDone { failed } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
             total_segments: previous.total_segments,
             done_bytes: previous.done_bytes,
             total_bytes: previous.total_bytes,
-            current_speed_mbps: 0.0,
+            current_speed_mbps: previous.current_speed_mbps,
             message: None,
             file_update: None,
-            phase: if *failed > 0 {
-                Some(UploadPhase::Reposting { missing: *failed })
-            } else {
-                Some(UploadPhase::Done)
-            },
+            phase: None,
             par2_slices: None,
-            queue_extended: None,
-            par2_hint_bytes: 0,
-            par2_complete: false,
-        }),
-        E::CheckRetrying { .. } => Some(ProgressUpdate {
-            done_segments: previous.done_segments,
-            total_segments: previous.total_segments,
-            done_bytes: previous.done_bytes,
-            total_bytes: previous.total_bytes,
-            current_speed_mbps: 0.0,
-            message: None,
-            file_update: None,
-            phase: Some(match &previous.phase {
-                Some(UploadPhase::Reposting { missing }) => {
-                    UploadPhase::Reposting { missing: *missing }
-                }
-                _ => UploadPhase::Reposting { missing: 0 },
-            }),
-            par2_slices: None,
+            check_progress: Some((
+                previous.check_progress.map(|(c, _)| c).unwrap_or(0),
+                *failed,
+            )),
             queue_extended: None,
             par2_hint_bytes: 0,
             par2_complete: false,
@@ -2337,6 +2311,7 @@ fn extract_progress_update(
                 file_update: Some(file_update),
                 phase: None,
                 par2_slices: None,
+                check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: 0,
                 par2_complete: false,
@@ -2354,6 +2329,7 @@ fn extract_progress_update(
             file_update: None,
             phase: None,
             par2_slices: None,
+            check_progress: None,
             queue_extended: Some((*segments, *bytes)),
             par2_hint_bytes: 0,
             par2_complete: false,

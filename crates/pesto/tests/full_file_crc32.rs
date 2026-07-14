@@ -139,7 +139,6 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
         extra_servers: vec![],
-        verify: false,
         resume: false,
         upload_rate: 0,
         compress_format: None,

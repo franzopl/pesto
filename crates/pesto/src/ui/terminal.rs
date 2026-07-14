@@ -145,14 +145,13 @@ struct RenderState {
     par2_write_total: u32,
     par2_write_done: u32,
     par2_write_start: Instant,
-    // Post-check phase
+    // Streaming check queue — runs concurrently with the upload, so there is
+    // no fixed total known upfront (unlike the old end-of-run STAT sweep).
     check_active: bool,
-    check_total: u64,
     check_checked: u64,
     check_failed: u64,
     check_start: Instant,
     check_retry_msg: Option<String>,
-    check_waiting_secs: Option<u64>,
     // PAR2 encode info block (shown while encoding, inspired by parpar)
     par2_info: Option<Par2Info>,
     // PAR2 input slice encode progress
@@ -204,12 +203,10 @@ impl RenderState {
             par2_write_done: 0,
             par2_write_start: Instant::now(),
             check_active: false,
-            check_total: 0,
             check_checked: 0,
             check_failed: 0,
             check_start: Instant::now(),
             check_retry_msg: None,
-            check_waiting_secs: None,
             par2_info: None,
             par2_encode_done: 0,
             par2_encode_total: 0,
@@ -385,25 +382,18 @@ impl RenderState {
                     self.par2_write_active = false;
                 }
             }
-            ProgressEvent::CheckStarted { total } => {
-                self.started = true; // allow draw_panel when used as a standalone check renderer
-                self.check_active = true;
-                self.check_total = total;
-                self.check_checked = 0;
-                self.check_failed = 0;
-                self.check_start = Instant::now();
-                self.check_retry_msg = None;
-                self.check_waiting_secs = None;
-            }
-            ProgressEvent::CheckWaiting { remaining_secs } => {
-                self.started = true;
-                self.check_active = true;
-                self.check_waiting_secs = Some(remaining_secs);
-            }
             ProgressEvent::CheckProgress { checked, ok } => {
+                if !self.check_active {
+                    // Lazy start: the streaming check queue has no fixed
+                    // total known upfront, so it just starts showing up the
+                    // first time an article gets resolved, concurrently
+                    // with the upload panel above it.
+                    self.started = true;
+                    self.check_active = true;
+                    self.check_start = Instant::now();
+                }
                 self.check_checked = checked;
                 self.check_retry_msg = None;
-                self.check_waiting_secs = None;
                 if !ok {
                     self.check_failed += 1;
                 }
@@ -421,32 +411,6 @@ impl RenderState {
                 self.check_active = false;
                 self.check_failed = failed;
                 self.check_retry_msg = None;
-                self.check_waiting_secs = None;
-            }
-            ProgressEvent::RepostRoundStarted {
-                round,
-                max_rounds,
-                missing,
-            } => {
-                self.started = true;
-                self.check_active = true;
-                self.check_retry_msg = Some(format!(
-                    "↻ reposting {missing} missing article(s) — round {round}/{max_rounds}",
-                ));
-            }
-            ProgressEvent::RepostRoundDone {
-                round,
-                max_rounds,
-                reposted,
-                still_missing,
-            } => {
-                self.check_retry_msg = if still_missing > 0 {
-                    Some(format!(
-                        "reposted {reposted} article(s), {still_missing} still missing — round {round}/{max_rounds} done",
-                    ))
-                } else {
-                    None
-                };
             }
         }
     }
@@ -974,48 +938,36 @@ impl RenderState {
             lines.push(ansi(&res_line, "2")); // dim — informational, not critical
         }
 
-        // --- post-check STAT phase ---------------------------------------
-        if self.check_active || (final_draw && self.check_total > 0) {
+        // --- streaming check queue -----------------------------------------
+        // Runs concurrently with the upload above, so this has no fixed
+        // total or progress bar — just a running count of articles resolved
+        // so far (verified, or reposted-and-still-missing).
+        if self.check_active || (final_draw && self.check_checked > 0) {
             let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
-
-            if let Some(remaining) = self.check_waiting_secs {
-                // Propagation delay: show a pulsing wait bar and countdown.
-                let line = format!("▸ check  waiting for propagation · {remaining}s remaining");
-                lines.push(ansi(&line, "2")); // dim while waiting
+            let elapsed_str = if !self.check_active {
+                format!(" · elapsed {}", format_duration(elapsed))
             } else {
-                let frac = if self.check_total > 0 {
-                    (self.check_checked as f64 / self.check_total as f64).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let bar = render_bar(frac, 26);
-                let elapsed_str = if !self.check_active {
-                    format!(" · elapsed {}", format_duration(elapsed))
-                } else {
-                    String::new()
-                };
-                let line = if self.check_failed > 0 {
-                    let line = format!(
-                        "▸ check  [{}] {}/{} · {} missing{}",
-                        bar, self.check_checked, self.check_total, self.check_failed, elapsed_str
-                    );
-                    ansi(&line, "31") // red — articles missing
-                } else if !self.check_active && self.check_total > 0 {
-                    let line = format!(
-                        "▸ check  [{}] {}/{} · all verified{}",
-                        bar, self.check_checked, self.check_total, elapsed_str
-                    );
-                    ansi(&line, "32") // green — all good
-                } else {
-                    format!(
-                        "▸ check  [{}] {}/{}{}",
-                        bar, self.check_checked, self.check_total, elapsed_str
-                    )
-                };
-                lines.push(line);
-                if let Some(msg) = &self.check_retry_msg {
-                    lines.push(ansi(&format!("  {msg}"), "33")); // yellow retry notice
-                }
+                String::new()
+            };
+            let verified = self.check_checked.saturating_sub(self.check_failed);
+            let line = if self.check_failed > 0 {
+                let line = format!(
+                    "▸ check  {} verified · {} missing{}",
+                    verified, self.check_failed, elapsed_str
+                );
+                ansi(&line, "31") // red — articles missing
+            } else if !self.check_active {
+                let line = format!(
+                    "▸ check  {} verified · all confirmed{}",
+                    verified, elapsed_str
+                );
+                ansi(&line, "32") // green — all good
+            } else {
+                format!("▸ check  {} verified{}", verified, elapsed_str)
+            };
+            lines.push(line);
+            if let Some(msg) = &self.check_retry_msg {
+                lines.push(ansi(&format!("  {msg}"), "33")); // yellow retry notice
             }
         }
 
@@ -1071,17 +1023,21 @@ impl RenderState {
             return;
         }
 
-        if self.check_active {
-            let _ = writeln!(
-                err,
-                "check: {}/{} articles · {} missing",
-                self.check_checked, self.check_total, self.check_failed,
-            );
-            let _ = err.flush();
-            return;
-        }
+        // Streaming check runs concurrently with the upload, so it's an
+        // extra suffix on the normal progress line rather than a phase that
+        // suppresses it.
+        let check_suffix = if self.check_active || (final_draw && self.check_checked > 0) {
+            let verified = self.check_checked.saturating_sub(self.check_failed);
+            format!(" · check {verified} verified/{} missing", self.check_failed)
+        } else {
+            String::new()
+        };
 
         if self.files.is_empty() {
+            if !check_suffix.is_empty() {
+                let _ = writeln!(err, "check:{check_suffix}");
+                let _ = err.flush();
+            }
             return;
         }
 
@@ -1089,7 +1045,7 @@ impl RenderState {
         if final_draw {
             let _ = writeln!(
                 err,
-                "done: {}/{} segments · {} · {} failures · {}",
+                "done: {}/{} segments · {} · {} failures · {}{check_suffix}",
                 self.done_segments,
                 self.total_segments,
                 format_size(self.done_bytes),
@@ -1099,7 +1055,7 @@ impl RenderState {
         } else {
             let _ = writeln!(
                 err,
-                "posting: {}/{} segments · {} · {}/s",
+                "posting: {}/{} segments · {} · {}/s{check_suffix}",
                 self.done_segments,
                 self.total_segments,
                 format_size(self.done_bytes),

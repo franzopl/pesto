@@ -243,7 +243,7 @@ fn all_boolean_defaults_are_correct() {
     assert!(cfg.ssl, "ssl should default to true");
     assert!(!cfg.dry_run);
     assert!(!cfg.par2_only);
-    assert!(!cfg.verify);
+    assert!(cfg.check, "check should default to true");
     assert!(!cfg.resume);
     assert!(!cfg.no_archive);
     assert!(cfg.history, "history should default to true");
@@ -356,7 +356,6 @@ fn toml_posting_section_sets_all_fields() {
         line_length = 64
         retries = 5
         par2 = 20
-        verify = true
         obfuscate = "full"
         date = "now"
         no_archive = true
@@ -371,7 +370,6 @@ fn toml_posting_section_sets_all_fields() {
     assert_eq!(cfg.line_length, 64);
     assert_eq!(cfg.retries, 5);
     assert_eq!(cfg.par2, 20);
-    assert!(cfg.verify);
     assert_eq!(cfg.obfuscate, ObfuscateMode::Full);
     assert_eq!(cfg.date.as_deref(), Some("now"));
     assert!(cfg.no_archive);
@@ -627,18 +625,18 @@ fn cli_overrides_obfuscate_and_par2() {
 }
 
 #[test]
-fn cli_overrides_verify_resume_no_archive() {
+fn cli_overrides_check_resume_no_archive() {
     let cfg = Config::resolve(
         minimal_file(),
         Overrides {
-            verify: Some(true),
+            check: Some(false),
             resume: Some(true),
             no_archive: Some(true),
             ..Default::default()
         },
     )
     .unwrap();
-    assert!(cfg.verify);
+    assert!(!cfg.check);
     assert!(cfg.resume);
     assert!(cfg.no_archive);
 }
@@ -822,19 +820,19 @@ fn config_check_delay_implies_check() {
 }
 
 #[test]
-fn config_check_off_by_default() {
+fn config_check_on_by_default() {
     let file: FileConfig =
         toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\n").unwrap();
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
-    assert!(!cfg.check);
-    assert_eq!(cfg.check_delay_secs, 30);
+    assert!(cfg.check, "streaming check should default to on");
+    assert_eq!(cfg.check_delay_secs, 5);
 }
 
 #[test]
-fn config_explicit_check_true_uses_default_delay() {
+fn config_explicit_check_false_disables_it() {
     let file: FileConfig =
-        toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\ncheck=true\n").unwrap();
+        toml::from_str("[server]\nhost=\"h\"\n[posting]\ngroups=[\"a\"]\ncheck=false\n").unwrap();
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
-    assert!(cfg.check);
-    assert_eq!(cfg.check_delay_secs, 30);
+    assert!(!cfg.check);
+    assert_eq!(cfg.check_delay_secs, 5);
 }

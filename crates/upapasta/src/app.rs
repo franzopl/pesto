@@ -50,6 +50,11 @@ pub struct UploadProgress {
     /// Whether PAR2 encode + write phases are fully complete.
     pub par2_finished: bool,
 
+    /// Streaming check queue progress (runs concurrently with NNTP posting,
+    /// for the lifetime of the upload rather than as its own phase).
+    pub check_checked: u64,
+    pub check_failed: u64,
+
     /// Bytes pre-seeded from par2_bytes_hint; consumed as QueueExtended arrives
     /// so total_bytes never jumps backwards.
     pub par2_hint_remaining: u64,
@@ -89,7 +94,6 @@ pub struct UploadSettingsSummary {
     pub groups: String,
     pub from: String,
     pub article_size: String,
-    pub verify: String,
     pub check: String,
 }
 
@@ -161,6 +165,8 @@ impl UploadProgress {
         self.par2_done_slices = 0;
         self.par2_total_slices = 0;
         self.par2_finished = false;
+        self.check_checked = 0;
+        self.check_failed = 0;
         self.par2_hint_remaining = 0;
         self.compress_total_bytes = 0;
         self.compress_done_bytes = 0;
@@ -241,6 +247,10 @@ impl UploadProgress {
             if total > 0 {
                 self.par2_total_slices = total;
             }
+        }
+        if let Some((checked, failed)) = update.check_progress {
+            self.check_checked = checked;
+            self.check_failed = failed;
         }
         if update.par2_hint_bytes > 0 {
             self.par2_hint_remaining = update.par2_hint_bytes;
@@ -743,7 +753,6 @@ pub struct SessionOverrides {
     /// 0–50 %
     pub par2: Option<u8>,
     pub article_size_kb: Option<usize>,
-    pub verify: Option<bool>,
     pub check: Option<bool>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
@@ -794,7 +803,6 @@ pub enum ConfirmField {
     FolderMode,
     Compress,
     CompressPassword,
-    Verify,
     Check,
     NzbPassword,
     Groups,
@@ -1583,7 +1591,6 @@ impl App {
 
             let article = format!("{} KB / {} chars", cfg.article_size / 1024, cfg.line_length);
 
-            let verify = on_off(cfg.verify).to_string();
             let check = on_off(cfg.check).to_string();
 
             UploadSettingsSummary {
@@ -1593,7 +1600,6 @@ impl App {
                 groups,
                 from,
                 article_size: article,
-                verify,
                 check,
             }
         } else {
@@ -1605,7 +1611,6 @@ impl App {
                 groups: "alt.binaries.test (dry-run)".to_string(),
                 from: "upapasta@local (dry-run)".to_string(),
                 article_size: "750 KB / 128 chars (dry-run)".to_string(),
-                verify: "Off (dry-run)".to_string(),
                 check: "Off (dry-run)".to_string(),
             }
         }
@@ -1751,8 +1756,8 @@ impl App {
                 .or_else(|| cfg.map(|c| (c.article_size / 1024).to_string()))
                 .unwrap_or_else(|| "750".to_string()),
             5 => {
-                // verify: cycle bool
-                self.config_cycle_verify();
+                // check: cycle bool
+                self.config_cycle_check();
                 return;
             }
             6 => ov
@@ -1898,11 +1903,11 @@ impl App {
             2 => ov.obfuscate = None,
             3 => ov.par2 = None,
             4 => ov.article_size_kb = None,
-            5 => ov.verify = None,
-            6 => ov.check = None,
-            7 => ov.nzb_password = None,
-            8 => ov.nzb_category = None,
-            9 => ov.compress_password = None,
+            5 => ov.check = None,
+            6 => ov.nzb_password = None,
+            7 => ov.nzb_category = None,
+            8 => ov.compress_password = None,
+            // 9 = separator "── Prowlarr ──" (not selectable/resettable)
             10 => {
                 self.prowlarr.url_override = None;
                 self.prowlarr.status = crate::prowlarr::ConnectionStatus::Unknown;
@@ -1938,15 +1943,11 @@ impl App {
         self.status_bar.set("Obfuscate mode changed");
     }
 
-    fn config_cycle_verify(&mut self) {
-        let cfg_default = self
-            .pesto_config
-            .as_ref()
-            .map(|c| c.verify)
-            .unwrap_or(false);
-        let current = self.config_state.overrides.verify.unwrap_or(cfg_default);
-        self.config_state.overrides.verify = Some(!current);
-        self.status_bar.set("Verify mode toggled");
+    fn config_cycle_check(&mut self) {
+        let cfg_default = self.pesto_config.as_ref().map(|c| c.check).unwrap_or(true);
+        let current = self.config_state.overrides.check.unwrap_or(cfg_default);
+        self.config_state.overrides.check = Some(!current);
+        self.status_bar.set("Check mode toggled");
     }
 
     /// Apply session overrides on top of the effective config, returning a
@@ -1972,9 +1973,6 @@ impl App {
         }
         if let Some(kb) = ov.article_size_kb {
             cfg.article_size = kb * 1024;
-        }
-        if let Some(verify) = ov.verify {
-            cfg.verify = verify;
         }
         if let Some(check) = ov.check {
             cfg.check = check;
@@ -2021,7 +2019,6 @@ impl App {
         v.extend([
             Compress,
             CompressPassword,
-            Verify,
             Check,
             NzbPassword,
             Groups,
@@ -2092,7 +2089,6 @@ impl App {
                 self.config_state.overrides.folder_mode = Some(cur.next());
             }
             ConfirmField::Compress => self.confirm_cycle_compress(true),
-            ConfirmField::Verify => self.confirm_toggle_verify(),
             ConfirmField::Check => self.confirm_toggle_check(),
             // Number / text fields → enter edit mode prefilled with the current value.
             ConfirmField::Par2 => self.confirm_start_edit(self.par2_effective().to_string()),
@@ -2194,16 +2190,6 @@ impl App {
         self.config_state.overrides.compress_format = Some(next.to_string());
     }
 
-    fn confirm_toggle_verify(&mut self) {
-        let cur = self.config_state.overrides.verify.unwrap_or(
-            self.pesto_config
-                .as_ref()
-                .map(|c| c.verify)
-                .unwrap_or(false),
-        );
-        self.config_state.overrides.verify = Some(!cur);
-    }
-
     fn confirm_toggle_check(&mut self) {
         let cur = self
             .config_state
@@ -2218,7 +2204,6 @@ impl App {
         match self.current_confirm_field() {
             Some(ConfirmField::Obfuscate) => self.confirm_cycle_obfuscate(true),
             Some(ConfirmField::Compress) => self.confirm_cycle_compress(true),
-            Some(ConfirmField::Verify) => self.confirm_toggle_verify(),
             Some(ConfirmField::Check) => self.confirm_toggle_check(),
             Some(ConfirmField::FolderMode) => {
                 let cur = self.effective_folder_mode();
@@ -2238,7 +2223,6 @@ impl App {
             // Cycles are short; stepping backwards is the same as cycling forward.
             Some(ConfirmField::Obfuscate) => self.confirm_cycle_obfuscate(false),
             Some(ConfirmField::Compress) => self.confirm_cycle_compress(false),
-            Some(ConfirmField::Verify) => self.confirm_toggle_verify(),
             Some(ConfirmField::Check) => self.confirm_toggle_check(),
             Some(ConfirmField::FolderMode) => {
                 let cur = self.effective_folder_mode();
@@ -2331,17 +2315,11 @@ impl App {
                             .unwrap_or_default();
                         ("Zip pass", mask(&raw), "Enter edit  Tab show")
                     }
-                    ConfirmField::Verify => (
-                        "Verify",
-                        on_off(ov.verify.unwrap_or(cfg.map(|c| c.verify).unwrap_or(false)))
-                            .to_string(),
-                        "←→ toggle",
-                    ),
                     ConfirmField::Check => (
                         "Check",
                         on_off(ov.check.unwrap_or(cfg.map(|c| c.check).unwrap_or(false)))
                             .to_string(),
-                        "←→ toggle: STAT all articles after upload",
+                        "←→ toggle: streaming STAT check during upload",
                     ),
                     ConfirmField::NzbPassword => {
                         let raw = ov
@@ -2501,9 +2479,6 @@ impl App {
             }
             if o.par2.is_none() {
                 o.par2 = prefs.par2;
-            }
-            if o.verify.is_none() {
-                o.verify = prefs.verify;
             }
             if o.check.is_none() {
                 o.check = prefs.check;
@@ -2977,6 +2952,7 @@ url = \"http://old:9696\"
                 file_update: None,
                 phase: None,
                 par2_slices: None,
+                check_progress: None,
                 queue_extended: None,
                 par2_hint_bytes: 0,
                 par2_complete: false,

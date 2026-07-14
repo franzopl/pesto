@@ -12,7 +12,7 @@
 //! becoming STAT-findable, not even hours later. `spawn_flaky_dedup_server`
 //! models a server that drops a *run* of distinct IDs before one lands
 //! correctly, proving that retrying with fresh IDs (not the same one) is
-//! what actually recovers the article across `--check-post-retries` rounds.
+//! what actually recovers the article across `--check-post-retries` attempts.
 //!
 //! `spawn_always_reject_server` covers a different, simpler failure mode: a
 //! server that rejects every repost as a duplicate (`441`) no matter what ID
@@ -254,10 +254,11 @@ fn run_pesto_with_args(
 }
 
 #[test]
-fn one_repost_round_is_not_enough_when_the_server_keeps_losing_the_article() {
+fn one_repost_attempt_is_not_enough_when_the_server_keeps_losing_the_article() {
     // The first 2 distinct Message-IDs the server ever sees are cursed: the
-    // original post (1st) and the round-1 repost's fresh ID (2nd) both fail
-    // STAT. A single round only gets one repost attempt, so it's not enough.
+    // original post (1st) and the one allowed repost's fresh ID (2nd) both
+    // fail STAT. `check-post-retries 1` allows only one repost attempt per
+    // article, so it's not enough.
     let addr = spawn_flaky_dedup_server(2);
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
@@ -269,20 +270,21 @@ fn one_repost_round_is_not_enough_when_the_server_keeps_losing_the_article() {
 
     assert!(
         !output.status.success(),
-        "expected pesto to fail with only 1 check-post-retries round\nstderr:\n{stderr}"
+        "expected pesto to fail with only 1 check-post-retries attempt\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("still missing after 1 repost round(s)"),
-        "stderr did not report exhausting the single repost round:\n{stderr}"
+        stderr.contains("still missing after every repost attempt"),
+        "stderr did not report exhausting the single repost attempt:\n{stderr}"
     );
 }
 
 #[test]
-fn a_second_repost_round_recovers_an_article_the_first_round_missed() {
-    // Same flaky server: original post (1st distinct ID, cursed) + round-1
-    // repost (2nd distinct ID, still cursed) + round-2 repost (3rd distinct
-    // ID, past `cursed_count` — lucky) recovers exactly because the loop
-    // doesn't give up after a single round, and each round tries a fresh ID.
+fn a_second_repost_attempt_recovers_an_article_the_first_missed() {
+    // Same flaky server: original post (1st distinct ID, cursed) + repost 1
+    // (2nd distinct ID, still cursed) + repost 2 (3rd distinct ID, past
+    // `cursed_count` — lucky) recovers exactly because the streaming check
+    // queue doesn't give up after a single repost, and each attempt uses a
+    // fresh ID.
     let addr = spawn_flaky_dedup_server(2);
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
@@ -294,10 +296,10 @@ fn a_second_repost_round_recovers_an_article_the_first_round_missed() {
 
     assert!(
         output.status.success(),
-        "expected pesto to succeed with 2 check-post-retries rounds\nstderr:\n{stderr}"
+        "expected pesto to succeed with 2 check-post-retries attempts\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("all article(s) confirmed after repost"),
+        stderr.contains("all 1 article(s) verified"),
         "stderr did not report a successful recovery:\n{stderr}"
     );
     assert!(
@@ -334,12 +336,8 @@ fn repost_never_trusts_a_441_duplicate_rejection_as_proof_of_success() {
         "expected pesto to fail against a server that never actually serves the article\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("reposted 0/1 article(s)"),
-        "a 441 duplicate rejection must not be counted as a successful repost:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("still missing after 1 repost round(s)"),
-        "stderr did not report the article as still missing:\n{stderr}"
+        stderr.contains("still missing after every repost attempt"),
+        "a 441 duplicate rejection must not be counted as a successful repost — stderr did not report the article as still missing:\n{stderr}"
     );
     assert!(
         !out.exists(),
@@ -349,7 +347,7 @@ fn repost_never_trusts_a_441_duplicate_rejection_as_proof_of_success() {
 
 /// `--allow-incomplete-nzb` is the explicit opt-in to publish anyway (e.g.
 /// relying on PAR2 recovery) when articles are still confirmed missing after
-/// every repost round — it should not silently mask the failure, just stop
+/// every repost attempt — it should not silently mask the failure, just stop
 /// it from blocking the NZB and post-hooks.
 #[test]
 fn allow_incomplete_nzb_publishes_despite_confirmed_missing_articles() {

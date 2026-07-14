@@ -33,6 +33,9 @@ use parmesan::packet::{self, SliceChecksum};
 
 use parmesan::worker::Par2Worker;
 
+mod check;
+use check::spawn_check_coordinator;
+
 /// Returns `(slice_size_bytes, total_input_slices)`.
 /// `file_size² / par2_slice_size`, so tying the PAR2 slice to the (small)
 /// article size makes large files quadratically expensive. Several articles
@@ -172,12 +175,18 @@ pub struct FailedTask {
 pub struct PostOutcome {
     pub segments: Vec<PostedSegment>,
     pub failures: Vec<String>,
-    /// Segments that failed during the upload run, preserved for retry.
+    /// Segments that never got a `240` even after the in-run blind retry
+    /// pass, preserved so the caller can report them.
     pub failed_tasks: Vec<FailedTask>,
     pub cancelled: bool,
     /// The newsgroup(s) actually used for this upload (one entry when multiple
     /// groups are configured, since `pick_post_group` selects one at random).
     pub groups: Vec<String>,
+    /// Message-IDs that were posted (`240`) but never confirmed retrievable
+    /// via the streaming STAT check, even after every repost attempt. Empty
+    /// when `config.check` is disabled. A non-empty list means the run
+    /// produced content that is not fully confirmed on the server.
+    pub still_missing: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,12 +233,12 @@ struct Shared {
     /// Server list in failover order (primary first).
     servers: Arc<Vec<crate::config::ServerEntry>>,
 
-    results: Mutex<Vec<PostedSegment>>,
+    results: Arc<Mutex<Vec<PostedSegment>>>,
     failures: Mutex<Vec<String>>,
     failed_tasks: Mutex<Vec<FailedTask>>,
     /// Progress channel; `None` keeps the poster silent (library default).
     events: Option<ProgressSender>,
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
     /// Resume state shared among workers. `None` when resume is disabled.
     resume: Option<Arc<Mutex<ResumeState>>>,
     /// Path of the resume state file; `None` when resume is disabled.
@@ -440,11 +449,11 @@ pub async fn post_files_with_progress_and_cancel(
         config: config.clone(),
         servers,
 
-        results: Mutex::new(Vec::new()),
+        results: Arc::new(Mutex::new(Vec::new())),
         failures: Mutex::new(Vec::new()),
         failed_tasks: Mutex::new(Vec::new()),
         events,
-        cancelled: AtomicBool::new(false),
+        cancelled: Arc::new(AtomicBool::new(false)),
         resume: resume_arc,
         resume_path: resume_path_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
@@ -531,6 +540,22 @@ pub async fn post_files_with_progress_and_cancel(
         })
     };
 
+    // Streaming check: every segment that gets a clean `240` is queued here
+    // and STAT-checked a few seconds later, concurrently with the rest of
+    // the upload, instead of waiting for the whole run to finish.
+    let check_coordinator = if config.check && !config.dry_run && !config.par2_only {
+        Some(spawn_check_coordinator(
+            config.clone(),
+            shared.post_group.clone(),
+            Arc::clone(&shared.results),
+            shared.events.clone(),
+            Some(Arc::clone(&shared.cancelled)),
+        ))
+    } else {
+        None
+    };
+    let check_tx = check_coordinator.as_ref().map(|c| c.sender());
+
     let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
     let tx_opt = if worker_count > 0 {
@@ -538,7 +563,13 @@ pub async fn post_files_with_progress_and_cancel(
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
         let pool = ConnectionPool::build(shared.servers.clone(), worker_count);
         for (idx, slot) in pool.into_slots().into_iter().enumerate() {
-            handles.push(tokio::spawn(worker(shared.clone(), rx.clone(), idx, slot)));
+            handles.push(tokio::spawn(worker(
+                shared.clone(),
+                rx.clone(),
+                idx,
+                slot,
+                check_tx.clone(),
+            )));
         }
         Some(tx)
     } else {
@@ -557,24 +588,67 @@ pub async fn post_files_with_progress_and_cancel(
         let _ = handle.await;
     }
 
+    cancel_handle.abort();
+
+    let mut failures = std::mem::take(&mut *shared.failures.lock().unwrap());
+    let mut failed_tasks = std::mem::take(&mut *shared.failed_tasks.lock().unwrap());
+    let cancelled = shared.cancelled.load(Ordering::Relaxed);
+
+    // Blind retry for segments that never got a `240` in the main loop
+    // (connection drops, timeouts, etc — never confirmed by the server at
+    // all). Recovered segments flow into the same streaming check queue as
+    // everything else, so they get the same STAT confirmation before the
+    // run reports them as posted.
+    if !failed_tasks.is_empty() && !cancelled {
+        let n = failed_tasks.len();
+        info!(count = n, "retrying segments that failed during upload");
+        let recovered = repost_failed_tasks(
+            config,
+            &failed_tasks,
+            &shared.post_group,
+            shared.events.as_ref(),
+            Some(&shared.cancelled),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "retry: repost_failed_tasks error");
+            Vec::new()
+        });
+        let recovered_keys: std::collections::HashSet<(String, u32, u32)> = recovered
+            .iter()
+            .map(|s| (s.file_name.clone(), s.part, s.total))
+            .collect();
+        for seg in recovered {
+            if let Some(tx) = &check_tx {
+                let _ = tx.send(seg.clone());
+            }
+            shared.results.lock().unwrap().push(seg);
+        }
+        failed_tasks.retain(|t| !recovered_keys.contains(&(t.file_name.clone(), t.part, t.total)));
+        failures.retain(|f| {
+            !recovered_keys.iter().any(|(name, part, total)| {
+                f.starts_with(name.as_str()) && f.contains(&format!("{part}/{total}"))
+            })
+        });
+    }
+
     // The PAR2 files posted in normal mode are written to a per-process temp
     // directory purely as an intermediate. Cleanup is deliberately *not* done
-    // here: `--check`'s repost pass and the end-of-run `repost_failed_tasks`
-    // retry both run after this function returns and may need to re-read a
-    // PAR2 file's bytes to repost a missing segment. Deleting the directory
-    // this early made any PAR2 segment that came up missing permanently
-    // unrepostable ("cannot open file: No such file or directory"),
-    // regardless of how many repost rounds were configured. The caller is
-    // responsible for removing `par2_temp_dir()` once it's truly done with
-    // the run (see `run_single_upload` / `run_upload`).
-    cancel_handle.abort();
+    // here: the streaming check's repost path may still need to re-read a
+    // PAR2 file's bytes while it drains below. The caller is responsible for
+    // removing `par2_temp_dir()` once it's truly done with the run (see
+    // `run_single_upload` / `run_upload`).
+    drop(check_tx);
+    let still_missing = if let Some(coordinator) = check_coordinator {
+        coordinator.finish_and_drain().await
+    } else {
+        Vec::new()
+    };
+
     shared.emit(ProgressEvent::Finished);
 
     let mut segments = std::mem::take(&mut *shared.results.lock().unwrap());
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
-    let failures = std::mem::take(&mut *shared.failures.lock().unwrap());
-    let failed_tasks = std::mem::take(&mut *shared.failed_tasks.lock().unwrap());
-    let cancelled = shared.cancelled.load(Ordering::Relaxed);
 
     // 26d/26g — network performance summary + post phase timing
     let total_retries = shared.total_retries.load(Ordering::Relaxed);
@@ -582,6 +656,7 @@ pub async fn post_files_with_progress_and_cancel(
         posted = segments.len(),
         failed = failures.len(),
         retries = total_retries,
+        still_missing = still_missing.len(),
         elapsed_ms = t_post_start.elapsed().as_millis(),
         phase = "post",
         "network summary"
@@ -593,6 +668,7 @@ pub async fn post_files_with_progress_and_cancel(
         failed_tasks,
         cancelled,
         groups: shared.post_group.clone(),
+        still_missing,
     })
 }
 
@@ -1387,6 +1463,7 @@ async fn worker(
     rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PostTask>>>,
     conn_id: usize,
     mut slot: ConnectionSlot,
+    check_tx: Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
 ) {
     let mut rate_limiter = RateLimiter::new(
         // Divide the global rate across all workers proportionally.
@@ -1400,11 +1477,10 @@ async fn worker(
 
     // pipeline_depth == 0 means adaptive: measure RTT on the first article and
     // compute depth = ceil(post_time / encode_time), capped at MAX_AUTO_PIPELINE_DEPTH.
-    // verify mode forces sequential (pipelining and STAT are incompatible).
     let cfg_depth = shared.config.pipeline_depth;
-    let is_adaptive = cfg_depth == 0 && !shared.config.verify;
+    let is_adaptive = cfg_depth == 0;
     // Effective depth used for batch-filling; starts at 1 until warm-up is done.
-    let mut effective_depth: usize = if shared.config.verify || is_adaptive || cfg_depth == 1 {
+    let mut effective_depth: usize = if is_adaptive || cfg_depth == 1 {
         1
     } else {
         cfg_depth
@@ -1644,77 +1720,26 @@ async fn worker(
                                 p.message_id = server_id;
                             }
                         }
-                        if shared.config.verify {
-                            match conn.stat(&p.message_id).await {
-                                Ok(true) => {
-                                    debug!(segment = %p.message_id, "posted and verified via STAT");
-                                    posted = true;
-                                    break;
-                                }
-                                Ok(false) => {
-                                    last_err = format!(
-                                        "STAT: article {} not found after posting",
-                                        p.message_id
-                                    );
-                                    warn!(segment = %p.message_id, attempt, "STAT not found; retrying");
-                                    slot.invalidate("stat_430");
-                                    // A genuine `240` accept followed by a STAT
-                                    // miss means the server may have already
-                                    // cursed this exact Message-ID in its dedup
-                                    // history without ever storing the body (see
-                                    // `repost_missing_segments`) — retrying under
-                                    // the same ID could loop forever. Generate a
-                                    // fresh one for the next attempt so it gets
-                                    // an independent chance.
-                                    if attempt < max_attempts {
-                                        let new_id = generate_message_id(
-                                            shared.config.message_id_domain.as_deref(),
-                                        );
-                                        let (rfc_date, _ts) = &p.date;
-                                        let article = Article {
-                                            message_id: new_id.clone(),
-                                            from: p.task.from.clone(),
-                                            newsgroups: shared.post_group.clone(),
-                                            subject: default_subject(
-                                                &p.task.meta.subject_name,
-                                                p.task.part,
-                                                p.task.total,
-                                            ),
-                                            date: rfc_date.clone(),
-                                            no_archive: shared.config.no_archive,
-                                        };
-                                        p.headers = article.build_headers();
-                                        p.message_id = new_id;
-                                    }
-                                }
-                                Err(e) => {
-                                    last_err = format!("STAT: {e:#}");
-                                    warn!(segment = %p.message_id, error = %e, "STAT error; retrying");
-                                    slot.invalidate("stat_err");
-                                }
-                            }
-                        } else {
-                            // Adaptive warm-up: compute pipeline depth from the
-                            // ratio of post time (send + RTT) to encode time.
-                            if is_adaptive && !warmup_done {
-                                let post_us = t_post.elapsed().as_micros().max(1);
-                                let enc_us = p.encode_time.as_micros().max(1);
-                                let ratio = post_us.saturating_div(enc_us);
-                                let depth = (ratio as usize).clamp(1, MAX_AUTO_PIPELINE_DEPTH);
-                                effective_depth = depth;
-                                warmup_done = true;
-                                info!(
-                                    conn = conn_id,
-                                    depth,
-                                    post_ms = t_post.elapsed().as_millis(),
-                                    encode_us = enc_us,
-                                    "adaptive pipeline depth computed"
-                                );
-                            }
-                            debug!(segment = %p.message_id, "posted");
-                            posted = true;
-                            break;
+                        // Adaptive warm-up: compute pipeline depth from the
+                        // ratio of post time (send + RTT) to encode time.
+                        if is_adaptive && !warmup_done {
+                            let post_us = t_post.elapsed().as_micros().max(1);
+                            let enc_us = p.encode_time.as_micros().max(1);
+                            let ratio = post_us.saturating_div(enc_us);
+                            let depth = (ratio as usize).clamp(1, MAX_AUTO_PIPELINE_DEPTH);
+                            effective_depth = depth;
+                            warmup_done = true;
+                            info!(
+                                conn = conn_id,
+                                depth,
+                                post_ms = t_post.elapsed().as_millis(),
+                                encode_us = enc_us,
+                                "adaptive pipeline depth computed"
+                            );
                         }
+                        debug!(segment = %p.message_id, "posted");
+                        posted = true;
+                        break;
                     }
                     Err(e) => {
                         last_err = format!("{e:#}");
@@ -1731,6 +1756,7 @@ async fn worker(
 
             commit_result(
                 &shared,
+                check_tx.as_ref(),
                 p.task,
                 p.message_id,
                 p.headers.len() + p.encoded.body.len(),
@@ -1844,6 +1870,7 @@ async fn worker(
                 let last_err = result.err().unwrap_or_else(|| "pipeline failed".into());
                 commit_result(
                     &shared,
+                    check_tx.as_ref(),
                     p.task,
                     p.message_id,
                     p.headers.len() + p.encoded.body.len(),
@@ -1983,8 +2010,10 @@ fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
 
 /// Persist a successfully posted segment or record a failure, then emit the
 /// corresponding progress event and release the article buffer back to the pool.
+#[allow(clippy::too_many_arguments)]
 fn commit_result(
     shared: &Shared,
+    check_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
     task: PostTask,
     message_id: String,
     wire_bytes: usize,
@@ -2000,7 +2029,7 @@ fn commit_result(
                 let _ = state.save(rp);
             }
         }
-        shared.results.lock().unwrap().push(PostedSegment {
+        let seg = PostedSegment {
             file_name: task.meta.real_name.clone(),
             file_path: task.meta.path.clone(),
             subject_name: task.subject_name.clone(),
@@ -2012,7 +2041,11 @@ fn commit_result(
             from: task.from.clone(),
             date,
             full_crc32: task.meta.full_crc32,
-        });
+        };
+        if let Some(tx) = check_tx {
+            let _ = tx.send(seg.clone());
+        }
+        shared.results.lock().unwrap().push(seg);
     } else {
         record_failure(shared, &task.meta, &task, message_id, last_err);
     }
@@ -2067,298 +2100,6 @@ fn record_failure(
         date: task.date.clone(),
         full_crc32: meta.full_crc32,
     });
-}
-
-/// Re-post a subset of already-posted segments whose `Message-ID`s are listed
-/// in `missing_ids`.
-///
-/// Each missing segment is located by path and byte offset, re-encoded as
-/// yEnc, and posted under a **freshly generated** `Message-ID` — deliberately
-/// *not* the original one. These segments were already confirmed absent by a
-/// full STAT pass, and real-world observation shows some servers register a
-/// Message-ID in their dedup history at `240`-accept time regardless of
-/// whether the article body actually lands in the readable spool: once that
-/// happens, the ID is permanently cursed — every future repost under the
-/// *same* ID gets a genuine-looking `240` again (the server just isn't
-/// bothering to re-store a "duplicate" of an ID it already has on file), yet
-/// the article never becomes STAT-findable, not even hours later. A fresh ID
-/// sidesteps the cursed dedup entry entirely, giving each attempt an
-/// independent chance of landing correctly.
-///
-/// This also still uses [`Connection::repost_parts_confirmed`] rather than
-/// [`Connection::post_parts`] as a second line of defense: a `441`/"already
-/// exists" rejection is *not* trusted as proof of success here (unlike the
-/// original post or a connection-drop retry in [`repost_failed_tasks`]),
-/// since even a freshly generated ID could in principle collide with
-/// something the server already has. Only a genuine `240` counts; the
-/// caller's own STAT re-verification remains the real arbiter.
-///
-/// Distributes the missing segments across the same number of parallel
-/// connections as [`check_articles`] (`check_connections`, or the upload
-/// connection count) instead of a single sequential connection: reposting a
-/// large batch one article at a time can eat most of `check_delay_secs`
-/// itself, leaving little of that window for the server to actually store
-/// the article before the follow-up STAT pass runs.
-///
-/// Returns the [`PostedSegment`]s that were successfully (re)posted, each
-/// carrying its new `message_id`. The caller must splice these back into its
-/// own segment list — matched by `file_name` + `part`, since the old
-/// Message-ID is no longer valid — before writing the `.nzb` or re-verifying
-/// via STAT.
-pub async fn repost_missing_segments(
-    config: &Config,
-    all_segments: &[PostedSegment],
-    missing_ids: &[String],
-    groups: &[String],
-    events: Option<&ProgressSender>,
-    cancel: Option<&Arc<AtomicBool>>,
-) -> Result<Vec<PostedSegment>> {
-    if missing_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let missing_set: std::collections::HashSet<&str> =
-        missing_ids.iter().map(String::as_str).collect();
-    let to_repost: Vec<PostedSegment> = all_segments
-        .iter()
-        .filter(|s| missing_set.contains(s.message_id.as_str()))
-        .cloned()
-        .collect();
-
-    if to_repost.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let n_workers = if config.check_connections == 0 {
-        config.total_connections()
-    } else {
-        config.check_connections
-    }
-    .max(1)
-    .min(to_repost.len());
-
-    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
-    let article_size = config.article_size;
-    let line_length = config.line_length;
-    let no_archive = config.no_archive;
-    let max_retries = config.retries.max(1);
-    let message_id_domain = config.message_id_domain.clone();
-    let groups: Arc<Vec<String>> = Arc::new(groups.to_vec());
-    let total = to_repost.len();
-    let reposted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    // Split into chunks — one per worker — the same way `check_articles` does.
-    let chunks: Vec<Vec<PostedSegment>> = {
-        let mut v: Vec<Vec<PostedSegment>> = (0..n_workers).map(|_| Vec::new()).collect();
-        for (i, seg) in to_repost.into_iter().enumerate() {
-            v[i % n_workers].push(seg);
-        }
-        v
-    };
-
-    let events_tx: Option<ProgressSender> = events.cloned();
-    let cancel_flag: Option<Arc<AtomicBool>> = cancel.map(Arc::clone);
-
-    let mut handles = Vec::with_capacity(n_workers);
-    for (worker_idx, chunk) in chunks.into_iter().enumerate() {
-        let servers = Arc::clone(&servers);
-        let groups = Arc::clone(&groups);
-        let reposted_count = Arc::clone(&reposted_count);
-        let tx = events_tx.clone();
-        let worker_cancel = cancel_flag.clone();
-        let message_id_domain = message_id_domain.clone();
-
-        handles.push(tokio::spawn(async move {
-            let server_idx = if servers.is_empty() {
-                0
-            } else {
-                worker_idx % servers.len()
-            };
-            let mut slot = ConnectionSlot::with_id(Arc::clone(&servers), server_idx, worker_idx);
-            let mut reposted: Vec<PostedSegment> = Vec::new();
-
-            for seg in &chunk {
-                if worker_cancel
-                    .as_ref()
-                    .is_some_and(|f| f.load(Ordering::Relaxed))
-                {
-                    break;
-                }
-                let offset = (seg.part as u64 - 1) * article_size as u64;
-
-                let mut file = match File::open(&seg.file_path).await {
-                    Ok(f) => f,
-                    Err(e) => {
-                        warn!(file = %seg.file_name, "repost: cannot open file: {e}");
-                        continue;
-                    }
-                };
-
-                use tokio::io::AsyncSeekExt;
-                if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-                    warn!(file = %seg.file_name, offset, "repost: seek failed: {e}");
-                    continue;
-                }
-
-                // `seg.bytes` is the wire size (headers + yEnc-encoded body)
-                // used for the NZB `<segment bytes="...">` attribute —
-                // reading that many raw bytes here always overruns, since
-                // yEnc encoding only grows data. The raw slice length must be
-                // derived from the original file size the same way
-                // `repost_failed_tasks` does.
-                let read_len = (seg.file_size - offset).min(article_size as u64) as usize;
-                let mut buf = vec![0u8; read_len];
-                if let Err(e) = file.read_exact(&mut buf).await {
-                    warn!(file = %seg.file_name, "repost: read failed: {e}");
-                    continue;
-                }
-
-                let spec = yenc::PartSpec {
-                    number: seg.part,
-                    total: seg.total,
-                    offset,
-                };
-                let file_crc32 = (seg.part == seg.total).then_some(seg.full_crc32);
-                let encoded = yenc::encode_part(
-                    &seg.subject_name,
-                    seg.file_size,
-                    spec,
-                    &buf,
-                    line_length,
-                    file_crc32,
-                );
-                let (rfc_date, _ts) = &seg.date;
-                // Deliberately a fresh ID, not `seg.message_id` — see the
-                // function doc comment for why reusing the confirmed-missing
-                // ID is unsafe.
-                let mut message_id = generate_message_id(message_id_domain.as_deref());
-                let article = Article {
-                    message_id: message_id.clone(),
-                    from: seg.from.clone(),
-                    newsgroups: (*groups).clone(),
-                    subject: default_subject(&seg.subject_name, seg.part, seg.total),
-                    date: rfc_date.clone(),
-                    no_archive,
-                };
-                let headers = article.build_headers();
-                let wire_bytes = (headers.len() + encoded.body.len()) as u64;
-
-                let mut ok = false;
-                for attempt in 1..=max_retries {
-                    match slot.ensure_connected().await {
-                        Ok(conn) => {
-                            match conn.repost_parts_confirmed(&headers, &encoded.body).await {
-                                Ok(returned_id) => {
-                                    // See the sequential post path for why:
-                                    // some servers substitute their own
-                                    // Message-ID at accept time.
-                                    if let Some(server_id) = returned_id {
-                                        if server_id != message_id {
-                                            warn!(
-                                                sent = %message_id,
-                                                returned = %server_id,
-                                                "server returned a different Message-ID than sent; adopting it"
-                                            );
-                                            message_id = server_id;
-                                        }
-                                    }
-                                    ok = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    slot.invalidate("post_err");
-                                    warn!(id = %message_id, slot_id = worker_idx, attempt,
-                                        "repost attempt failed: {e}");
-                                    if let Some(tx) = &tx {
-                                        let _ = tx.send(ProgressEvent::Status {
-                                            text: format!(
-                                                "repost attempt {attempt}/{max_retries} failed: {e}"
-                                            ),
-                                        });
-                                    }
-                                    if attempt < max_retries {
-                                        if worker_cancel
-                                            .as_ref()
-                                            .is_some_and(|f| f.load(Ordering::Relaxed))
-                                        {
-                                            break;
-                                        }
-                                        tokio::time::sleep(Duration::from_secs(1)).await;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(attempt, slot_id = worker_idx, "repost: connect failed: {e}");
-                            if let Some(tx) = &tx {
-                                let _ = tx.send(ProgressEvent::Status {
-                                    text: format!("repost connect failed (attempt {attempt}): {e}"),
-                                });
-                            }
-                            if attempt < max_retries {
-                                if worker_cancel
-                                    .as_ref()
-                                    .is_some_and(|f| f.load(Ordering::Relaxed))
-                                {
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_secs(1)).await;
-                            }
-                        }
-                    }
-                }
-
-                if ok {
-                    reposted.push(PostedSegment {
-                        file_name: seg.file_name.clone(),
-                        file_path: seg.file_path.clone(),
-                        subject_name: seg.subject_name.clone(),
-                        file_size: seg.file_size,
-                        part: seg.part,
-                        total: seg.total,
-                        message_id,
-                        bytes: wire_bytes,
-                        from: seg.from.clone(),
-                        date: seg.date.clone(),
-                        full_crc32: seg.full_crc32,
-                    });
-                    let done = reposted_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Some(tx) = &tx {
-                        let _ = tx.send(ProgressEvent::Status {
-                            text: format!("reposted {done}/{total} missing article(s)"),
-                        });
-                    }
-                } else {
-                    warn!(id = %seg.message_id, "repost: gave up after all retries");
-                    if let Some(tx) = &tx {
-                        let _ = tx.send(ProgressEvent::Status {
-                            text: format!(
-                                "repost failed: {} (check logs for details)",
-                                seg.message_id
-                            ),
-                        });
-                    }
-                }
-            }
-
-            reposted
-        }));
-    }
-
-    let mut reposted = Vec::new();
-    for handle in handles {
-        if let Ok(v) = handle.await {
-            reposted.extend(v);
-        }
-    }
-
-    if let Some(tx) = events {
-        let _ = tx.send(ProgressEvent::Status {
-            text: String::new(),
-        });
-    }
-
-    Ok(reposted)
 }
 
 /// Post a fresh copy of each segment in `failed`, re-posting under the
@@ -2526,243 +2267,6 @@ pub async fn repost_failed_tasks(
     }
 
     Ok(recovered)
-}
-
-/// Check that every article in `segments` is retrievable via `STAT`.
-///
-/// Opens a single NNTP connection (using the primary server from `config`),
-/// waits `config.check_delay_secs`, then queries each article. Each article
-/// is retried up to `config.check_retries` times before being recorded as
-/// missing. Returns the list of `Message-ID`s that could not be confirmed.
-///
-/// Progress events (`CheckStarted`, `CheckProgress`, `CheckDone`) are emitted
-/// on `events` when provided.
-pub async fn check_articles(
-    config: &Config,
-    segments: &[PostedSegment],
-    events: Option<&ProgressSender>,
-    cancel: Option<&Arc<AtomicBool>>,
-) -> Result<Vec<String>> {
-    if segments.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let total = segments.len() as u64;
-    if let Some(tx) = events {
-        let _ = tx.send(ProgressEvent::CheckStarted { total });
-    }
-
-    // Distribute segments across N parallel workers, each holding its own
-    // NNTP connection. 0 = match the upload connection count.
-    let n_workers = if config.check_connections == 0 {
-        config.total_connections()
-    } else {
-        config.check_connections
-    }
-    .max(1)
-    .min(segments.len());
-    let max_attempts = config.check_retries.max(1) as usize;
-
-    info!(
-        workers = n_workers,
-        segments = total,
-        delay_secs = config.check_delay_secs,
-        "check phase starting"
-    );
-
-    let check_start = std::time::Instant::now();
-
-    // Wait for server propagation, emitting a per-second countdown so the
-    // terminal shows a live "waiting N s remaining" notice.
-    if config.check_delay_secs > 0 {
-        let mut remaining = config.check_delay_secs;
-        while remaining > 0 {
-            if cancel.is_some_and(|f| f.load(Ordering::Relaxed)) {
-                break;
-            }
-            if let Some(tx) = events {
-                let _ = tx.send(ProgressEvent::CheckWaiting {
-                    remaining_secs: remaining,
-                });
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            remaining -= 1;
-        }
-    }
-
-    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
-    let missing_ids: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let done_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let retry_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-    // Split segments into chunks — one per worker.
-    let chunks: Vec<Vec<PostedSegment>> = {
-        let mut v: Vec<Vec<PostedSegment>> = (0..n_workers).map(|_| Vec::new()).collect();
-        for (i, seg) in segments.iter().enumerate() {
-            v[i % n_workers].push(seg.clone());
-        }
-        v
-    };
-
-    let events_tx: Option<ProgressSender> = events.cloned();
-    let cancel_flag: Option<Arc<AtomicBool>> = cancel.map(Arc::clone);
-
-    let mut handles = Vec::with_capacity(n_workers);
-    for (worker_idx, chunk) in chunks.into_iter().enumerate() {
-        let servers = Arc::clone(&servers);
-        let missing_ids = Arc::clone(&missing_ids);
-        let done_count = Arc::clone(&done_count);
-        let retry_count = Arc::clone(&retry_count);
-        let tx = events_tx.clone();
-        let worker_cancel = cancel_flag.clone();
-
-        handles.push(tokio::spawn(async move {
-            let server_idx = if servers.is_empty() {
-                0
-            } else {
-                worker_idx % servers.len()
-            };
-            let mut slot = ConnectionSlot::with_id(Arc::clone(&servers), server_idx, worker_idx);
-
-            for seg in &chunk {
-                if worker_cancel
-                    .as_ref()
-                    .is_some_and(|f| f.load(Ordering::Relaxed))
-                {
-                    break;
-                }
-                let mut found = false;
-                for attempt in 1..=max_attempts {
-                    if worker_cancel
-                        .as_ref()
-                        .is_some_and(|f| f.load(Ordering::Relaxed))
-                    {
-                        break;
-                    }
-                    match slot.ensure_connected().await {
-                        Ok(conn) => match conn.stat(&seg.message_id).await {
-                            Ok(true) => {
-                                found = true;
-                                break;
-                            }
-                            Ok(false) => {
-                                if attempt < max_attempts {
-                                    if worker_cancel
-                                        .as_ref()
-                                        .is_some_and(|f| f.load(Ordering::Relaxed))
-                                    {
-                                        break;
-                                    }
-                                    retry_count.fetch_add(1, Ordering::Relaxed);
-                                    let delay = 20u64;
-                                    if let Some(tx) = &tx {
-                                        let _ = tx.send(ProgressEvent::CheckRetrying {
-                                            attempt: attempt as u32,
-                                            max_attempts: max_attempts as u32,
-                                            delay_secs: delay,
-                                        });
-                                    }
-                                    tokio::time::sleep(Duration::from_secs(delay)).await;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    segment = %seg.message_id,
-                                    slot_id = worker_idx,
-                                    error = %e,
-                                    "STAT error; invalidating slot"
-                                );
-                                slot.invalidate("stat_err");
-                                if attempt < max_attempts {
-                                    if worker_cancel
-                                        .as_ref()
-                                        .is_some_and(|f| f.load(Ordering::Relaxed))
-                                    {
-                                        break;
-                                    }
-                                    retry_count.fetch_add(1, Ordering::Relaxed);
-                                    let base = slot.retry_delay();
-                                    tokio::time::sleep(jittered(base, worker_idx)).await;
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            warn!(
-                                segment = %seg.message_id,
-                                slot_id = worker_idx,
-                                error = %e,
-                                "connect error during check; invalidating slot"
-                            );
-                            slot.invalidate("connect_err");
-                            if attempt < max_attempts {
-                                if worker_cancel
-                                    .as_ref()
-                                    .is_some_and(|f| f.load(Ordering::Relaxed))
-                                {
-                                    break;
-                                }
-                                retry_count.fetch_add(1, Ordering::Relaxed);
-                                let base = slot.retry_delay();
-                                tokio::time::sleep(jittered(base, worker_idx)).await;
-                            }
-                        }
-                    }
-                }
-
-                if !found {
-                    missing_ids.lock().unwrap().push(seg.message_id.clone());
-                }
-
-                let checked = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Some(tx) = &tx {
-                    let _ = tx.send(ProgressEvent::CheckProgress { checked, ok: found });
-                }
-            }
-        }));
-    }
-
-    for handle in handles {
-        let _ = handle.await;
-    }
-
-    let missing = Arc::try_unwrap(missing_ids)
-        .unwrap_or_else(|arc| Mutex::new(arc.lock().unwrap().clone()))
-        .into_inner()
-        .unwrap();
-
-    let failed = missing.len() as u64;
-    let verified = total.saturating_sub(failed);
-    let retries = retry_count.load(Ordering::Relaxed);
-    let elapsed_ms = check_start.elapsed().as_millis();
-    let cancelled = cancel.is_some_and(|f| f.load(Ordering::Relaxed));
-
-    if cancelled {
-        info!(
-            verified,
-            missing = failed,
-            retries,
-            elapsed_ms,
-            "check phase cancelled"
-        );
-    } else {
-        info!(
-            verified,
-            missing = failed,
-            retries,
-            elapsed_ms,
-            "check phase complete"
-        );
-    }
-
-    if let Some(tx) = events {
-        if cancelled {
-            let _ = tx.send(ProgressEvent::Interrupted);
-        } else {
-            let _ = tx.send(ProgressEvent::CheckDone { failed });
-        }
-    }
-
-    Ok(missing)
 }
 
 #[cfg(test)]
@@ -3117,11 +2621,11 @@ mod tests {
         Arc::new(Shared {
             config,
             servers: Arc::new(vec![]),
-            results: Mutex::new(Vec::new()),
+            results: Arc::new(Mutex::new(Vec::new())),
             failures: Mutex::new(Vec::new()),
             failed_tasks: Mutex::new(Vec::new()),
             events: None,
-            cancelled: AtomicBool::new(false),
+            cancelled: Arc::new(AtomicBool::new(false)),
             resume: None,
             resume_path: None,
             pool: Arc::new(Mutex::new(Vec::new())),

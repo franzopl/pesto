@@ -34,7 +34,6 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
         extra_servers: vec![],
-        verify: false,
         resume: false,
         upload_rate: 0,
         compress_format: None,

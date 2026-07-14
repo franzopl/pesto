@@ -9,6 +9,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.51] — 2026-07-14
+
+### Changed
+- **`--check` now runs as a streaming background queue during the upload,
+  and is on by default.** Investigation on two independent Newshosting
+  ingest endpoints (US and NL) confirmed a small, consistent rate of
+  articles that POST cleanly (`240`) but are never `STAT`-findable is a
+  structural characteristic of posting at volume — not a `pesto` bug — and
+  that `nyuu` "never fails" only because it checks and reposts by default,
+  as a background queue running concurrently with the upload
+  (`check.delay`/`check.tries`/`check.postRetries` in its `config.js`),
+  rather than pesto's old model of a single STAT sweep that only started
+  after 100% of segments had posted. `pesto` now does the same: each posted
+  article is queued for a STAT check `--check-delay` seconds later (default
+  lowered 30s → 5s, matching `nyuu`), on a small dedicated connection pool
+  (`--check-connections`, default a handful rather than the full upload
+  connection count), while posting keeps going. Misses are reposted under a
+  fresh Message-ID and re-checked automatically. This removes the serialized
+  end-of-run wait the old sweep added on every large upload.
+- `upapasta` (via `pesto::upload::run_upload`) now gets the same
+  multi-attempt repost robustness the CLI always had — previously it only
+  got a single repost pass instead of the full `--check-post-retries`-bounded
+  behavior.
+
+### Removed
+- **`--verify`**: superseded by the streaming check above. Its guarantee
+  (nothing is reported as posted before confirmation) is preserved — the
+  run doesn't return until the streaming check queue has fully drained —
+  without `--verify`'s per-article round-trip cost, which forced posting
+  sequential and killed throughput.
+
+---
+
 ## [0.3.50] — 2026-07-14
 
 ### Fixed

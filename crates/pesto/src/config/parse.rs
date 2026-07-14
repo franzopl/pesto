@@ -178,7 +178,6 @@ impl Config {
             par2_only,
             threads: cli.threads.unwrap_or(0), // 0 means auto
             simd: cli.simd.unwrap_or_default(),
-            verify: cli.verify.or(file.posting.verify).unwrap_or(false),
             resume: cli.resume.or(file.output.resume).unwrap_or(false),
             upload_rate: {
                 if let Some(rate) = cli.upload_rate {
@@ -261,10 +260,8 @@ impl Config {
             check_delay_secs: cli
                 .check_delay_secs
                 .or(file.posting.check_delay)
-                .unwrap_or(30),
-            check: cli.check.or(file.posting.check).unwrap_or(false)
-                || cli.check_delay_secs.is_some()
-                || file.posting.check_delay.is_some(),
+                .unwrap_or(5),
+            check: cli.check.or(file.posting.check).unwrap_or(true),
             check_retries: cli
                 .check_retries
                 .or(file.posting.check_retries)

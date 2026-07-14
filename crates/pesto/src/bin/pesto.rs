@@ -17,7 +17,7 @@ use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, 
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -192,11 +192,6 @@ struct Cli {
     #[arg(long)]
     resume: bool,
 
-    /// After posting each article, confirm it is present on the server with
-    /// STAT and repost if not found [config: posting.verify, default false].
-    #[arg(long)]
-    verify: bool,
-
     /// Maximum upload rate across all connections (e.g. "50 MiB/s", "10 MB/s").
     /// 0 or omitted means unlimited [config: posting.upload_rate].
     #[arg(long, value_name = "RATE")]
@@ -366,25 +361,30 @@ struct Cli {
     #[arg(long, value_name = "SECS", default_value = "30")]
     watch_interval: u64,
 
-    /// After all articles are posted, verify each one is present on the server
-    /// via STAT. Waits --check-delay seconds before checking. Articles not
-    /// found after --check-retries attempts are reported as missing
-    /// [config: posting.check, default false].
+    /// Confirm every posted article via a streaming STAT check that runs
+    /// concurrently with the upload — each article is checked --check-delay
+    /// seconds after it posts, and misses are reposted automatically. On by
+    /// default; pass --no-check to disable
+    /// [config: posting.check, default true].
     #[arg(long)]
     check: bool,
 
-    /// Seconds to wait after the last article is posted before running the
-    /// STAT verification pass [config: posting.check_delay, default 30].
+    /// Disable the streaming STAT check [config: posting.check].
+    #[arg(long)]
+    no_check: bool,
+
+    /// Seconds to wait after an article posts before its first STAT check
+    /// [config: posting.check_delay, default 5].
     #[arg(long, value_name = "SECS")]
     check_delay: Option<u64>,
 
-    /// Number of STAT attempts per article during post-check before marking
-    /// it as missing; 20 seconds between each retry [config: posting.check_retries, default 3].
+    /// Number of STAT attempts per posted copy before triggering a repost;
+    /// 20 seconds between each retry [config: posting.check_retries, default 3].
     #[arg(long, value_name = "N")]
     check_retries: Option<u32>,
 
-    /// Number of parallel NNTP connections for the post-check STAT pass;
-    /// defaults to the same value as the upload connection count
+    /// Number of dedicated parallel NNTP connections for the streaming check
+    /// queue; defaults to a small pool sized to the upload connection count
     /// [config: posting.check_connections].
     #[arg(long, value_name = "N")]
     check_connections: Option<usize>,
@@ -482,7 +482,6 @@ impl Cli {
             threads: self.threads,
             simd: Some(self.simd),
             resume: if self.resume { Some(true) } else { None },
-            verify: if self.verify { Some(true) } else { None },
             upload_rate: self
                 .rate
                 .as_deref()
@@ -527,7 +526,13 @@ impl Cli {
             } else {
                 self.nzb_conflict
             },
-            check: if self.check { Some(true) } else { None },
+            check: if self.no_check {
+                Some(false)
+            } else if self.check {
+                Some(true)
+            } else {
+                None
+            },
             check_delay_secs: self.check_delay,
             check_retries: self.check_retries,
             check_connections: self.check_connections,
@@ -569,8 +574,9 @@ struct UploadResult {
 #[derive(Default)]
 struct PhaseTimings {
     compress_ms: Option<u128>,
+    /// Includes the streaming check/repost queue draining, which now runs
+    /// concurrently with posting rather than as a separate serial phase.
     post_ms: Option<u128>,
-    check_ms: Option<u128>,
 }
 
 /// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
@@ -655,7 +661,7 @@ async fn run_single_upload(
             password: config.compress_password.as_deref(),
             par2: config.par2,
             resume: config.resume,
-            verify: config.verify,
+            check: config.check,
         });
     }
 
@@ -892,133 +898,16 @@ async fn run_single_upload(
     let _ = renderer.await;
     timings.post_ms = Some(t_post.elapsed().as_millis());
 
-    // ── Retry segments that failed during the upload ──────────────────────────
-    let mut outcome = outcome;
-    if !outcome.failed_tasks.is_empty()
-        && !config.dry_run
-        && !config.par2_only
-        && !outcome.cancelled
-    {
-        let n = outcome.failed_tasks.len();
-        eprintln!("{n} segment(s) failed during upload — retrying…");
-
-        let (retry_tx, retry_renderer) = if params.json_mode {
-            pesto::progress::spawn_json_emitter()
-        } else {
-            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-        };
-
-        let mut recovered = pesto::poster::repost_failed_tasks(
-            config,
-            &outcome.failed_tasks,
-            &outcome.groups,
-            Some(&retry_tx),
-            cancel,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("retry: error: {e:#}");
-            error!(error = %e, "retry: repost_failed_tasks error");
-            Vec::new()
-        });
-
-        drop(retry_tx);
-        let _ = retry_renderer.await;
-
-        // `repost_failed_tasks` treats a `240`/`441` POST response as
-        // "recovered" (correct for the ordinary connection-drop case it's
-        // designed for), but --verify specifically asked for STAT
-        // confirmation — a segment that landed here because verify's own
-        // inline retries were exhausted needs that same confirmation before
-        // counting as recovered, or this blind retry would silently defeat
-        // --verify's guarantee for exactly the segments it flagged as
-        // suspect.
-        if config.verify
-            && !recovered.is_empty()
-            && !cancel.is_some_and(|f| f.load(Ordering::Relaxed))
-        {
-            let (verify_tx, verify_renderer) = if params.json_mode {
-                pesto::progress::spawn_json_emitter()
-            } else {
-                pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-            };
-            // Skip check_articles' propagation-delay wait and multi-attempt,
-            // 20s-spaced retries: --verify is about fast, inline confirmation,
-            // not --check's patient end-of-run pass, and repost_failed_tasks
-            // already gave this segment its best shot. A single quick STAT is
-            // enough to tell whether the blind repost actually landed —
-            // anyone wanting more patience already has --check for that.
-            let mut verify_config = (**config).clone();
-            verify_config.check_delay_secs = 0;
-            verify_config.check_retries = 1;
-            let still_missing =
-                pesto::poster::check_articles(&verify_config, &recovered, Some(&verify_tx), cancel)
-                    .await
-                    .unwrap_or_else(|e| {
-                        eprintln!("retry: verify after retry failed: {e:#}");
-                        error!(error = %e, "retry: post-recovery STAT pass failed");
-                        recovered.iter().map(|s| s.message_id.clone()).collect()
-                    });
-            drop(verify_tx);
-            let _ = verify_renderer.await;
-            if !still_missing.is_empty() {
-                eprintln!(
-                    "retry: {}/{} recovered segment(s) failed STAT verification",
-                    still_missing.len(),
-                    recovered.len()
-                );
-                let missing_set: std::collections::HashSet<&str> =
-                    still_missing.iter().map(String::as_str).collect();
-                recovered.retain(|s| !missing_set.contains(s.message_id.as_str()));
-            }
-        }
-
-        let r = recovered.len();
-        eprintln!("retry: {r}/{n} segment(s) recovered");
-        outcome.segments.extend(recovered);
-        // Remove recovered tasks from the failure lists so they don't appear
-        // as failures in the final summary and NZB is written correctly.
-        if r == n {
-            outcome.failures.retain(|f| {
-                !outcome.failed_tasks.iter().any(|t| {
-                    f.starts_with(&t.file_name) && f.contains(&format!("{}/{}", t.part, t.total))
-                })
-            });
-            outcome.failed_tasks.clear();
-        }
-    }
-
-    // ── Post-check STAT pass ──────────────────────────────────────────────────
-    let mut cancelled = outcome.cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
-    let check_missing: Vec<String> = if config.check
-        && !config.dry_run
-        && !config.par2_only
-        && !cancelled
-        && !outcome.segments.is_empty()
-    {
-        let (check_tx, check_renderer) = if params.json_mode {
-            pesto::progress::spawn_json_emitter()
-        } else {
-            pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-        };
-        let t_check = std::time::Instant::now();
-        let missing =
-            pesto::poster::check_articles(config, &outcome.segments, Some(&check_tx), cancel)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("check: error during STAT pass: {e:#}");
-                    error!(error = %e, "check: STAT pass failed");
-                    Vec::new()
-                });
-        cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
-        drop(check_tx);
-        let _ = check_renderer.await;
-        let check_ms = t_check.elapsed().as_millis();
-        info!(elapsed_ms = check_ms, phase = "check", "phase done");
-        timings.check_ms = Some(check_ms);
-        missing
-    } else {
+    // `post_files_with_progress_and_cancel` already retried in-run POST
+    // failures (repost_failed_tasks) and ran the streaming STAT check +
+    // repost internally, concurrently with the upload. `outcome.still_missing`
+    // is the final list of articles that never got confirmed after every
+    // repost attempt.
+    let cancelled = outcome.cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
+    let check_missing: Vec<String> = if cancelled {
         Vec::new()
+    } else {
+        outcome.still_missing.clone()
     };
 
     if !params.json_mode && config.par2_only {
@@ -1042,184 +931,33 @@ async fn run_single_upload(
             eprintln!("  - {failure}");
         }
     }
-    let check_missing = if !cancelled && !check_missing.is_empty() {
-        let max_rounds = config.check_post_retries.max(1);
-        let mut still_missing = check_missing;
-
-        for round in 1..=max_rounds {
-            eprintln!(
-                "check: {} article(s) not found — reposting… (round {round}/{max_rounds})",
-                still_missing.len()
-            );
-            warn!(
-                count = still_missing.len(),
-                round, max_rounds, "check: articles not found on server"
-            );
-
-            let (repost_tx, repost_renderer) = if params.json_mode {
-                pesto::progress::spawn_json_emitter()
-            } else {
-                pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-            };
-            let _ = repost_tx.send(pesto::progress::ProgressEvent::RepostRoundStarted {
-                round,
-                max_rounds,
-                missing: still_missing.len() as u64,
-            });
-
-            let reposted_segments = pesto::poster::repost_missing_segments(
-                config,
-                &outcome.segments,
-                &still_missing,
-                &outcome.groups,
-                Some(&repost_tx),
-                cancel,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("check: repost error: {e:#}");
-                error!(error = %e, "check: repost_missing_segments failed");
-                Vec::new()
-            });
-
-            drop(repost_tx);
-            let _ = repost_renderer.await;
-
-            eprintln!(
-                "check: reposted {}/{} article(s)",
-                reposted_segments.len(),
-                still_missing.len()
-            );
-
-            cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
-
-            if cancelled {
-                eprintln!("check: interrupted — skipping verify after repost");
-                break;
-            }
-
-            let reposted_count = reposted_segments.len() as u64;
-
-            // Splice the freshly reposted segments (fresh Message-IDs) back
-            // into `outcome.segments`, replacing the stale, confirmed-missing
-            // entries. `repost_missing_segments` deliberately does not reuse
-            // the original ID (see its doc comment) — a server that silently
-            // curses a Message-ID at accept time would otherwise report the
-            // same segment as "reposted" every round without it ever
-            // becoming readable.
-            let missing_before: std::collections::HashSet<&str> =
-                still_missing.iter().map(String::as_str).collect();
-            let mut reposted_by_key: std::collections::HashMap<
-                (String, u32),
-                pesto::poster::PostedSegment,
-            > = reposted_segments
-                .into_iter()
-                .map(|s| ((s.file_name.clone(), s.part), s))
-                .collect();
-            // Captured before the splice loop drains `reposted_by_key` below.
-            let new_ids: std::collections::HashSet<String> = reposted_by_key
-                .values()
-                .map(|s| s.message_id.clone())
-                .collect();
-            for seg in outcome.segments.iter_mut() {
-                if missing_before.contains(seg.message_id.as_str()) {
-                    if let Some(new_seg) =
-                        reposted_by_key.remove(&(seg.file_name.clone(), seg.part))
-                    {
-                        *seg = new_seg;
-                    }
-                }
-            }
-
-            // Segments still carrying an old, confirmed-missing ID never got
-            // a fresh one this round (file re-open failed, or every POST
-            // retry was exhausted) — they stay missing without wasting a
-            // STAT call on an ID we already know is unchanged.
-            let carried_over: Vec<String> = outcome
-                .segments
-                .iter()
-                .filter(|s| missing_before.contains(s.message_id.as_str()))
-                .map(|s| s.message_id.clone())
-                .collect();
-
-            // Re-verify only the segments that were just reposted (now under
-            // their new IDs), not the whole upload — the rest were already
-            // confirmed by the first STAT pass and re-checking them again
-            // every round scales with the total article count instead of the
-            // (shrinking) missing set.
-            let to_verify: Vec<pesto::poster::PostedSegment> = outcome
-                .segments
-                .iter()
-                .filter(|s| new_ids.contains(s.message_id.as_str()))
-                .cloned()
-                .collect();
-
-            let (verify_tx, verify_renderer) = if params.json_mode {
-                pesto::progress::spawn_json_emitter()
-            } else {
-                pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-            };
-            let after_verify =
-                pesto::poster::check_articles(config, &to_verify, Some(&verify_tx), cancel)
-                    .await
-                    .unwrap_or_else(|e| {
-                        eprintln!("check: verify after repost failed: {e:#}");
-                        error!(error = %e, "check: post-repost STAT pass failed");
-                        to_verify.iter().map(|s| s.message_id.clone()).collect()
-                    });
-            cancelled = cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
-
-            still_missing = carried_over.into_iter().chain(after_verify).collect();
-
-            let _ = verify_tx.send(pesto::progress::ProgressEvent::RepostRoundDone {
-                round,
-                max_rounds,
-                reposted: reposted_count,
-                still_missing: still_missing.len() as u64,
-            });
-            drop(verify_tx);
-            let _ = verify_renderer.await;
-
-            if cancelled {
-                eprintln!("check: interrupted during verify after repost");
-                break;
-            } else if still_missing.is_empty() {
-                eprintln!("check: all article(s) confirmed after repost");
-                break;
-            } else if round == max_rounds {
-                eprintln!(
-                    "check: {} article(s) still missing after {max_rounds} repost round(s):",
-                    still_missing.len()
-                );
-                for id in &still_missing {
-                    eprintln!("  - {id}");
-                }
-                error!(
-                    count = still_missing.len(),
-                    ids = ?still_missing,
-                    max_rounds,
-                    "check: articles still missing after all repost rounds"
-                );
-            } else {
-                eprintln!(
-                    "check: {} article(s) still missing — trying another round…",
-                    still_missing.len()
-                );
-            }
-        }
-
-        still_missing
-    } else {
-        if config.check
-            && !config.dry_run
-            && !config.par2_only
-            && !cancelled
-            && !outcome.segments.is_empty()
-        {
+    // `check_missing` is already final: `post_files_with_progress_and_cancel`
+    // ran the streaming STAT check and every repost attempt internally,
+    // concurrently with the upload, so there is no separate repost round to
+    // drive here anymore.
+    if !cancelled
+        && config.check
+        && !config.dry_run
+        && !config.par2_only
+        && !outcome.segments.is_empty()
+    {
+        if check_missing.is_empty() {
             eprintln!("check: all {} article(s) verified", outcome.segments.len());
+        } else {
+            eprintln!(
+                "check: {} article(s) still missing after every repost attempt:",
+                check_missing.len()
+            );
+            for id in &check_missing {
+                eprintln!("  - {id}");
+            }
+            error!(
+                count = check_missing.len(),
+                ids = ?check_missing,
+                "check: articles still missing after every repost attempt"
+            );
         }
-        Vec::new()
-    };
+    }
 
     // If segments still failed after retry, refuse to write the NZB — it
     // would be incomplete. The resume state already has all successfully
@@ -1259,11 +997,13 @@ async fn run_single_upload(
         eprintln!();
         if config.allow_incomplete_nzb {
             eprintln!(
-                "warning: {n} article(s) still missing on the server after all repost rounds."
+                "warning: {n} article(s) still missing on the server after every repost attempt."
             );
             eprintln!("Publishing anyway — --allow-incomplete-nzb was set.");
         } else {
-            eprintln!("error: {n} article(s) still missing on the server after all repost rounds.");
+            eprintln!(
+                "error: {n} article(s) still missing on the server after every repost attempt."
+            );
             eprintln!(
                 "The NZB will NOT be written — pass --allow-incomplete-nzb to publish anyway \
                  (e.g. relying on PAR2 recovery)."
@@ -1502,9 +1242,6 @@ async fn run_single_upload(
         }
         if let Some(ms) = timings.post_ms {
             parts.push(format!("post={ms}ms"));
-        }
-        if let Some(ms) = timings.check_ms {
-            parts.push(format!("check={ms}ms"));
         }
         info!(
             total_ms,

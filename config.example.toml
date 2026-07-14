@@ -93,9 +93,32 @@ groups = ["alt.binaries.test"]
 # Default: 10.
 # par2 = 10
 
-# verify — confirm each posted article is present on the server via STAT
-# and repost if not found. Adds one round-trip per article. Default: false.
-# verify = false
+# check — confirm every posted article via a streaming STAT check that runs
+# concurrently with the upload: each article is checked check_delay seconds
+# after it posts, and misses are reposted automatically. Default: true.
+# check = true
+
+# check_delay — seconds to wait after an article posts before its first STAT
+# check. Default: 5.
+# check_delay = 5
+
+# check_retries — number of STAT attempts per posted copy before triggering
+# a repost. Default: 3.
+# check_retries = 3
+
+# check_connections — number of dedicated parallel NNTP connections for the
+# streaming check queue. Default: 0 (a small pool sized to the upload
+# connection count).
+# check_connections = 0
+
+# check_post_retries — number of times to re-post an article the check queue
+# still can't find. Default: 1.
+# check_post_retries = 1
+
+# allow_incomplete_nzb — publish the NZB (and run post-upload hooks) even
+# when some articles are still confirmed missing after every
+# check_post_retries round. Default: false.
+# allow_incomplete_nzb = false
 
 # upload_rate — maximum total upload speed across all connections.
 # Accepts human-readable values: "50 MiB/s", "10 MB/s", "1024 KiB/s".

@@ -206,7 +206,7 @@ pub async fn run_upload(
 
     // ── Post ─────────────────────────────────────────────────────────────────
     let post_tx = progress_tx.clone();
-    let mut outcome = if let Some(ref cancel_flag) = cancel {
+    let outcome = if let Some(ref cancel_flag) = cancel {
         crate::poster::post_files_with_progress_and_cancel(
             config,
             &inputs,
@@ -229,146 +229,23 @@ pub async fn run_upload(
     // ─────────────────────────────────────────────────────────────────────────
 
     let has_post_failures = !outcome.failures.is_empty();
-    // Set when a STAT pass still can't find some articles after every
-    // repost attempt. Kept separate from `has_post_failures` because
+    // Set when the streaming check still can't confirm some articles after
+    // every repost attempt. Kept separate from `has_post_failures` because
     // `--allow-incomplete-nzb` only opts back into publishing past *this*
     // kind of gap, not a genuine POST failure.
-    let mut has_confirmed_missing = false;
-    let mut cancelled = outcome.cancelled;
+    let has_confirmed_missing = !outcome.still_missing.is_empty();
+    let cancelled = outcome.cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
 
-    // ── Post-check STAT pass ──────────────────────────────────────────────────
-    if config.check
-        && !config.dry_run
-        && !config.par2_only
-        && !cancelled
-        && !outcome.segments.is_empty()
-    {
-        emit_status(
-            &progress_tx,
-            format!("checking {} article(s) via STAT…", outcome.segments.len()),
-        );
-        let check_result = crate::poster::check_articles(
-            config,
-            &outcome.segments,
-            progress_tx.as_ref(),
-            cancel.as_ref(),
-        )
-        .await;
-        cancelled = cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
-        match check_result {
-            Ok(missing) if !cancelled && !missing.is_empty() => {
-                emit_status(
-                    &progress_tx,
-                    format!("check: {} article(s) not found — reposting…", missing.len()),
-                );
-                tracing::warn!(count = missing.len(), "check: articles not found on server");
-
-                let reposted_segments = crate::poster::repost_missing_segments(
-                    config,
-                    &outcome.segments,
-                    &missing,
-                    &outcome.groups,
-                    progress_tx.as_ref(),
-                    cancel.as_ref(),
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    emit_status(&progress_tx, format!("check: repost error: {e:#}"));
-                    tracing::error!(error = %e, "check: repost_missing_segments failed");
-                    Vec::new()
-                });
-
-                emit_status(
-                    &progress_tx,
-                    format!(
-                        "check: reposted {}/{} article(s)",
-                        reposted_segments.len(),
-                        missing.len()
-                    ),
-                );
-
-                cancelled = cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
-
-                // Splice the freshly reposted segments (fresh Message-IDs)
-                // back into `outcome.segments` before re-verifying.
-                // `repost_missing_segments` deliberately never reuses a
-                // confirmed-missing ID (see its doc comment) — the second
-                // STAT pass below must check the new IDs, not the old ones
-                // we already proved the server doesn't have.
-                let mut reposted_by_key: std::collections::HashMap<
-                    (String, u32),
-                    crate::poster::PostedSegment,
-                > = reposted_segments
-                    .into_iter()
-                    .map(|s| ((s.file_name.clone(), s.part), s))
-                    .collect();
-                for seg in outcome.segments.iter_mut() {
-                    if let Some(new_seg) =
-                        reposted_by_key.remove(&(seg.file_name.clone(), seg.part))
-                    {
-                        *seg = new_seg;
-                    }
-                }
-
-                // Second STAT pass to confirm reposts landed (only if not cancelled).
-                if cancelled {
-                    emit_status(
-                        &progress_tx,
-                        "check: interrupted — skipping verify after repost".to_string(),
-                    );
-                } else {
-                    match crate::poster::check_articles(
-                        config,
-                        &outcome.segments,
-                        progress_tx.as_ref(),
-                        cancel.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(still_missing) if still_missing.is_empty() => {
-                            // CheckDone { failed: 0 } already emitted by check_articles.
-                        }
-                        Ok(still_missing) => {
-                            emit_status(
-                                &progress_tx,
-                                format!(
-                                    "check: {} article(s) still missing after repost",
-                                    still_missing.len()
-                                ),
-                            );
-                            for id in &still_missing {
-                                emit_status(&progress_tx, format!("  missing: {id}"));
-                            }
-                            tracing::error!(
-                                count = still_missing.len(),
-                                ids = ?still_missing,
-                                "check: articles still missing after repost"
-                            );
-                            has_confirmed_missing = true;
-                        }
-                        Err(e) => {
-                            emit_status(
-                                &progress_tx,
-                                format!("check: verify after repost failed: {e:#}"),
-                            );
-                            tracing::error!(error = %e, "check: second STAT pass failed");
-                            has_confirmed_missing = true;
-                        }
-                    }
-                    cancelled =
-                        cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
-                }
-            }
-            Ok(_) => {
-                // Either all verified or cancelled before/during check.
-            }
-            Err(e) => {
-                emit_status(&progress_tx, format!("check: STAT pass error: {e:#}"));
-                tracing::error!(error = %e, "check: STAT pass failed");
-            }
+    if has_confirmed_missing {
+        for id in &outcome.still_missing {
+            emit_status(&progress_tx, format!("  missing: {id}"));
         }
+        tracing::error!(
+            count = outcome.still_missing.len(),
+            ids = ?outcome.still_missing,
+            "check: articles still missing after every repost attempt"
+        );
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
     // If some articles are still confirmed missing after every repost round,
     // refuse to write the NZB (and skip NFO/hooks below) unless the caller
@@ -552,10 +429,11 @@ pub async fn run_upload(
     if let Some(dir) = compress_temp_dir {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
-    // Only now — after the check repost pass and the end-of-run failed-task
-    // retry above have both had every chance to re-read a PAR2 file's bytes —
-    // is it safe to remove the PAR2 temp dir. See `poster::par2_temp_dir`'s
-    // doc comment for why this used to happen too early.
+    // Only now — after `post_files_with_progress_and_cancel` has fully
+    // drained its internal streaming check/repost queue, which may need to
+    // re-read a PAR2 file's bytes — is it safe to remove the PAR2 temp dir.
+    // See `poster::par2_temp_dir`'s doc comment for why this used to happen
+    // too early.
     if !config.par2_only {
         let _ = tokio::fs::remove_dir_all(crate::poster::par2_temp_dir()).await;
     }
