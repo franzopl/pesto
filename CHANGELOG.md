@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.50] — 2026-07-14
+
 ### Fixed
 - **A multi-part file's last segment never carried the whole-file CRC-32**:
   found by comparing `pesto`'s yEnc article construction against `nyuu`'s,
