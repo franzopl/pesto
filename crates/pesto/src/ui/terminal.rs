@@ -591,7 +591,8 @@ impl RenderState {
             "ETA —".to_string()
         };
 
-        let line = format!("{spinner}  {pct:>3}% · {eta_str}");
+        let width = terminal_width().unwrap_or(80).max(20);
+        let line = truncate(&format!("{spinner}  {pct:>3}% · {eta_str}"), width);
 
         let mut out = String::new();
         if self.lines_drawn > 0 {
@@ -684,7 +685,22 @@ impl RenderState {
             self.poll_proc_stats();
         }
         self.expire_check_retry();
-        let lines = self.panel_lines(final_draw);
+        // Every emitted line must fit within one physical terminal row, or
+        // it wraps onto a second row the redraw logic below doesn't know
+        // about: cursor-up moves by *logical* line count, so once any line
+        // wraps, moving up N logical lines undershoots the true top of the
+        // previous frame, leaving a stray fragment behind on every redraw
+        // (reported as the header line — the one line not bounded by the
+        // fixed-width box below it — repeating itself over and over on
+        // narrow terminals, e.g. a phone SSH client). Truncating every line
+        // to the actual detected width keeps the 1-logical-line-per-row
+        // invariant the cursor arithmetic below depends on.
+        let width = terminal_width().unwrap_or(80).max(20);
+        let lines: Vec<String> = self
+            .panel_lines(final_draw)
+            .into_iter()
+            .map(|l| truncate(&l, width))
+            .collect();
 
         let mut out = String::new();
         // Move the cursor back to the top of the previous panel and wipe
@@ -1517,5 +1533,54 @@ fn format_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A line wider than the terminal wraps onto a second physical row that
+    // the cursor-up-by-logical-line-count redraw logic doesn't know about,
+    // corrupting every subsequent redraw (see `draw_panel`'s comment). The
+    // fix is to always truncate to the detected width before writing, so
+    // these tests pin the invariant that makes that safe: truncated output
+    // never exceeds the requested visible width, with or without embedded
+    // ANSI color codes (the header line mixes both — colored phase text
+    // plus a plain target label).
+    #[test]
+    fn truncate_never_exceeds_requested_width_plain() {
+        let long =
+            "pesto  posting data  1 file(s) → usnews.blocknews.net + news.newshosting.com · 0:12";
+        for width in [10, 20, 40, 60, 80] {
+            let out = truncate(long, width);
+            assert!(
+                visible_len(&out) <= width,
+                "width={width} produced {} visible chars: {out:?}",
+                visible_len(&out)
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_never_exceeds_requested_width_with_ansi_colour() {
+        // Mirrors panel_lines()'s header: a colored phase word embedded in
+        // otherwise plain text. Hardcoded escape (rather than calling
+        // `ansi()`, which no-ops when stderr isn't a TTY — as under `cargo
+        // test`) so this actually exercises the escape-aware branch.
+        let long = "pesto  \x1b[36mwriting PAR2\x1b[0m  1 file(s) → usnews.blocknews.net + news.newshosting.com · 0:12";
+        for width in [10, 20, 40, 60, 80] {
+            let out = truncate(long, width);
+            assert!(
+                visible_len(&out) <= width,
+                "width={width} produced {} visible chars: {out:?}",
+                visible_len(&out)
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_leaves_short_lines_untouched() {
+        assert_eq!(truncate("short", 80), "short");
     }
 }

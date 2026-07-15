@@ -9,6 +9,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.59] — 2026-07-15
+
+### Fixed
+- **The panel header could repeat itself over and over instead of updating
+  in place, on any terminal narrow enough for the line to wrap** — not a
+  terminal-compatibility gap (0.3.58's fix, while correct on its own
+  terms, didn't address the real cause). The header line had no width
+  limit; once it grew past the target label added in 0.3.57 (`→
+  host1 + host2`), it could exceed the actual terminal width — common on
+  narrow clients like a phone SSH session. The redraw logic moves the
+  cursor up by the *logical* line count before erasing and rewriting, but
+  a wrapped line occupies more than one *physical* row, so that count
+  undershoots the true top of the previous frame: each redraw only
+  overwrites the last physical row of the wrap, leaving a fragment of the
+  previous frame stranded above on every tick.
+  Every panel line (header and box) is now truncated to the actual
+  detected terminal width (queried via `TIOCGWINSZ`, already used
+  elsewhere in the renderer but not applied to redraw output) before being
+  written, with a `…` marker when cut — guaranteeing the one-logical-line-
+  per-physical-row invariant the redraw's cursor arithmetic depends on.
+  Covered by new unit tests pinning that truncated output never exceeds
+  the requested width, with or without embedded ANSI colour codes.
+
+---
+
 ## [0.3.58] — 2026-07-15
 
 ### Fixed
