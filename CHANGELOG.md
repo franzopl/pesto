@@ -9,6 +9,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.56] — 2026-07-15
+
+### Changed
+- **The streaming `--check` queue is now partitioned per configured server**
+  instead of sharing one queue across every check worker. In a multi-server
+  (failover) config, articles for different providers used to interleave in
+  a single shared queue, so a worker's connection would `retarget` — a full
+  reconnect + re-auth — on almost every item once two providers' articles
+  were mixed. Each worker now has a "home" server (round-robin across the
+  configured list) and drains its own queue first, only stealing a ready
+  item from another server's queue once its own is empty — so every
+  server's backlog still gets drained even with fewer check connections
+  than servers, without paying for a reconnect on every STAT.
+- **A STAT failing due to a connection error (not a plain "article not
+  found") is now visible in the UI.** It used to be silent — only a
+  `tracing::warn!`, a no-op unless the user ran with `-v`/`--session-log` —
+  so a run of connection-error retries was indistinguishable from a hang.
+  `ProgressEvent::CheckRetrying` now carries a `reason` ("article not
+  found" vs. "connection error"), shown in both the panel and plain-text
+  renderer.
+- **The check panel's retry line is now a live countdown** ("connection
+  error — retry 1/3 in 14s" counting down each redraw) instead of a static
+  string that got wiped by the next resolved article from any other
+  worker — it used to disappear almost immediately with more than one
+  check worker active, which is the common case.
+- **Reposted articles now have a persistent counter** in the check panel
+  (and the plain-text renderer), instead of only a one-line `Status`
+  message shared — and instantly overwritten — by every other kind of
+  status text in the app.
+
+---
+
 ## [0.3.55] — 2026-07-14
 
 ### Fixed

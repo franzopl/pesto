@@ -2086,7 +2086,9 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
             attempt,
             max_attempts,
             delay_secs,
-        } => format!("Check retry {attempt}/{max_attempts} (waiting {delay_secs}s)…"),
+            reason,
+        } => format!("Check retry {attempt}/{max_attempts} ({reason}, waiting {delay_secs}s)…"),
+        E::CheckReposted { reposted } => format!("Check: reposted article #{reposted}"),
         _ => String::new(), // many low-level events are too noisy for the TUI log
     }
 }

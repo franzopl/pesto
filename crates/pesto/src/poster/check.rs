@@ -63,7 +63,15 @@ impl Ord for QueueItem {
 }
 
 struct Inner {
-    heap: Mutex<BinaryHeap<QueueItem>>,
+    /// One queue per configured server, indexed by `PostedSegment::server_idx`.
+    /// Partitioning by server (instead of one heap shared by every worker)
+    /// means a worker whose items are all destined for the same server
+    /// never has to `retarget` its connection — that used to happen almost
+    /// every item once two providers' articles interleaved in a single
+    /// shared queue, turning every STAT into a fresh reconnect+auth. See
+    /// `check_worker` for the work-stealing fallback that still guarantees
+    /// every queue gets drained even when a server has no home worker.
+    heaps: Vec<Mutex<BinaryHeap<QueueItem>>>,
     /// Items queued or currently being processed by a worker. Reaching zero
     /// after `open` goes false means the coordinator is done.
     in_flight: AtomicUsize,
@@ -77,6 +85,7 @@ struct Inner {
     cancel: Option<Arc<AtomicBool>>,
     servers: Arc<Vec<crate::config::ServerEntry>>,
     checked_count: AtomicUsize,
+    reposted_count: AtomicUsize,
 }
 
 impl Inner {
@@ -93,6 +102,43 @@ impl Inner {
     fn emit(&self, event: ProgressEvent) {
         if let Some(tx) = &self.events {
             let _ = tx.send(event);
+        }
+    }
+
+    /// Queue `item` on the partition matching the server it's headed to
+    /// (its current `seg.server_idx`), clamped defensively in case the
+    /// server list ever ends up shorter than the index recorded on an item.
+    fn push_item(&self, item: QueueItem) {
+        let idx = item.seg.server_idx.min(self.heaps.len() - 1);
+        self.heaps[idx].lock().unwrap().push(item);
+    }
+
+    /// Pop a ready item, preferring `home_idx`'s own queue and falling back
+    /// to stealing a ready item from another server's queue so a worker
+    /// never sits idle while a backlog exists elsewhere — this is what
+    /// keeps every server's queue drained even with fewer check workers
+    /// than servers (a very common case: the check pool is deliberately
+    /// small, often 1-4 connections total across every configured server).
+    fn try_pop_ready(&self, home_idx: usize) -> Option<QueueItem> {
+        let now = Instant::now();
+        if let Some(item) = Self::pop_ready(&self.heaps[home_idx], now) {
+            return Some(item);
+        }
+        let n = self.heaps.len();
+        for offset in 1..n {
+            let idx = (home_idx + offset) % n;
+            if let Some(item) = Self::pop_ready(&self.heaps[idx], now) {
+                return Some(item);
+            }
+        }
+        None
+    }
+
+    fn pop_ready(heap: &Mutex<BinaryHeap<QueueItem>>, now: Instant) -> Option<QueueItem> {
+        let mut heap = heap.lock().unwrap();
+        match heap.peek() {
+            Some(top) if top.ready_at <= now => heap.pop(),
+            _ => None,
         }
     }
 
@@ -180,9 +226,12 @@ pub fn spawn_check_coordinator(
 ) -> CheckCoordinatorHandle {
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let n_workers = check_connections;
+    let n_heaps = servers.len().max(1);
 
     let inner = Arc::new(Inner {
-        heap: Mutex::new(BinaryHeap::new()),
+        heaps: (0..n_heaps)
+            .map(|_| Mutex::new(BinaryHeap::new()))
+            .collect(),
         in_flight: AtomicUsize::new(0),
         open: AtomicBool::new(true),
         config,
@@ -193,6 +242,7 @@ pub fn spawn_check_coordinator(
         cancel,
         servers,
         checked_count: AtomicUsize::new(0),
+        reposted_count: AtomicUsize::new(0),
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<PostedSegment>();
@@ -202,7 +252,7 @@ pub fn spawn_check_coordinator(
         let delay = Duration::from_secs(feeder_inner.config.check_delay_secs);
         while let Some(seg) = rx.recv().await {
             feeder_inner.in_flight.fetch_add(1, Ordering::AcqRel);
-            feeder_inner.heap.lock().unwrap().push(QueueItem {
+            feeder_inner.push_item(QueueItem {
                 ready_at: Instant::now() + delay,
                 seg,
                 stat_attempts: 0,
@@ -229,39 +279,43 @@ pub fn spawn_check_coordinator(
 }
 
 async fn check_worker(inner: Arc<Inner>, worker_idx: usize) {
-    let server_idx = if inner.servers.is_empty() {
+    // Each worker has a "home" server whose queue it drains preferentially,
+    // spread round-robin across the configured servers so every server gets
+    // a fair share of home workers regardless of how the check pool size
+    // relates to the server count (the pool is often smaller than the
+    // server count, since it's deliberately kept small — see
+    // `effective_check_connections`). A worker only steals from another
+    // server's queue (`Inner::try_pop_ready`) once its own is empty, which
+    // keeps the connection on one server for as long as there's real work
+    // there instead of retargeting on every item.
+    let home_idx = if inner.servers.is_empty() {
         0
     } else {
         worker_idx % inner.servers.len()
     };
-    let mut slot = ConnectionSlot::with_id(Arc::clone(&inner.servers), server_idx, worker_idx);
+    let mut slot = ConnectionSlot::with_id(Arc::clone(&inner.servers), home_idx, worker_idx);
 
     loop {
         if inner.is_cancelled() {
             // Drain whatever remains without further network calls so
             // `finish_and_drain` doesn't hang waiting on cancelled work.
-            let mut heap = inner.heap.lock().unwrap();
-            while let Some(item) = heap.pop() {
-                inner
-                    .still_missing
-                    .lock()
-                    .unwrap()
-                    .push(item.seg.message_id.clone());
-                inner.in_flight.fetch_sub(1, Ordering::AcqRel);
+            for heap in &inner.heaps {
+                let mut heap = heap.lock().unwrap();
+                while let Some(item) = heap.pop() {
+                    inner
+                        .still_missing
+                        .lock()
+                        .unwrap()
+                        .push(item.seg.message_id.clone());
+                    inner.in_flight.fetch_sub(1, Ordering::AcqRel);
+                }
             }
-            drop(heap);
             if inner.is_done() {
                 break;
             }
         }
 
-        let item = {
-            let mut heap = inner.heap.lock().unwrap();
-            match heap.peek() {
-                Some(top) if top.ready_at <= Instant::now() => heap.pop(),
-                _ => None,
-            }
-        };
+        let item = inner.try_pop_ready(home_idx);
 
         let Some(item) = item else {
             if inner.is_done() {
@@ -316,9 +370,9 @@ async fn process_item(
                     attempt: item.stat_attempts,
                     max_attempts: max_stat_attempts,
                     delay_secs: STAT_RETRY_DELAY_SECS,
+                    reason: "article not found",
                 });
-                let mut heap = inner.heap.lock().unwrap();
-                heap.push(QueueItem {
+                inner.push_item(QueueItem {
                     ready_at: Instant::now() + Duration::from_secs(STAT_RETRY_DELAY_SECS),
                     ..item
                 });
@@ -337,8 +391,18 @@ async fn process_item(
             item.stat_attempts += 1;
             if item.stat_attempts < max_stat_attempts {
                 let base = super::jittered(slot.retry_delay(), worker_idx);
-                let mut heap = inner.heap.lock().unwrap();
-                heap.push(QueueItem {
+                // Unlike the "not found" path above, this used to be silent
+                // in the UI — only a `tracing::warn!`, which is a no-op
+                // unless the user runs with `-v`/`--session-log`. A run of
+                // connection failures then looked indistinguishable from a
+                // hang instead of a visible backoff.
+                inner.emit(ProgressEvent::CheckRetrying {
+                    attempt: item.stat_attempts,
+                    max_attempts: max_stat_attempts,
+                    delay_secs: base.as_secs(),
+                    reason: "connection error",
+                });
+                inner.push_item(QueueItem {
                     ready_at: Instant::now() + base,
                     ..item
                 });
@@ -377,6 +441,10 @@ async fn handle_confirmed_miss(
 
     match repost_one(&inner.config, slot, &item.seg, &inner.groups).await {
         Ok(new_seg) => {
+            let reposted = inner.reposted_count.fetch_add(1, Ordering::Relaxed) + 1;
+            inner.emit(ProgressEvent::CheckReposted {
+                reposted: reposted as u64,
+            });
             inner.emit(ProgressEvent::Status {
                 text: format!(
                     "check: reposted {} (attempt {}/{})",
@@ -387,8 +455,7 @@ async fn handle_confirmed_miss(
             });
             inner.splice(&new_seg);
             let delay = Duration::from_secs(inner.config.check_delay_secs);
-            let mut heap = inner.heap.lock().unwrap();
-            heap.push(QueueItem {
+            inner.push_item(QueueItem {
                 ready_at: Instant::now() + delay,
                 seg: new_seg,
                 stat_attempts: 0,

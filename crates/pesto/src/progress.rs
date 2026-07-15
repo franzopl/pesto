@@ -133,12 +133,22 @@ pub enum ProgressEvent {
     /// `failed` is the number of articles that were never confirmed even
     /// after every repost attempt.
     CheckDone { failed: u64 },
-    /// An article was not found on attempt `attempt`; retrying after `delay_secs`.
+    /// A STAT attempt failed on try `attempt`; retrying after `delay_secs`.
+    /// `reason` distinguishes an article genuinely missing ("article not
+    /// found") from the STAT call itself failing ("connection error") —
+    /// the latter used to be silent (a `tracing::warn!` only, invisible
+    /// without `-v`), leaving connection-trouble backoffs indistinguishable
+    /// from a hang.
     CheckRetrying {
         attempt: u32,
         max_attempts: u32,
         delay_secs: u64,
+        reason: &'static str,
     },
+    /// An article was successfully reposted under a fresh Message-ID after
+    /// its original copy exhausted its STAT attempts. `reposted` is a
+    /// running count of reposts so far this run.
+    CheckReposted { reposted: u64 },
     /// Worker connection `conn` is authenticating with the server.
     ConnectionAuth { conn: usize },
     /// Worker connection `conn` failed an attempt and is retrying.
@@ -335,11 +345,16 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         attempt,
                         max_attempts,
                         delay_secs,
+                        reason,
                     } => {
                         let _ = writeln!(
                             out,
-                            r#"{{"type":"check_retrying","attempt":{attempt},"max_attempts":{max_attempts},"delay_secs":{delay_secs}}}"#
+                            r#"{{"type":"check_retrying","attempt":{attempt},"max_attempts":{max_attempts},"delay_secs":{delay_secs},"reason":"{reason}"}}"#
                         );
+                    }
+                    ProgressEvent::CheckReposted { reposted } => {
+                        let _ =
+                            writeln!(out, r#"{{"type":"check_reposted","reposted":{reposted}}}"#);
                     }
                     // Connection and pool events are noisy and not useful to consumers.
                     ProgressEvent::ConnectionBusy { .. }

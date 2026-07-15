@@ -189,8 +189,14 @@ struct RenderState {
     check_active: bool,
     check_checked: u64,
     check_failed: u64,
+    check_reposted: u64,
     check_start: Instant,
-    check_retry_msg: Option<String>,
+    /// Most recent retry backoff still in its window: (label without the
+    /// countdown, e.g. "connection error — retry 1/3", deadline). Cleared
+    /// once the deadline passes (`expire_check_retry`) rather than on every
+    /// resolved article, so a fast-moving pool of concurrent check workers
+    /// doesn't wipe it before the user can read it.
+    check_retry: Option<(String, Instant)>,
     // PAR2 encode info block (shown while encoding, inspired by parpar)
     par2_info: Option<Par2Info>,
     // PAR2 input slice encode progress
@@ -244,8 +250,9 @@ impl RenderState {
             check_active: false,
             check_checked: 0,
             check_failed: 0,
+            check_reposted: 0,
             check_start: Instant::now(),
-            check_retry_msg: None,
+            check_retry: None,
             par2_info: None,
             par2_encode_done: 0,
             par2_encode_total: 0,
@@ -444,7 +451,6 @@ impl RenderState {
                     self.check_start = Instant::now();
                 }
                 self.check_checked = checked;
-                self.check_retry_msg = None;
                 if !ok {
                     self.check_failed += 1;
                 }
@@ -453,15 +459,20 @@ impl RenderState {
                 attempt,
                 max_attempts,
                 delay_secs,
+                reason,
             } => {
-                self.check_retry_msg = Some(format!(
-                    "article not found — retry {attempt}/{max_attempts} in {delay_secs}s",
+                self.check_retry = Some((
+                    format!("{reason} — retry {attempt}/{max_attempts}"),
+                    Instant::now() + Duration::from_secs(delay_secs),
                 ));
+            }
+            ProgressEvent::CheckReposted { reposted } => {
+                self.check_reposted = reposted;
             }
             ProgressEvent::CheckDone { failed } => {
                 self.check_active = false;
                 self.check_failed = failed;
-                self.check_retry_msg = None;
+                self.check_retry = None;
             }
         }
     }
@@ -639,6 +650,16 @@ impl RenderState {
         }
     }
 
+    /// Clear a retry countdown once its deadline has passed, so the panel
+    /// reverts to the normal "elapsed" line instead of freezing on "in 0s".
+    fn expire_check_retry(&mut self) {
+        if let Some((_, deadline)) = &self.check_retry {
+            if Instant::now() >= *deadline {
+                self.check_retry = None;
+            }
+        }
+    }
+
     fn draw_panel(&mut self, final_draw: bool) {
         if !self.started {
             return;
@@ -653,6 +674,7 @@ impl RenderState {
         if !final_draw {
             self.poll_proc_stats();
         }
+        self.expire_check_retry();
         let lines = self.panel_lines(final_draw);
 
         let mut out = String::new();
@@ -841,7 +863,7 @@ impl RenderState {
                 // it explains instead of a separate line or header colouring.
                 let verified_str = ansi(&format!("{verified} verified"), CHECK_BAND_COLOR);
                 let pending_str = ansi(&format!("{pending} pending"), UPLOAD_BAND_COLOR);
-                let line1 = if self.check_failed > 0 {
+                let mut line1 = if self.check_failed > 0 {
                     format!(
                         "{verified_str} · {pending_str} · {}",
                         ansi(&format!("{} missing", self.check_failed), "31")
@@ -851,11 +873,19 @@ impl RenderState {
                 } else {
                     format!("{verified_str} · {pending_str}")
                 };
+                // Reposts had no counter at all before — the only trace was
+                // a `Status` line shared (and instantly overwritten) by
+                // every other kind of status message in the app.
+                if self.check_reposted > 0 {
+                    line1.push_str(&format!(
+                        " · {}",
+                        ansi(&format!("{} reposted", self.check_reposted), "33")
+                    ));
+                }
                 let elapsed = self.check_start.elapsed().as_secs_f64().max(0.001);
-                let line2 = if !self.check_active {
-                    format!("elapsed {}", format_duration(elapsed))
-                } else if let Some(msg) = &self.check_retry_msg {
-                    msg.clone()
+                let line2 = if let Some((label, deadline)) = &self.check_retry {
+                    let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+                    format!("{label} in {remaining}s")
                 } else {
                     format!("elapsed {}", format_duration(elapsed))
                 };
@@ -1062,6 +1092,7 @@ impl RenderState {
         if !final_draw && !self.plain_ticks.is_multiple_of(10) {
             return;
         }
+        self.expire_check_retry();
         let mut err = std::io::stderr().lock();
 
         if self.compress_active {
@@ -1094,10 +1125,21 @@ impl RenderState {
         let check_suffix = if self.check_active || (final_draw && self.check_checked > 0) {
             let verified = self.check_checked.saturating_sub(self.check_failed);
             let pending = self.done_segments.saturating_sub(self.check_checked);
-            format!(
+            let mut suffix = format!(
                 " · check {verified} verified/{} missing/{pending} pending",
                 self.check_failed
-            )
+            );
+            if self.check_reposted > 0 {
+                suffix.push_str(&format!("/{} reposted", self.check_reposted));
+            }
+            // Unlike the boxed panel, plain mode has no dedicated retry line
+            // — append it here so a connection-error backoff isn't silently
+            // invisible when output is redirected/logged (non-TTY).
+            if let Some((label, deadline)) = &self.check_retry {
+                let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+                suffix.push_str(&format!(" · {label} in {remaining}s"));
+            }
+            suffix
         } else {
             String::new()
         };
