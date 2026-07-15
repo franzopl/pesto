@@ -1004,11 +1004,24 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
         });
         let total_bytes = std::fs::metadata(&nzb_path).map(|m| m.len()).unwrap_or(0);
 
+        // No live PostOutcome here (this re-runs hooks for an already
+        // completed NZB), so report every configured server rather than
+        // just the primary — mirrors the pre-hook case in the `pesto` CLI.
+        let servers_str = cfg
+            .all_servers()
+            .map(|s| s.host)
+            .collect::<Vec<_>>()
+            .join(":");
         let ctx = pesto::hooks::HookContext {
             name: release_name.clone(),
             total_bytes,
             input_paths: String::new(),
-            server: cfg.host.clone(),
+            server: servers_str
+                .split(':')
+                .next()
+                .unwrap_or(&cfg.host)
+                .to_string(),
+            servers: servers_str,
             group: cfg.groups.first().cloned().unwrap_or_default(),
             groups: cfg.groups.join(":"),
             password: cfg
@@ -1774,11 +1787,24 @@ async fn run_season_hooks(
         None
     };
 
+    // No per-segment server record survives the season-pack merge on disk,
+    // so — like the pre-hook case — report every configured server rather
+    // than just the primary.
+    let season_servers_str = config
+        .all_servers()
+        .map(|s| s.host)
+        .collect::<Vec<_>>()
+        .join(":");
     let ctx = pesto::hooks::HookContext {
         name: label.to_string(),
         total_bytes,
         input_paths: String::new(),
-        server: config.host.clone(),
+        server: season_servers_str
+            .split(':')
+            .next()
+            .unwrap_or(&config.host)
+            .to_string(),
+        servers: season_servers_str,
         group: config.groups.first().cloned().unwrap_or_default(),
         groups: config.groups.join(":"),
         password: config

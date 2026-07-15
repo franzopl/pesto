@@ -10,7 +10,7 @@
 //!
 //! Each hook receives the same environment variables:
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
-//! `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`,
+//! `PESTO_SERVERS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`,
 //! `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
 //! `PESTO_TAGS`.
 
@@ -28,7 +28,16 @@ pub struct HookContext {
     pub name: String,
     pub total_bytes: u64,
     pub input_paths: String,
+    /// The server that actually accepted at least one article this run
+    /// (typically the first entry of `servers`), not just the statically
+    /// configured primary — see `servers`.
     pub server: String,
+    /// Colon-separated list of every server that actually accepted at
+    /// least one article this run, derived from the real posted results —
+    /// not the configured list, which can include a failover server that
+    /// never ended up receiving anything, or omit which one of several
+    /// equally-configured servers a given run landed on.
+    pub servers: String,
     pub group: String,
     pub groups: String,
     pub password: String,
@@ -220,6 +229,7 @@ fn apply_env(cmd: &mut Command, ctx: &HookContext) {
         .env("PESTO_BYTES", ctx.total_bytes.to_string())
         .env("PESTO_INPUT_PATHS", &ctx.input_paths)
         .env("PESTO_SERVER", &ctx.server)
+        .env("PESTO_SERVERS", &ctx.servers)
         .env("PESTO_GROUP", &ctx.group)
         .env("PESTO_GROUPS", &ctx.groups)
         .env("PESTO_PASSWORD", &ctx.password)

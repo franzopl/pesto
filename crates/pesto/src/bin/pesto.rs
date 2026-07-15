@@ -282,7 +282,7 @@ struct Cli {
     /// receives the same environment variables as the post-hook, except
     /// `PESTO_NZB` and `PESTO_NFO` (which don't exist yet at this point):
     /// `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`,
-    /// `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_SERVER`,
+    /// `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_SERVER`, `PESTO_SERVERS`,
     /// `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
     /// `PESTO_TAGS`
     /// Can be specified multiple times. [config: output.pre_hooks].
@@ -293,8 +293,8 @@ struct Cli {
     /// receives upload details via environment variables:
     /// `PESTO_NZB`, `PESTO_NFO`, `PESTO_NAME`, `PESTO_BYTES`,
     /// `PESTO_INPUT_PATHS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`,
-    /// `PESTO_SERVER`, `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`,
-    /// `PESTO_PAR2`, `PESTO_TAGS`
+    /// `PESTO_SERVER`, `PESTO_SERVERS`, `PESTO_CATEGORY`, `PESTO_NZB_NAME`,
+    /// `PESTO_OBFUSCATE`, `PESTO_PAR2`, `PESTO_TAGS`
     /// Can be specified multiple times. [config: output.post_hooks].
     #[arg(long, value_name = "CMD", action = clap::ArgAction::Append)]
     post_hook: Vec<String>,
@@ -613,6 +613,16 @@ async fn run_single_upload(
         };
         let pre_groups_str = config.groups.join(":");
         let pre_tags_str = config.nzb_tags.join(" ");
+        // No upload has happened yet, so report every server that will get a
+        // connection quota (config.host plus extra_servers) rather than just
+        // the primary — with [[servers]] all of them start receiving
+        // connections immediately, unlike `groups`, where only one is
+        // eventually chosen at random.
+        let pre_servers_str = config
+            .all_servers()
+            .map(|s| s.host)
+            .collect::<Vec<_>>()
+            .join(":");
         let pre_env = HookEnv {
             nzb_path: None,
             nfo_path: None,
@@ -622,7 +632,8 @@ async fn run_single_upload(
             group: config.groups.first().map(String::as_str),
             groups: &pre_groups_str,
             password: None,
-            server: &config.host,
+            server: pre_servers_str.split(':').next().unwrap_or(&config.host),
+            servers: &pre_servers_str,
             category: config.nzb_category.as_deref(),
             nzb_name: config.nzb_name.as_deref(),
             obfuscate: pre_obfuscate,
@@ -1102,6 +1113,11 @@ async fn run_single_upload(
                     } else {
                         None
                     };
+                    // The server(s) that actually accepted an article this
+                    // run (`outcome.servers`), not just the statically
+                    // configured primary — a multi-server (failover) config
+                    // commonly uses every configured server at once.
+                    let history_servers_str = outcome.servers.join(", ");
                     pesto::history::record_upload(
                         &pesto::history::UploadRecord {
                             name: entry_label,
@@ -1112,7 +1128,8 @@ async fn run_single_upload(
                             // chose one at random from `config.groups`), not
                             // the configured list's static first entry.
                             group: outcome.groups.first().map(String::as_str),
-                            server: Some(config.host.as_str()),
+                            server: (!history_servers_str.is_empty())
+                                .then_some(history_servers_str.as_str()),
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
                             nzb_path: Some(&reported.display().to_string()),
@@ -1208,6 +1225,10 @@ async fn run_single_upload(
         // full configured list), not the static configured list itself —
         // this is a post-upload hook, so the real destination is known.
         let post_groups_str = outcome.groups.join(":");
+        // Same reasoning for PESTO_SERVER/PESTO_SERVERS: report the
+        // server(s) that actually accepted an article (`outcome.servers`),
+        // not just the statically configured primary.
+        let post_servers_str = outcome.servers.join(":");
         let post_tags_str = config.nzb_tags.join(" ");
         let hook_env = HookEnv {
             nzb_path: nzb_reported_path.as_deref(),
@@ -1218,7 +1239,8 @@ async fn run_single_upload(
             group: outcome.groups.first().map(String::as_str),
             groups: &post_groups_str,
             password: effective_password.as_deref(),
-            server: &config.host,
+            server: post_servers_str.split(':').next().unwrap_or(&config.host),
+            servers: &post_servers_str,
             category: config.nzb_category.as_deref(),
             nzb_name: config.nzb_name.as_deref(),
             obfuscate: post_obfuscate,
@@ -1474,6 +1496,20 @@ async fn run_batch(
             // season (each picked its own at random — see `all_groups`
             // above), not the static configured list.
             let season_groups_str = all_groups.join(":");
+            // Same reasoning for the server(s): the union of servers that
+            // actually accepted an article across every episode, derived
+            // from each segment's `server_idx`, not the static config.
+            let season_server_list: Vec<_> = config.all_servers().collect();
+            let mut season_server_idxs: Vec<usize> =
+                all_segments.iter().map(|s| s.server_idx).collect();
+            season_server_idxs.sort_unstable();
+            season_server_idxs.dedup();
+            let season_servers_str = season_server_idxs
+                .into_iter()
+                .filter_map(|idx| season_server_list.get(idx))
+                .map(|s| s.host.as_str())
+                .collect::<Vec<_>>()
+                .join(":");
             let season_tags_str = config.nzb_tags.join(" ");
             let hook_env = HookEnv {
                 nzb_path: Some(&season_path),
@@ -1484,7 +1520,8 @@ async fn run_batch(
                 group: all_groups.first().map(String::as_str),
                 groups: &season_groups_str,
                 password: effective_password.as_deref(),
-                server: &config.host,
+                server: season_servers_str.split(':').next().unwrap_or(&config.host),
+                servers: &season_servers_str,
                 category: config.nzb_category.as_deref(),
                 nzb_name: config.nzb_name.as_deref(),
                 obfuscate: season_obfuscate,
@@ -2337,7 +2374,17 @@ struct HookEnv<'a> {
     /// Colon-separated list of all newsgroups.
     groups: &'a str,
     password: Option<&'a str>,
+    /// The server that actually accepted at least one article this run (the
+    /// first entry of `servers` below), not just the statically configured
+    /// primary — see `servers` for why this can differ in a multi-server
+    /// (failover) config.
     server: &'a str,
+    /// Colon-separated list of every server that actually accepted at least
+    /// one article this run, derived from `PostedSegment::server_idx` on the
+    /// real posted results — not the configured list, which can include a
+    /// failover server that never ended up receiving anything, or omit which
+    /// one of several equally-configured servers a given run landed on.
+    servers: &'a str,
     category: Option<&'a str>,
     nzb_name: Option<&'a str>,
     obfuscate: &'a str,
@@ -2351,6 +2398,7 @@ fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
     child.env("PESTO_BYTES", env.total_bytes.to_string());
     child.env("PESTO_INPUT_PATHS", env.input_paths);
     child.env("PESTO_SERVER", env.server);
+    child.env("PESTO_SERVERS", env.servers);
     child.env("PESTO_GROUP", env.group.unwrap_or(""));
     child.env("PESTO_GROUPS", env.groups);
     child.env("PESTO_PASSWORD", env.password.unwrap_or(""));

@@ -292,6 +292,11 @@ pub async fn run_upload(
                     } else {
                         None
                     };
+                    // The server(s) that actually accepted an article
+                    // (`outcome.servers`), not just the statically
+                    // configured primary — see the analogous comment on
+                    // `group` below.
+                    let history_servers_str = outcome.servers.join(", ");
                     crate::history::record_upload(
                         &crate::history::UploadRecord {
                             name: entry_label,
@@ -306,7 +311,8 @@ pub async fn run_upload(
                             // chose one at random from `config.groups`), not
                             // the configured list's static first entry.
                             group: outcome.groups.first().map(String::as_str),
-                            server: Some(config.host.as_str()),
+                            server: (!history_servers_str.is_empty())
+                                .then_some(history_servers_str.as_str()),
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
                             nzb_path: Some(&out.display().to_string()),
@@ -390,7 +396,14 @@ pub async fn run_upload(
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
                 .join(":"),
-            server: config.host.clone(),
+            // The server(s) that actually accepted an article, not the
+            // static configured primary — same reasoning as `group` below.
+            server: outcome
+                .servers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| config.host.clone()),
+            servers: outcome.servers.join(":"),
             // The group(s) actually posted to, not the static configured
             // list — see the analogous comment on the history record above.
             group: outcome.groups.first().cloned().unwrap_or_default(),

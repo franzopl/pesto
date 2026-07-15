@@ -261,6 +261,13 @@ pub struct PostOutcome {
     /// The newsgroup(s) actually used for this upload (one entry when multiple
     /// groups are configured, since `pick_post_group` selects one at random).
     pub groups: Vec<String>,
+    /// The server(s) that actually accepted at least one article this run —
+    /// derived from `PostedSegment::server_idx` on the final, post-check
+    /// segment list, not just the configured list. In a multi-server
+    /// (failover) config this can legitimately be a subset (a server that
+    /// was unreachable all run) or, more commonly, every configured server
+    /// that had a connection quota. Empty for `--par2-only`/`--dry-run`.
+    pub servers: Vec<String>,
     /// Message-IDs that were posted (`240`) but never confirmed retrievable
     /// via the streaming STAT check, even after every repost attempt. Empty
     /// when `config.check` is disabled. A non-empty list means the run
@@ -552,10 +559,16 @@ pub async fn post_files_with_progress_and_cancel(
     } else if config.dry_run {
         (RunMode::DryRun, None)
     } else {
-        (
-            RunMode::Post,
-            Some(format!("{}:{}", config.host, config.port)),
-        )
+        // Every configured server (primary + extra_servers) gets a share of
+        // worker connections from the start (see `assign_workers`), unlike
+        // `groups` — where only one of the configured groups is picked at
+        // random per run — so the full server list is already known here,
+        // not just after the fact. Reporting only `config.host` (the
+        // primary) used to make a failover/multi-provider run look
+        // single-server for its entire duration.
+        let all_servers: Vec<_> = config.all_servers().collect();
+        let label = target_label(&all_servers, config.total_connections());
+        (RunMode::Post, Some(label))
     };
     let _ = &target; // used below
                      // Exact PAR2 recovery-set geometry, computed with the same formula
@@ -764,6 +777,16 @@ pub async fn post_files_with_progress_and_cancel(
         "network summary"
     );
 
+    let all_servers: Vec<_> = config.all_servers().collect();
+    let mut used_server_idxs: Vec<usize> = segments.iter().map(|s| s.server_idx).collect();
+    used_server_idxs.sort_unstable();
+    used_server_idxs.dedup();
+    let servers_used: Vec<String> = used_server_idxs
+        .into_iter()
+        .filter_map(|idx| all_servers.get(idx))
+        .map(|s| s.host.clone())
+        .collect();
+
     Ok(PostOutcome {
         segments,
         failures,
@@ -771,6 +794,7 @@ pub async fn post_files_with_progress_and_cancel(
         cancelled,
         groups: shared.post_group.clone(),
         still_missing,
+        servers: servers_used,
     })
 }
 
@@ -2178,6 +2202,24 @@ fn jittered(base: Duration, slot_id: usize) -> Duration {
     base + Duration::from_millis(extra_ms as u64)
 }
 
+/// Build the "→ ..." label shown in the live panel header and the `Started`
+/// progress event's `target` field. Lists every configured server (not just
+/// the primary) so a multi-server run doesn't look single-server for its
+/// entire duration — see the call site's comment for why this is knowable
+/// up front, unlike `groups`.
+fn target_label(servers: &[crate::config::ServerEntry], total_connections: usize) -> String {
+    match servers {
+        [] => String::new(),
+        [only] => format!("{}:{}", only.host, only.port),
+        _ if servers.len() <= 3 => servers
+            .iter()
+            .map(|s| s.host.as_str())
+            .collect::<Vec<_>>()
+            .join(" + "),
+        _ => format!("{} servers ({total_connections} conn)", servers.len()),
+    }
+}
+
 fn record_failure(
     shared: &Shared,
     meta: &FileMeta,
@@ -2392,6 +2434,50 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.contains('@'));
         assert!(!a.contains("blocknews") && !a.contains("pesto"));
+    }
+
+    // ── target_label ──────────────────────────────────────────────────────────
+
+    fn test_server(host: &str) -> crate::config::ServerEntry {
+        crate::config::ServerEntry {
+            host: host.to_string(),
+            port: 563,
+            ssl: true,
+            connections: 50,
+            username: None,
+            password: None,
+            retry_delay: 1,
+            timeout: 60,
+        }
+    }
+
+    #[test]
+    fn target_label_single_server_shows_host_and_port() {
+        let servers = vec![test_server("news.example.com")];
+        assert_eq!(target_label(&servers, 50), "news.example.com:563");
+    }
+
+    #[test]
+    fn target_label_two_servers_lists_both_hosts() {
+        let servers = vec![
+            test_server("usnews.blocknews.net"),
+            test_server("news.newshosting.com"),
+        ];
+        assert_eq!(
+            target_label(&servers, 100),
+            "usnews.blocknews.net + news.newshosting.com"
+        );
+    }
+
+    #[test]
+    fn target_label_many_servers_falls_back_to_a_count() {
+        let servers = vec![
+            test_server("a.example.com"),
+            test_server("b.example.com"),
+            test_server("c.example.com"),
+            test_server("d.example.com"),
+        ];
+        assert_eq!(target_label(&servers, 200), "4 servers (200 conn)");
     }
 
     // ── wire_name ─────────────────────────────────────────────────────────────

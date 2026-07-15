@@ -9,6 +9,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.57] — 2026-07-15
+
+### Fixed
+- **A multi-server (failover) run looked single-server everywhere except the
+  actual connections.** The live panel header (`→ host:port`), the
+  `PESTO_SERVER` hook variable, and the `history.jsonl` server field were
+  all built from `config.host`/`config.port` alone — the primary server —
+  never looking at `extra_servers`, even though every configured server
+  gets a real share of worker connections from the start. A run posting
+  across two providers (e.g. 50 + 50 connections) would show only the
+  primary's hostname for its entire duration, making it look like the
+  second provider was never used, even though it was.
+  - The panel header and the `Started` progress event's `target` now list
+    every configured server (`host1 + host2`, or `N servers (M conn)`
+    beyond three).
+  - A new `PESTO_SERVERS` hook variable carries the colon-separated list of
+    servers that actually accepted an article this run (derived from
+    `PostedSegment::server_idx` on the real posted results); `PESTO_SERVER`
+    is kept as the first entry for backward compatibility. Available in
+    both the `pesto` CLI hooks and `upapasta`'s hook context.
+  - `history.jsonl`'s `server` field now records the actual server(s) used
+    instead of only the configured primary.
+
+---
+
 ## [0.3.56] — 2026-07-15
 
 ### Changed
