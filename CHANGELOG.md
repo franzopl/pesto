@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.58] — 2026-07-15
+
+### Fixed
+- **The panel's redraw could repeat the header line dozens of times
+  instead of updating in place, on Linux terminals (not just Windows).**
+  The renderer moved the cursor back to the top of the panel with
+  `\x1b[{n}F` (Cursor Previous Line), which per spec moves up *and* returns
+  to column 1 — but that specific sequence is less universally implemented
+  than plain Cursor Up (`\x1b[{n}A`); some terminals and SSH clients honour
+  `A` but treat `F` as a no-op or as `A` without the column reset. When
+  that happens the cursor never returns to column 0, so each redraw's text
+  lands right after the previous one instead of overwriting it — visible
+  as the same header line concatenated over and over with no separator.
+  Replaced `\x1b[{n}F` with `\x1b[{n}A\r`: Cursor Up (widely supported)
+  followed by a literal carriage return, a bare control character every
+  terminal honours, to guarantee the column reset instead of relying on
+  `F`'s.
+
+---
+
 ## [0.3.57] — 2026-07-15
 
 ### Fixed

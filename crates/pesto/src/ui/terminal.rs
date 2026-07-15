@@ -595,7 +595,16 @@ impl RenderState {
 
         let mut out = String::new();
         if self.lines_drawn > 0 {
-            out.push_str("\x1b[1F\x1b[2K");
+            // Cursor Previous Line (`\x1b[nF`) is supposed to move up *and*
+            // return to column 1, but several terminals (some SSH clients,
+            // minimal emulators) implement only plain Cursor Up (`\x1b[nA`),
+            // leaving the column wherever it was. Do the column reset
+            // ourselves with a literal `\r` — a bare control character every
+            // terminal honours — instead of relying on `F`'s column-reset
+            // semantics. Without this, a terminal that only supports `A`
+            // never returns to column 0, so each redraw's text lands right
+            // after the previous one instead of overwriting it.
+            out.push_str("\x1b[1A\r\x1b[2K");
         }
         out.push_str(&line);
         out.push('\n');
@@ -680,8 +689,19 @@ impl RenderState {
         let mut out = String::new();
         // Move the cursor back to the top of the previous panel and wipe
         // everything below it, so a shorter panel leaves no stale lines.
+        //
+        // Cursor Previous Line (`\x1b[nF`) is supposed to move up *and*
+        // return to column 1, but several terminals (some SSH clients,
+        // minimal emulators) implement only plain Cursor Up (`\x1b[nA`),
+        // leaving the column wherever the previous draw left it. Do the
+        // column reset ourselves with a literal `\r` instead of relying on
+        // `F`'s column-reset semantics — without this, a terminal that only
+        // supports `A` never returns to column 0, so `\x1b[0J`'s erase
+        // starts mid-line and every redraw's text lands right after the
+        // previous one instead of overwriting it (looks like the header
+        // line repeating itself dozens of times instead of updating).
         if self.lines_drawn > 0 {
-            out.push_str(&format!("\x1b[{}F", self.lines_drawn));
+            out.push_str(&format!("\x1b[{}A\r", self.lines_drawn));
         }
         out.push_str("\x1b[0J");
         for line in &lines {
