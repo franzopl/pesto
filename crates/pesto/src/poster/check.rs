@@ -10,6 +10,16 @@
 //! check queue (`check.delay`, `check.tries`, `check.postRetries` in its
 //! `config.js`) instead of pesto's old model of a single STAT sweep run only
 //! after the whole upload finished.
+//!
+//! A miss doesn't always wait through the full patient retry sequence
+//! first, though — see `should_fast_repost`. Once a run has enough
+//! first-time checks to trust its miss rate, an isolated miss (rare
+//! against an otherwise clean run) skips straight to a repost instead of
+//! waiting out `STAT_RETRY_DELAY_SECS` × `check_retries` to reach an
+//! already-foregone verdict. A high miss rate — which looks like the
+//! server falling behind on indexing rather than individual articles being
+//! lost — keeps the patient behavior, so a systemic problem doesn't get
+//! answered by flooding an already-struggling server with reposts.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
@@ -33,6 +43,33 @@ use super::PostedSegment;
 /// (minimal scope — nobody has asked for control over this); matches the
 /// value the old end-of-run check pass used.
 const STAT_RETRY_DELAY_SECS: u64 = 20;
+
+/// Minimum number of first-time STAT checks (original copies, not reposts)
+/// this run has made before its miss rate is trusted enough to skip
+/// patient retries — avoids reacting to a single early miss with no other
+/// data yet, when it's just as likely to be one slow article as the start
+/// of a systemic problem.
+const MIN_SAMPLE_FOR_FAST_REPOST: usize = 20;
+
+/// Above this fraction of first-time checks missing, an individual miss
+/// stops looking like "this one article is genuinely gone" and starts
+/// looking like "the server is behind on indexing right now" — in which
+/// case immediately reposting every miss would flood an already-struggling
+/// server with duplicates instead of giving it time to catch up. Below it,
+/// misses are rare enough that the patient multi-retry wait
+/// (`STAT_RETRY_DELAY_SECS` × `check_retries`) mostly just delays an
+/// already-correct "it's gone" verdict, so `process_item` skips straight to
+/// `handle_confirmed_miss` instead.
+const MASS_FAILURE_RATE_THRESHOLD: f64 = 0.05;
+
+/// Whether an isolated STAT miss should skip the remaining patient retries
+/// and repost immediately, based on how rare misses have been among this
+/// run's other first-time checks so far. See `MIN_SAMPLE_FOR_FAST_REPOST`
+/// and `MASS_FAILURE_RATE_THRESHOLD`.
+fn should_fast_repost(first_checks: usize, first_misses: usize) -> bool {
+    first_checks >= MIN_SAMPLE_FOR_FAST_REPOST
+        && (first_misses as f64 / first_checks.max(1) as f64) <= MASS_FAILURE_RATE_THRESHOLD
+}
 
 struct QueueItem {
     ready_at: Instant,
@@ -86,6 +123,15 @@ struct Inner {
     servers: Arc<Vec<crate::config::ServerEntry>>,
     checked_count: AtomicUsize,
     reposted_count: AtomicUsize,
+    /// Running totals behind `should_fast_repost` — first-time STAT checks
+    /// of an original (non-reposted) copy, and how many of those came back
+    /// a miss. Deliberately whole-run cumulative rather than a sliding
+    /// window (simpler, no extra bookkeeping/races): a late-onset problem
+    /// on an otherwise clean run dilutes into the average more slowly than
+    /// a sliding window would react, trading some responsiveness for
+    /// simplicity.
+    first_checks: AtomicUsize,
+    first_misses: AtomicUsize,
 }
 
 impl Inner {
@@ -243,6 +289,8 @@ pub fn spawn_check_coordinator(
         servers,
         checked_count: AtomicUsize::new(0),
         reposted_count: AtomicUsize::new(0),
+        first_checks: AtomicUsize::new(0),
+        first_misses: AtomicUsize::new(0),
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<PostedSegment>();
@@ -339,6 +387,14 @@ async fn process_item(
 ) {
     let max_stat_attempts = inner.config.check_retries.max(1);
 
+    // Whether this is the very first STAT attempt on an article's original
+    // (never-reposted) copy — the signal `should_fast_repost` is trained
+    // on. Retries of the same copy and checks of a reposted copy don't
+    // count: only the first look at each genuinely new article should move
+    // the running miss rate, or a batch of slow retries/reposts would
+    // itself skew the rate that decides how to handle them.
+    let is_first_attempt = item.repost_count == 0 && item.stat_attempts == 0;
+
     // Always start from the server this article was actually posted to
     // (see `PostedSegment::server_idx`) rather than whichever server this
     // worker's slot happens to be on — a multi-server failover config can
@@ -355,6 +411,9 @@ async fn process_item(
 
     match stat_result {
         Ok(true) => {
+            if is_first_attempt {
+                inner.first_checks.fetch_add(1, Ordering::Relaxed);
+            }
             let checked = inner.checked_count.fetch_add(1, Ordering::Relaxed) + 1;
             inner.emit(ProgressEvent::CheckProgress {
                 checked: checked as u64,
@@ -365,6 +424,20 @@ async fn process_item(
         Ok(false) => {
             slot.invalidate("stat_430");
             item.stat_attempts += 1;
+            if is_first_attempt {
+                let checks = inner.first_checks.fetch_add(1, Ordering::Relaxed) + 1;
+                let misses = inner.first_misses.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_fast_repost(checks, misses) {
+                    // Misses have been rare against a large-enough sample of
+                    // this run's other checks — an isolated miss is more
+                    // likely a genuinely lost article than a server that's
+                    // simply behind on indexing, so skip the remaining
+                    // patient retries (which would just delay an
+                    // already-correct verdict) and repost right away.
+                    handle_confirmed_miss(inner, slot, worker_idx, item).await;
+                    return;
+                }
+            }
             if item.stat_attempts < max_stat_attempts {
                 inner.emit(ProgressEvent::CheckRetrying {
                     attempt: item.stat_attempts,
@@ -573,4 +646,35 @@ async fn repost_one(
         }
     }
     Err(last_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_repost_withheld_below_the_sample_floor() {
+        // Even a 0% miss rate shouldn't be trusted with almost no data —
+        // a single miss out of 3 checks is not distinguishable from a
+        // systemic problem yet.
+        assert!(!should_fast_repost(3, 1));
+        assert!(!should_fast_repost(MIN_SAMPLE_FOR_FAST_REPOST - 1, 0));
+    }
+
+    #[test]
+    fn fast_repost_allowed_once_sample_floor_met_with_a_low_rate() {
+        // 1 miss in 20 checks (5%) sits right at the threshold — allowed.
+        assert!(should_fast_repost(MIN_SAMPLE_FOR_FAST_REPOST, 1));
+        // A single isolated miss in a much larger, otherwise-clean run.
+        assert!(should_fast_repost(1000, 5));
+    }
+
+    #[test]
+    fn fast_repost_withheld_once_the_rate_looks_systemic() {
+        // 2 misses in 20 checks (10%) is over the 5% threshold.
+        assert!(!should_fast_repost(MIN_SAMPLE_FOR_FAST_REPOST, 2));
+        // A third of checks missing is a server having a bad time, not a
+        // handful of unlucky articles.
+        assert!(!should_fast_repost(300, 100));
+    }
 }

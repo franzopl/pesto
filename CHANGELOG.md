@@ -9,6 +9,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.60] — 2026-07-15
+
+### Added
+- **The streaming `--check` queue now skips the patient STAT retry wait for
+  an isolated miss once it has enough data to trust that it really is
+  isolated.** Previously every miss waited through the full
+  `check_retries` × 20s backoff before triggering a repost, even when the
+  run's overall miss rate made it obvious early on that this particular
+  article was genuinely gone rather than just slow to index. Once a run
+  has made at least 20 first-time checks (of original, non-reposted
+  copies) with a miss rate at or below 5%, a new miss reposts immediately
+  instead of waiting out an already-foregone verdict — cutting the tail
+  latency for a typical low-miss-rate upload's stragglers from ~45-65s
+  down to whatever the repost itself takes. A high miss rate (above 5%)
+  looks like the server falling behind on indexing rather than individual
+  lost articles, so it keeps the original patient behavior instead of
+  flooding an already-struggling server with immediate reposts.
+  Covered by unit tests on the rate/threshold decision and an end-to-end
+  integration test (mock NNTP server, 40 articles with one isolated miss)
+  confirming the repost happens in well under a second instead of the
+  20s+ a patient retry would need.
+
+---
+
 ## [0.3.59] — 2026-07-15
 
 ### Fixed
