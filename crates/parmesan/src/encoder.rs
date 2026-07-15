@@ -3619,6 +3619,16 @@ impl RecoveryEncoder {
     /// Consume the encoder and return the finished recovery slices together
     /// with all accumulated per-slice checksums (empty when checksums were
     /// not enabled via [`with_checksums`]).
+    ///
+    /// This conversion is intentionally sequential rather than parallel: each
+    /// input buffer is converted and dropped before the next one starts, so
+    /// the transient old+new duplication is bounded to a single extra slice
+    /// instead of `rayon::current_num_threads()` extra slices held at once.
+    /// With hundreds of MB per recovery slice and dozens of cores, running
+    /// this in parallel (as before) could spike peak memory by several GiB
+    /// right at the point `poster`'s memory budget assumes we're done
+    /// allocating, which is what caused OOM aborts on memory-constrained
+    /// hosts.
     pub fn finish(mut self) -> (Vec<RecoverySlice>, Vec<SliceChecksum>) {
         self.flush();
         let checksums = self.pending_checksums;
@@ -3626,7 +3636,7 @@ impl RecoveryEncoder {
         let slice_words = self.slice_words;
         let slices: Vec<RecoverySlice> = match self.buffers {
             RecoveryBufferSet::Normal(bufs) => bufs
-                .into_par_iter()
+                .into_iter()
                 .enumerate()
                 .map(|(i, buffer)| {
                     let mut data = Vec::with_capacity(buffer.len() * 2);
@@ -3640,7 +3650,7 @@ impl RecoveryEncoder {
                 })
                 .collect(),
             RecoveryBufferSet::Altmap(bufs) => bufs
-                .into_par_iter()
+                .into_iter()
                 .enumerate()
                 .map(|(i, altmap_buf)| {
                     let mut words = vec![0u16; slice_words];
@@ -3656,7 +3666,7 @@ impl RecoveryEncoder {
                 })
                 .collect(),
             RecoveryBufferSet::Shuffle2x(bufs) => bufs
-                .into_par_iter()
+                .into_iter()
                 .enumerate()
                 .map(|(i, s2x_buf)| {
                     let mut normal = vec![0u8; s2x_buf.len()];

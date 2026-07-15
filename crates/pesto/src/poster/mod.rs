@@ -1072,13 +1072,22 @@ async fn producer(
         "PAR2 geometry"
     );
 
-    // Auto-detect safe RAM limit if not specified (70% of available RAM)
+    // Auto-detect safe RAM limit if not specified (70% of available RAM).
+    // `available_memory()` reports the host's RAM and ignores cgroup/container
+    // limits, so on a memory-limited container it can report far more than is
+    // actually usable, letting the computed limit blow past the real ceiling
+    // and OOM. Take the tighter of the host figure and the cgroup's free
+    // memory (when the process is confined by one) instead.
     let memory_limit = match shared.config.par2_memory_limit {
         Some(limit) => limit,
         None => {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
             let available_ram = sys.available_memory();
+            let available_ram = match sys.cgroup_limits() {
+                Some(limits) if limits.free_memory > 0 => available_ram.min(limits.free_memory),
+                _ => available_ram,
+            };
             let safe_limit = (available_ram as f64 * 0.70) as usize;
 
             // At least 256MB as a bare minimum fallback
