@@ -114,9 +114,9 @@ if ($videoFile) {
     $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
 
     if (-not $ffmpeg -or -not $ffprobe) {
-        Warn "ffmpeg/ffprobe not found in PATH — skipping screenshots."
+        Warn "ffmpeg/ffprobe not found in PATH - skipping screenshots."
     } elseif ($ImgbbApiKey -eq "YOUR_IMGBB_API_KEY") {
-        Warn "ImgBB API key is not set — skipping screenshots."
+        Warn "ImgBB API key is not set - skipping screenshots."
     } else {
         Log "Video file detected: $(Split-Path $videoFile -Leaf)"
         Log "Capturing 6 screenshots..."
@@ -127,7 +127,7 @@ if ($videoFile) {
         $duration = [int][double]$durationStr
 
         if ($duration -lt 30) {
-            Warn "Could not determine video duration — skipping screenshots."
+            Warn "Could not determine video duration - skipping screenshots."
         } else {
             $tmpDir = Join-Path $env:TEMP ("pesto-shots-" + [IO.Path]::GetRandomFileName())
             New-Item -ItemType Directory -Path $tmpDir | Out-Null
@@ -210,7 +210,7 @@ $releaseId = if ($response.public_id) { $response.public_id } `
              else                      { "?" }
 
 if ($response.public_id -or $response.id) {
-    Log "OK — release id: $releaseId"
+    Log "OK - release id: $releaseId"
 } else {
     Write-Error "[Indexer] FAILED: $($response | ConvertTo-Json -Compress)"
     exit 1
