@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.55] — 2026-07-14
+
+### Fixed
+- **The terminal dashboard printed raw ANSI/VT100 escape codes as garbled
+  text instead of a redrawn panel on legacy Windows consoles**
+  (`conhost.exe`, PowerShell/cmd hosts without Windows Terminal), because
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is off by default there and `pesto`
+  never enabled it before writing cursor-movement and color sequences. The
+  renderer now attempts to turn on VT processing on Windows before drawing,
+  and falls back to the existing escape-free plain-text renderer (one line
+  per tick, no cursor movement) whenever that can't be confirmed — instead
+  of spamming unreadable output. This was very likely the real cause behind
+  reports of the streaming `--check` phase "hanging" or being slow on
+  Windows: the check panel was progressing normally, but the broken redraw
+  made it unreadable.
+
+---
+
 ## [0.3.54] — 2026-07-14
 
 ### Fixed

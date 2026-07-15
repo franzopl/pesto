@@ -1279,7 +1279,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pesto-poster"
-version = "0.3.54"
+version = "0.3.55"
 dependencies = [
  "anyhow",
  "bdinfo-rs-core",
@@ -1302,6 +1302,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

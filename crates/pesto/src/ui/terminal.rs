@@ -15,6 +15,42 @@ pub fn spawn_renderer() -> (ProgressSender, JoinHandle<()>) {
     spawn_renderer_with(RendererOptions::default())
 }
 
+/// Enable ANSI/VT100 escape processing on the stderr console handle.
+///
+/// Legacy Windows consoles (`conhost.exe`, old PowerShell/cmd hosts without
+/// Windows Terminal) have `ENABLE_VIRTUAL_TERMINAL_PROCESSING` off by
+/// default, so cursor-movement and SGR color sequences are printed as raw
+/// text instead of being interpreted. Returns `false` when VT processing
+/// could not be confirmed enabled, so callers can fall back to the
+/// escape-free plain renderer instead of spamming garbled output.
+#[cfg(windows)]
+fn enable_ansi_support() -> bool {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        STD_ERROR_HANDLE,
+    };
+    unsafe {
+        let handle = GetStdHandle(STD_ERROR_HANDLE);
+        if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+            return false;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return false;
+        }
+        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+            return true;
+        }
+        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_ansi_support() -> bool {
+    true
+}
+
 /// Like [`spawn_renderer`] but with explicit display options.
 pub fn spawn_renderer_with(opts: RendererOptions) -> (ProgressSender, JoinHandle<()>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -23,7 +59,7 @@ pub fn spawn_renderer_with(opts: RendererOptions) -> (ProgressSender, JoinHandle
 }
 
 async fn render_loop(mut rx: ProgressReceiver, opts: RendererOptions) {
-    let tty = std::io::stderr().is_terminal();
+    let tty = std::io::stderr().is_terminal() && enable_ansi_support();
     let mut state = RenderState::new();
     // Base interval; may be extended by adaptive logic when draws are slow.
     let mut interval_ms: u64 = 200;
