@@ -1,0 +1,97 @@
+name: Release parmesan
+
+# Separate from release.yml (which builds/releases the `pesto` binary on
+# `v*` tags): parmesan is versioned and published independently — see
+# crates/parmesan/CHANGELOG.md — so it gets its own tag prefix and its own
+# GitHub Release, on its own cadence, entirely decoupled from pesto's.
+#
+# To ship a new parmesan binary release:
+#   git tag parmesan-v<version>   # matching crates/parmesan/Cargo.toml
+#   git push origin parmesan-v<version>
+
+on:
+  push:
+    tags:
+      - 'parmesan-v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: parmesan
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: parmesan
+            musl: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: parmesan.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl tools
+        if: matrix.musl
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install Rust
+        run: rustup toolchain install stable --target ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-parmesan-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Build
+        run: cargo build --release -p parmesan-par2 --bin parmesan --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Rename binaries
+        run: |
+          mv x86_64-unknown-linux-gnu/parmesan parmesan-linux-x86_64
+          mv x86_64-unknown-linux-musl/parmesan parmesan-linux-x86_64-musl
+          mv x86_64-pc-windows-msvc/parmesan.exe parmesan-windows-x86_64.exe
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            parmesan-linux-x86_64
+            parmesan-linux-x86_64-musl
+            parmesan-windows-x86_64.exe
+          # Not `generate_release_notes: true` — GitHub's auto-generated notes
+          # pick the previous *tag by creation time* across the whole repo,
+          # which would pull in unrelated `pesto` (v*) tags interleaved with
+          # `parmesan-v*` ones and produce a noisy, wrong diff. Point at the
+          # crate's own changelog instead.
+          body: |
+            See [`crates/parmesan/CHANGELOG.md`](https://github.com/franzopl/pesto/blob/main/crates/parmesan/CHANGELOG.md) for what changed in this release.
+
+            Also published to [crates.io](https://crates.io/crates/parmesan-par2) and documented on [docs.rs](https://docs.rs/parmesan-par2).
