@@ -149,8 +149,6 @@ pub struct ParsedNzb {
 /// sorted by `(file_name, part)` before returning so they can be passed
 /// directly to [`generate`].
 pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
-    use anyhow::Context as _;
-
     let mut poster = String::new();
     let mut groups: Vec<String> = Vec::new();
     let mut meta = NzbMeta::default();
@@ -171,7 +169,6 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
         if t.starts_with("<file ") {
             in_file = true;
             in_groups = false;
-            current_file_name = xml_attr(t, "name").context("<file> missing name attribute")?;
             current_poster = xml_attr(t, "poster").unwrap_or_default();
             if poster.is_empty() {
                 poster = current_poster.clone();
@@ -179,6 +176,16 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
             current_date = xml_attr(t, "date").and_then(|s| s.parse().ok());
             let subject = xml_attr(t, "subject").unwrap_or_default();
             current_subject_name = strip_part_suffix(&subject);
+            // `name` is a `pesto`-only convention (see this module's doc
+            // comment); standard NZB 1.1 (every real indexer/posting tool)
+            // only writes `subject`, with the real name as the quoted
+            // string inside it — exactly what `strip_part_suffix` already
+            // extracts into `current_subject_name`. Fall back to that
+            // instead of erroring, so foreign `.nzb`s parse at all. A fully
+            // obfuscated subject (no quotes) yields the raw hash-like text
+            // here — not the real name, but a valid starting point for
+            // `penne::deobfuscate` to recover the true one from PAR2.
+            current_file_name = xml_attr(t, "name").unwrap_or_else(|| current_subject_name.clone());
             file_segment_start = segments.len();
         } else if t == "</file>" {
             // Back-fill `total` now that we know how many segments this file has.
@@ -673,6 +680,56 @@ mod tests {
         let parsed = parse(&xml).expect("parse must succeed");
         // message_id must carry angle brackets.
         assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
+    }
+
+    /// Real-world NZBs (every indexer/posting tool other than `pesto`
+    /// itself) never write a `name` attribute on `<file>` — only `subject`,
+    /// per the standard NZB 1.1 DTD. `parse()` must derive the filename
+    /// from the quoted string inside `subject` in that case instead of
+    /// erroring, or `penne` could never download anything but its own
+    /// self-posted content.
+    #[test]
+    fn parse_derives_file_name_from_subject_when_name_attribute_is_absent() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster &lt;p@x&gt;" date="1700000000" subject="&quot;real.mkv&quot; yEnc (1/2)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="500" number="1">seg1@x</segment>
+      <segment bytes="500" number="2">seg2@x</segment>
+    </segments>
+  </file>
+</nzb>
+"#;
+        let parsed = parse(xml).expect("parse must succeed without a name attribute");
+        assert_eq!(parsed.segments.len(), 2);
+        assert_eq!(parsed.segments[0].file_name, "real.mkv");
+    }
+
+    /// A *fully* obfuscated post has no quoted real name in `subject`
+    /// either — the raw (suffix-stripped) subject text becomes the
+    /// starting `file_name`. Meaningless, but must not be a parse error:
+    /// recovering the true name from PAR2 is `penne::deobfuscate`'s job,
+    /// which needs the file to be queued and downloaded first.
+    #[test]
+    fn parse_falls_back_to_raw_subject_when_fully_obfuscated() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster &lt;p@x&gt;" date="1700000000" subject="a1b2c3d4e5f6 (1/1)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="500" number="1">seg1@x</segment>
+    </segments>
+  </file>
+</nzb>
+"#;
+        let parsed = parse(xml).expect("parse must succeed on a fully obfuscated subject");
+        assert_eq!(parsed.segments.len(), 1);
+        assert_eq!(parsed.segments[0].file_name, "a1b2c3d4e5f6");
     }
 
     #[test]

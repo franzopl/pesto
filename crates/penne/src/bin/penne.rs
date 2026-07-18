@@ -52,6 +52,11 @@ enum Command {
         /// config file's `download_dir`, or the current directory.
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        /// Archive extraction password. Overrides the `.nzb`'s own
+        /// `<meta type="password">`, if any — useful for obfuscated
+        /// releases that don't carry the password in the `.nzb` itself.
+        #[arg(long)]
+        password: Option<String>,
     },
 }
 
@@ -68,9 +73,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Info { nzb }) => info(&nzb),
-        Some(Command::Download { nzb, out_dir }) => {
-            download(&nzb, out_dir, cli.config.flatten()).await
-        }
+        Some(Command::Download {
+            nzb,
+            out_dir,
+            password,
+        }) => download(&nzb, out_dir, cli.config.flatten(), password).await,
         None => {
             println!(
                 "penne — fast NZB downloader.\n\n\
@@ -97,6 +104,7 @@ async fn download(
     nzb: &Path,
     out_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
+    password: Option<String>,
 ) -> Result<()> {
     let parsed = penne::nzb::load(nzb)?;
     let queue = penne::queue::build(&parsed);
@@ -184,6 +192,21 @@ async fn download(
         }
     }
 
+    let synthetic_base = nzb
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("release");
+    let rename_report =
+        penne::deobfuscate::run(&dest_dir, &queue, &assembled, synthetic_base).await?;
+    for r in &rename_report.renames {
+        let label = match r.reason {
+            penne::deobfuscate::RenameReason::Par2Volume => "par2 file",
+            penne::deobfuscate::RenameReason::Par2Recovered => "recovered name (PAR2)",
+            penne::deobfuscate::RenameReason::Guessed => "guessed name",
+        };
+        println!("  {label}: {} -> {}", r.old_name, r.new_name);
+    }
+
     match penne::repair::verify_and_repair(&dest_dir).await? {
         penne::repair::RepairOutcome::Ok => println!("PAR2: all files verified intact"),
         penne::repair::RepairOutcome::Repaired(plan) => {
@@ -209,7 +232,8 @@ async fn download(
         }
     }
 
-    let extracted = penne::extract::extract_all(&dest_dir, parsed.meta.password.as_deref()).await?;
+    let password = password.as_deref().or(parsed.meta.password.as_deref());
+    let extracted = penne::extract::extract_all(&dest_dir, password).await?;
     for archive in &extracted {
         println!("  extracted: {} ({:?})", archive.base_name, archive.kind);
     }

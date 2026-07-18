@@ -49,6 +49,7 @@ testable state.
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
 | 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
 | 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
+| 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
 
 ---
 
@@ -420,6 +421,71 @@ back.
 - [ ] Add `penne` to the release workflow once it has a stable CLI surface
       (see `.github/workflows/release.yml` / `release-parmesan.yml` for the
       pattern to follow).
+
+## Phase 11 — De-obfuscation ✅ (core done; multi-recovery-set clustering and multi-volume ZIP guessing explicitly out of scope)
+
+Real-world Usenet posts — especially scene/P2P releases — are routinely
+**obfuscated**: subjects (and often the yEnc `name=` inside each article)
+are random hashes instead of the real filename, specifically so the
+release survives automated DMCA/spam filtering. Two gaps had to close
+before `penne` could handle this at all:
+
+- [x] **`pesto::nzb::parse` couldn't load a standard NZB.** It hard-required
+      a `name` attribute on `<file>` (`.context("<file> missing name
+      attribute")`) — a `pesto`-only convention (the `.nzb` this crate's own
+      `generate()` writes always carries the real name there regardless of
+      wire obfuscation). No real indexer or other posting tool writes that
+      attribute; the standard NZB 1.1 DTD only has `subject`, with the real
+      name conventionally the quoted string inside it. `parse()` now derives
+      `file_name` from `subject` (via the existing `strip_part_suffix`) when
+      `name` is absent — pesto-generated NZBs are unaffected (they always
+      set `name`); foreign NZBs parse for the first time. A fully obfuscated
+      subject (no quotes) yields the raw hash text as a starting name —
+      meaningless, but not a parse error, and exactly what the pass below
+      recovers the truth from.
+- [x] **`penne::deobfuscate`** (new module) — runs once, after
+      `crate::assemble` and before `crate::repair`/`crate::extract`, and
+      renames files on disk so neither of those needs any changes at all:
+      1. Content-sniffs PAR2 (`pesto::par2::packet_reader::read_packets`,
+         already public — a non-empty result means valid packets are
+         present) regardless of extension, and tags every match with a
+         `.par2` suffix. `find_par2_index`/`RecoverySet::load` — both
+         extension-only — then find the whole set exactly as they already
+         do for a non-obfuscated release.
+      2. Matches every other file against the loaded recovery set's
+         `FileEntry` list (`parmesan::recovery_set::FileEntry`, already
+         exposing `name`/`length`/`md5_16k`) by `(length, first-16KiB MD5)`
+         — the same signal SABnzbd/NZBGet use for this — and renames
+         matches to their real name (`RenameReason::Par2Recovered`, high
+         confidence).
+      3. **Guesses** whatever's left uncovered by PAR2, or when there's no
+         PAR2 at all: sniffs for a RAR/7z/Zip signature
+         (`penne::extract::sniff`, new) and renames using `.nzb` queue order
+         as a best-effort volume sequence (`RenameReason::Guessed`) — a
+         poster's splitting tool almost always lists volumes in that order,
+         but this is inherently unverifiable without PAR2 coverage, and
+         reported to the user as a guess, distinct from a PAR2-verified
+         recovery.
+      Verified in `crates/penne/src/deobfuscate.rs`'s unit tests (PAR2
+      content tagged regardless of name; hash-match rename; guess numbering
+      in queue order; a single guessed volume gets no part-suffix; an
+      existing file at the target name blocks a clobber; `Incomplete` files
+      are never rename candidates) and end-to-end in
+      `tests/deobfuscate.rs` — a hand-written, `name`-attribute-free NZB
+      with hash-like subjects and a real PAR2 index (built via
+      `tests/support::build_fixture_set`) driven through the actual
+      compiled binary, confirming the final file lands under its recovered
+      real name and the PAR2 file itself gets tagged too.
+- [x] `--password` on `penne download`: overrides the `.nzb`'s own
+      `<meta type="password">`, for releases (common when obfuscated) that
+      don't carry the extraction password in the `.nzb` itself.
+- **Known, explicitly out-of-scope limitations:** only the first PAR2
+  recovery set found is used if a directory somehow holds more than one
+  (matches `find_par2_index`'s own pre-existing single-set assumption); the
+  guess pass can't tell two unrelated archive sets of the same kind apart;
+  multi-volume ZIP isn't guessed at all (`crate::extract` has no
+  multi-volume ZIP support to hand a guessed sequence to in the first
+  place).
 
 ---
 

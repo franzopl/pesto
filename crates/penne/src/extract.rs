@@ -45,6 +45,21 @@ pub struct ExtractedArchive {
     pub entry_path: PathBuf,
 }
 
+/// Identify an archive format from its leading bytes, regardless of file
+/// name/extension. Used by [`crate::deobfuscate`] to classify obfuscated
+/// files that [`classify`] (name-based) can't recognise.
+pub fn sniff(bytes: &[u8]) -> Option<ArchiveKind> {
+    if bytes.starts_with(b"Rar!\x1a\x07\x00") || bytes.starts_with(b"Rar!\x1a\x07\x01\x00") {
+        Some(ArchiveKind::Rar)
+    } else if bytes.starts_with(b"7z\xbc\xaf\x27\x1c") {
+        Some(ArchiveKind::SevenZip)
+    } else if bytes.starts_with(b"PK\x03\x04") {
+        Some(ArchiveKind::Zip)
+    } else {
+        None
+    }
+}
+
 /// Find every archive directly under `dir`, grouping multi-volume sets
 /// (`.rar`+`.r00`+`.r01`+…, `.partN.rar`, `.7z.NNN`) so each becomes exactly
 /// one [`ExtractionTarget`] rather than one per volume file.
@@ -276,6 +291,33 @@ fn run_command(mut cmd: Command, tool: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sniff_recognises_rar4_and_rar5_signatures() {
+        assert_eq!(
+            sniff(b"Rar!\x1a\x07\x00rest of the archive"),
+            Some(ArchiveKind::Rar)
+        );
+        assert_eq!(
+            sniff(b"Rar!\x1a\x07\x01\x00rest of the archive"),
+            Some(ArchiveKind::Rar)
+        );
+    }
+
+    #[test]
+    fn sniff_recognises_7z_and_zip_signatures() {
+        assert_eq!(
+            sniff(b"7z\xbc\xaf\x27\x1crest"),
+            Some(ArchiveKind::SevenZip)
+        );
+        assert_eq!(sniff(b"PK\x03\x04rest"), Some(ArchiveKind::Zip));
+    }
+
+    #[test]
+    fn sniff_returns_none_for_unrelated_bytes() {
+        assert_eq!(sniff(b"just a normal media file header"), None);
+        assert_eq!(sniff(b""), None);
+    }
 
     #[test]
     fn classifies_plain_archives() {

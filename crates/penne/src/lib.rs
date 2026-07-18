@@ -16,6 +16,7 @@ pub mod assemble;
 pub mod cache;
 pub mod client;
 pub mod config;
+pub mod deobfuscate;
 pub mod download;
 pub mod extract;
 pub mod nzb;

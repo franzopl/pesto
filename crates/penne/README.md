@@ -108,9 +108,12 @@ if you use both.
 # Parse a .nzb and print file/segment/size counts — no network I/O.
 cargo run --bin penne -- info path/to/release.nzb
 
-# Download, assemble, PAR2-verify/repair, and extract.
+# Download, assemble, deobfuscate, PAR2-verify/repair, and extract.
+# --out-dir defaults to the config's download_dir; --password overrides
+# the .nzb's own embedded password. Both optional.
 cargo run --bin penne -- download path/to/release.nzb \
-    --out-dir ./downloads   # optional; defaults to the config's download_dir
+    --out-dir ./downloads \
+    --password hunter2
 ```
 
 ### What `download` does, in order
@@ -123,24 +126,33 @@ cargo run --bin penne -- download path/to/release.nzb \
 3. **Assemble** each file from its decoded segments. A file missing any
    segment is left unwritten entirely — a partial file that looks complete
    is worse than none.
-4. **PAR2 verify/repair**, if any `.par2` file is present among the
-   downloaded files: files left unwritten in step 3 can be recreated
-   *whole* from recovery data; files with a bad checksum are patched at
-   just the damaged parts.
-5. **Extract** any `.rar`/`.7z`/`.zip` found (including multi-volume sets),
-   using the `.nzb`'s embedded password if it has one.
+4. **De-obfuscate**: obfuscated releases (common for scene/P2P posts) hide
+   real filenames behind random hashes, in both the `.nzb` subject and the
+   downloaded file names. `penne` content-sniffs for PAR2 packets regardless
+   of extension, tags them `.par2`, and matches every other file against the
+   PAR2 recovery set's real names by size + hash. Whatever PAR2 doesn't
+   cover (or when there's no PAR2 at all) gets a best-effort guess from
+   archive magic bytes (`.rar`/`.7z`/`.zip`) plus `.nzb` file order — clearly
+   reported as a guess, distinct from a PAR2-confirmed recovery.
+5. **PAR2 verify/repair**, if any `.par2` file is present among the
+   downloaded files (including ones just tagged in step 4): files left
+   unwritten in step 3 can be recreated *whole* from recovery data; files
+   with a bad checksum are patched at just the damaged parts.
+6. **Extract** any `.rar`/`.7z`/`.zip` found (including multi-volume sets),
+   using `--password` if given, else the `.nzb`'s own embedded password.
 
-If anything is still incomplete or damaged after step 4, `penne download`
+If anything is still incomplete or damaged after step 5, `penne download`
 exits non-zero and reports which files.
 
 ### Progress
 
-While fetching, `penne download` prints a live status line (`fetching:
-1234/6968 segments (18%) — 3 missing, 0 corrupt`) instead of sitting silent
-until the whole queue is done — a large release can take a while, and no
-output for minutes looks like a hang even when it isn't. On an interactive
-terminal the line updates in place; redirected to a file or pipe, it prints
-one line per whole percentage point instead.
+While fetching, `penne download` draws a live panel on stderr — an overall
+progress bar, download speed, ETA, and one bar per file currently
+downloading (capped so a release with many volumes doesn't flood the
+terminal) — instead of sitting silent until the whole queue is done, which
+would otherwise look like a hang on a large release. Redirected output
+(not a terminal) falls back to one plain status line per whole percentage
+point instead.
 
 ### Resume
 
