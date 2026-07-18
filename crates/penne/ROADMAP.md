@@ -42,6 +42,7 @@ testable state.
 | 1 | NZB loading & queue model — `penne::nzb::load`/`summarize`, `penne::queue::build` |
 | 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
 | 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
+| 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
 
 ---
 
@@ -134,15 +135,45 @@ back.
       `encode_part` output as the served bodies, plus a corrupt-primary /
       good-backup failover case and a no-server-decodable case.
 
-## Phase 4 — File assembly
+## Phase 4 — File assembly ✅
 
-- [ ] `penne::assemble::assemble` — write decoded segments to their offset in
-      the destination file; segments may complete out of order across
-      connections, so this cannot assume sequential arrival.
-- [ ] Whole-file CRC32 check once every part has landed (`pesto::yenc::Crc32`
-      already supports incremental updates).
-- [ ] Temp-file-then-rename so a killed download never leaves a file that
-      looks complete but isn't.
+- [x] `penne::assemble::assemble` — writes each decoded segment at its own
+      byte offset (`DecodedPart::begin`) via `seek`+`write_all`, rather than
+      appending in fetch order — assembles correctly regardless of arrival
+      order, which matters once downloading is parallelized (Phase 2's
+      still-open N-connection item). A segment missing from the `decoded`
+      map (not fetched/not decodable) makes the whole file `Incomplete`
+      *without writing anything* — a partial file that looks complete is
+      worse than no file. `assemble_all` runs this over every file in a
+      `DownloadQueue` and reports one `AssembleOutcome` each.
+- [x] Whole-file CRC-32 check: accumulated incrementally with
+      `pesto::yenc::Crc32` while writing, in ascending part order (guaranteed
+      by `queue::build`'s sort) — not by re-reading the file back, so cost is
+      independent of file size. Compared against any segment's
+      `file_crc32` (from `=yend crc32=`) when one was sent. Per-part
+      `crc_matches()` failures are tracked too and surfaced separately
+      (`AssembleOutcome::ChecksumMismatch { bad_parts, .. }`) — a
+      structurally valid decode whose content doesn't match its own claimed
+      checksum is corruption-in-transit, not something to hide by only
+      checking the whole-file sum. Either signal lands the file in
+      `ChecksumMismatch`, kept on disk regardless (a PAR2 repair candidate,
+      Phase 6, not something to discard).
+- [x] Temp-file-then-rename: writes go to a `<name>.penne-part` sibling of
+      the final path, renamed into place only after every segment has
+      landed, so a killed download never leaves behind a file that looks
+      complete but isn't.
+- [x] `penne download` (the CLI) now performs a real download: parses the
+      `.nzb`, requires `--config` (server credentials — no longer optional,
+      since there is nothing meaningful to do without one), calls
+      `download_queue` then `assemble_all`, and reports per-file status
+      (`ok`/`ok (unverified)`/`DAMAGED`/`INCOMPLETE`). Exits non-zero if
+      anything didn't fully assemble. Verified against a local, in-process
+      fake NNTP server through the actual compiled binary (not just the
+      library) in `tests/cli_download_end_to_end.rs`, using the
+      synchronous mock-server pattern from
+      `crates/pesto/tests/server_substituted_message_id.rs` (a blocking
+      `std::process::Command` inside an async `tokio` test would otherwise
+      risk starving the mock server's own task).
 
 ## Phase 5 — Progress & CLI UX
 

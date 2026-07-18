@@ -1,12 +1,14 @@
-//! `penne` CLI: reads a `.nzb` and (eventually) downloads it.
+//! `penne` CLI: reads a `.nzb`, downloads it, and assembles the result.
 //!
-//! Currently only `info` is functional end-to-end; `download` parses the
-//! `.nzb` and reports what it would do, since article retrieval is not
-//! implemented yet (see `ROADMAP.md` Phase 2 onward).
+//! `info` and `download` are both functional end-to-end as of Phase 4:
+//! fetch (Phase 2), yEnc decode (Phase 3), and file assembly (Phase 4).
+//! Concurrency is still one connection per server (`ROADMAP.md` Phase 2's
+//! still-open item), and PAR2 repair / archive extraction are not wired up
+//! yet (Phases 6/7).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -23,7 +25,7 @@ enum Command {
         /// Path to the `.nzb` file.
         nzb: PathBuf,
     },
-    /// Download the contents of a `.nzb`.
+    /// Download and assemble the contents of a `.nzb`.
     Download {
         /// Path to the `.nzb` file.
         nzb: PathBuf,
@@ -31,56 +33,94 @@ enum Command {
         /// config file's `download_dir`, or the current directory.
         #[arg(long)]
         out_dir: Option<PathBuf>,
-        /// Path to a `penne` TOML config file.
+        /// Path to a `penne` TOML config file (server credentials).
         #[arg(long)]
-        config: Option<PathBuf>,
+        config: PathBuf,
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Info { nzb } => {
-            let parsed = penne::nzb::load(&nzb)?;
-            let summary = penne::nzb::summarize(&parsed);
-            println!("{}", nzb.display());
-            println!("  poster:   {}", parsed.poster);
-            println!("  groups:   {}", parsed.groups.join(", "));
-            println!("  files:    {}", summary.files);
-            println!("  segments: {}", summary.segments);
-            println!("  size:     {} bytes", summary.total_bytes);
-            Ok(())
-        }
+        Command::Info { nzb } => info(&nzb),
         Command::Download {
             nzb,
             out_dir,
             config,
-        } => {
-            let parsed = penne::nzb::load(&nzb)?;
-            let summary = penne::nzb::summarize(&parsed);
-            let queue = penne::queue::build(&parsed);
+        } => download(&nzb, out_dir, &config).await,
+    }
+}
 
-            let dest = out_dir
-                .or_else(|| {
-                    config
-                        .as_ref()
-                        .and_then(|p| std::fs::read_to_string(p).ok())
-                        .and_then(|s| penne::config::RawConfig::parse(&s).ok())
-                        .and_then(|c| c.download_dir)
-                })
-                .unwrap_or_else(|| PathBuf::from("."));
+fn info(nzb: &Path) -> Result<()> {
+    let parsed = penne::nzb::load(nzb)?;
+    let summary = penne::nzb::summarize(&parsed);
+    println!("{}", nzb.display());
+    println!("  poster:   {}", parsed.poster);
+    println!("  groups:   {}", parsed.groups.join(", "));
+    println!("  files:    {}", summary.files);
+    println!("  segments: {}", summary.segments);
+    println!("  size:     {} bytes", summary.total_bytes);
+    Ok(())
+}
 
-            println!(
-                "would download {} file(s), {} segment(s), {} bytes to {}",
-                queue.files.len(),
-                summary.segments,
-                summary.total_bytes,
-                dest.display()
-            );
-            println!("download engine not implemented yet — see ROADMAP.md Phase 2 onward");
-            Ok(())
+async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> Result<()> {
+    let parsed = penne::nzb::load(nzb)?;
+    let queue = penne::queue::build(&parsed);
+
+    let config_toml = std::fs::read_to_string(config_path)
+        .with_context(|| format!("reading {}", config_path.display()))?;
+    let config = penne::config::RawConfig::parse(&config_toml)?.resolve()?;
+    anyhow::ensure!(
+        !config.servers.is_empty(),
+        "no [[servers]] configured in {}",
+        config_path.display()
+    );
+    let dest_dir = out_dir.unwrap_or(config.download_dir);
+
+    let outcome = penne::download::download_queue(&queue, &config.servers, None).await?;
+    println!(
+        "fetched {} segment(s); {} missing; {} corrupt",
+        outcome.segments.len(),
+        outcome.missing.len(),
+        outcome.corrupt.len()
+    );
+    for seg in &outcome.missing {
+        println!("  missing: {} part {}", seg.file_name, seg.part);
+    }
+    for seg in &outcome.corrupt {
+        println!(
+            "  corrupt: {} part {} ({})",
+            seg.file_name, seg.part, seg.error
+        );
+    }
+
+    let assembled =
+        penne::assemble::assemble_all(&queue, &outcome.segments, &dest_dir, None).await?;
+    let mut incomplete = 0;
+    for (name, result) in &assembled {
+        match result {
+            penne::assemble::AssembleOutcome::Complete => println!("  ok: {name}"),
+            penne::assemble::AssembleOutcome::CompleteUnverified => {
+                println!("  ok (unverified): {name}")
+            }
+            penne::assemble::AssembleOutcome::ChecksumMismatch { .. } => {
+                incomplete += 1;
+                println!("  DAMAGED: {name} ({result:?})");
+            }
+            penne::assemble::AssembleOutcome::Incomplete { .. } => {
+                incomplete += 1;
+                println!("  INCOMPLETE: {name} ({result:?})");
+            }
         }
     }
+
+    if incomplete > 0 {
+        anyhow::bail!(
+            "{incomplete} file(s) incomplete or damaged; PAR2 repair not wired up yet (ROADMAP.md Phase 6)"
+        );
+    }
+    Ok(())
 }
