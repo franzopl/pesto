@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use parmesan::ops::{calculate_geometry, ingest_files, CreateOptions, InputFile};
+use parmesan::ops::{
+    calculate_geometry, ingest_files, sort_files_by_file_id, CreateOptions, InputFile,
+};
 use parmesan::recovery_set::RecoverySet;
+use parmesan::repair::{self, RepairOptions};
 use parmesan::verify::{self, FileStatus, VerifyReport};
 use parmesan::worker::Par2Worker;
 use parmesan::{encoder::RecoveryEncoder, layout, packet, SimdPath};
@@ -26,6 +29,8 @@ enum Command {
     Create(CreateArgs),
     /// Verify files against an existing PAR2 recovery set.
     Verify(VerifyArgs),
+    /// Repair damaged or missing files using an existing PAR2 recovery set.
+    Repair(RepairArgs),
 }
 
 #[derive(Args, Debug)]
@@ -109,6 +114,25 @@ struct VerifyArgs {
     json: bool,
 }
 
+#[derive(Args, Debug)]
+struct RepairArgs {
+    /// Path to the PAR2 index file (e.g. "movie.mkv.par2").
+    index: PathBuf,
+
+    /// Report what would be repaired without writing any files.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Write repaired files under this directory instead of overwriting
+    /// damaged/missing originals in place.
+    #[arg(short, long)]
+    out_dir: Option<PathBuf>,
+
+    /// Suppress the per-file report; only the summary line is printed.
+    #[arg(short = 'q', long)]
+    quiet: bool,
+}
+
 fn parse_size(s: &str) -> Result<u64> {
     let s = s.trim().to_ascii_lowercase();
     let split = s
@@ -167,9 +191,10 @@ fn collect_files(paths: &[PathBuf], recurse: bool) -> Result<Vec<InputFile>> {
 }
 
 /// Subcommand names that must never be preceded by an implicit `create`.
-const KNOWN_FIRST_ARGS: [&str; 7] = [
+const KNOWN_FIRST_ARGS: [&str; 8] = [
     "create",
     "verify",
+    "repair",
     "help",
     "-h",
     "--help",
@@ -194,14 +219,24 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Create(args) => run_create(args).await,
         Command::Verify(args) => run_verify(args),
+        Command::Repair(args) => run_repair(args),
     }
 }
 
 async fn run_create(cli: CreateArgs) -> Result<()> {
-    let input_files = collect_files(&cli.files, cli.recurse)?;
+    let mut input_files = collect_files(&cli.files, cli.recurse)?;
     if input_files.is_empty() {
         anyhow::bail!("no input files found");
     }
+    // The default output base name follows the first file as given on the
+    // command line — a naming choice, independent of Reed-Solomon ordering.
+    // Captured before the sort below so it doesn't start depending on file
+    // content.
+    let default_base_name = input_files[0].display_name.clone();
+    // Reed-Solomon coefficients are assigned by ascending File ID, per the
+    // PAR2 spec — not by command-line/directory order. See
+    // `ops::sort_files_by_file_id` for why this matters for multi-file sets.
+    tokio::task::block_in_place(|| sort_files_by_file_id(&mut input_files))?;
 
     let options = CreateOptions {
         slice_size: cli
@@ -246,10 +281,7 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
         std::fs::create_dir_all(&out_dir)?;
     }
 
-    let base_name = cli
-        .base_name
-        .clone()
-        .unwrap_or_else(|| input_files[0].display_name.clone());
+    let base_name = cli.base_name.clone().unwrap_or(default_base_name);
 
     let creator_string = if cli.comment.is_empty() {
         "parmesan".to_owned()
@@ -457,6 +489,69 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
     }
 
     std::process::exit(report.exit_code());
+}
+
+fn run_repair(args: RepairArgs) -> Result<()> {
+    let set = RecoverySet::load(&args.index)
+        .with_context(|| format!("loading recovery set from `{}`", args.index.display()))?;
+    let base_dir = args
+        .index
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let report = verify::verify(&set, &base_dir)?;
+
+    if report.is_ok() {
+        if !args.quiet {
+            println!("All files verified OK — nothing to repair.");
+        }
+        return Ok(());
+    }
+    if !report.is_repairable() {
+        anyhow::bail!(
+            "not enough recovery data to repair: {} bad slice(s), only {} recovery block(s) available",
+            report.total_bad_slices(),
+            report.available_recovery_blocks
+        );
+    }
+
+    let options = RepairOptions {
+        out_dir: args.out_dir.clone(),
+        dry_run: args.dry_run,
+    };
+    let plan = repair::repair(&set, &report, &base_dir, &options)?;
+
+    if !args.quiet {
+        let verb = if plan.dry_run {
+            "Would repair"
+        } else {
+            "Repaired"
+        };
+        for f in &plan.repaired_files {
+            println!(
+                "{verb:<13} {} ({} slice(s)) -> {}",
+                f.name,
+                f.slices_repaired,
+                f.path.display()
+            );
+        }
+    }
+
+    if plan.dry_run {
+        println!(
+            "\nDry run: {} file(s) would be repaired.",
+            plan.repaired_files.len()
+        );
+    } else {
+        println!(
+            "\n{} file(s) repaired successfully.",
+            plan.repaired_files.len()
+        );
+    }
+
+    Ok(())
 }
 
 fn print_json_report(report: &VerifyReport) {

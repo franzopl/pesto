@@ -32,6 +32,11 @@ pub struct FileReport {
     /// Slices that need reconstruction (0 when `status` is `Ok`; equal to
     /// `total_slices` when `status` is `Missing`).
     pub bad_slices: usize,
+    /// Indices (0-based, within this file) of the slices that need
+    /// reconstruction, ascending. Empty when `status` is `Ok`; every index
+    /// `0..total_slices` when `status` is `Missing`. [`crate::repair`] uses
+    /// this directly to know which slices to hand to [`crate::decoder`].
+    pub bad_slice_indices: Vec<usize>,
 }
 
 /// Full verification result for a recovery set.
@@ -91,6 +96,7 @@ pub fn verify(set: &RecoverySet, base_dir: &Path) -> Result<VerifyReport> {
                 status: FileStatus::Missing,
                 total_slices,
                 bad_slices: total_slices,
+                bad_slice_indices: (0..total_slices).collect(),
             });
             continue;
         }
@@ -98,25 +104,26 @@ pub fn verify(set: &RecoverySet, base_dir: &Path) -> Result<VerifyReport> {
         let mut file = File::open(&path)
             .with_context(|| format!("opening `{}` for verification", path.display()))?;
 
-        let mut bad = 0usize;
+        let mut bad_slice_indices = Vec::new();
         let mut buf = vec![0u8; slice_size];
-        for expected in &entry.slice_checksums {
+        for (i, expected) in entry.slice_checksums.iter().enumerate() {
             let read = read_slice_padded(&mut file, &mut buf)?;
             let got = slice_checksum(&buf);
             if read == 0 || got.md5 != expected.md5 || got.crc32 != expected.crc32 {
-                bad += 1;
+                bad_slice_indices.push(i);
             }
         }
 
         files.push(FileReport {
             name: entry.name.clone(),
-            status: if bad == 0 {
+            status: if bad_slice_indices.is_empty() {
                 FileStatus::Ok
             } else {
                 FileStatus::Damaged
             },
             total_slices,
-            bad_slices: bad,
+            bad_slices: bad_slice_indices.len(),
+            bad_slice_indices,
         });
     }
 

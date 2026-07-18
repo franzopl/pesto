@@ -47,18 +47,38 @@ use case for any complete PAR2 tool.
 **Design decisions** (see `crates/parmesan/src/encoder.rs`, `gf16.rs` for the
 existing encoder this phase builds on):
 
-- Decode reuses the encoder's SIMD multiply-accumulate kernel (currently
-  private methods on `RecoveryEncoder::flush_*`) by extracting it into free
-  functions shared by encode and decode. This is the only step that touches
-  existing production code; every other module below is additive.
-- Matrix inversion (GF(2¹⁶) Gauss-Jordan) lives in its own module, independent
-  of the encoder — the encoder never inverts anything today.
+- **Revised during implementation:** decode does *not* extract the encoder's
+  SIMD kernels. It uses a fresh, independent scalar multiply-accumulate
+  kernel (`gf16_mac.rs`) instead. Extracting `RecoveryEncoder::flush_*` was
+  the original plan and is still the right end state for performance, but it
+  is the one step in this phase that touches existing production code, and
+  doing it blind (all six backends, 4200+ lines of `unsafe` SIMD) before
+  proving the repair *algorithm* itself correct was the wrong order of
+  operations. Getting a correct, fully-tested scalar repair path shipped
+  first — with zero risk to the existing encoder — was judged more valuable
+  than the performance work. SIMD extraction is now tracked as its own
+  follow-up (still called out below; no longer a dependency of 22d.3).
+- Matrix inversion (GF(2¹⁶) Gauss-Jordan) lives in its own module
+  (`matrix.rs`), independent of the encoder — the encoder never inverts
+  anything today. The multiplicative inverse it needs was added to
+  `Gf16::inverse` in `gf16.rs` (pure field arithmetic, not matrix-specific).
 - No dependency on the external `rust-par2` crate: its SIMD coverage stops at
   AVX2/SSSE3 (missing AVX2+GFNI, AVX-512+GFNI, NEON, which `parmesan` already
   has for encoding) and its license is unconfirmed. Decode is implemented
   natively to keep one GF(2¹⁶) codebase for the whole PAR2 lifecycle.
 - No public API of the existing encoder changes; all new work lands in new
   modules (see table below).
+
+**A prerequisite bug found and fixed along the way:** the PAR2 spec assigns
+Reed-Solomon coefficients to input slices in ascending File ID order (the
+same order the Main packet lists them in), not in command-line/directory
+order. `parmesan create` fed slices to the encoder in command-line order,
+which made recovery data for any *multi-file* set silently incompatible with
+third-party PAR2 readers — repair here would have reconstructed the wrong
+bytes without any error, since the math "succeeds" with the wrong
+coefficients. Fixed in `ops::sort_files_by_file_id` (see 22d.3 below).
+Single-file recovery sets were never affected. `.par2` sets created by
+`parmesan` before this fix should be regenerated.
 
 **Effort legend:** S = 0.5–1 day · M = 1–3 days · L = 3–7 days · XL = 1–3 weeks.
 
@@ -72,7 +92,7 @@ existing encoder this phase builds on):
 | 22c.2 | 22c.1               | S  |
 | 22d.1 | —                   | M  |
 | 22d.2 | — (touches `encoder.rs`; own branch) | L |
-| 22d.3 | 22b.2, 22d.1, 22d.2 | L  |
+| 22d.3 | 22b.2, 22d.1        | L  |
 | 22d.4 | 22c.1, 22d.3        | M  |
 | 22e   | 22d.2, 22d.3        | M  |
 | 22f   | 22d.3               | M  |
@@ -81,9 +101,11 @@ existing encoder this phase builds on):
 | 22i   | everything above stable | S  |
 
 22b.2/22c.1 and 22d.1 can start in parallel — they have no mutual dependency.
-22d.2 is the real bottleneck: it is the only item touching existing production
-code, so it should land in its own PR, proven behaviorally identical to the
-current encoder output, *before* 22d.3 starts depending on it.
+22d.3 no longer depends on 22d.2 (see the revised design decision above):
+it uses its own scalar kernel, so it only needed 22d.1 and 22b.2 to start.
+22d.2 (SIMD kernel extraction) remains the item to be most careful with
+whenever it *is* picked up — it's still the only one touching existing
+production code — but it no longer blocks the rest of the phase.
 
 ### 22a — Subcommand refactor (Complexity: Low) ✅ Done
 
@@ -170,26 +192,33 @@ Manually verified end-to-end: `create` → `verify` (OK), byte-corrupted file �
 `verify` (`DAMAGED`, exit 1, repairable), missing file → `verify` (`MISSING`,
 exit 2 when damage exceeds available recovery blocks), `--json` output.
 
-### 22d.1 — GF(2¹⁶) matrix module (Complexity: Medium)
+### 22d.1 — GF(2¹⁶) matrix module (Complexity: Medium) ✅ Done
 
 New module `matrix.rs`, independent of the encoder.
 
-- [ ] Build the reduced `m×m` matrix from selected missing/available block
-      indices via `gf16::Gf16::recovery_coefficient` / `pow` (a submatrix of a
-      Vandermonde-like matrix — always invertible over the field).
-- [ ] Gauss-Jordan elimination in GF(2¹⁶) with pivoting; a zero pivot from a
-      bad block selection must return an explicit error, never panic.
+- [x] Build the reduced `m×m` matrix from selected missing/available block
+      indices via `gf16::Gf16::pow` (a submatrix of a Vandermonde-like
+      matrix — always invertible over the field).
+- [x] Gauss-Jordan elimination in GF(2¹⁶) with pivoting; a zero pivot from a
+      bad block selection returns `Err(SingularMatrix)`, never panics.
 
-### 22d.2 — Extract the SIMD MAC kernel (Complexity: Very High)
+Also added `Gf16::inverse` to `gf16.rs` (the multiplicative inverse
+Gauss-Jordan needs) — pure field arithmetic, so it lives alongside `mul`/
+`pow`/`exp`, not in `matrix.rs`.
 
-The only step of this phase that touches existing code
-(`crates/parmesan/src/encoder.rs`). Own branch, own PR.
+### 22d.2 — Extract the SIMD MAC kernel (Complexity: Very High) ⏸ Deferred
+
+**Not started, and no longer blocking the rest of this phase** — see the
+revised design decision above. The only step of this phase that would touch
+existing code (`crates/parmesan/src/encoder.rs`); still deserves its own
+branch/PR and a byte-for-byte before/after proof whenever it's picked up.
 
 - [ ] Move the multiply-accumulate logic out of `flush_scalar` / `flush_ssse3`
       / `flush_avx2` / `flush_avx2_gfni` / `flush_avx512_gfni` /
-      `flush_neon_clmul` into free functions in a new `gf16_mac.rs`,
-      parameterised by `(coefficient, source buffer, destination buffer)`
-      instead of reading `self.buffers` directly.
+      `flush_neon_clmul` into free functions, parameterised by
+      `(coefficient, source buffer, destination buffer)` instead of reading
+      `self.buffers` directly, and have `gf16_mac.rs` dispatch to them
+      instead of its current scalar-only implementation.
 - [ ] Preserve every `#[target_feature]` annotation and the existing runtime
       dispatch logic from `flush()` unchanged in behavior.
 - [ ] Prove byte-for-byte identical output before/after the refactor over a
@@ -199,23 +228,37 @@ The only step of this phase that touches existing code
 - [ ] Update `RecoveryEncoder::flush_*` to call the extracted functions; no
       change to any public type or signature in `encoder.rs`.
 
-### 22d.3 — RecoveryDecoder (Complexity: Very High)
+### 22d.3 — RecoveryDecoder (Complexity: Very High) ✅ Done
 
-New module `decoder.rs`.
+New modules `gf16_mac.rs` and `decoder.rs`.
 
-- [ ] Select available recovery blocks for the missing input slices (prefer
-      lowest exponents first when more blocks than needed are available).
-- [ ] Subtract the contribution of known input slices from selected recovery
-      blocks via `gf16_mac`, incrementally as each known slice is processed —
-      not as a separate full pass, matching par2cmdline's incremental
-      Gauss-Jordan strategy to keep the practical cost near the MAC cost
-      rather than `O(m³)` dominating.
-- [ ] Invert the reduced matrix via `matrix.rs` and reconstruct missing slice
+- [x] `gf16_mac::mac(gf, dst, src, coeff)`: a fresh, independent scalar
+      multiply-accumulate kernel (`dst ^= coeff * src`) — not extracted from
+      the encoder (see the revised design decision above).
+- [x] Select available recovery blocks for the missing input slices (lowest
+      exponents first when more blocks than needed are available).
+- [x] Subtract the contribution of every known input slice from all selected
+      recovery blocks in one pass over the known slices — the caller's
+      `known_slice` callback is invoked exactly once per known index, not
+      once per missing block, so reading from disk pays for one sequential
+      pass over the surviving data. (A fully incremental Gauss-Jordan
+      merged with that same read pass, matching par2cmdline more closely, is
+      further optimisation — deferred alongside 22d.2/22e.)
+- [x] Invert the reduced matrix via `matrix.rs` and reconstruct missing slice
       data via `gf16_mac`.
-- [ ] Public API: `RecoveryDecoder::new(...)`, `add_recovery_block(...)`,
-      `has_enough()`, `finish() -> Vec<(usize, Vec<u8>)>`.
+- [x] Public API ended up callback-based rather than incremental
+      (`add_recovery_block`/`has_enough` as originally sketched):
+      `RecoveryDecoder::new(slice_size, total_input_slices, missing)`,
+      `.missing()`, `.reconstruct(known_slice_fn, &recovery_blocks)`. This
+      keeps the decoder decoupled from file I/O entirely — `repair.rs`
+      supplies `known_slice` as a closure that reads from disk.
+- [x] Round-trip proven against the real encoder: `RecoveryEncoder` produces
+      recovery blocks, slices are dropped, `RecoveryDecoder` reconstructs
+      them bit-exact, across single/multiple/surplus-recovery-block/
+      reconstruct-everything cases and a not-enough-recovery-blocks error
+      case.
 
-### 22d.4 — Repair orchestration (Complexity: High)
+### 22d.4 — Repair orchestration (Complexity: High) ✅ Done
 
 New module `repair.rs`.
 
@@ -223,19 +266,36 @@ New module `repair.rs`.
 parmesan repair <index.par2>
 ```
 
-- [ ] Identify damaged/missing input slices from the verify pass (22c.1).
-- [ ] Determine whether enough recovery blocks exist to reconstruct them.
-- [ ] Drive `RecoveryDecoder` to reconstruct the missing slices.
-- [ ] Write reconstructed data back to the original file paths (or `--out-dir`).
-- [ ] Re-verify restored files against their checksums before reporting success.
-- [ ] `--dry-run` flag: report what *would* be repaired without writing files.
+- [x] Identify damaged/missing input slices from the verify pass (22c.1) via
+      `VerifyReport::files[_].bad_slice_indices` (verify.rs was extended to
+      expose *which* slices are bad, not just a count).
+- [x] Determine whether enough recovery blocks exist to reconstruct them
+      (`VerifyReport::is_repairable`).
+- [x] Drive `RecoveryDecoder` to reconstruct the missing slices.
+- [x] Write reconstructed data back to the original file paths (or `--out-dir`,
+      which copies damaged files whole before patching, and creates missing
+      files fresh).
+- [x] Re-verify restored files against their checksums — done *before*
+      writing anything (every reconstructed slice's checksum is checked
+      against its IFSC entry first; a mismatch aborts that file's repair
+      with no data written), which is a stronger guarantee than checking
+      after the fact.
+- [x] `--dry-run` flag: reconstructs and checksum-verifies without writing.
 
-### 22e — SIMD parity for decode (Complexity: Medium)
+Proven end-to-end with the real CLI binary: multi-file `create`, corrupt one
+file + delete another entirely, `verify` (reports both), `repair --dry-run`,
+`repair`, `verify` again (clean), MD5 of both files matches the originals
+exactly.
 
-- [ ] Benchmark all six SIMD backends in the decode path, confirming runtime
-      dispatch picks the same backend decode would pick for encode on the
-      same CPU. Should require no new kernel code if 22d.2 was done correctly
-      — this step is the explicit validation, not new implementation.
+### 22e — SIMD parity for decode (Complexity: Medium) — Blocked on 22d.2
+
+- [ ] Once 22d.2 lands, benchmark all six SIMD backends in the decode path,
+      confirming runtime dispatch picks the same backend decode would pick
+      for encode on the same CPU.
+- [ ] Until then, decode runs scalar-only. `gf16_mac::mac` processes one
+      `u16` word (2 bytes) per loop iteration with no vectorisation — this is
+      the performance gap that keeps `parmesan repair` from being
+      competitive with `par2cmdline-turbo` yet.
 
 ### 22f — Streaming memory model (Complexity: Medium)
 
@@ -244,14 +304,26 @@ parmesan repair <index.par2>
       memory to `m × chunk_size` rather than `m × slice_size`, mirroring the
       existing `flush_limit_bytes` mechanism in the encoder. Can be deferred
       past the initial MVP if memory pressure isn't observed in practice.
+      Today `RecoveryDecoder` and `repair.rs` hold every selected recovery
+      block and every in-flight reconstructed slice fully in memory at once.
 
-### 22g — CLI wiring (Complexity: Low)
+### 22g — CLI wiring (Complexity: Low) — Mostly done
 
-- [ ] `verify`/`repair` subcommand flags: `--dry-run`, `--out-dir`, `--json`,
-      `--simd` (inherited from `create`).
-- [ ] Progress bar via `indicatif`, same pattern as `create`.
+- [x] `verify` subcommand: `--quiet`, `--json`.
+- [x] `repair` subcommand: `--dry-run`, `--out-dir`, `--quiet`.
+- [x] `--simd` inherited from `create` (repair doesn't have its own SIMD
+      choice to make yet — see 22e).
+- [ ] `--json` on `repair` (currently `verify`-only).
+- [ ] Progress bar via `indicatif` for `repair`, same pattern as `create`
+      (not yet wired; repairs in the tested size range finish fast enough
+      that this hasn't been a priority).
 
-### 22h — Compatibility & test suite (Complexity: Very High)
+### 22h — Compatibility & test suite (Complexity: Very High) — In progress
+
+Unit-level correctness is covered today: 89 tests across the new modules,
+including full round-trips through the real `RecoveryEncoder` and the real
+CLI binary (multi-file create → corrupt/delete → verify → repair → verify,
+confirmed byte-identical via MD5). What's still open:
 
 - [ ] **Cross round-trip**: create with `parmesan`, corrupt slices, repair
       with real `par2cmdline` → byte-identical to the original, and the

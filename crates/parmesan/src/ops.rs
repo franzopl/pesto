@@ -1,6 +1,7 @@
+use crate::packet;
 use crate::worker::Par2Worker;
 use crate::SimdPath;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 
 /// High-level PAR2 creation parameters.
@@ -35,6 +36,47 @@ pub struct InputFile {
     pub path: PathBuf,
     pub display_name: String,
     pub size: u64,
+}
+
+/// Reorder `files` into the canonical order the PAR2 spec requires for
+/// Reed-Solomon block indices: ascending numeric order of File ID.
+///
+/// Per the Parity Volume Set Specification, the Main packet lists File IDs
+/// sorted as 16-byte unsigned integers, and "the first source block from the
+/// first file in this sorted list receives the first valid constant, the
+/// second block receives the second constant, and so on" — i.e. this order,
+/// not the order files were passed on the command line, determines which
+/// Reed-Solomon coefficient each input slice gets. Any reader that follows
+/// the spec (par2cmdline included) computes coefficients this way, so the
+/// encoder must feed slices in this order for multi-file recovery sets to be
+/// repairable by anything other than this exact build of `parmesan`.
+///
+/// File ID only needs the first 16 KiB of each file (`compute_file_id`
+/// hashes the 16k head, not the whole file), so this is a cheap pre-pass —
+/// full-file hashing still happens once, later, during encoding.
+pub fn sort_files_by_file_id(files: &mut Vec<InputFile>) -> Result<()> {
+    use std::io::Read;
+
+    let mut keyed: Vec<([u8; 16], InputFile)> = Vec::with_capacity(files.len());
+    for f in files.drain(..) {
+        let mut file = std::fs::File::open(&f.path)
+            .with_context(|| format!("opening `{}` to compute its File ID", f.path.display()))?;
+        let mut head = vec![0u8; 16 * 1024];
+        let mut read = 0usize;
+        while read < head.len() {
+            match file.read(&mut head[read..])? {
+                0 => break,
+                n => read += n,
+            }
+        }
+        head.truncate(read);
+        let md5_16k = packet::md5(&head);
+        let file_id = packet::compute_file_id(&md5_16k, f.size, &f.display_name);
+        keyed.push((file_id, f));
+    }
+    keyed.sort_by_key(|(id, _)| *id);
+    *files = keyed.into_iter().map(|(_, f)| f).collect();
+    Ok(())
 }
 
 /// Computes total padded bytes for a given slice size across all files.
@@ -278,5 +320,62 @@ mod tests {
         o.slice_size = Some(512 * 1024);
         let (slice_size, _, _) = calculate_geometry(&files, &o).unwrap();
         assert_eq!(slice_size, 512 * 1024);
+    }
+
+    #[test]
+    fn sort_files_by_file_id_orders_by_ascending_file_id_not_input_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "parmesan-ops-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Content (and therefore File ID) is unrelated to file name or the
+        // order files are listed in — that's exactly the case this fix
+        // matters for.
+        let names = ["zzz.bin", "aaa.bin", "mmm.bin"];
+        let mut files = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let path = dir.join(name);
+            let data = vec![i as u8; 100 + i * 37];
+            std::fs::write(&path, &data).unwrap();
+            files.push(InputFile {
+                path,
+                display_name: (*name).to_string(),
+                size: data.len() as u64,
+            });
+        }
+
+        // Compute the expected order independently of the function under test.
+        let mut expected_ids = Vec::new();
+        for f in &files {
+            let bytes = std::fs::read(&f.path).unwrap();
+            let md5_16k = crate::packet::md5(&bytes);
+            expected_ids.push(crate::packet::compute_file_id(
+                &md5_16k,
+                f.size,
+                &f.display_name,
+            ));
+        }
+        expected_ids.sort();
+
+        sort_files_by_file_id(&mut files).unwrap();
+
+        let got_ids: Vec<[u8; 16]> = files
+            .iter()
+            .map(|f| {
+                let bytes = std::fs::read(&f.path).unwrap();
+                let md5_16k = crate::packet::md5(&bytes);
+                crate::packet::compute_file_id(&md5_16k, f.size, &f.display_name)
+            })
+            .collect();
+        assert_eq!(got_ids, expected_ids);
+        assert!(got_ids.windows(2).all(|w| w[0] <= w[1]));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

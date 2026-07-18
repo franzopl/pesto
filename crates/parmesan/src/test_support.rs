@@ -45,6 +45,24 @@ pub(crate) fn build_fixture_set(
         std::fs::write(dir.join(f.name), &f.data).unwrap();
     }
 
+    // Mirror `main.rs`'s `sort_files_by_file_id` step: Reed-Solomon
+    // coefficients are assigned by ascending File ID, not input order (see
+    // `ops::sort_files_by_file_id` and `ROADMAP.md` Phase 22). Fixtures with
+    // more than one file must encode in this same order or `RecoverySet`
+    // (which always presents files in File-ID order) would disagree with
+    // what was actually encoded.
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    let file_ids_for_sort: Vec<[u8; 16]> = files
+        .iter()
+        .map(|f| {
+            let head_len = f.data.len().min(16 * 1024);
+            let md5_16k = packet::md5(&f.data[..head_len]);
+            packet::compute_file_id(&md5_16k, f.data.len() as u64, f.name)
+        })
+        .collect();
+    order.sort_by_key(|&i| file_ids_for_sort[i]);
+    let files: Vec<&FixtureFile> = order.into_iter().map(|i| &files[i]).collect();
+
     let total_slices: usize = files
         .iter()
         .map(|f| f.data.len().div_ceil(slice_size))
@@ -55,7 +73,7 @@ pub(crate) fn build_fixture_set(
 
     let mut hashes = Vec::new();
     let mut slice_counts = Vec::new();
-    for f in files {
+    for f in &files {
         let mut hasher = FileHasher::new();
         let n_slices = f.data.len().div_ceil(slice_size);
         let mut pos = 0usize;
