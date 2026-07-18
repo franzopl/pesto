@@ -21,10 +21,8 @@ pub struct Config {
     pub servers: Vec<ServerEntry>,
     /// Directory where completed files are written.
     pub download_dir: PathBuf,
-    /// Directory used for in-progress downloads before a file is complete.
-    /// Defaults to `download_dir` when unset.
-    pub temp_dir: Option<PathBuf>,
-    /// Number of parallel NNTP connections to use.
+    /// Default number of parallel NNTP connections for a server that
+    /// doesn't set its own `connections`.
     pub connections: usize,
     /// Number of retry attempts per segment against a single server before
     /// moving on to the next configured server (see
@@ -55,7 +53,8 @@ pub struct RawConfig {
     #[serde(default)]
     pub servers: Vec<RawServer>,
     pub download_dir: Option<PathBuf>,
-    pub temp_dir: Option<PathBuf>,
+    /// Default `connections` for a `[[servers]]` entry that doesn't set its
+    /// own.
     pub connections: Option<usize>,
     /// Retry attempts per segment per server before failing over.
     pub retries: Option<u32>,
@@ -72,6 +71,7 @@ impl RawConfig {
     /// `download_dir` falls back to the current directory when neither the
     /// config file nor a CLI override provides one.
     pub fn resolve(self) -> Result<Config> {
+        let default_connections = self.connections.unwrap_or(DEFAULT_CONNECTIONS);
         let servers = self
             .servers
             .into_iter()
@@ -79,7 +79,7 @@ impl RawConfig {
                 host: s.host,
                 port: s.port.unwrap_or(if s.ssl { 563 } else { 119 }),
                 ssl: s.ssl,
-                connections: s.connections.unwrap_or(DEFAULT_CONNECTIONS),
+                connections: s.connections.unwrap_or(default_connections),
                 username: s.username,
                 password: s.password,
                 retry_delay: s.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
@@ -90,8 +90,7 @@ impl RawConfig {
         Ok(Config {
             servers,
             download_dir: self.download_dir.unwrap_or_else(|| PathBuf::from(".")),
-            temp_dir: self.temp_dir,
-            connections: self.connections.unwrap_or(DEFAULT_CONNECTIONS),
+            connections: default_connections,
             retries: self.retries.unwrap_or(DEFAULT_RETRIES),
         })
     }
@@ -126,5 +125,32 @@ mod tests {
         let config = raw.resolve().unwrap();
         assert_eq!(config.download_dir, PathBuf::from("."));
         assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn top_level_connections_is_the_default_for_servers_without_their_own() {
+        let toml = r#"
+            connections = 20
+
+            [[servers]]
+            host = "primary.example.com"
+
+            [[servers]]
+            host = "backup.example.com"
+            connections = 3
+        "#;
+        let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
+        assert_eq!(config.servers[0].connections, 20);
+        assert_eq!(config.servers[1].connections, 3);
+    }
+
+    #[test]
+    fn connections_defaults_to_the_built_in_default_when_unset_anywhere() {
+        let toml = r#"
+            [[servers]]
+            host = "news.example.com"
+        "#;
+        let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
+        assert_eq!(config.servers[0].connections, DEFAULT_CONNECTIONS);
     }
 }
