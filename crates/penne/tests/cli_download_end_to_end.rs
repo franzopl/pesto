@@ -433,11 +433,17 @@ fn stat_reports_complete_and_downloads_nothing_when_every_segment_is_present() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(stdout.contains("complete: movie.bin (1/1 segments)"));
-    assert!(stdout.contains("1 of 1 file(s) complete; 0 segment(s) missing"));
+    // The concise closing summary leads with the percentage of articles
+    // present — the number that matters most at a glance.
+    assert!(
+        stdout.contains("articles present: 1/1 (100.0%)"),
+        "stdout did not report the present-article percentage:\n{stdout}"
+    );
+    assert!(stdout.contains("files complete:   1/1"));
     // The whole point of --stat is that it's cheap — report exactly how
     // cheap, in a human-readable size, not just a raw byte count.
     assert!(
-        stdout.contains("used ") && stdout.contains("to check (1 segment(s) via STAT"),
+        stdout.contains("data used:") && stdout.contains("STAT only"),
         "stdout did not report bytes used for the check:\n{stdout}"
     );
     // --stat never downloads: the destination directory shouldn't even
@@ -462,5 +468,6 @@ fn stat_reports_incomplete_and_exits_non_zero_when_a_segment_is_missing() {
         "expected a non-zero exit when a segment is missing; stdout:\n{stdout}"
     );
     assert!(stdout.contains("INCOMPLETE: movie.bin (0/1 segments)"));
+    assert!(stdout.contains("articles present: 0/1 (0.0%)"));
     assert!(!download_dir.exists());
 }

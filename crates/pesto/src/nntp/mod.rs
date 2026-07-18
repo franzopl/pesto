@@ -4,7 +4,7 @@
 //! protocol (RFC 3977 / RFC 4643) to authenticate and post articles — that is
 //! the whole MVP surface.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -82,7 +82,7 @@ impl Connection {
         tcp.set_nodelay(true).ok();
 
         let stream: Box<dyn Stream> = if tls {
-            let connector = TlsConnector::from(Arc::new(tls_config()?));
+            let connector = TlsConnector::from(tls_config());
             let server_name = ServerName::try_from(host.to_string())
                 .with_context(|| format!("invalid TLS server name `{host}`"))?;
             let tls_stream = connector
@@ -565,17 +565,34 @@ fn dot_stuff(input: &[u8], out: &mut Vec<u8>) {
 }
 
 /// Build the rustls client configuration, trusting the bundled Mozilla roots.
-fn tls_config() -> Result<ClientConfig> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+/// Build (once) and share the TLS client config across every connection.
+///
+/// Building this from scratch — populating a `RootCertStore` with 100+
+/// webpki root certificates and constructing a fresh crypto provider — is
+/// synchronous, non-trivial CPU work with no `.await` point in it. Doing
+/// that on *every* `connect()` call is harmless for one connection at a
+/// time, but opening many connections concurrently (e.g. `penne --stat`
+/// with a large `connections` count) used to mean that many threads all
+/// doing this rebuild at once, blocking the tokio runtime's worker threads
+/// long enough to visibly stall progress reporting before any actual NNTP
+/// traffic had even started. Building it once and sharing the `Arc` makes
+/// every connection after the first pay only a refcount bump.
+fn tls_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let config = ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .context("configuring TLS protocol versions")?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(config)
+            let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+            let config = ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("TLS protocol version configuration is static and always valid")
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Arc::new(config)
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -830,6 +847,21 @@ mod tests {
         // `read_line`'s returned count (and so `bytes_read`) includes the
         // trailing "\r\n".
         assert_eq!(conn.bytes_read(), response.len() as u64);
+    }
+
+    #[test]
+    fn tls_config_is_built_once_and_shared() {
+        // Building the root cert store + crypto provider from scratch is
+        // real, non-yielding CPU work; opening many concurrent connections
+        // (e.g. a `--stat` check with a high `connections` count) must not
+        // pay that cost more than once, or it can visibly stall the async
+        // runtime before any actual NNTP traffic starts.
+        let a = tls_config();
+        let b = tls_config();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "tls_config() should return the same cached Arc on every call"
+        );
     }
 
     #[tokio::test]

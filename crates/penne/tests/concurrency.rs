@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use penne::download::download_queue;
+use penne::progress::{channel, ProgressEvent};
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
 /// Spawn a fake NNTP server whose `BODY` handler sleeps `delay` before
@@ -205,4 +206,164 @@ async fn multiple_connections_to_one_server_run_concurrently() {
         "took {elapsed:?}, expected well under {:?} if truly sequential",
         DELAY * SEGMENTS as u32
     );
+}
+
+/// Regression test mirroring `penne::check`'s identical fix: every worker
+/// in a server's pass pulls from one shared queue and only stops once it's
+/// empty, so a `SegmentDownloaded` event emitted only after the *whole*
+/// pass returns means the progress panel sits still for the entire
+/// download and then jumps straight to 100%, no matter how large the
+/// release. Events must arrive while the download is still in flight.
+#[tokio::test]
+async fn progress_events_arrive_while_the_download_is_still_running() {
+    const SEGMENTS: usize = 20;
+    const CONNECTIONS: usize = 4;
+    const DELAY: Duration = Duration::from_millis(50);
+
+    let mut known = HashMap::new();
+    let mut segments = Vec::new();
+    for i in 0..SEGMENTS {
+        let id = format!("seg{i}@test");
+        known.insert(
+            id.clone(),
+            yenc_body("movie.bin", format!("d{i}").as_bytes()),
+        );
+        segments.push(QueuedSegment {
+            message_id: id,
+            part: i as u32 + 1,
+            bytes: 5,
+        });
+    }
+    let (addr, _in_flight, _peak) = spawn_slow_server(known, DELAY);
+
+    let queue = DownloadQueue {
+        files: vec![QueuedFile {
+            name: "movie.bin".to_string(),
+            segments,
+        }],
+    };
+    let server = ServerEntry {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        ssl: false,
+        connections: CONNECTIONS,
+        username: None,
+        password: None,
+        retry_delay: 0,
+        timeout: 5,
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().to_path_buf();
+
+    let (tx, mut rx) = channel();
+    let handle =
+        tokio::spawn(
+            async move { download_queue(&queue, &[server], &dest_path, 0, Some(tx)).await },
+        );
+
+    // The `Started` event fires immediately; skip past it to the first
+    // real per-segment event.
+    loop {
+        let ev = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for the first progress event — events aren't being streamed")
+            .expect("channel closed before any per-segment event arrived");
+        if matches!(ev, ProgressEvent::Started { .. }) {
+            continue;
+        }
+        assert!(
+            matches!(ev, ProgressEvent::SegmentDownloaded { .. }),
+            "expected a SegmentDownloaded event, got {ev:?}"
+        );
+        break;
+    }
+
+    // Total expected wall time is roughly SEGMENTS/CONNECTIONS * DELAY =
+    // 250ms. Confirming the download hasn't already finished by the time
+    // its first per-segment event was consumed proves events are streamed
+    // during the run rather than dumped all at once right before
+    // `download_queue` returns.
+    assert!(
+        !handle.is_finished(),
+        "download_queue already finished by the time its first SegmentDownloaded event was \
+         consumed — events are batched at the end instead of streamed"
+    );
+
+    let outcome = handle.await.unwrap().unwrap();
+    assert_eq!(outcome.segments.len(), SEGMENTS);
+}
+
+/// Companion regression test for a real report against `penne::check`'s
+/// identical fix: a release with many missing articles against a single
+/// server must also stream `SegmentMissing` events per-item on that (the
+/// last) server, not batch them into the post-loop — otherwise a
+/// mostly-missing download would sit at 0% for the whole run too.
+#[tokio::test]
+async fn missing_progress_events_arrive_while_the_download_is_still_running() {
+    const SEGMENTS: usize = 20;
+    const CONNECTIONS: usize = 4;
+    const DELAY: Duration = Duration::from_millis(50);
+
+    // No known bodies at all — every BODY request comes back 430.
+    let (addr, _in_flight, _peak) = spawn_slow_server(HashMap::new(), DELAY);
+
+    let mut segments = Vec::new();
+    for i in 0..SEGMENTS {
+        segments.push(QueuedSegment {
+            message_id: format!("seg{i}@test"),
+            part: i as u32 + 1,
+            bytes: 5,
+        });
+    }
+    let queue = DownloadQueue {
+        files: vec![QueuedFile {
+            name: "movie.bin".to_string(),
+            segments,
+        }],
+    };
+    let server = ServerEntry {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        ssl: false,
+        connections: CONNECTIONS,
+        username: None,
+        password: None,
+        retry_delay: 0,
+        timeout: 5,
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().to_path_buf();
+
+    let (tx, mut rx) = channel();
+    let handle =
+        tokio::spawn(
+            async move { download_queue(&queue, &[server], &dest_path, 0, Some(tx)).await },
+        );
+
+    loop {
+        let ev = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect(
+                "timed out waiting for the first missing-progress event — \
+                 a mostly-missing download isn't streaming progress either",
+            )
+            .expect("channel closed before any per-segment event arrived");
+        if matches!(ev, ProgressEvent::Started { .. }) {
+            continue;
+        }
+        assert!(
+            matches!(ev, ProgressEvent::SegmentMissing { .. }),
+            "expected a SegmentMissing event, got {ev:?}"
+        );
+        break;
+    }
+
+    assert!(
+        !handle.is_finished(),
+        "download_queue already finished by the time its first SegmentMissing event was \
+         consumed — missing events are still batched at the end instead of streamed"
+    );
+
+    let outcome = handle.await.unwrap().unwrap();
+    assert_eq!(outcome.missing.len(), SEGMENTS);
 }

@@ -155,20 +155,25 @@ pub async fn download_queue(
     // tried) can tell the two apart.
     let mut last_decode_err: HashMap<String, String> = HashMap::new();
 
-    for server in servers {
+    let last_server_idx = servers.len() - 1;
+    for (idx, server) in servers.iter().enumerate() {
         if pending.is_empty() {
             break;
         }
         let worker_count = server.connections.max(1);
-        let (fetched, leftover) =
-            drain_one_server(server, pending, dest_dir, retries, worker_count).await;
+        let is_last_server = idx == last_server_idx;
+        let (fetched, leftover) = drain_one_server(
+            server,
+            pending,
+            dest_dir,
+            retries,
+            worker_count,
+            &progress,
+            is_last_server,
+        )
+        .await;
 
         for (item, decoded) in fetched {
-            emit(&progress, || ProgressEvent::SegmentDownloaded {
-                file_name: item.file_name.clone(),
-                part: item.part,
-                bytes: decoded.data.len() as u64,
-            });
             last_decode_err.remove(&item.message_id);
             outcome.segments.insert(item.message_id, decoded);
         }
@@ -182,14 +187,15 @@ pub async fn download_queue(
         }
     }
 
+    // Every item still here failed even the last configured server, so
+    // `worker_loop` (told it was draining the last server) has already
+    // emitted its `SegmentMissing`/`SegmentCorrupt` progress event for each
+    // — this just builds the precise final report from the full
+    // cross-server `last_decode_err` history, which is more authoritative
+    // than any single pass's own view (see that map's own doc comment).
     for item in pending {
         match last_decode_err.remove(&item.message_id) {
             Some(error) => {
-                emit(&progress, || ProgressEvent::SegmentCorrupt {
-                    file_name: item.file_name.clone(),
-                    part: item.part,
-                    error: error.clone(),
-                });
                 outcome.corrupt.push(CorruptSegment {
                     file_name: item.file_name,
                     part: item.part,
@@ -198,10 +204,6 @@ pub async fn download_queue(
                 });
             }
             None => {
-                emit(&progress, || ProgressEvent::SegmentMissing {
-                    file_name: item.file_name.clone(),
-                    part: item.part,
-                });
                 outcome.missing.push(MissingSegment {
                     file_name: item.file_name,
                     part: item.part,
@@ -225,12 +227,32 @@ fn emit(progress: &Option<ProgressSender>, event: impl FnOnce() -> ProgressEvent
 /// with its decoded body; `leftover` is everything this server didn't
 /// resolve (missing, or fetched-but-undecodable — paired with the decode
 /// error when that's why), for the next server in priority order to try.
+///
+/// `progress` is threaded down into each worker so a `SegmentDownloaded`
+/// event fires the instant *that item* is fetched and decoded — not
+/// batched up and only emitted once this whole function returns. All of
+/// `worker_count` workers pull from one shared queue and only stop once
+/// it's empty, so without per-item emission every worker's task finishes
+/// within the same instant at the very end of the pass regardless of queue
+/// size, making the progress panel sit still for the whole fetch and then
+/// jump straight to 100% (found and fixed via the identical bug in
+/// `penne::check::drain_one_server` — see that module's history).
+///
+/// `is_last_server` mirrors `penne::check`'s fix too: a "missing"/"corrupt"
+/// verdict is normally only final once every configured server has had a
+/// turn, but for the *last* one that's true the instant each item
+/// resolves, so it emits per-item there too instead of leaving every
+/// leftover item to pile up for one batch after the whole multi-server
+/// check returns — the difference between a mostly-missing release
+/// updating the panel throughout the download or not moving until the end.
 async fn drain_one_server(
     server: &ServerEntry,
     pending: Vec<WorkItem>,
     dest_dir: &Path,
     retries: u32,
     worker_count: usize,
+    progress: &Option<ProgressSender>,
+    is_last_server: bool,
 ) -> (
     Vec<(WorkItem, DecodedPart)>,
     Vec<(WorkItem, Option<String>)>,
@@ -244,6 +266,8 @@ async fn drain_one_server(
             server.clone(),
             dest_dir.to_path_buf(),
             retries,
+            progress.clone(),
+            is_last_server,
         ));
     }
 
@@ -268,11 +292,21 @@ async fn drain_one_server(
 /// against `server` (retrying per [`fetch_with_retry`]), repeat until the
 /// queue is empty. Keeps one connection open for the entire pass rather
 /// than reconnecting per item.
+///
+/// Emits `SegmentDownloaded` as soon as each item is fetched and decoded.
+/// A `SegmentMissing`/`SegmentCorrupt` event fires per-item too, but only
+/// when `is_last_server` — classified from *this pass's own* outcome
+/// (missing if the server never had it, corrupt if it had it but decoding
+/// failed), a reasonable live approximation; the authoritative
+/// classification `download_queue` ultimately reports still comes from its
+/// own full cross-server `last_decode_err` history, unaffected by this.
 async fn worker_loop(
     queue: Arc<Mutex<VecDeque<WorkItem>>>,
     server: ServerEntry,
     dest_dir: PathBuf,
     retries: u32,
+    progress: Option<ProgressSender>,
+    is_last_server: bool,
 ) -> (
     Vec<(WorkItem, DecodedPart)>,
     Vec<(WorkItem, Option<String>)>,
@@ -291,12 +325,24 @@ async fn worker_loop(
         let body = match fetch_with_retry(&mut client, &server, &item.message_id, retries).await {
             Ok(Some(body)) => body,
             Ok(None) => {
+                if is_last_server {
+                    emit(&progress, || ProgressEvent::SegmentMissing {
+                        file_name: item.file_name.clone(),
+                        part: item.part,
+                    });
+                }
                 leftover.push((item, None));
                 continue;
             }
             Err(_) => {
                 // Exhausted retries against this server; the next server in
                 // priority order gets a turn.
+                if is_last_server {
+                    emit(&progress, || ProgressEvent::SegmentMissing {
+                        file_name: item.file_name.clone(),
+                        part: item.part,
+                    });
+                }
                 leftover.push((item, None));
                 continue;
             }
@@ -307,9 +353,23 @@ async fn worker_loop(
                 // Cache the raw body, not the decoded form — see the module
                 // docs on `crate::cache` for why.
                 let _ = cache::store(&dest_dir, &item.message_id, &body);
+                emit(&progress, || ProgressEvent::SegmentDownloaded {
+                    file_name: item.file_name.clone(),
+                    part: item.part,
+                    bytes: decoded.data.len() as u64,
+                });
                 fetched.push((item, decoded));
             }
-            Err(e) => leftover.push((item, Some(e.to_string()))),
+            Err(e) => {
+                if is_last_server {
+                    emit(&progress, || ProgressEvent::SegmentCorrupt {
+                        file_name: item.file_name.clone(),
+                        part: item.part,
+                        error: e.to_string(),
+                    });
+                }
+                leftover.push((item, Some(e.to_string())));
+            }
         }
     }
 

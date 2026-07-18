@@ -156,16 +156,23 @@ existence check, not an article transfer — and reports which files are
 complete and which are missing segments, without fetching, decoding,
 writing, or extracting anything. Exits non-zero if anything is missing, so
 it's useful to script ahead of a real download (e.g. skip a release that's
-already expired off the indexer's server). The final line reports exactly
-how many bytes the check itself used (KiB/MiB, not the release's size) —
-proof of just how cheap `STAT` is next to a real download:
+already expired off the indexer's server). A live progress bar (segments
+checked, not bytes/speed — nothing is ever fetched) tracks the check on an
+interactive terminal, same as `download`'s own panel. A concise summary
+closes the run, leading with the percentage of articles actually present —
+the number that matters most at a glance — plus how many bytes the check
+itself used (KiB/MiB, not the release's size, proof of just how cheap
+`STAT` is next to a real download):
 
 ```
 checking 6968 segment(s) across 24 file(s)...
   complete: movie.mkv (200/200 segments)
   ...
-24 of 24 file(s) complete; 0 segment(s) missing
-used 218.7 KiB to check (6968 segment(s) via STAT — no article data was downloaded)
+
+summary
+  articles present: 6968/6968 (100.0%)
+  files complete:   24/24
+  data used:        218.7 KiB (STAT only — no article data downloaded)
 ```
 
 ### Progress

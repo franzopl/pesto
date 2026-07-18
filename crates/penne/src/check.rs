@@ -32,6 +32,24 @@ use tokio::task::JoinSet;
 use crate::client::DownloadClient;
 use crate::queue::DownloadQueue;
 
+/// One segment's `STAT` just resolved, for a live progress bar —
+/// deliberately its own small type rather than reusing
+/// [`crate::progress::ProgressEvent`]: that enum's variants
+/// (`SegmentDownloaded`, `FileAssembled`, ...) describe fetching and
+/// writing bytes, none of which a `STAT`-only check ever does.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckProgress {
+    pub present: bool,
+}
+
+pub type CheckProgressSender = tokio::sync::mpsc::UnboundedSender<CheckProgress>;
+pub type CheckProgressReceiver = tokio::sync::mpsc::UnboundedReceiver<CheckProgress>;
+
+/// Create a fresh check-progress channel.
+pub fn channel() -> (CheckProgressSender, CheckProgressReceiver) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
 /// A segment no configured server confirmed via `STAT`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MissingSegment {
@@ -86,10 +104,18 @@ struct WorkItem {
 /// order, up to `server.connections` workers concurrently per server. A
 /// segment confirmed missing (`430`) from every configured server lands in
 /// [`CheckOutcome::missing`]; everything else counts as present.
+///
+/// `progress`, when given, gets one [`CheckProgress`] event per segment as
+/// its fate is *finally* decided — a "present" event fires as soon as any
+/// server confirms it; a "missing" event only fires once every configured
+/// server has been tried and none had it, mirroring
+/// [`crate::download::download_queue`]'s own emit points exactly (never
+/// emit "missing" for a segment a backup server might still have).
 pub async fn check_queue(
     queue: &DownloadQueue,
     servers: &[ServerEntry],
     retries: u32,
+    progress: Option<CheckProgressSender>,
 ) -> Result<CheckOutcome> {
     anyhow::ensure!(!servers.is_empty(), "no servers configured");
 
@@ -109,13 +135,22 @@ pub async fn check_queue(
     let mut present: HashMap<String, u32> = HashMap::new();
     let mut bytes_used = 0u64;
 
-    for server in servers {
+    let last_server_idx = servers.len() - 1;
+    for (idx, server) in servers.iter().enumerate() {
         if pending.is_empty() {
             break;
         }
         let worker_count = server.connections.max(1);
-        let (found, leftover, bytes) =
-            drain_one_server(server, pending, retries, worker_count).await;
+        let is_last_server = idx == last_server_idx;
+        let (found, leftover, bytes) = drain_one_server(
+            server,
+            pending,
+            retries,
+            worker_count,
+            &progress,
+            is_last_server,
+        )
+        .await;
         bytes_used += bytes;
         for item in found {
             *present.entry(item.file_name).or_insert(0) += 1;
@@ -123,6 +158,10 @@ pub async fn check_queue(
         pending = leftover;
     }
 
+    // Every item still here failed even the last configured server, so
+    // `worker_loop` (told it was draining the last server) has already
+    // emitted its "missing" progress event for each of them — this just
+    // builds the report, it doesn't emit again.
     let missing = pending
         .into_iter()
         .map(|item| MissingSegment {
@@ -151,23 +190,55 @@ pub async fn check_queue(
     })
 }
 
+fn emit(progress: &Option<CheckProgressSender>, present: bool) {
+    if let Some(tx) = progress {
+        let _ = tx.send(CheckProgress { present });
+    }
+}
+
 /// Drain `pending` against `server` using `worker_count` concurrent
 /// connections. Returns `(found, leftover, bytes_used)`: `found` is
 /// everything this server confirmed present; `leftover` is everything it
 /// didn't (missing, or a STAT attempt that exhausted its retries), for the
 /// next server in priority order to try; `bytes_used` is every byte sent or
 /// received across every connection this server's workers opened.
+///
+/// `progress` is threaded down into each worker so a "present" event fires
+/// the instant *that item* resolves — not batched up and only emitted once
+/// this whole function returns. All of `worker_count` workers pull from one
+/// shared queue and only stop once it's empty, so without per-item
+/// emission every worker's task finishes within the same instant at the
+/// very end of the pass regardless of queue size, making the progress bar
+/// sit still for the entire check and then jump straight to 100%.
+///
+/// `is_last_server` matters for the same reason: a "missing" verdict is
+/// only final once every configured server has had a turn, but for the
+/// *last* one, that's true the instant each item resolves — so on the last
+/// server, a "missing" event fires per-item too, instead of every leftover
+/// item silently piling up for a single batch emitted after this whole
+/// function (and therefore the whole multi-server check) returns. On a
+/// single-server setup (the common case) every pass is the last pass, so
+/// this is the difference between a release with many missing articles
+/// updating the bar throughout the check or not moving until the very end.
 async fn drain_one_server(
     server: &ServerEntry,
     pending: Vec<WorkItem>,
     retries: u32,
     worker_count: usize,
+    progress: &Option<CheckProgressSender>,
+    is_last_server: bool,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
 
     let mut workers = JoinSet::new();
     for _ in 0..worker_count {
-        workers.spawn(worker_loop(queue.clone(), server.clone(), retries));
+        workers.spawn(worker_loop(
+            queue.clone(),
+            server.clone(),
+            retries,
+            progress.clone(),
+            is_last_server,
+        ));
     }
 
     let mut found = Vec::new();
@@ -186,10 +257,17 @@ async fn drain_one_server(
 /// One worker's whole pass over `queue`: pop an item, `STAT` it against
 /// `server` (retrying per [`stat_with_retry`]), repeat until the queue is
 /// empty. Keeps one connection open for the entire pass.
+///
+/// Emits a "present" [`CheckProgress`] event as soon as each item resolves
+/// present. A "missing" event fires per-item too, but only when
+/// `is_last_server` — otherwise a segment this server doesn't have might
+/// still turn up on the next one, so it's not a final answer yet.
 async fn worker_loop(
     queue: Arc<Mutex<VecDeque<WorkItem>>>,
     server: ServerEntry,
     retries: u32,
+    progress: Option<CheckProgressSender>,
+    is_last_server: bool,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let mut client: Option<DownloadClient> = None;
     let mut found = Vec::new();
@@ -212,8 +290,16 @@ async fn worker_loop(
         )
         .await
         {
-            Ok(true) => found.push(item),
-            Ok(false) | Err(_) => leftover.push(item),
+            Ok(true) => {
+                emit(&progress, true);
+                found.push(item);
+            }
+            Ok(false) | Err(_) => {
+                if is_last_server {
+                    emit(&progress, false);
+                }
+                leftover.push(item);
+            }
         }
     }
 

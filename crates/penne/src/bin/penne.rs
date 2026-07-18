@@ -276,7 +276,14 @@ async fn check_availability(
         queue.files.len()
     );
 
-    let outcome = penne::check::check_queue(queue, servers, retries).await?;
+    let (tx, rx) = penne::check::channel();
+    let progress_task = penne::ui::check::spawn_renderer(rx, total_segments as u32);
+
+    let outcome = penne::check::check_queue(queue, servers, retries, Some(tx)).await?;
+    // `check_queue` owns the only sender clone, so it's already dropped by
+    // the time it returns — the renderer's channel closes on its own and
+    // this simply waits for its final redraw to flush.
+    progress_task.await.ok();
 
     let mut incomplete_files = 0u32;
     for f in &outcome.files {
@@ -297,16 +304,24 @@ async fn check_availability(
         println!("    missing: {} part {}", seg.file_name, seg.part);
     }
 
+    let present_segments = total_segments as u32 - outcome.missing.len() as u32;
+    let present_pct = if total_segments > 0 {
+        present_segments as f64 / total_segments as f64 * 100.0
+    } else {
+        100.0
+    };
+    let complete_files = outcome.files.len() as u32 - incomplete_files;
+
+    println!();
+    println!("summary");
+    println!("  articles present: {present_segments}/{total_segments} ({present_pct:.1}%)");
     println!(
-        "{} of {} file(s) complete; {} segment(s) missing",
-        outcome.files.len() as u32 - incomplete_files,
-        outcome.files.len(),
-        outcome.missing.len()
+        "  files complete:   {complete_files}/{}",
+        outcome.files.len()
     );
     println!(
-        "used {} to check ({} segment(s) via STAT — no article data was downloaded)",
-        pesto::progress::format_size(outcome.bytes_used),
-        total_segments,
+        "  data used:        {} (STAT only — no article data downloaded)",
+        pesto::progress::format_size(outcome.bytes_used)
     );
 
     anyhow::ensure!(

@@ -50,7 +50,7 @@ testable state.
 | 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
 | 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
 | 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
-| 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking. |
+| 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`. |
 
 ---
 
@@ -536,6 +536,128 @@ before `penne` could handle this at all:
       integration test in `tests/check.rs` against a real TCP round trip,
       and an end-to-end assertion that the report line appears in
       `tests/cli_download_end_to_end.rs`.
+- [x] **Live progress bar**: a check across thousands of segments still
+      takes long enough to look like a hang without feedback, and a static
+      "checking N segments..." line gave none while it ran. A new
+      `penne::check::CheckProgress`/`channel()` — deliberately its own tiny
+      type rather than reusing `crate::progress::ProgressEvent`, whose
+      variants (`SegmentDownloaded`, `FileAssembled`, ...) all describe
+      fetching/writing bytes a `STAT`-only check never does — lets
+      `check_queue` emit one event per segment as its fate is *finally*
+      decided (mirroring `download_queue`'s own emit points: "present"
+      fires as soon as any server confirms it, "missing" only once every
+      server has been tried). `penne::ui::check` (new, alongside
+      `penne::ui::terminal`) renders it: a single redraw-in-place bar on a
+      TTY, one throttled plain line otherwise — deliberately much simpler
+      than the download panel (no speed/ETA, since nothing is fetched; no
+      per-file bars, since one number — segments resolved — is what
+      matters here), but still built on the same shared
+      `pesto::ui::render` primitives so it reads as the same program.
+      Verified with unit tests in `penne::ui::check` (bar reflects progress
+      and missing count; an empty queue reports 100% without a
+      divide-by-zero) and an integration test in `tests/check.rs`
+      confirming `check_queue` emits exactly one present/missing event per
+      segment, and manually under a real pty via `script` against a
+      400-segment synthetic check.
+- [x] **Concise closing summary**: the per-file `complete`/`INCOMPLETE`
+      listing buries the one number that matters most — how much of the
+      release is actually there — among individual file lines on a
+      many-file release. `check_availability` now closes with a short
+      `summary` block leading with `articles present: N/M (P.P%)`, then
+      file completeness and bytes used, instead of the flatter "N of M
+      file(s) complete; K missing" line it printed before.
+- [x] `tests/check_concurrency.rs` — mirrors `tests/concurrency.rs` (the
+      Phase 9 proof for `download_queue`) but for `check_queue`: a fake
+      server holds each `STAT` open briefly and records peak concurrent
+      in-flight requests, confirming `server.connections` really are all
+      used at once (not a hidden serial drain) — written in response to a
+      real check that "took a while". Concurrency itself checked out.
+- [x] **`tls_config()` rebuilt from scratch on every connection** — a real,
+      separate perf bug found while investigating the report below.
+      `pesto::nntp::Connection::connect` populated an entire
+      `RootCertStore` (100+ webpki root certificates) and constructed a
+      fresh `ring` crypto provider on *every single call* — synchronous,
+      non-yielding CPU work with no `.await` point in it. With a high
+      `connections` count and TLS enabled, that many connection attempts
+      firing together means that many redundant rebuilds competing for the
+      runtime's worker threads. Fixed by building the `ClientConfig` once
+      behind a `OnceLock` and sharing the `Arc` — every connection after
+      the first now pays only a refcount bump. Benefits `pesto`'s own
+      posting connections too, not just `penne`. Verified with
+      `tls_config_is_built_once_and_shared` (`crates/pesto/src/nntp/mod.rs`),
+      asserting two calls return the same `Arc` via `Arc::ptr_eq`.
+- [x] **Found and fixed the actual cause**, reported against a
+      50-connection, 6968-segment real-world check: the progress bar sat at
+      0% the entire time, then jumped straight to 100%. Reproduced locally
+      with a synthetic 2000-segment/20-connection check against a fake
+      server (**no TLS involved** — ruling out the fix above as the
+      explanation) and confirmed under a real pty via `script`: the exact
+      same stuck-then-jump behaviour, proving this wasn't just "too fast to
+      see."
+      Root cause: `check_queue`'s per-server pass (`drain_one_server`)
+      spawns `server.connections` workers that all pull from *one shared*
+      queue and each keep running until that shared queue is empty — so
+      every worker's task only completes within the same instant, right at
+      the very end of the whole pass, regardless of how many segments there
+      are. The old code only emitted progress events from the results
+      `drain_one_server` returned *after every worker had finished* — so no
+      event was ever visible until the entire pass was already done, no
+      matter the release's size. `download_queue` (`penne::download`) has
+      the byte-for-byte identical structure and therefore the identical
+      bug, confirmed via the same reproduction technique against the
+      regular (non-`--stat`) download panel.
+      Fixed in both by threading the progress sender down into
+      `worker_loop` and emitting the "present"/`SegmentDownloaded` event
+      the instant *that item* resolves, instead of batching results up in
+      a `Vec` only inspected after the worker (and thus the whole pass)
+      returns. The "missing"/`SegmentMissing`/`SegmentCorrupt` side is
+      deliberately left where it was — a segment one server doesn't have
+      might still turn up on the next one, so only `check_queue`/
+      `download_queue`, once every configured server has actually been
+      tried, can call something truly missing.
+      Verified with new regression tests that catch exactly this failure
+      mode: `progress_events_arrive_while_the_check_is_still_running`
+      (`tests/check.rs`) and `progress_events_arrive_while_the_download_is_still_running`
+      (`tests/concurrency.rs`) both use a fake server with an artificial
+      per-request delay, start the check/download as a background task,
+      wait for the *first* progress event, and assert the background task
+      has *not yet finished* — impossible if events were still batched at
+      the end. Also verified manually under a real pty: the `--stat` bar
+      now climbs smoothly (0%, 4%, 9%, 14%, ... 100%) instead of sitting
+      still and jumping.
+- [x] **The "present" fix alone wasn't enough** — reported again against a
+      release "known to have many failures" (nuked/flooded on the test
+      server), where `--stat` still "barely left starting." The fix above
+      only moved the *present* path's emission earlier; a "missing" verdict
+      is only final once every configured server has been tried, so it was
+      still only ever emitted from the post-loop after the *entire*
+      multi-server check returned — meaning a release that's mostly or
+      entirely missing (a single-server setup makes every pass "the last
+      one") got none of the earlier fix's benefit at all.
+      Fixed by tracking which server in the priority list is the *last*
+      one (`servers.len() - 1`): on that server specifically, a "missing"
+      (`penne::check`) or `SegmentMissing`/`SegmentCorrupt`
+      (`penne::download`) event now fires the instant an item resolves
+      there too, since there's no further server left that could still
+      redeem it — that verdict genuinely is final already, `worker_loop`
+      just wasn't allowed to act on it in real time before. Non-last
+      servers are unaffected: an item they can't resolve still moves to
+      `leftover` silently, since a backup server might yet have it.
+      `download_queue`'s `SegmentMissing` vs `SegmentCorrupt` live
+      classification is a deliberate, documented approximation (judged
+      from that one pass's own outcome, not the full cross-server
+      `last_decode_err` history) — the *returned* `DownloadOutcome` is
+      still classified exactly as before, unaffected, so only the live
+      progress event could in a rare multi-server edge case differ
+      momentarily from the final report.
+      Verified with `missing_progress_events_arrive_while_the_check_is_still_running`
+      (`tests/check.rs`) and
+      `missing_progress_events_arrive_while_the_download_is_still_running`
+      (`tests/concurrency.rs`) — same background-task/first-event/
+      not-yet-finished technique as above, this time against a server that
+      has *nothing* — and manually under a real pty against a fully-missing
+      2000-segment release: the bar now climbs smoothly with a live
+      "N missing" counter instead of sitting at 0% for the whole check.
 
 ---
 
