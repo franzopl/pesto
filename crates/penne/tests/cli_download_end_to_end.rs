@@ -314,3 +314,80 @@ fn download_recovers_a_fully_missing_segment_via_par2() {
     let recovered = std::fs::read(download_dir.join("movie.bin")).unwrap();
     assert_eq!(recovered, original);
 }
+
+#[test]
+fn download_prints_live_progress_instead_of_staying_silent_until_done() {
+    // Regression test: `penne download` used to build the whole
+    // `DownloadOutcome` before printing anything at all, so a large release
+    // looked hung for however long the fetch took. `print_progress` should
+    // now report as segments land.
+    let part1 = b"first half of the file".to_vec();
+    let part2 = b"second half of the file".to_vec();
+    let encoded1 = encode_part(
+        "movie.bin",
+        (part1.len() + part2.len()) as u64,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        &part1,
+        128,
+        None,
+    );
+    let encoded2 = encode_part(
+        "movie.bin",
+        (part1.len() + part2.len()) as u64,
+        PartSpec {
+            number: 2,
+            total: 2,
+            offset: part1.len() as u64,
+        },
+        &part2,
+        128,
+        None,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("seg1@test", encoded1.body);
+    known.insert("seg2@test", encoded2.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+
+    let nzb_path = write_nzb(
+        dir.path(),
+        vec![
+            segment("movie.bin", 1, 2, "seg1@test", part1.len() as u64),
+            segment("movie.bin", 2, 2, "seg2@test", part2.len() as u64),
+        ],
+    );
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download(&nzb_path, &config_path);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The test harness captures the child's stdout via a pipe, not a TTY,
+    // so `print_progress` takes its non-interactive, one-line-per-percent
+    // path — deterministic and easy to assert on, unlike the `\r`-driven
+    // interactive path.
+    assert!(
+        stdout.contains("fetching: 1/2 segments (50%)"),
+        "stdout did not contain a progress line at 50%%:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("fetching: 2/2 segments (100%)"),
+        "stdout did not contain a progress line at 100%%:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("assembled: movie.bin"),
+        "stdout did not report the file being assembled:\n{stdout}"
+    );
+}
