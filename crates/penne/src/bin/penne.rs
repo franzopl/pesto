@@ -2,10 +2,12 @@
 //! verifies/repairs it with PAR2 if recovery data was part of the release,
 //! and extracts any archives (`.rar`/`.7z`/`.zip`) it finds.
 //!
-//! `info` and `download` are both functional end-to-end as of Phase 7: fetch
-//! (Phase 2), yEnc decode (Phase 3), file assembly (Phase 4), PAR2
-//! verify/repair (Phase 6), and archive extraction (Phase 7). Concurrency is
-//! still one connection per server (`ROADMAP.md` Phase 2's still-open item).
+//! `info` and `download` are both functional end-to-end as of Phase 8: fetch
+//! (Phase 2, with per-segment retry/backoff and resume via
+//! [`penne::cache`] — Phase 8), yEnc decode (Phase 3), file assembly
+//! (Phase 4), PAR2 verify/repair (Phase 6), and archive extraction
+//! (Phase 7). Concurrency is still one connection per server (`ROADMAP.md`
+//! Phase 2's still-open item).
 
 use std::path::{Path, PathBuf};
 
@@ -81,7 +83,9 @@ async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> R
     );
     let dest_dir = out_dir.unwrap_or(config.download_dir);
 
-    let outcome = penne::download::download_queue(&queue, &config.servers, None).await?;
+    let outcome =
+        penne::download::download_queue(&queue, &config.servers, &dest_dir, config.retries, None)
+            .await?;
     println!(
         "fetched {} segment(s); {} missing; {} corrupt",
         outcome.segments.len(),
@@ -147,6 +151,11 @@ async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> R
     for archive in &extracted {
         println!("  extracted: {} ({:?})", archive.base_name, archive.kind);
     }
+
+    // Everything that needed fixing got fixed (we'd have bailed above
+    // otherwise), so the cached article bodies kept for resume are no
+    // longer needed.
+    penne::cache::clear(&dest_dir)?;
 
     Ok(())
 }

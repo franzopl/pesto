@@ -45,6 +45,7 @@ testable state.
 | 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
 | 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
+| 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
 
 ---
 
@@ -272,16 +273,47 @@ back.
   test fixture was missing it; `penne::extract`'s own logic was correct
   throughout.
 
-## Phase 8 — Resilience
+## Phase 8 — Resilience ✅
 
-- [ ] Resume: persist queue state so an interrupted download continues
-      instead of restarting (mirrors `pesto::resume` conceptually, but the
-      resumable unit is "segments not yet fetched", not "files not yet
-      posted").
-- [ ] Retry/backoff per segment, configurable, matching `pesto`'s conventions
-      (`retry_delay` already exists on `ServerEntry`, reused from `pesto`).
-- [ ] Multi-server priority: primary + backup providers, already representable
-      via `Config::servers`; wire actual failover logic in Phase 2.
+- [x] **Resume**, at the segment level (`penne::cache`): before any network
+      request, `download_queue` checks a small on-disk cache
+      (`<dest_dir>/.penne-cache/`, one file per Message-ID, keyed by a
+      percent-encoded — not hashed, to rule out collisions entirely — form
+      of the ID) for a body already fetched in a previous, interrupted run.
+      A hit skips the network request outright. Every freshly fetched body
+      is cached the same way, so an interrupted `penne download` re-run on
+      the same `.nzb`/`--out-dir` picks up exactly where it left off instead
+      of re-downloading everything. `penne download` clears the cache once
+      a run completes fully (assembled, PAR2-clean or repaired, extracted)
+      — its only purpose is resuming *that* download.
+      This is deliberately **not** the "resumable unit is 'segments not yet
+      fetched', not 'files not yet posted'" design taken further into a
+      full fetch-and-write-incrementally pipeline merge with
+      `crate::assemble` (which would also solve holding a whole file's
+      decoded bytes in memory before writing — a real scalability concern
+      for multi-GB releases, tracked under Phase 9). The cache achieves the
+      same resumability outcome without that larger refactor's risk.
+- [x] **Retry/backoff per segment, configurable:** a connection or fetch
+      error against one server (not a definitive `430` — that is retried by
+      trying the *next server*, never the same one again) is retried up to
+      `retries` times, sleeping that server's own `retry_delay` between
+      attempts, reconnecting each time since an error likely means the
+      connection is dead. `retries` now comes from `penne`'s own config
+      (`RawConfig::retries`, defaulting to `pesto::config::DEFAULT_RETRIES`);
+      `RawServer::retry_delay` is newly configurable per server too — it was
+      silently hardcoded to `1` before this phase, ignoring whatever the
+      TOML said.
+- [x] **Multi-server priority** (primary + backup providers): already
+      implemented in Phase 2's per-segment failover — nothing new needed
+      here, just confirming the roadmap's forward-reference is satisfied.
+- [x] Verified in `tests/resilience.rs`: a segment already present in the
+      cache is served without any network I/O (proven against a server
+      that would report the article missing if actually queried); a
+      freshly fetched segment lands in the cache for next time; a
+      transient connection failure (a fake server that drops its first *N*
+      connections outright) is recovered from once `retries` covers it; and
+      exhausting `retries` reports the segment `missing` rather than
+      hanging or failing the whole run.
 
 ## Phase 9 — Performance
 

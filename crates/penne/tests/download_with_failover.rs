@@ -152,7 +152,10 @@ async fn fetches_and_decodes_from_the_only_configured_server() {
     let queue = queue_with_one_segment("art1@test");
     let servers = vec![server_entry(addr)];
 
-    let outcome = download_queue(&queue, &servers, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
     let decoded = outcome.segments.get("art1@test").unwrap();
@@ -171,7 +174,10 @@ async fn falls_back_to_backup_when_primary_is_missing() {
     let queue = queue_with_one_segment("art1@test");
     let servers = vec![server_entry(primary), server_entry(backup)];
 
-    let outcome = download_queue(&queue, &servers, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
     assert_eq!(outcome.segments.get("art1@test").unwrap().data, data);
@@ -195,7 +201,10 @@ async fn falls_back_to_backup_when_primary_serves_a_corrupt_copy() {
     let queue = queue_with_one_segment("art1@test");
     let servers = vec![server_entry(primary), server_entry(backup)];
 
-    let outcome = download_queue(&queue, &servers, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
     assert_eq!(outcome.segments.get("art1@test").unwrap().data, data);
@@ -213,7 +222,10 @@ async fn records_corrupt_when_no_server_has_a_decodable_copy() {
     let queue = queue_with_one_segment("art1@test");
     let servers = vec![server_entry(addr)];
 
-    let outcome = download_queue(&queue, &servers, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.segments.is_empty());
     assert_eq!(outcome.corrupt.len(), 1);
@@ -229,7 +241,10 @@ async fn records_missing_when_no_server_has_it() {
     let queue = queue_with_one_segment("ghost@test");
     let servers = vec![server_entry(a), server_entry(b)];
 
-    let outcome = download_queue(&queue, &servers, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
+        .await
+        .unwrap();
     assert!(outcome.segments.is_empty());
     assert!(outcome.corrupt.is_empty());
     assert_eq!(outcome.missing.len(), 1);

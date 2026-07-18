@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use pesto::config::ServerEntry;
+use pesto::config::{ServerEntry, DEFAULT_RETRIES, DEFAULT_RETRY_DELAY};
 use serde::{Deserialize, Serialize};
 
 /// Default number of parallel download connections.
@@ -26,6 +26,11 @@ pub struct Config {
     pub temp_dir: Option<PathBuf>,
     /// Number of parallel NNTP connections to use.
     pub connections: usize,
+    /// Number of retry attempts per segment against a single server before
+    /// moving on to the next configured server (see
+    /// [`crate::download::download_queue`]). Each server's own
+    /// `retry_delay` governs the pause between attempts.
+    pub retries: u32,
 }
 
 /// On-disk TOML representation of a `[[servers]]` entry, before defaults are
@@ -40,6 +45,8 @@ pub struct RawServer {
     pub username: Option<String>,
     pub password: Option<String>,
     pub connections: Option<usize>,
+    /// Seconds to wait between retry attempts against this server.
+    pub retry_delay: Option<u64>,
 }
 
 /// On-disk TOML representation of the whole config file.
@@ -50,6 +57,8 @@ pub struct RawConfig {
     pub download_dir: Option<PathBuf>,
     pub temp_dir: Option<PathBuf>,
     pub connections: Option<usize>,
+    /// Retry attempts per segment per server before failing over.
+    pub retries: Option<u32>,
 }
 
 impl RawConfig {
@@ -73,7 +82,7 @@ impl RawConfig {
                 connections: s.connections.unwrap_or(DEFAULT_CONNECTIONS),
                 username: s.username,
                 password: s.password,
-                retry_delay: 1,
+                retry_delay: s.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
                 timeout: 120,
             })
             .collect();
@@ -83,6 +92,7 @@ impl RawConfig {
             download_dir: self.download_dir.unwrap_or_else(|| PathBuf::from(".")),
             temp_dir: self.temp_dir,
             connections: self.connections.unwrap_or(DEFAULT_CONNECTIONS),
+            retries: self.retries.unwrap_or(DEFAULT_RETRIES),
         })
     }
 }

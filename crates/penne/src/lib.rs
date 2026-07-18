@@ -13,6 +13,7 @@
 //! of scope until the CLI reaches feature parity with the roadmap.
 
 pub mod assemble;
+pub mod cache;
 pub mod client;
 pub mod config;
 pub mod download;
