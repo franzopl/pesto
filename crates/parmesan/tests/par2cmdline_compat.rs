@@ -216,3 +216,185 @@ fn par2cmdline_creates_parmesan_verifies_and_reports_ok() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+#[ignore = "shells out to the external `par2` binary; run with `--ignored`"]
+fn single_file_round_trips_both_directions() {
+    if !par2cmdline_available() {
+        eprintln!("skipping: `par2` (par2cmdline) not found on PATH");
+        return;
+    }
+
+    // A single-file set has no File-ID ordering decision to get right, but
+    // it's still worth confirming as a baseline both tools agree on.
+    for (dir_name, parmesan_creates) in [("single-p-creates", true), ("single-par2-creates", false)]
+    {
+        let dir = temp_dir(dir_name);
+        let f = dir.join("solo.bin");
+        random_file(&f, 250_000, 42);
+        let original_md5 = md5_of(&f);
+
+        if parmesan_creates {
+            let status = Command::new(parmesan_bin())
+                .args(["create", "solo.bin", "-r", "25", "-s", "8KiB", "-q"])
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "parmesan create failed");
+        } else {
+            let status = Command::new("par2")
+                .args([
+                    "create",
+                    "-q",
+                    "-r25",
+                    "-s8192",
+                    "-a",
+                    "solo.bin.par2",
+                    "solo.bin",
+                ])
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "par2cmdline create failed");
+        }
+
+        corrupt_one_byte(&f, 123_456);
+
+        if parmesan_creates {
+            let status = Command::new("par2")
+                .args(["repair", "solo.bin.par2"])
+                .current_dir(&dir)
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "par2cmdline repair failed");
+        } else {
+            let status = Command::new(parmesan_bin())
+                .args(["repair", "solo.bin.par2"])
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "parmesan repair failed");
+        }
+
+        assert_eq!(md5_of(&f), original_md5, "{dir_name}: content mismatch");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[test]
+#[ignore = "shells out to the external `par2` binary; run with `--ignored`"]
+fn unicode_filenames_round_trip_both_directions() {
+    if !par2cmdline_available() {
+        eprintln!("skipping: `par2` (par2cmdline) not found on PATH");
+        return;
+    }
+
+    let dir = temp_dir("unicode-names");
+    // Accented Latin, CJK, and an emoji — exercises non-ASCII File
+    // Description packet names in both directions.
+    let movie = dir.join("filme_ação.mkv");
+    let subs = dir.join("字幕_🎬.srt.bin");
+    random_file(&movie, 200_000, 8);
+    random_file(&subs, 40_000, 9);
+    let movie_md5 = md5_of(&movie);
+    let subs_md5 = md5_of(&subs);
+
+    let status = Command::new(parmesan_bin())
+        .args([
+            "create",
+            "filme_ação.mkv",
+            "字幕_🎬.srt.bin",
+            "-r",
+            "40",
+            "-s",
+            "16KiB",
+            "-q",
+        ])
+        .current_dir(&dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "parmesan create failed");
+
+    corrupt_one_byte(&movie, 54_321);
+    std::fs::remove_file(&subs).unwrap();
+
+    let status = Command::new("par2")
+        .args(["repair", "filme_ação.mkv.par2"])
+        .current_dir(&dir)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "par2cmdline repair failed on Unicode names"
+    );
+
+    assert_eq!(md5_of(&movie), movie_md5);
+    assert_eq!(md5_of(&subs), subs_md5);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore = "shells out to the external `par2` binary; run with `--ignored`"]
+fn heavier_multi_file_damage_round_trips_both_directions() {
+    if !par2cmdline_available() {
+        eprintln!("skipping: `par2` (par2cmdline) not found on PATH");
+        return;
+    }
+
+    // Five files, several corrupted in multiple places and two deleted
+    // entirely — closer to a real "half the archive got mangled" scenario
+    // than the single-byte-corruption tests above.
+    let dir = temp_dir("heavier-damage");
+    let names = ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin"];
+    let sizes = [90_000usize, 150_000, 45_000, 300_000, 60_000];
+    let mut originals = Vec::new();
+    for (i, (name, size)) in names.iter().zip(sizes).enumerate() {
+        let path = dir.join(name);
+        random_file(&path, size, 100 + i as u64);
+        originals.push(md5_of(&path));
+    }
+
+    let status = Command::new(parmesan_bin())
+        .args(
+            [
+                "create", "a.bin", "b.bin", "c.bin", "d.bin", "e.bin", "-r", "50", "-s", "8KiB",
+                "-q",
+            ]
+            .as_slice(),
+        )
+        .current_dir(&dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "parmesan create failed");
+
+    // Corrupt several spots in a.bin, several in d.bin; delete b.bin and e.bin.
+    for offset in [1_000usize, 40_000, 80_000] {
+        corrupt_one_byte(&dir.join("a.bin"), offset);
+    }
+    for offset in [5_000usize, 150_000, 250_000] {
+        corrupt_one_byte(&dir.join("d.bin"), offset);
+    }
+    std::fs::remove_file(dir.join("b.bin")).unwrap();
+    std::fs::remove_file(dir.join("e.bin")).unwrap();
+
+    let status = Command::new("par2")
+        .args(["repair", "a.bin.par2"])
+        .current_dir(&dir)
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "par2cmdline repair failed");
+
+    for (name, expected) in names.iter().zip(&originals) {
+        assert_eq!(
+            &md5_of(&dir.join(name)),
+            expected,
+            "{name} content mismatch"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}

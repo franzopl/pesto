@@ -369,8 +369,12 @@ confirmed byte-identical via MD5). What's still open:
       (exit 0) on an untouched `par2cmdline`-created set. This is the
       strongest evidence so far that the File-ID ordering fix is actually
       correct, not just self-consistent within `parmesan`.
-- [ ] **Wider fixture matrix**: more file counts/sizes/slice sizes, Unicode
-      names, single-file sets, sets with more damage than one byte per file.
+- [x] **Wider fixture matrix**: `par2cmdline_compat.rs` now also covers a
+      single-file set (both directions), Unicode filenames (accented Latin,
+      CJK, and an emoji in the same set, `par2cmdline`-repaired), and
+      heavier multi-file damage (5 files, 3 corruption spots each in two of
+      them, 2 files deleted entirely, `par2cmdline`-repaired) — 6 ignored
+      tests total, all passing against `par2cmdline` 0.8.1.
 - [ ] **Fixture corpus**: small set of real `.par2` files (varying slice
       sizes, volume counts, Unicode names) versioned under
       `crates/parmesan/tests/fixtures/`, exercised in every CI run without
@@ -405,7 +409,7 @@ confirmed byte-identical via MD5). What's still open:
       benchmark of matrix inversion cost for `m` from 10 to 5000 to calibrate
       the practical limit before algebra cost dominates the MAC cost.
 
-### 22i — Documentation (Complexity: Low) — Mostly done
+### 22i — Documentation (Complexity: Low) ✅ Done
 
 - [x] Rustdoc on every new public item in `packet_reader`, `recovery_set`,
       `matrix`, `gf16_mac`, `verify`, `decoder`, `repair` (extends Phase 26's
@@ -418,10 +422,14 @@ confirmed byte-identical via MD5). What's still open:
       fixed a stale README entry: the `create` flag table listed
       `--num-slices`, which doesn't exist — the real flag is
       `--slice-count`).
-- [ ] Repair algorithm section in `INTERNALS.md` (Phase 26c), citing the PAR2
-      spec sections it implements. `INTERNALS.md` doesn't exist yet at all
-      (Phase 26c is unstarted); the module-level doc comments on `matrix.rs`,
-      `decoder.rs`, and `repair.rs` cover the same ground for now.
+- [x] `INTERNALS.md` written (didn't exist before this). Covers the repair
+      algorithm this phase added *and* the encode-side material Phase 26c
+      originally scoped (GF(2¹⁶) construction, the Vandermonde/MDS
+      structure behind the reduced matrix, SIMD dispatch strategy for both
+      encode and decode, the packet format, volume layout) — Phase 26c can
+      likely be closed as substantially addressed rather than redone from
+      scratch, though it isn't marked done here since this phase didn't
+      audit it against 26c's original checklist item by item.
 
 ---
 
