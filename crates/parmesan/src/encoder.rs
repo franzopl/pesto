@@ -314,7 +314,7 @@ impl RecoveryEncoder {
 
     /// Create an encoder that stores recovery buffers in ALTMAP bit-plane format.
     ///
-    /// Identical to [`new`] in every respect except that the internal recovery
+    /// Identical to [`Self::new`] in every respect except that the internal recovery
     /// buffers use the ALTMAP layout (Phase 27d/27e).  The `flush_avx2_altmap`
     /// path (27e) will use these directly; `finish()` converts them back to
     /// normal layout before returning `RecoverySlice`s.
@@ -357,7 +357,7 @@ impl RecoveryEncoder {
 
     /// Create an encoder that stores recovery buffers in Shuffle2x layout.
     ///
-    /// Identical to [`new`] in every respect except that the internal recovery
+    /// Identical to [`Self::new`] in every respect except that the internal recovery
     /// buffers use the Shuffle2x layout (Phase 28a): lo-bytes in lane 0, hi-bytes
     /// in lane 1 of each 32-byte chunk.  The `flush_avx2_shuffle2x` path will
     /// use these directly; `finish()` converts them back to normal layout before
@@ -415,7 +415,7 @@ impl RecoveryEncoder {
 
     /// Enable parallel per-slice MD5+CRC32 checksum computation.
     /// Each flush will compute checksums alongside RS recovery using `rayon::join`.
-    /// Call [`drain_checksums`] after [`finish`] to retrieve them in slice order.
+    /// Call [`Self::drain_checksums`] after [`Self::finish`] to retrieve them in slice order.
     pub fn with_checksums(mut self) -> Self {
         self.compute_checksums = true;
         self
@@ -434,7 +434,7 @@ impl RecoveryEncoder {
 
     /// Hand the producer an empty, slice-sized `Vec<u8>` — either a buffer
     /// recycled from a previous flush or a fresh allocation. Returning the
-    /// buffer to the encoder via [`add_slice`] keeps the pool refilled.
+    /// buffer to the encoder via [`Self::add_slice`] keeps the pool refilled.
     pub fn take_buffer(&mut self) -> Vec<u8> {
         let slice_size = self.slice_words * 2;
         if let Some(mut buf) = self.free_buffers.pop() {
@@ -3618,7 +3618,7 @@ impl RecoveryEncoder {
 
     /// Consume the encoder and return the finished recovery slices together
     /// with all accumulated per-slice checksums (empty when checksums were
-    /// not enabled via [`with_checksums`]).
+    /// not enabled via [`Self::with_checksums`]).
     ///
     /// This conversion is intentionally sequential rather than parallel: each
     /// input buffer is converted and dropped before the next one starts, so

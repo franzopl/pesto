@@ -21,6 +21,10 @@ path = "src/lib.rs"
 name = "parmesan"
 path = "src/main.rs"
 
+[[bench]]
+name = "decode_throughput"
+harness = false
+
 [dependencies]
 rayon = "1.12.0"
 md-5 = "0.10"
@@ -36,3 +40,7 @@ walkdir = "2"
 [features]
 bench-internals = []
 par2-avx2-gfni-unsafe = []
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+proptest = "1.11.0"

@@ -120,6 +120,19 @@ impl Gf16 {
         self.log[value as usize]
     }
 
+    /// Multiplicative inverse: the value `v⁻¹` such that `mul(v, v⁻¹) == 1`.
+    ///
+    /// Every non-zero element of the multiplicative group has order dividing
+    /// [`ORDER`], so `v⁻¹ == 2^(ORDER - log(v))`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` is zero (zero has no multiplicative inverse).
+    pub fn inverse(&self, value: u16) -> u16 {
+        let log = self.discrete_log(value) as u32;
+        self.exp(ORDER - log)
+    }
+
     /// The base constants assigned to the first `count` input blocks.
     pub fn input_bases(&self, count: usize) -> Vec<u16> {
         input_logbases(count)
@@ -287,6 +300,27 @@ mod tests {
         assert_eq!(gf.recovery_coefficient(1, 1), 4);
         // base_0 = 2, so exponent 2 gives 2^2 = 4.
         assert_eq!(gf.recovery_coefficient(0, 2), 4);
+    }
+
+    #[test]
+    fn inverse_is_the_multiplicative_inverse() {
+        let gf = Gf16::new();
+        assert_eq!(gf.inverse(1), 1);
+        for value in [2u16, 3, 7, 12_345, 60_000, 65_535] {
+            let inv = gf.inverse(value);
+            assert_eq!(gf.mul(value, inv), 1, "value={value:#06x}");
+        }
+    }
+
+    #[test]
+    fn inverse_covers_every_nonzero_element() {
+        let gf = Gf16::new();
+        // Every non-zero element must have a valid inverse; spot-check a
+        // representative spread rather than all 65535 for test speed.
+        for exponent in (0..65_535u32).step_by(997) {
+            let value = gf.exp(exponent);
+            assert_eq!(gf.mul(value, gf.inverse(value)), 1);
+        }
     }
 
     #[test]
