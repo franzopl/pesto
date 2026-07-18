@@ -47,17 +47,21 @@ use case for any complete PAR2 tool.
 **Design decisions** (see `crates/parmesan/src/encoder.rs`, `gf16.rs` for the
 existing encoder this phase builds on):
 
-- **Revised during implementation:** decode does *not* extract the encoder's
-  SIMD kernels. It uses a fresh, independent scalar multiply-accumulate
-  kernel (`gf16_mac.rs`) instead. Extracting `RecoveryEncoder::flush_*` was
-  the original plan and is still the right end state for performance, but it
-  is the one step in this phase that touches existing production code, and
-  doing it blind (all six backends, 4200+ lines of `unsafe` SIMD) before
-  proving the repair *algorithm* itself correct was the wrong order of
-  operations. Getting a correct, fully-tested scalar repair path shipped
-  first — with zero risk to the existing encoder — was judged more valuable
-  than the performance work. SIMD extraction is now tracked as its own
-  follow-up (still called out below; no longer a dependency of 22d.3).
+- **Revised during implementation, twice.** First revision: decode does
+  *not* extract the encoder's SIMD kernels. It uses a fresh, independent
+  multiply-accumulate kernel (`gf16_mac.rs`) instead. Extracting
+  `RecoveryEncoder::flush_*` was the original plan; doing that blind (all
+  six backends, 4200+ lines of `unsafe` SIMD) before proving the repair
+  *algorithm* itself correct would have been the wrong order of operations.
+  Getting a correct, fully-tested repair path shipped first — with zero risk
+  to the existing encoder — was judged more valuable than reusing code.
+  Second revision: that fresh kernel then grew SSSE3 and AVX2 paths of its
+  own (22e), independently of `encoder.rs`, using the same nibble-lookup
+  technique but written from scratch against `gf16_mac::mac`'s
+  single-coefficient signature. Net effect: decode has real SIMD
+  acceleration (7.18× measured on the SSSE3/AVX2 hardware available while
+  building this) and `encoder.rs` was never touched — extraction (22d.2) is
+  now optional deduplication, not a performance dependency.
 - Matrix inversion (GF(2¹⁶) Gauss-Jordan) lives in its own module
   (`matrix.rs`), independent of the encoder — the encoder never inverts
   anything today. The multiplicative inverse it needs was added to
@@ -91,21 +95,22 @@ Single-file recovery sets were never affected. `.par2` sets created by
 | 22c.1 | 22b.2, 22b.3        | S  |
 | 22c.2 | 22c.1               | S  |
 | 22d.1 | —                   | M  |
-| 22d.2 | — (touches `encoder.rs`; own branch) | L |
+| 22d.2 | superseded by 22e; open only as a dedup cleanup | L |
 | 22d.3 | 22b.2, 22d.1        | L  |
 | 22d.4 | 22c.1, 22d.3        | M  |
-| 22e   | 22d.2, 22d.3        | M  |
+| 22e   | 22d.3               | M  |
 | 22f   | 22d.3               | M  |
 | 22g   | 22a, 22c.2, 22d.4   | S  |
 | 22h   | runs alongside all steps above | XL |
 | 22i   | everything above stable | S  |
 
 22b.2/22c.1 and 22d.1 can start in parallel — they have no mutual dependency.
-22d.3 no longer depends on 22d.2 (see the revised design decision above):
-it uses its own scalar kernel, so it only needed 22d.1 and 22b.2 to start.
-22d.2 (SIMD kernel extraction) remains the item to be most careful with
-whenever it *is* picked up — it's still the only one touching existing
-production code — but it no longer blocks the rest of the phase.
+22d.3 never depended on 22d.2 (see the revised design decision above): it
+used its own scalar kernel from the start, and 22e later added SIMD to that
+same kernel independently of `encoder.rs`. 22d.2 (SIMD kernel extraction)
+remains the item to be most careful with whenever it *is* picked up — it's
+still the only one touching existing production code — but it's now purely
+optional cleanup, not a step anything else in this phase is waiting on.
 
 ### 22a — Subcommand refactor (Complexity: Low) ✅ Done
 
@@ -206,35 +211,37 @@ Also added `Gf16::inverse` to `gf16.rs` (the multiplicative inverse
 Gauss-Jordan needs) — pure field arithmetic, so it lives alongside `mul`/
 `pow`/`exp`, not in `matrix.rs`.
 
-### 22d.2 — Extract the SIMD MAC kernel (Complexity: Very High) ⏸ Deferred
+### 22d.2 — Extract the SIMD MAC kernel (Complexity: Very High) — Superseded
 
-**Not started, and no longer blocking the rest of this phase** — see the
-revised design decision above. The only step of this phase that would touch
-existing code (`crates/parmesan/src/encoder.rs`); still deserves its own
-branch/PR and a byte-for-byte before/after proof whenever it's picked up.
+**Not done, and not needed the way it was originally scoped.** The plan was
+to extract `flush_scalar`/`flush_ssse3`/`flush_avx2`/… out of `encoder.rs`
+into shared free functions. Instead, 22e (below) added SSSE3 and AVX2
+directly to `gf16_mac.rs` as fresh, independent implementations of the same
+nibble-lookup technique — never touching `encoder.rs` at all. That achieves
+this item's actual goal (SIMD-accelerated decode) with strictly less risk,
+since production `create` code is untouched either way. Extraction to
+eliminate the resulting *duplication* between the two kernel sets is still
+a reasonable cleanup, but it's no longer blocking anything and there's no
+correctness or performance reason to do it — only a code-reuse one. Left
+open, downgraded from "the roadmap's highest-risk item" to "nice to have."
 
-- [ ] Move the multiply-accumulate logic out of `flush_scalar` / `flush_ssse3`
-      / `flush_avx2` / `flush_avx2_gfni` / `flush_avx512_gfni` /
-      `flush_neon_clmul` into free functions, parameterised by
-      `(coefficient, source buffer, destination buffer)` instead of reading
-      `self.buffers` directly, and have `gf16_mac.rs` dispatch to them
-      instead of its current scalar-only implementation.
-- [ ] Preserve every `#[target_feature]` annotation and the existing runtime
-      dispatch logic from `flush()` unchanged in behavior.
-- [ ] Prove byte-for-byte identical output before/after the refactor over a
-      fixed corpus, in addition to the existing regression tests
-      (`simd_recovery_matches_scalar`, `gfni_recovery_matches_scalar`, …)
-      already in `encoder.rs`.
-- [ ] Update `RecoveryEncoder::flush_*` to call the extracted functions; no
-      change to any public type or signature in `encoder.rs`.
+- [ ] If picked up later: move the multiply-accumulate logic out of
+      `flush_scalar`/`flush_ssse3`/`flush_avx2`/`flush_avx2_gfni`/
+      `flush_avx512_gfni`/`flush_neon_clmul` into free functions matching
+      `gf16_mac`'s `(coefficient, source, destination)` signature, and have
+      both `RecoveryEncoder::flush_*` and `gf16_mac::mac` call the same
+      code. Would need the byte-for-byte before/after proof over a fixed
+      corpus this item always called for, on top of `gf16_mac`'s existing
+      exhaustive-coefficient tests.
 
 ### 22d.3 — RecoveryDecoder (Complexity: Very High) ✅ Done
 
 New modules `gf16_mac.rs` and `decoder.rs`.
 
-- [x] `gf16_mac::mac(gf, dst, src, coeff)`: a fresh, independent scalar
+- [x] `gf16_mac::mac(gf, dst, src, coeff)`: a fresh, independent
       multiply-accumulate kernel (`dst ^= coeff * src`) — not extracted from
-      the encoder (see the revised design decision above).
+      the encoder (see the revised design decision above). Started
+      scalar-only; SSSE3 and AVX2 paths were added in 22e below.
 - [x] Select available recovery blocks for the missing input slices (lowest
       exponents first when more blocks than needed are available).
 - [x] Subtract the contribution of every known input slice from all selected
@@ -287,15 +294,42 @@ file + delete another entirely, `verify` (reports both), `repair --dry-run`,
 `repair`, `verify` again (clean), MD5 of both files matches the originals
 exactly.
 
-### 22e — SIMD parity for decode (Complexity: Medium) — Blocked on 22d.2
+### 22e — SIMD parity for decode (Complexity: Medium) — SSSE3 + AVX2 done
 
-- [ ] Once 22d.2 lands, benchmark all six SIMD backends in the decode path,
-      confirming runtime dispatch picks the same backend decode would pick
-      for encode on the same CPU.
-- [ ] Until then, decode runs scalar-only. `gf16_mac::mac` processes one
-      `u16` word (2 bytes) per loop iteration with no vectorisation — this is
-      the performance gap that keeps `parmesan repair` from being
-      competitive with `par2cmdline-turbo` yet.
+**No longer blocked on 22d.2** — see the revised 22d.2 entry. `gf16_mac.rs`
+now has SSSE3 and AVX2 kernels, written fresh against the same
+nibble-lookup decomposition `encoder.rs`'s `Ssse3Table`/`Avx2Table` use
+(`NibbleTables` in `gf16_mac.rs`), with runtime dispatch in `mac()`:
+AVX2 → SSSE3 → scalar.
+
+- [x] SSSE3: 16 bytes (8 words) per iteration, direct port of the technique
+      `encoder.rs` uses, adapted to `mac`'s single-coefficient-per-call
+      signature instead of precomputing tables for many slices at once.
+- [x] AVX2: 32 bytes (16 words) per iteration; the 16-entry nibble tables
+      are broadcast into both 128-bit lanes since `vpshufb` only shuffles
+      within a lane.
+- [x] Scalar tail for whatever bytes don't fill a full SIMD block (always
+      even, since `mac` requires whole words).
+- [x] Exhaustive correctness proof: all 65536 possible coefficients, SSSE3
+      vs. scalar and AVX2 vs. scalar, both from a fresh buffer and
+      accumulating onto existing data (matching real decode usage) —
+      verified on real hardware (Intel i5-10400: SSSE3 + AVX2, no GFNI/
+      AVX-512). Same discipline `gf16.rs` uses for `xor_dep_matrix`.
+      `cargo test` also exercises these paths implicitly: every
+      decoder/repair round-trip test now runs through whichever backend
+      the CPU running the suite picks — AVX2 here.
+- [x] Informal throughput measurement (`gf16_mac::tests::throughput_scalar_vs_dispatched`,
+      `--ignored --nocapture`, release build): **1596 MB/s scalar → 11460
+      MB/s dispatched (AVX2), a 7.18× speedup** on the same i5-10400. Not a
+      `criterion` benchmark (still open, see 22h) and not yet compared
+      against `par2cmdline-turbo`'s own throughput, but a first real data
+      point that decode is no longer purely scalar-bound.
+- [ ] GFNI, AVX-512, and NEON paths remain unimplemented — this environment
+      has neither the hardware (GFNI/AVX-512) nor the toolchain target
+      (NEON/AArch64) to write *and validate* them the way SSSE3/AVX2 were
+      validated here. Same nibble-table technique extends to GFNI trivially
+      (`encoder.rs`'s GFNI kernels show the pattern) but shouldn't be added
+      without real hardware to run the exhaustive-coefficient test on.
 
 ### 22f — Streaming memory model (Complexity: Medium)
 
