@@ -46,6 +46,7 @@ testable state.
 | 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
+| 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
 
 ---
 
@@ -58,7 +59,7 @@ testable state.
 - [ ] Handle multi-`.nzb` batch input (a queue of queues) once single-file
       download works end-to-end.
 
-## Phase 2 — NNTP article retrieval ✅ (core done; N-way concurrency still open)
+## Phase 2 — NNTP article retrieval ✅
 
 The first real gap versus `pesto`: posting never needed to *read* an article
 back.
@@ -87,16 +88,12 @@ back.
 - [x] Missing-article handling: `DownloadOutcome::missing` records every
       segment no configured server had, alongside `DownloadOutcome::segments`
       for what *was* fetched and decoded — nothing is silently dropped.
-- [ ] **Still open:** true N-parallel-connections-per-server concurrency,
-      mirroring `pesto::nntp::pool`'s `ConnectionSlot`/`ConnectionPool`.
-      Today's `download_queue` is one connection per server, drained
-      sequentially — correct, but not yet fast. This is the natural next
-      increment once Phase 4 gives the decoded bytes somewhere to go
-      (assembly), so throughput work has something real to measure against.
-- [ ] Wire `penne download` (the CLI) to actually call `download_queue`
-      instead of only printing a summary — reasonable to defer until
-      assembly (Phase 4) exists, since decoded segments still need to land
-      on disk to become a file.
+- [x] True N-parallel-connections-per-server concurrency: closed in
+      Phase 9 (`drain_one_server`/`worker_loop`) rather than here, once
+      Phase 4 gave the decoded bytes somewhere to go and throughput work had
+      something real to measure against, exactly as anticipated below.
+- [x] Wire `penne download` (the CLI) to actually call `download_queue`:
+      done in Phase 4, once assembly existed for decoded segments to land in.
 
 ## Phase 3 — yEnc decoding ✅
 
@@ -315,12 +312,45 @@ back.
       exhausting `retries` reports the segment `missing` rather than
       hanging or failing the whole run.
 
-## Phase 9 — Performance
+## Phase 9 — Performance ✅ (core done; buffer pool and real-provider benchmarks still open)
 
-- [ ] Double-buffered writer / buffer pool on the assembly path, mirroring
-      `pesto`'s posting-side buffer pool (Phase 12 there).
-- [ ] Benchmark against a real indexer/provider pair once Phases 2–4 exist;
-      add a `bench/` entry alongside the existing `pesto`/`parmesan` ones.
+- [x] **True N-parallel-connections-per-server concurrency** — the
+      centerpiece of this phase, and the item Phase 2 flagged as its own
+      biggest remaining gap. `download_queue` no longer drains one
+      connection per server sequentially: for each server, in priority
+      order, up to `server.connections` worker tasks (`tokio::task::JoinSet`)
+      pull from a shared, mutex-guarded work queue and fetch/decode/cache
+      concurrently. Each worker keeps one connection open for its whole
+      pass rather than reconnecting per segment.
+      Priority-ordered *servers* stay sequential (all of server 1's workers
+      finish before server 2's start) — that part is deliberately unlike
+      `pesto::nntp::pool`'s rotate-on-error model, because "missing from
+      this server" is an expected, per-segment condition for a downloader
+      (an article genuinely not being on a given provider), not a failure
+      to route around; a backup provider should only ever be asked about
+      the segments the primary didn't have, not raced against it.
+      `DownloadOutcome`'s shape and `download_queue`'s public signature are
+      unchanged, so nothing downstream (`assemble`, `repair`, `extract`,
+      the CLI) needed to change.
+      Verified in `tests/concurrency.rs` two ways against a fake server that
+      deliberately holds each `BODY` request open for 80 ms: peak observed
+      concurrent in-flight requests actually exceeds 1 (impossible for a
+      sequential drain), and wall-clock time for 8 segments over 4
+      connections lands far under the ~640 ms a sequential drain would take
+      (consistently ~250 ms across repeated runs).
+- [ ] **Still open:** double-buffered writer / buffer pool on the assembly
+      path, mirroring `pesto`'s posting-side buffer pool (Phase 12 there).
+      Judged lower priority than connection concurrency: a downloader's
+      bottleneck is overwhelmingly NNTP round-trip latency and connection
+      count, not the cost of a `seek`+`write_all` per already-in-memory
+      segment — `assemble` doing that today is unlikely to be where time
+      actually goes. Worth revisiting with real profiling data, not
+      speculatively.
+- [ ] **Still open:** benchmark against a real indexer/provider pair; add a
+      `bench/` entry alongside the existing `pesto`/`parmesan` ones. Blocked
+      on infrastructure this environment doesn't have (a real Usenet
+      provider account and indexer) — `tests/concurrency.rs`'s synthetic
+      timing check is the closest available substitute for now.
 
 ## Phase 10 — Packaging & release
 
