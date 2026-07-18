@@ -1,11 +1,11 @@
-//! `penne` CLI: reads a `.nzb`, downloads it, assembles the result, and
-//! verifies/repairs it with PAR2 if recovery data was part of the release.
+//! `penne` CLI: reads a `.nzb`, downloads it, assembles the result,
+//! verifies/repairs it with PAR2 if recovery data was part of the release,
+//! and extracts any archives (`.rar`/`.7z`/`.zip`) it finds.
 //!
-//! `info` and `download` are both functional end-to-end as of Phase 6:
-//! fetch (Phase 2), yEnc decode (Phase 3), file assembly (Phase 4), and PAR2
-//! verify/repair (Phase 6). Concurrency is still one connection per server
-//! (`ROADMAP.md` Phase 2's still-open item), and archive extraction is not
-//! wired up yet (Phase 7).
+//! `info` and `download` are both functional end-to-end as of Phase 7: fetch
+//! (Phase 2), yEnc decode (Phase 3), file assembly (Phase 4), PAR2
+//! verify/repair (Phase 6), and archive extraction (Phase 7). Concurrency is
+//! still one connection per server (`ROADMAP.md` Phase 2's still-open item).
 
 use std::path::{Path, PathBuf};
 
@@ -141,6 +141,11 @@ async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> R
                 "{needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
             );
         }
+    }
+
+    let extracted = penne::extract::extract_all(&dest_dir, parsed.meta.password.as_deref()).await?;
+    for archive in &extracted {
+        println!("  extracted: {} ({:?})", archive.base_name, archive.kind);
     }
 
     Ok(())

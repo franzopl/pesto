@@ -44,6 +44,7 @@ testable state.
 | 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
 | 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
 | 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
+| 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 
 ---
 
@@ -234,15 +235,42 @@ back.
       deferred until there's a queue/download API for fetching a delta
       after the fact.
 
-## Phase 7 — Archive extraction
+## Phase 7 — Archive extraction ✅
 
-- [ ] `penne::extract::extract_all` for `.rar`/`.7z`/`.zip` (`pesto::compress`
-      only creates archives; this is new code, most likely shelling out to
-      `7z`/`unrar` like `pesto::compress::find_binary` already does for
-      creation).
-- [ ] Password support (`.nzb` `<meta type="password">`, already parsed into
-      `ParsedNzb::meta` today).
-- [ ] Multi-volume RAR (`.r00`, `.r01`, …) and 7z (`.7z.001`, …) sets.
+- [x] `penne::extract::extract_all` for `.rar`/`.7z`/`.zip`. `pesto::compress`
+      only creates archives (no extraction path to build on), so this is new
+      code — mirrors its conventions (`pesto::compress::find_binary` reused
+      directly; a local `run_command` with the same password-redaction-in-
+      debug-logs behavior) rather than reimplementing archive parsing.
+      Shells out to `7z x` for `.7z`/`.zip` and `unrar x` for `.rar` — well-
+      tested external tools, same posture as PAR2 (Phase 6) and `pesto`'s own
+      compression (Phase 9 there).
+      Runs on `tokio::task::spawn_blocking`, and only *after* PAR2
+      verify/repair ([`crate::repair`]) in `penne download` — extracting a
+      `.rar` before confirming (or repairing) its integrity is pointless.
+- [x] Password support: `penne download` passes `ParsedNzb::meta.password`
+      (already parsed from the `.nzb`'s `<meta type="password">` today)
+      through to `extract_all`.
+- [x] Multi-volume RAR (both old-style `.rar`+`.r00`+`.r01`+… and new-style
+      `.partN.rar`) and 7z (`.7z.001`, `.7z.002`, …) sets: `find_extractable`
+      groups a release's volume files by `(kind, base_name)` and picks the
+      correct entry point per group — the bare `.rar`/`.7z` file if one
+      exists, else the lowest-numbered volume — since `7z`/`unrar` discover
+      sibling volumes themselves once pointed at the right one. Verified
+      against *real* archives built with the actual `7z`/`rar` CLIs (not
+      hand-crafted archive bytes) in `tests/extract.rs`: plain and password-
+      protected `.7z`, a wrong-password failure, a genuine multi-volume
+      `.rar` set (uncovered a `rar` quirk along the way — see below), and a
+      no-archives-present no-op. Tests skip gracefully if `7z`/`rar`/`unrar`
+      aren't installed, matching `pesto::compress`'s own stance that these
+      are optional system dependencies (`rar` itself isn't distributed with
+      `pesto`/`penne` "due to licensing").
+- **Fixture bug found while writing the RAR test, not a `penne` bug:**
+  `rar a` given an *absolute* input path embeds the full path inside the
+  archive (`tmp/xyz/big.bin`) unless `-ep1` is passed — exactly the flag
+  `pesto::compress::compress_with_rar` already uses for real releases. The
+  test fixture was missing it; `penne::extract`'s own logic was correct
+  throughout.
 
 ## Phase 8 — Resilience
 
