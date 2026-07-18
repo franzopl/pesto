@@ -4,7 +4,12 @@ pub mod gf16;
 pub mod layout;
 pub mod ops;
 pub mod packet;
+pub mod packet_reader;
+pub mod recovery_set;
 pub mod shuffle2x;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub mod verify;
 pub mod worker;
 pub mod yenc;
 

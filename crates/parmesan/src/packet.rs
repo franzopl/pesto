@@ -15,7 +15,7 @@
 
 use md5::{Digest, Md5};
 
-const MAGIC: [u8; 8] = *b"PAR2\0PKT";
+pub(crate) const MAGIC: [u8; 8] = *b"PAR2\0PKT";
 
 /// Size of the fixed packet header.
 pub const HEADER_LEN: usize = 64;

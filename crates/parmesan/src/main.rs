@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use parmesan::ops::{calculate_geometry, ingest_files, CreateOptions, InputFile};
+use parmesan::recovery_set::RecoverySet;
+use parmesan::verify::{self, FileStatus, VerifyReport};
 use parmesan::worker::Par2Worker;
 use parmesan::{encoder::RecoveryEncoder, layout, packet, SimdPath};
 use std::path::PathBuf;
@@ -14,6 +16,20 @@ use walkdir::WalkDir;
     about = "Fast, standalone PAR2 creation tool"
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Create a new PAR2 recovery set for the given files (default action).
+    Create(CreateArgs),
+    /// Verify files against an existing PAR2 recovery set.
+    Verify(VerifyArgs),
+}
+
+#[derive(Args, Debug)]
+struct CreateArgs {
     /// Files or directories to protect.
     #[arg(required = true)]
     files: Vec<PathBuf>,
@@ -31,7 +47,7 @@ struct Cli {
     slice_count: Option<usize>,
 
     /// Exact number of recovery blocks to generate.
-    #[arg(short = 'r', long)]
+    #[arg(long)]
     recovery_count: Option<usize>,
 
     /// Maximum RAM for recovery buffers, e.g. "1 GiB".
@@ -77,6 +93,20 @@ struct Cli {
     /// Exponent of the first recovery block (default 0).
     #[arg(short = 'e', long, default_value_t = 0)]
     recovery_offset: usize,
+}
+
+#[derive(Args, Debug)]
+struct VerifyArgs {
+    /// Path to the PAR2 index file (e.g. "movie.mkv.par2").
+    index: PathBuf,
+
+    /// Suppress the per-file report; only the summary line is printed.
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
+    /// Emit a machine-readable JSON report instead of human-readable text.
+    #[arg(long)]
+    json: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64> {
@@ -136,11 +166,38 @@ fn collect_files(paths: &[PathBuf], recurse: bool) -> Result<Vec<InputFile>> {
     Ok(input_files)
 }
 
+/// Subcommand names that must never be preceded by an implicit `create`.
+const KNOWN_FIRST_ARGS: [&str; 7] = [
+    "create",
+    "verify",
+    "help",
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+];
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse();
 
+    // Bare invocation (`parmesan <files>...`) aliases to `create` for
+    // backwards compatibility with versions before subcommands existed.
+    let mut args: Vec<String> = std::env::args().collect();
+    if let Some(first) = args.get(1) {
+        if !KNOWN_FIRST_ARGS.contains(&first.as_str()) {
+            args.insert(1, "create".to_string());
+        }
+    }
+    let cli = Cli::parse_from(args);
+
+    match cli.command {
+        Command::Create(args) => run_create(args).await,
+        Command::Verify(args) => run_verify(args),
+    }
+}
+
+async fn run_create(cli: CreateArgs) -> Result<()> {
     let input_files = collect_files(&cli.files, cli.recurse)?;
     if input_files.is_empty() {
         anyhow::bail!("no input files found");
@@ -350,4 +407,100 @@ async fn main() -> Result<()> {
         println!("\nAll recovery volumes created successfully.");
     }
     Ok(())
+}
+
+fn run_verify(args: VerifyArgs) -> Result<()> {
+    let set = RecoverySet::load(&args.index)
+        .with_context(|| format!("loading recovery set from `{}`", args.index.display()))?;
+    let base_dir = args
+        .index
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let report = verify::verify(&set, &base_dir)?;
+
+    if args.json {
+        print_json_report(&report);
+    } else {
+        if !args.quiet {
+            for f in &report.files {
+                let status = match f.status {
+                    FileStatus::Ok => "OK",
+                    FileStatus::Damaged => "DAMAGED",
+                    FileStatus::Missing => "MISSING",
+                };
+                println!(
+                    "{status:<8} {} ({}/{} slices ok)",
+                    f.name,
+                    f.total_slices - f.bad_slices,
+                    f.total_slices
+                );
+            }
+        }
+        if report.is_ok() {
+            println!("\nAll files verified OK.");
+        } else if report.is_repairable() {
+            println!(
+                "\n{} slice(s) need repair; {} recovery block(s) available — repairable.",
+                report.total_bad_slices(),
+                report.available_recovery_blocks
+            );
+        } else {
+            println!(
+                "\n{} slice(s) need repair; only {} recovery block(s) available — NOT repairable.",
+                report.total_bad_slices(),
+                report.available_recovery_blocks
+            );
+        }
+    }
+
+    std::process::exit(report.exit_code());
+}
+
+fn print_json_report(report: &VerifyReport) {
+    let mut out = String::from("{\"files\":[");
+    for (i, f) in report.files.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let status = match f.status {
+            FileStatus::Ok => "ok",
+            FileStatus::Damaged => "damaged",
+            FileStatus::Missing => "missing",
+        };
+        out.push_str(&format!(
+            "{{\"name\":{},\"status\":\"{}\",\"total_slices\":{},\"bad_slices\":{}}}",
+            json_string(&f.name),
+            status,
+            f.total_slices,
+            f.bad_slices
+        ));
+    }
+    out.push_str(&format!(
+        "],\"available_recovery_blocks\":{},\"repairable\":{},\"ok\":{}}}",
+        report.available_recovery_blocks,
+        report.is_repairable(),
+        report.is_ok()
+    ));
+    println!("{out}");
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

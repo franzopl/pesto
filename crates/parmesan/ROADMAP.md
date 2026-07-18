@@ -44,51 +44,247 @@ The highest-impact missing feature: without verify/repair, `parmesan` can only
 *create* PAR2 sets — it cannot check or restore damaged files, which is a core
 use case for any complete PAR2 tool.
 
-### 22a — Subcommand refactor (Complexity: Low)
+**Design decisions** (see `crates/parmesan/src/encoder.rs`, `gf16.rs` for the
+existing encoder this phase builds on):
+
+- Decode reuses the encoder's SIMD multiply-accumulate kernel (currently
+  private methods on `RecoveryEncoder::flush_*`) by extracting it into free
+  functions shared by encode and decode. This is the only step that touches
+  existing production code; every other module below is additive.
+- Matrix inversion (GF(2¹⁶) Gauss-Jordan) lives in its own module, independent
+  of the encoder — the encoder never inverts anything today.
+- No dependency on the external `rust-par2` crate: its SIMD coverage stops at
+  AVX2/SSSE3 (missing AVX2+GFNI, AVX-512+GFNI, NEON, which `parmesan` already
+  has for encoding) and its license is unconfirmed. Decode is implemented
+  natively to keep one GF(2¹⁶) codebase for the whole PAR2 lifecycle.
+- No public API of the existing encoder changes; all new work lands in new
+  modules (see table below).
+
+**Effort legend:** S = 0.5–1 day · M = 1–3 days · L = 3–7 days · XL = 1–3 weeks.
+
+| Step | Depends on | Effort |
+|------|------------|--------|
+| 22a  | —                    | S  |
+| 22b.1 | —                   | M  |
+| 22b.2 | 22b.1               | M  |
+| 22b.3 | 22b.1               | S  |
+| 22c.1 | 22b.2, 22b.3        | S  |
+| 22c.2 | 22c.1               | S  |
+| 22d.1 | —                   | M  |
+| 22d.2 | — (touches `encoder.rs`; own branch) | L |
+| 22d.3 | 22b.2, 22d.1, 22d.2 | L  |
+| 22d.4 | 22c.1, 22d.3        | M  |
+| 22e   | 22d.2, 22d.3        | M  |
+| 22f   | 22d.3               | M  |
+| 22g   | 22a, 22c.2, 22d.4   | S  |
+| 22h   | runs alongside all steps above | XL |
+| 22i   | everything above stable | S  |
+
+22b.2/22c.1 and 22d.1 can start in parallel — they have no mutual dependency.
+22d.2 is the real bottleneck: it is the only item touching existing production
+code, so it should land in its own PR, proven behaviorally identical to the
+current encoder output, *before* 22d.3 starts depending on it.
+
+### 22a — Subcommand refactor (Complexity: Low) ✅ Done
 
 Currently the CLI has a single implicit `create` action. Restructure it into
 explicit subcommands to make room for `verify` and `repair`.
 
-- [ ] Rename the current entry point to `parmesan create <files>`.
-- [ ] Keep all existing flags under `create`; adjust README and shell completions.
-- [ ] Alias bare invocation (no subcommand) to `create` for backwards compatibility.
+- [x] Rename the current entry point to `parmesan create <files>`.
+- [x] Keep all existing flags under `create`; adjust README and shell completions.
+- [x] Alias bare invocation (no subcommand) to `create` for backwards compatibility.
 
-### 22b — PAR2 file parser (Complexity: High)
+While wiring this up, found and fixed a pre-existing, unrelated bug: `-r` was
+bound to both `--recovery-pct` and `--recovery-count`, which made clap panic
+while building the parser (only visible once something actually called
+`Cli::parse()` — no test or CI step had ever exercised that path). Dropped the
+short flag from `--recovery-count`; `-r`/`--recovery-pct` is unchanged and
+matches the documented README flag table.
 
-Reading existing `.par2` files is the foundation for both verify and repair.
+### 22b.1 — PAR2 packet reader (Complexity: Medium) ✅ Done
 
-- [ ] Implement a packet reader that can deserialise all packet types: Main, File
-      Description, IFSC, Recovery, Creator.
-- [ ] Validate packet magic, CRC, and recovery-set-ID consistency.
-- [ ] Collect the full recovery set by scanning for all `.par2` / `*.vol*.par2`
-      files in the same directory as the index file.
-- [ ] Handle duplicate and out-of-order packets gracefully.
+New module `packet_reader.rs`, the byte-level inverse of `packet.rs`.
 
-### 22c — Verify mode (Complexity: Medium)
+- [x] Deserialise all packet types: Main, File Description, IFSC, Recovery,
+      Creator (64-byte header + body, per `packet.rs`'s documented layout).
+- [x] Validate magic bytes and recompute the packet MD5 (bytes 32 onward);
+      discard packets that fail either check instead of aborting the file.
+- [x] Treat the header's `total length` field as untrusted: bound-check it
+      against the actual file size before allocating, so a forged length
+      cannot cause an out-of-memory abort. This module is the only part of
+      the crate that parses externally-sourced bytes (downloaded `.par2`
+      files), so it is the target of the fuzzing work in 22h.
+
+Covered by unit tests today (round trip, corrupted-hash skip, forged length,
+truncated input, garbage input); `cargo-fuzz` harness itself is still open,
+tracked under 22h.
+
+### 22b.2 — Recovery set assembly (Complexity: Medium) ✅ Done
+
+New module `recovery_set.rs`.
+
+- [x] Scan the index file's directory for all `.par2` / `*.volNNN+MMM.par2`
+      files, independent of naming scheme — cannot assume `layout.rs`'s
+      `plan_volumes()`, which only governs how *this* encoder writes volumes.
+- [x] Aggregate packets by `recovery_set_id`; index available recovery blocks
+      by exponent and input slices by file.
+- [x] Public type `RecoverySet` with `RecoverySet::load(index_path)`.
+
+`RecoverySet::files` is ordered by ascending File ID per the PAR2 spec (see
+the module doc comment) — this is the canonical order a compliant reader must
+use, independent of the encoder-side ordering issue tracked under 22d.3.
+
+### 22b.3 — Packet validation & deduplication (Complexity: Low) ✅ Done
+
+- [x] Deduplicate packets that appear in more than one volume file (common in
+      practice), keeping the first validly-hashed occurrence.
+- [x] Handle out-of-order packets and missing volumes gracefully — a
+      `RecoverySet` must be usable even when some volumes are absent.
+
+### 22c.1 — Verify pipeline (Complexity: Low) ✅ Done
+
+New module `verify.rs`.
+
+- [x] Re-hash input files and compare MD5-16k / MD5-full against File
+      Description packets, reusing `encoder::FileHasher` unchanged.
+- [x] Compare per-slice CRC32 + MD5 against IFSC packets, reusing
+      `encoder::slice_checksum` unchanged.
+- [x] Stream files with the same double-buffered read pattern as
+      `ops::ingest_files`.
+
+Streams each file in `slice_size` chunks rather than reading it whole, so
+verification of large (movie-sized) files stays memory-bounded.
+
+### 22c.2 — Verify report & exit codes (Complexity: Low) ✅ Done
 
 ```
 parmesan verify <index.par2>
 ```
 
-- [ ] Re-hash input files and compare MD5-16k / MD5-full against File Description
-      packets.
-- [ ] Compare per-slice CRC32 + MD5 against IFSC packets.
-- [ ] Report: which files are OK, which are damaged, which are missing entirely.
-- [ ] Exit codes matching the PAR2 spec (0 = OK, 1 = repairable, 2+ = fatal).
-- [ ] `--quiet` and JSON output modes.
+- [x] `VerifyReport`: per-file status (OK / damaged / missing), recoverable
+      slice count vs. available recovery blocks.
+- [x] Exit codes matching the PAR2 spec (0 = OK, 1 = repairable, 2+ = fatal).
+- [x] `--quiet` and `--json` output modes.
 
-### 22d — Repair mode (Complexity: Very High)
+Manually verified end-to-end: `create` → `verify` (OK), byte-corrupted file →
+`verify` (`DAMAGED`, exit 1, repairable), missing file → `verify` (`MISSING`,
+exit 2 when damage exceeds available recovery blocks), `--json` output.
+
+### 22d.1 — GF(2¹⁶) matrix module (Complexity: Medium)
+
+New module `matrix.rs`, independent of the encoder.
+
+- [ ] Build the reduced `m×m` matrix from selected missing/available block
+      indices via `gf16::Gf16::recovery_coefficient` / `pow` (a submatrix of a
+      Vandermonde-like matrix — always invertible over the field).
+- [ ] Gauss-Jordan elimination in GF(2¹⁶) with pivoting; a zero pivot from a
+      bad block selection must return an explicit error, never panic.
+
+### 22d.2 — Extract the SIMD MAC kernel (Complexity: Very High)
+
+The only step of this phase that touches existing code
+(`crates/parmesan/src/encoder.rs`). Own branch, own PR.
+
+- [ ] Move the multiply-accumulate logic out of `flush_scalar` / `flush_ssse3`
+      / `flush_avx2` / `flush_avx2_gfni` / `flush_avx512_gfni` /
+      `flush_neon_clmul` into free functions in a new `gf16_mac.rs`,
+      parameterised by `(coefficient, source buffer, destination buffer)`
+      instead of reading `self.buffers` directly.
+- [ ] Preserve every `#[target_feature]` annotation and the existing runtime
+      dispatch logic from `flush()` unchanged in behavior.
+- [ ] Prove byte-for-byte identical output before/after the refactor over a
+      fixed corpus, in addition to the existing regression tests
+      (`simd_recovery_matches_scalar`, `gfni_recovery_matches_scalar`, …)
+      already in `encoder.rs`.
+- [ ] Update `RecoveryEncoder::flush_*` to call the extracted functions; no
+      change to any public type or signature in `encoder.rs`.
+
+### 22d.3 — RecoveryDecoder (Complexity: Very High)
+
+New module `decoder.rs`.
+
+- [ ] Select available recovery blocks for the missing input slices (prefer
+      lowest exponents first when more blocks than needed are available).
+- [ ] Subtract the contribution of known input slices from selected recovery
+      blocks via `gf16_mac`, incrementally as each known slice is processed —
+      not as a separate full pass, matching par2cmdline's incremental
+      Gauss-Jordan strategy to keep the practical cost near the MAC cost
+      rather than `O(m³)` dominating.
+- [ ] Invert the reduced matrix via `matrix.rs` and reconstruct missing slice
+      data via `gf16_mac`.
+- [ ] Public API: `RecoveryDecoder::new(...)`, `add_recovery_block(...)`,
+      `has_enough()`, `finish() -> Vec<(usize, Vec<u8>)>`.
+
+### 22d.4 — Repair orchestration (Complexity: High)
+
+New module `repair.rs`.
 
 ```
 parmesan repair <index.par2>
 ```
 
-- [ ] Identify the set of damaged/missing input slices (from verify pass).
+- [ ] Identify damaged/missing input slices from the verify pass (22c.1).
 - [ ] Determine whether enough recovery blocks exist to reconstruct them.
-- [ ] Apply Reed-Solomon decoding: solve the linear system for the missing slices.
+- [ ] Drive `RecoveryDecoder` to reconstruct the missing slices.
 - [ ] Write reconstructed data back to the original file paths (or `--out-dir`).
-- [ ] Validate restored files against their checksums before overwriting originals.
+- [ ] Re-verify restored files against their checksums before reporting success.
 - [ ] `--dry-run` flag: report what *would* be repaired without writing files.
+
+### 22e — SIMD parity for decode (Complexity: Medium)
+
+- [ ] Benchmark all six SIMD backends in the decode path, confirming runtime
+      dispatch picks the same backend decode would pick for encode on the
+      same CPU. Should require no new kernel code if 22d.2 was done correctly
+      — this step is the explicit validation, not new implementation.
+
+### 22f — Streaming memory model (Complexity: Medium)
+
+- [ ] Process reconstruction in column chunks: the inverted matrix is reused
+      across every word position of a slice, never rebuilt per chunk. Cap
+      memory to `m × chunk_size` rather than `m × slice_size`, mirroring the
+      existing `flush_limit_bytes` mechanism in the encoder. Can be deferred
+      past the initial MVP if memory pressure isn't observed in practice.
+
+### 22g — CLI wiring (Complexity: Low)
+
+- [ ] `verify`/`repair` subcommand flags: `--dry-run`, `--out-dir`, `--json`,
+      `--simd` (inherited from `create`).
+- [ ] Progress bar via `indicatif`, same pattern as `create`.
+
+### 22h — Compatibility & test suite (Complexity: Very High)
+
+- [ ] **Cross round-trip**: create with `parmesan`, corrupt slices, repair
+      with real `par2cmdline` → byte-identical to the original, and the
+      reverse (create with `par2cmdline`, repair with `parmesan`).
+- [ ] **Fixture corpus**: small set of real `.par2` files (varying slice
+      sizes, volume counts, Unicode names) versioned under
+      `crates/parmesan/tests/fixtures/`, exercised in every CI run without
+      requiring an external binary.
+- [ ] **Optional CI job with the real binary**: non-blocking job (runs on
+      `main`) installing `par2cmdline-turbo` for the cross round-trip above
+      against dynamically generated fixtures.
+- [ ] **Fuzzing**: `cargo-fuzz` target on `packet_reader.rs` (must never
+      panic, over-allocate, or read out of bounds on arbitrary bytes);
+      `proptest` on `matrix.rs` (any valid missing/available index set must
+      invert, and `A · A⁻¹ == I`).
+- [ ] **Property tests**: encode → drop N random slices (N ≤ available
+      recovery blocks) → decode → output identical to the original, for N
+      from 1 up to the repairable maximum; all six SIMD backends agree with
+      the scalar reference.
+- [ ] **Benchmarks**: `criterion` throughput (MB/s) per SIMD backend across
+      loss fractions (1%, 10%, 50%, at the repairable limit); direct
+      comparison against `par2cmdline-turbo` on the same machine; isolated
+      benchmark of matrix inversion cost for `m` from 10 to 5000 to calibrate
+      the practical limit before algebra cost dominates the MAC cost.
+
+### 22i — Documentation (Complexity: Low)
+
+- [ ] Rustdoc on every new public item in `packet_reader`, `recovery_set`,
+      `matrix`, `gf16_mac`, `verify`, `decoder`, `repair` (extends Phase 26's
+      documentation audit to the new modules).
+- [ ] README/CHANGELOG updates for the `verify`/`repair` subcommands.
+- [ ] Repair algorithm section in `INTERNALS.md` (Phase 26c), citing the PAR2
+      spec sections it implements.
 
 ---
 
