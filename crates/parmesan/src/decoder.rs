@@ -291,4 +291,69 @@ mod tests {
             assert_eq!(got[&i], slices[i]);
         }
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn distinct_below(seed: u64, count: usize, bound: usize) -> Vec<usize> {
+            let mut lcg = seed | 1;
+            let mut set = std::collections::BTreeSet::new();
+            while set.len() < count {
+                lcg = lcg
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                set.insert((lcg >> 32) as usize % bound);
+            }
+            set.into_iter().collect()
+        }
+
+        fn pseudo_random_bytes(seed: u64, len: usize) -> Vec<u8> {
+            let mut lcg = seed | 1;
+            (0..len)
+                .map(|_| {
+                    lcg = lcg
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (lcg >> 56) as u8
+                })
+                .collect()
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(96))]
+
+            /// End-to-end: real `RecoveryEncoder` output, an arbitrary valid
+            /// subset of slices treated as missing, `RecoveryDecoder`
+            /// reconstructs every one of them bit-exact — across randomly
+            /// chosen slice counts, recovery counts, and which slices are
+            /// missing (including the "reconstruct everything" edge and
+            /// "just enough recovery blocks" edge).
+            #[test]
+            fn round_trip_reconstructs_arbitrary_missing_sets(
+                n in 2usize..25,
+                recovery_count in 1usize..15,
+                seed in any::<u64>(),
+            ) {
+                let slice_size = 16;
+                let m = recovery_count.min(n);
+                let missing = distinct_below(seed, m, n);
+
+                let slices: Vec<Vec<u8>> = (0..n)
+                    .map(|i| pseudo_random_bytes(seed ^ 0x9E3779B9 ^ (i as u64), slice_size))
+                    .collect();
+                let recovery_blocks = encode(&slices, slice_size, recovery_count);
+
+                let dec = RecoveryDecoder::new(slice_size, n, missing.clone());
+                let result = dec
+                    .reconstruct(|j| Ok(slices[j].clone()), &recovery_blocks)
+                    .unwrap();
+
+                prop_assert_eq!(result.len(), missing.len());
+                for (idx, data) in result {
+                    prop_assert_eq!(data, slices[idx].clone(), "slice {} mismatch", idx);
+                }
+            }
+        }
+    }
 }

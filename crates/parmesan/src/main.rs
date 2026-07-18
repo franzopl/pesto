@@ -131,6 +131,10 @@ struct RepairArgs {
     /// Suppress the per-file report; only the summary line is printed.
     #[arg(short = 'q', long)]
     quiet: bool,
+
+    /// Emit a machine-readable JSON report instead of human-readable text.
+    #[arg(long)]
+    json: bool,
 }
 
 fn parse_size(s: &str) -> Result<u64> {
@@ -504,12 +508,24 @@ fn run_repair(args: RepairArgs) -> Result<()> {
     let report = verify::verify(&set, &base_dir)?;
 
     if report.is_ok() {
-        if !args.quiet {
+        if args.json {
+            println!(
+                r#"{{"repaired_files":[],"dry_run":{},"needed_repair":false}}"#,
+                args.dry_run
+            );
+        } else if !args.quiet {
             println!("All files verified OK — nothing to repair.");
         }
         return Ok(());
     }
     if !report.is_repairable() {
+        if args.json {
+            println!(
+                r#"{{"error":"not enough recovery data","bad_slices":{},"available_recovery_blocks":{}}}"#,
+                report.total_bad_slices(),
+                report.available_recovery_blocks
+            );
+        }
         anyhow::bail!(
             "not enough recovery data to repair: {} bad slice(s), only {} recovery block(s) available",
             report.total_bad_slices(),
@@ -522,6 +538,11 @@ fn run_repair(args: RepairArgs) -> Result<()> {
         dry_run: args.dry_run,
     };
     let plan = repair::repair(&set, &report, &base_dir, &options)?;
+
+    if args.json {
+        print_json_repair_plan(&plan);
+        return Ok(());
+    }
 
     if !args.quiet {
         let verb = if plan.dry_run {
@@ -552,6 +573,27 @@ fn run_repair(args: RepairArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_json_repair_plan(plan: &repair::RepairPlan) {
+    let mut out = String::from("{\"repaired_files\":[");
+    for (i, f) in plan.repaired_files.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"name\":{},\"path\":{},\"slices_repaired\":{},\"verified\":{}}}",
+            json_string(&f.name),
+            json_string(&f.path.display().to_string()),
+            f.slices_repaired,
+            f.verified
+        ));
+    }
+    out.push_str(&format!(
+        "],\"dry_run\":{},\"needed_repair\":true}}",
+        plan.dry_run
+    ));
+    println!("{out}");
 }
 
 fn print_json_report(report: &VerifyReport) {

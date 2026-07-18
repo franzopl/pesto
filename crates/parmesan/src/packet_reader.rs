@@ -169,4 +169,48 @@ mod tests {
         assert!(read_packets(&[]).is_empty());
         assert!(read_packets(b"not a par2 file at all").is_empty());
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(1000))]
+
+            /// The core robustness contract: `packet_reader` consumes bytes
+            /// from anywhere, including a network download or a
+            /// deliberately hostile file. No sequence of arbitrary bytes may
+            /// panic, and — because `try_parse_one` bounds every length
+            /// against the buffer it was actually given — none may attempt
+            /// an allocation or read larger than the input itself.
+            #[test]
+            fn arbitrary_bytes_never_panic(data in prop::collection::vec(any::<u8>(), 0..4096)) {
+                let _ = read_packets(&data);
+            }
+
+            /// A single valid packet surrounded by arbitrary noise is still
+            /// found — corruption before/after a packet must not hide it.
+            #[test]
+            fn a_valid_packet_survives_surrounding_noise(
+                noise_before in prop::collection::vec(any::<u8>(), 0..96),
+                noise_after in prop::collection::vec(any::<u8>(), 0..96),
+                mut body in prop::collection::vec(any::<u8>(), 0..64),
+            ) {
+                while !body.len().is_multiple_of(4) {
+                    body.push(0);
+                }
+                let rsid = [0x77u8; 16];
+                let mut bytes = noise_before;
+                bytes.extend(packet::serialize_packet(&rsid, &packet::TYPE_CREATOR, &body));
+                bytes.extend(noise_after);
+
+                let packets = read_packets(&bytes);
+                prop_assert!(packets
+                    .iter()
+                    .any(|p| p.packet_type == packet::TYPE_CREATOR
+                        && p.recovery_set_id == rsid
+                        && p.body == body));
+            }
+        }
+    }
 }

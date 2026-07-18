@@ -36,3 +36,6 @@ walkdir = "2"
 [features]
 bench-internals = []
 par2-avx2-gfni-unsafe = []
+
+[dev-dependencies]
+proptest = "1.11.0"

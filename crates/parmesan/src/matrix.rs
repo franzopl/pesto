@@ -268,4 +268,45 @@ mod tests {
         let exponents = vec![0u32, 1];
         Gf16Matrix::build_reduced(&gf, &bases, &exponents);
     }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// `m` distinct GF(2^16) exponents in `0..ORDER`, deterministically
+        /// derived from `seed` — a cheap stand-in for
+        /// `prop::collection::btree_set` with a size that depends on another
+        /// strategy's output.
+        fn distinct_exponents(seed: u64, m: usize) -> Vec<u32> {
+            let mut lcg = seed | 1;
+            let mut set = std::collections::BTreeSet::new();
+            while set.len() < m {
+                lcg = lcg
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                set.insert((lcg >> 32) as u32 % crate::gf16::ORDER);
+            }
+            set.into_iter().collect()
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(200))]
+
+            /// The MDS property, exercised randomly instead of only at the
+            /// fixed sizes/exponents the unit tests above use: any `m`
+            /// distinct input blocks and `m` distinct recovery exponents
+            /// must yield an invertible reduced matrix.
+            #[test]
+            fn reduced_matrix_always_inverts(m in 1usize..40, seed in any::<u64>()) {
+                let gf = Gf16::new();
+                let bases = gf.input_bases(m);
+                let exponents = distinct_exponents(seed, m);
+                let a = Gf16Matrix::build_reduced(&gf, &bases, &exponents);
+                let inv = a.invert(&gf);
+                prop_assert!(inv.is_ok(), "singular for m={m}, seed={seed:#x}");
+                let product = mat_mul(&gf, &a, &inv.unwrap());
+                prop_assert_eq!(product, Gf16Matrix::identity(m));
+            }
+        }
+    }
 }

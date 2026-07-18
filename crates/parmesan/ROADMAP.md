@@ -310,10 +310,9 @@ exactly.
 ### 22g — CLI wiring (Complexity: Low) — Mostly done
 
 - [x] `verify` subcommand: `--quiet`, `--json`.
-- [x] `repair` subcommand: `--dry-run`, `--out-dir`, `--quiet`.
+- [x] `repair` subcommand: `--dry-run`, `--out-dir`, `--quiet`, `--json`.
 - [x] `--simd` inherited from `create` (repair doesn't have its own SIMD
       choice to make yet — see 22e).
-- [ ] `--json` on `repair` (currently `verify`-only).
 - [ ] Progress bar via `indicatif` for `repair`, same pattern as `create`
       (not yet wired; repairs in the tested size range finish fast enough
       that this hasn't been a priority).
@@ -348,28 +347,47 @@ confirmed byte-identical via MD5). What's still open:
       a single `check` job (fmt/clippy/test); this would be an additive
       job, deliberately not wired up yet — CI pipeline changes get a
       separate go-ahead rather than riding along with a feature commit.
-- [ ] **Fuzzing**: `cargo-fuzz` target on `packet_reader.rs` (must never
-      panic, over-allocate, or read out of bounds on arbitrary bytes);
-      `proptest` on `matrix.rs` (any valid missing/available index set must
-      invert, and `A · A⁻¹ == I`).
-- [ ] **Property tests**: encode → drop N random slices (N ≤ available
-      recovery blocks) → decode → output identical to the original, for N
-      from 1 up to the repairable maximum; all six SIMD backends agree with
-      the scalar reference.
+- [x] **Property tests** (`proptest`, added as a dev-dependency): the
+      environment this was developed in has no nightly toolchain or
+      `cargo-fuzz` installed, so these substitute for true coverage-guided
+      fuzzing rather than being a strict subset of it — still meaningfully
+      randomized, but not proven exhaustive the way `cargo-fuzz` would be.
+      - `packet_reader::tests::props`: arbitrary byte buffers (up to 4 KiB,
+        1000 cases) never panic; a valid packet embedded in random noise
+        before/after is still found.
+      - `matrix::tests::props`: random `m` (1..40) with randomly chosen
+        distinct bases/exponents always inverts and satisfies
+        `A · A⁻¹ == I` (200 cases).
+      - `decoder::tests::props`: real `RecoveryEncoder` output, a random
+        subset of slices dropped (random slice count, recovery count, and
+        which indices are missing), `RecoveryDecoder` reconstructs every one
+        bit-exact (96 cases).
+- [ ] **True `cargo-fuzz` harness** for `packet_reader.rs`: needs a nightly
+      toolchain and the `cargo-fuzz` binary installed, neither present in
+      this environment — left as a follow-up requiring that setup.
 - [ ] **Benchmarks**: `criterion` throughput (MB/s) per SIMD backend across
       loss fractions (1%, 10%, 50%, at the repairable limit); direct
       comparison against `par2cmdline-turbo` on the same machine; isolated
       benchmark of matrix inversion cost for `m` from 10 to 5000 to calibrate
       the practical limit before algebra cost dominates the MAC cost.
 
-### 22i — Documentation (Complexity: Low)
+### 22i — Documentation (Complexity: Low) — Mostly done
 
-- [ ] Rustdoc on every new public item in `packet_reader`, `recovery_set`,
+- [x] Rustdoc on every new public item in `packet_reader`, `recovery_set`,
       `matrix`, `gf16_mac`, `verify`, `decoder`, `repair` (extends Phase 26's
-      documentation audit to the new modules).
-- [ ] README/CHANGELOG updates for the `verify`/`repair` subcommands.
+      documentation audit to the new modules). `cargo doc --no-deps -p
+      parmesan-par2` produces zero warnings — also fixed six pre-existing
+      broken intra-doc links in `encoder.rs` (missing `Self::` prefixes)
+      found along the way, unrelated to this phase but cheap to fix while
+      auditing docs crate-wide.
+- [x] README/CHANGELOG updates for the `verify`/`repair` subcommands (also
+      fixed a stale README entry: the `create` flag table listed
+      `--num-slices`, which doesn't exist — the real flag is
+      `--slice-count`).
 - [ ] Repair algorithm section in `INTERNALS.md` (Phase 26c), citing the PAR2
-      spec sections it implements.
+      spec sections it implements. `INTERNALS.md` doesn't exist yet at all
+      (Phase 26c is unstarted); the module-level doc comments on `matrix.rs`,
+      `decoder.rs`, and `repair.rs` cover the same ground for now.
 
 ---
 
