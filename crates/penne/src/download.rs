@@ -107,6 +107,18 @@ pub async fn download_queue(
 ) -> Result<DownloadOutcome> {
     anyhow::ensure!(!servers.is_empty(), "no servers configured");
 
+    emit(&progress, || ProgressEvent::Started {
+        files: queue
+            .files
+            .iter()
+            .map(|f| crate::progress::FileEntry {
+                name: f.name.clone(),
+                segments: f.segments.len() as u32,
+                bytes: f.segments.iter().map(|s| s.bytes).sum(),
+            })
+            .collect(),
+    });
+
     let mut outcome = DownloadOutcome::default();
 
     // Cache hits are resolved up front, sequentially — they're pure disk

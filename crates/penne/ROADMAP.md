@@ -43,7 +43,7 @@ testable state.
 | 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
 | 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
 | 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
-| 5 (partial) | Progress & CLI UX — live `fetching: N/M segments (P%)` status line in `penne download`, found missing while dogfooding a release build. Exit-code granularity and `--verbose`/`--quiet` still open. |
+| 5 (partial) | Progress & CLI UX — `pesto`-style live panel in `penne download` (overall bar, speed, ETA, capped per-file bars), on stderr; plain fallback when redirected. Exit-code granularity and `--verbose`/`--quiet` still open. |
 | 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
@@ -183,25 +183,47 @@ back.
       missing while dogfooding a release build — `download_queue` ran with
       `progress: None`, so a real multi-thousand-segment release printed
       nothing at all until the entire fetch finished, reading as a hang.
-      `download()` now opens a channel, spawns a task
-      (`print_progress`) that prints a live `fetching: 1234/6968 segments
-      (18%) — N missing, M corrupt` status line, and passes the sender (and
-      a clone) into both `download_queue` and `assemble_all` so
-      `FileAssembled` events show up too. Interactive terminals get an
-      in-place-updating line (`\r` + ANSI clear-line); redirected output
-      gets one line per whole percentage point instead, so a log file
-      doesn't fill up with carriage returns.
-      A real ordering bug turned up while verifying this manually under a
-      pty (`script`): the post-fetch summary line was printed immediately
-      after `download_queue` returned, but the unbounded progress channel
-      could still have buffered events the printer task hadn't drained
-      yet, so the summary interleaved mid-percentage. Fixed by awaiting the
-      printer task (after dropping the last sender) before printing
-      anything else — see `crates/penne/src/bin/penne.rs`.
-      Verified both automatically (`tests/cli_download_end_to_end.rs`,
-      captured stdout — the test harness's pipe isn't a TTY, so this
-      exercises the non-interactive one-line-per-percent path
-      deterministically) and manually under a real pty via `script`.
+      `download()` now opens a channel and passes the sender (and a clone)
+      into both `download_queue` and `assemble_all` so `FileAssembled`
+      events show up too. Superseded by the `pesto`-style panel below; the
+      original flat-line `print_progress` implementation (interactive
+      `\r`-updating single line vs. one line per whole percentage point
+      when redirected) no longer exists as such, but its ordering fix still
+      applies: the post-fetch summary must not print until the renderer
+      task has drained every buffered event, or it interleaves mid-percent
+      — see `crates/penne/src/bin/penne.rs`.
+- [x] **Live panel with per-file bars and speed**, mirroring `pesto`'s own
+      posting panel rather than a flat status line: `penne::ui::terminal`
+      (new module) draws a box-drawn overall-progress panel (bar, bytes,
+      speed, sparkline, ETA) plus one bar per in-flight file, redrawn in
+      place on a TTY. A release can ship 50+ RAR/PAR2 volumes, so only the
+      busiest 8 files ever get their own bar — the rest collapse into a
+      `+N more waiting` line, the same way `pesto`'s connection grid
+      collapses past its own limit. Redirected output falls back to a
+      throttled plain-text log (one line per percentage point, deduped),
+      same behaviour as before but now including speed.
+      Progress moved from stdout to stderr to match `pesto`'s convention
+      (keeps stdout clean for the final per-file result lines); a new
+      `ProgressEvent::Started { files }` event (mirroring
+      `pesto::progress::ProgressEvent::Started`) announces the full file
+      list up front so the renderer can seed every bar's totals from the
+      event stream alone, instead of a side-channel argument.
+      The generic bar/format/box-drawing primitives (`render_bar`,
+      `render_sparkline`, ANSI-aware `truncate`/`pad`, `format_duration`,
+      `box_top`/`box_bottom`) were extracted out of `pesto`'s
+      previously-private `ui::terminal` internals into a new public
+      `pesto::ui::render` module so both crates' panels share one
+      implementation instead of two — per this file's own design decision
+      to reuse `pesto`'s NNTP/NZB primitives, extended to its rendering
+      primitives too.
+      Verified with `cargo test -p pesto-poster` (the extraction is
+      behaviour-preserving — pinned by a `box_top` test asserting the exact
+      dash counts the old hand-rolled `terminal.rs` produced), new
+      `penne::ui::terminal` unit tests (per-file state updates, the
+      8-file cap collapsing correctly, done files dropping out of the bar
+      list), the updated `tests/cli_download_end_to_end.rs` (now asserting
+      on `stderr`), and manually under a real pty via `script` against a
+      12-file/48-segment synthetic release.
 - [ ] Exit codes distinguishing "fully complete", "complete after repair",
       and "incomplete/missing data" — a downloader's most important signal.
 - [ ] `--verbose`/`--quiet`, matching `pesto`'s conventions.

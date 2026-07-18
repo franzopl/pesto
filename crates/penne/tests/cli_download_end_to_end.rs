@@ -373,21 +373,23 @@ fn download_prints_live_progress_instead_of_staying_silent_until_done() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // The test harness captures the child's stdout via a pipe, not a TTY,
-    // so `print_progress` takes its non-interactive, one-line-per-percent
-    // path — deterministic and easy to assert on, unlike the `\r`-driven
-    // interactive path.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Progress lives on stderr (matching `pesto`'s own convention, and
+    // keeping stdout clean for the final per-file result lines). The test
+    // harness captures the child's stderr via a pipe, not a TTY, so the
+    // renderer takes its non-interactive, one-line-per-percent path —
+    // deterministic and easy to assert on, unlike the redraw-in-place TTY
+    // panel.
     assert!(
-        stdout.contains("fetching: 1/2 segments (50%)"),
-        "stdout did not contain a progress line at 50%%:\n{stdout}"
+        stderr.contains("fetching: 1/2 segments (50%)"),
+        "stderr did not contain a progress line at 50%%:\n{stderr}"
     );
     assert!(
-        stdout.contains("fetching: 2/2 segments (100%)"),
-        "stdout did not contain a progress line at 100%%:\n{stdout}"
+        stderr.contains("fetching: 2/2 segments (100%)"),
+        "stderr did not contain a progress line at 100%%:\n{stderr}"
     );
     assert!(
-        stdout.contains("assembled: movie.bin"),
-        "stdout did not report the file being assembled:\n{stdout}"
+        stderr.contains("assembled: movie.bin"),
+        "stderr did not report the file being assembled:\n{stderr}"
     );
 }

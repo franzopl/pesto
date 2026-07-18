@@ -1,4 +1,8 @@
 use crate::progress::{ProgressEvent, ProgressReceiver, ProgressSender, RendererOptions, RunMode};
+use crate::ui::render::{
+    ansi, box_bottom, box_top, format_duration, pad, render_bar, render_sparkline, terminal_width,
+    truncate, SUBCHAR,
+};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
@@ -792,11 +796,10 @@ impl RenderState {
                 "ETA —".to_string()
             };
             let line2 = format!("{}/s · {eta}", format_size(rate as u64));
-            // "─ compressing " = 14 chars (excluding ┌)
-            lines.push(format!("┌─ compressing {}┐", "─".repeat(BODY_W + 2 - 14)));
+            lines.push(box_top("compressing", BODY_W));
             lines.push(box_line(&line1));
             lines.push(box_line(&line2));
-            lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
+            lines.push(box_bottom(BODY_W));
         }
 
         // --- overall posting box (only after posting has started) --------
@@ -876,13 +879,13 @@ impl RenderState {
                 };
                 (l2, Some(l3))
             };
-            lines.push(format!("┌─ upload {}┐", "─".repeat(BODY_W + 2 - 9)));
+            lines.push(box_top("upload", BODY_W));
             lines.push(box_line(&line1));
             lines.push(box_line(&line2));
             if let Some(l3) = line3 {
                 lines.push(box_line(&l3));
             }
-            lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
+            lines.push(box_bottom(BODY_W));
 
             // --- streaming check queue box ---------------------------------
             // Runs concurrently with the upload above (its own dedicated
@@ -925,10 +928,10 @@ impl RenderState {
                 } else {
                     format!("elapsed {}", format_duration(elapsed))
                 };
-                lines.push(format!("┌─ check {}┐", "─".repeat(BODY_W + 2 - 8)));
+                lines.push(box_top("check", BODY_W));
                 lines.push(box_line(&line1));
                 lines.push(box_line(&line2));
-                lines.push(format!("└{}┘", "─".repeat(BODY_W + 2)));
+                lines.push(box_bottom(BODY_W));
             }
 
             // --- per-connection activity with colour codes (phase 21b) ----
@@ -1241,40 +1244,6 @@ fn box_line(body: &str) -> String {
     format!("│ {} │", pad(body, BODY_W))
 }
 
-// Eight sub-character blocks from narrowest to fullest (phase 21a).
-const SUBCHAR: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
-
-/// Draw a smooth proportional bar using sub-character block rendering.
-///
-/// The fractional leading cell uses one of `▏▎▍▌▋▊▉█` so the bar moves
-/// continuously instead of jumping whole-cell steps.
-fn render_bar(frac: f64, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let total_eighths = (frac.clamp(0.0, 1.0) * width as f64 * 8.0).round() as usize;
-    let full_blocks = (total_eighths / 8).min(width);
-    let remainder = total_eighths % 8;
-
-    let mut s = String::with_capacity(width * 3); // UTF-8 multi-byte
-    for _ in 0..full_blocks {
-        s.push('█');
-    }
-    if full_blocks < width {
-        if remainder > 0 {
-            s.push(SUBCHAR[remainder - 1]);
-            for _ in 0..width - full_blocks - 1 {
-                s.push('░');
-            }
-        } else {
-            for _ in 0..width - full_blocks {
-                s.push('░');
-            }
-        }
-    }
-    s
-}
-
 // Colours for the two upload-bar bands: the leading edge (segments posted,
 // not yet check-confirmed) and the trailing edge (segments the streaming
 // check queue has already resolved). Kept distinct from every other colour
@@ -1347,179 +1316,6 @@ fn render_dual_bar(checked_frac: f64, total_frac: f64, width: usize) -> String {
     s
 }
 
-// Nine-level sparkline characters (phase 21c).
-const SPARK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-/// Render a sparkline string from a slice of f64 speed samples.
-fn render_sparkline(samples: &[f64]) -> String {
-    if samples.is_empty() {
-        return String::new();
-    }
-    let max = samples.iter().cloned().fold(0.0_f64, f64::max);
-    if max < 1.0 {
-        return SPARK[0].to_string().repeat(samples.len());
-    }
-    samples
-        .iter()
-        .map(|&v| {
-            let idx = ((v / max) * 8.0).round() as usize;
-            SPARK[idx.min(8)]
-        })
-        .collect()
-}
-
-/// Returns the terminal column count queried via `TIOCGWINSZ`, or `None` on
-/// non-TTY fds or if the query fails.
-#[cfg(unix)]
-fn terminal_width() -> Option<usize> {
-    use std::os::fd::AsRawFd;
-
-    #[repr(C)]
-    struct Winsize {
-        ws_row: u16,
-        ws_col: u16,
-        ws_xpixel: u16,
-        ws_ypixel: u16,
-    }
-
-    extern "C" {
-        fn ioctl(
-            fd: std::ffi::c_int,
-            request: std::ffi::c_ulong,
-            out: *mut Winsize,
-        ) -> std::ffi::c_int;
-    }
-
-    // TIOCGWINSZ: Linux = 0x5413, macOS = 0x40087468
-    #[cfg(target_os = "linux")]
-    const TIOCGWINSZ: std::ffi::c_ulong = 0x5413;
-    #[cfg(target_os = "macos")]
-    const TIOCGWINSZ: std::ffi::c_ulong = 0x4008_7468;
-
-    let mut ws = Winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // Safety: ioctl(TIOCGWINSZ) writes exactly sizeof(Winsize) bytes into `ws`.
-    let ret = unsafe { ioctl(std::io::stderr().as_raw_fd(), TIOCGWINSZ, &mut ws) };
-    if ret == 0 && ws.ws_col > 0 {
-        Some(ws.ws_col as usize)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(unix))]
-fn terminal_width() -> Option<usize> {
-    None
-}
-
-/// Returns true when ANSI colour should be used (TTY + NO_COLOR not set).
-fn use_color() -> bool {
-    std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err()
-}
-
-/// Wrap `s` in the given ANSI SGR codes, or return `s` unchanged when colours
-/// are disabled.
-fn ansi(s: &str, code: &str) -> String {
-    if use_color() {
-        format!("\x1b[{code}m{s}\x1b[0m")
-    } else {
-        s.to_string()
-    }
-}
-
-/// Count of *visible* characters in `s`, skipping ANSI SGR escape sequences
-/// (`\x1b[...m`) so width math reflects what's actually drawn on screen —
-/// see `ansi()`, whose invisible colour codes would otherwise inflate a
-/// plain `.chars().count()` and desync box borders from colored content.
-fn visible_len(s: &str) -> usize {
-    let mut len = 0;
-    let mut in_escape = false;
-    for c in s.chars() {
-        if in_escape {
-            if c == 'm' {
-                in_escape = false;
-            }
-        } else if c == '\x1b' {
-            in_escape = true;
-        } else {
-            len += 1;
-        }
-    }
-    len
-}
-
-/// Pad `s` with spaces (or truncate it) to exactly `width` *visible*
-/// characters. ANSI escape sequences pass through untouched and don't count
-/// against `width`.
-fn pad(s: &str, width: usize) -> String {
-    let s = truncate(s, width);
-    let len = visible_len(&s);
-    let mut out = String::with_capacity(s.len() + width.saturating_sub(len));
-    out.push_str(&s);
-    for _ in 0..width.saturating_sub(len) {
-        out.push(' ');
-    }
-    out
-}
-
-/// Truncate `s` to at most `width` *visible* characters, marking a cut with
-/// `…`. ANSI escape sequences are preserved rather than being sliced
-/// through; if truncation cuts off before a colour's closing `\x1b[0m`, a
-/// reset is appended so colour never bleeds past the truncated line.
-fn truncate(s: &str, width: usize) -> String {
-    if visible_len(s) <= width {
-        return s.to_string();
-    }
-    let budget = width.saturating_sub(1);
-    let mut out = String::new();
-    let mut visible = 0;
-    let mut escape_buf = String::new();
-    let mut in_escape = false;
-    let mut color_active = false;
-    for c in s.chars() {
-        if in_escape {
-            escape_buf.push(c);
-            if c == 'm' {
-                in_escape = false;
-                color_active = escape_buf != "\x1b[0m";
-                out.push_str(&escape_buf);
-                escape_buf.clear();
-            }
-            continue;
-        }
-        if c == '\x1b' {
-            in_escape = true;
-            escape_buf.push(c);
-            continue;
-        }
-        if visible >= budget {
-            break;
-        }
-        out.push(c);
-        visible += 1;
-    }
-    out.push('…');
-    if color_active {
-        out.push_str("\x1b[0m");
-    }
-    out
-}
-
-/// Format a duration in seconds as `m:ss` (or `h:mm:ss` past an hour).
-fn format_duration(secs: f64) -> String {
-    let total = secs.round() as u64;
-    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
 /// Human-readable byte size with binary (IEC) units.
 fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
@@ -1533,54 +1329,5 @@ fn format_size(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // A line wider than the terminal wraps onto a second physical row that
-    // the cursor-up-by-logical-line-count redraw logic doesn't know about,
-    // corrupting every subsequent redraw (see `draw_panel`'s comment). The
-    // fix is to always truncate to the detected width before writing, so
-    // these tests pin the invariant that makes that safe: truncated output
-    // never exceeds the requested visible width, with or without embedded
-    // ANSI color codes (the header line mixes both — colored phase text
-    // plus a plain target label).
-    #[test]
-    fn truncate_never_exceeds_requested_width_plain() {
-        let long =
-            "pesto  posting data  1 file(s) → usnews.blocknews.net + news.newshosting.com · 0:12";
-        for width in [10, 20, 40, 60, 80] {
-            let out = truncate(long, width);
-            assert!(
-                visible_len(&out) <= width,
-                "width={width} produced {} visible chars: {out:?}",
-                visible_len(&out)
-            );
-        }
-    }
-
-    #[test]
-    fn truncate_never_exceeds_requested_width_with_ansi_colour() {
-        // Mirrors panel_lines()'s header: a colored phase word embedded in
-        // otherwise plain text. Hardcoded escape (rather than calling
-        // `ansi()`, which no-ops when stderr isn't a TTY — as under `cargo
-        // test`) so this actually exercises the escape-aware branch.
-        let long = "pesto  \x1b[36mwriting PAR2\x1b[0m  1 file(s) → usnews.blocknews.net + news.newshosting.com · 0:12";
-        for width in [10, 20, 40, 60, 80] {
-            let out = truncate(long, width);
-            assert!(
-                visible_len(&out) <= width,
-                "width={width} produced {} visible chars: {out:?}",
-                visible_len(&out)
-            );
-        }
-    }
-
-    #[test]
-    fn truncate_leaves_short_lines_untouched() {
-        assert_eq!(truncate("short", 80), "short");
     }
 }

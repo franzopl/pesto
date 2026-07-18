@@ -4,9 +4,22 @@
 
 use tokio::sync::mpsc;
 
+/// One file in the run, as announced by [`ProgressEvent::Started`].
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub name: String,
+    pub segments: u32,
+    pub bytes: u64,
+}
+
 /// A single progress update.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
+    /// The run begins. Carries the full work plan, mirroring
+    /// [`pesto::progress::ProgressEvent::Started`] so a future TUI/web
+    /// frontend can seed totals from the event stream alone, without a
+    /// side-channel argument.
+    Started { files: Vec<FileEntry> },
     /// An article body was fetched successfully.
     SegmentDownloaded {
         file_name: String,

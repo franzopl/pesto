@@ -22,4 +22,5 @@ pub mod nzb;
 pub mod progress;
 pub mod queue;
 pub mod repair;
+pub mod ui;
 pub mod wizard;
