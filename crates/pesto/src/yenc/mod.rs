@@ -11,6 +11,7 @@ mod tables;
 
 #[cfg(target_arch = "aarch64")]
 pub mod aarch64;
+pub mod decode;
 pub mod scalar;
 #[cfg(target_arch = "x86_64")]
 pub mod x86;
@@ -20,6 +21,7 @@ mod tests;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::encode_neon;
+pub use decode::{decode_part, DecodedPart};
 pub use scalar::encode_scalar;
 #[cfg(target_arch = "x86_64")]
 pub use x86::{encode_avx2, encode_ssse3};

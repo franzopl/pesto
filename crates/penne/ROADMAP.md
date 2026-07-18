@@ -41,6 +41,7 @@ testable state.
 | 0 | Foundation — workspace crate, CLI skeleton (`info`/`download`), config, `ROADMAP.md` |
 | 1 | NZB loading & queue model — `penne::nzb::load`/`summarize`, `penne::queue::build` |
 | 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
+| 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
 
 ---
 
@@ -80,30 +81,58 @@ back.
       single-server fetch, primary-missing-falls-back-to-backup, and
       no-server-has-it.
 - [x] Missing-article handling: `DownloadOutcome::missing` records every
-      segment no configured server had, alongside `DownloadOutcome::bodies`
-      for what *was* fetched — nothing is silently dropped.
+      segment no configured server had, alongside `DownloadOutcome::segments`
+      for what *was* fetched and decoded — nothing is silently dropped.
 - [ ] **Still open:** true N-parallel-connections-per-server concurrency,
       mirroring `pesto::nntp::pool`'s `ConnectionSlot`/`ConnectionPool`.
       Today's `download_queue` is one connection per server, drained
       sequentially — correct, but not yet fast. This is the natural next
-      increment once Phase 3/4 give the fetched bytes somewhere to go
-      (decoding + assembly), so throughput work has something real to
-      measure against.
+      increment once Phase 4 gives the decoded bytes somewhere to go
+      (assembly), so throughput work has something real to measure against.
 - [ ] Wire `penne download` (the CLI) to actually call `download_queue`
       instead of only printing a summary — reasonable to defer until
-      decoding (Phase 3) and assembly (Phase 4) exist, since fetched bytes
-      are still raw yEnc and cannot become a file yet.
+      assembly (Phase 4) exists, since decoded segments still need to land
+      on disk to become a file.
 
-## Phase 3 — yEnc decoding
+## Phase 3 — yEnc decoding ✅
 
-- [ ] `pesto::yenc` currently only encodes. Add a decoder: parse `=ybegin`/
-      `=ypart`/`=yend` control lines, undo the yEnc byte escaping, verify the
-      segment CRC32 the article carries.
-- [ ] Decide placement: this is generic yEnc, not download-specific policy,
-      so it belongs in `pesto::yenc` (shared with any future consumer),
-      analogous to how `pesto::nzb::parse` already sits next to `generate`.
-- [ ] Property-test round-trip: `decode(encode(x)) == x` for arbitrary bytes,
-      including the escape-byte edge cases the yEnc spec calls out.
+- [x] `pesto::yenc::decode::decode_part` — parses `=ybegin`/`=ypart`/`=yend`
+      control lines and decodes the data lines back to raw bytes. Operates on
+      raw bytes throughout (never `String`/UTF-8), since yEnc data is 8-bit
+      and a `name=` field or the decoded content itself is not guaranteed
+      valid UTF-8 (`name=` is captured via `String::from_utf8_lossy`, used
+      only for display — assembly should prefer the `.nzb`'s `file_name`,
+      never obfuscated, over this field).
+      Decodes one line at a time: confirmed safe because the encoder
+      (`scalar::encode_scalar`) never splits an escape pair across a line
+      boundary — both escape bytes are always written before the line-wrap
+      check runs.
+      Returns `DecodedPart` with `part_crc32`/`file_crc32` plus a
+      `crc_matches()` helper; a checksum mismatch is **not** a decode error —
+      it's a data-integrity signal for Phase 4/6 to act on, not a reason to
+      fail parsing that otherwise succeeded.
+- [x] Decided placement: lives in `pesto::yenc` (new `decode` submodule,
+      re-exported as `pesto::yenc::{decode_part, DecodedPart}`), not in
+      `penne` — generic yEnc, not download-specific policy, mirroring how
+      `pesto::nzb::parse` already sits next to `generate`.
+- [x] Round-trip tests: single-part, multi-part with file CRC, empty part,
+      names containing spaces, and a CRC-mismatch case that decodes fine but
+      reports `crc_matches() == false`. `round_trips_single_part` cycles all
+      256 byte values across multiple 128-byte lines, exercising every
+      critical/positional escape (NUL/LF/CR/`=`, boundary TAB/space, and
+      line-start `.`) the encoder can produce.
+- [x] Wired into `penne::download::download_queue`: each fetched body is
+      decoded immediately; a decode failure is **not** treated the same as a
+      missing article — the next configured server is tried before giving up
+      on the segment (a truncated/corrupted transfer from one provider
+      doesn't have to sink a file a backup server serves intact). Segments
+      that no server could produce a decodable copy of land in the new
+      `DownloadOutcome::corrupt`, distinct from `missing` (article exists
+      somewhere; no copy retrieved was structurally valid yEnc) — surfaced
+      via a new `ProgressEvent::SegmentCorrupt`, not silently dropped.
+      Verified end-to-end in `tests/download_with_failover.rs` using real
+      `encode_part` output as the served bodies, plus a corrupt-primary /
+      good-backup failover case and a no-server-decodable case.
 
 ## Phase 4 — File assembly
 

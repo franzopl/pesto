@@ -15,6 +15,13 @@ pub enum ProgressEvent {
     },
     /// An article could not be fetched from any configured server.
     SegmentMissing { file_name: String, part: u32 },
+    /// An article was fetched but could not be decoded as yEnc from any
+    /// server that had it (truncated/corrupted transfer).
+    SegmentCorrupt {
+        file_name: String,
+        part: u32,
+        error: String,
+    },
     /// A file finished reassembly.
     FileAssembled { file_name: String },
 }
