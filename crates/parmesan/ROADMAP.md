@@ -571,7 +571,11 @@ inside the repository; nothing requires a separate site.
 
 ### 26d — Changelog discipline (Complexity: Low)
 
-- [ ] Adopt the [Keep a Changelog](https://keepachangelog.com) format in
+- [x] Adopt the [Keep a Changelog](https://keepachangelog.com) format in
       `CHANGELOG.md`.
 - [ ] Document the rules in a `CONTRIBUTING.md` so contributors know to update
-      the changelog with every user-visible change.
+      the changelog with every user-visible change. Adjacent but distinct
+      from `RELEASING.md` (new, written alongside the v0.2.0 release): that
+      one documents the *release* process (version bumps, crates.io,
+      GitHub releases); this one would be about day-to-day changelog
+      hygiene per change.

@@ -103,6 +103,9 @@ cargo build --release -p parmesan
 
 The optimised binary lands at `target/release/parmesan`.
 
+See [`RELEASING.md`](RELEASING.md) for how versions get published to
+crates.io and released on GitHub.
+
 ## License
 
 MIT
