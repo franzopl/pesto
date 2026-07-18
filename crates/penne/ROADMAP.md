@@ -43,6 +43,7 @@ testable state.
 | 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
 | 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
 | 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
+| 5 (partial) | Progress & CLI UX — live `fetching: N/M segments (P%)` status line in `penne download`, found missing while dogfooding a release build. Exit-code granularity and `--verbose`/`--quiet` still open. |
 | 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
@@ -176,10 +177,31 @@ back.
       `std::process::Command` inside an async `tokio` test would otherwise
       risk starving the mock server's own task).
 
-## Phase 5 — Progress & CLI UX
+## Phase 5 — Progress & CLI UX (partial: live progress done; exit-code granularity and `--verbose`/`--quiet` still open)
 
-- [ ] Wire `penne::progress::ProgressEvent` into `penne download`: live
-      per-file progress, not just the current "would download" summary.
+- [x] Wire `penne::progress::ProgressEvent` into `penne download`: found
+      missing while dogfooding a release build — `download_queue` ran with
+      `progress: None`, so a real multi-thousand-segment release printed
+      nothing at all until the entire fetch finished, reading as a hang.
+      `download()` now opens a channel, spawns a task
+      (`print_progress`) that prints a live `fetching: 1234/6968 segments
+      (18%) — N missing, M corrupt` status line, and passes the sender (and
+      a clone) into both `download_queue` and `assemble_all` so
+      `FileAssembled` events show up too. Interactive terminals get an
+      in-place-updating line (`\r` + ANSI clear-line); redirected output
+      gets one line per whole percentage point instead, so a log file
+      doesn't fill up with carriage returns.
+      A real ordering bug turned up while verifying this manually under a
+      pty (`script`): the post-fetch summary line was printed immediately
+      after `download_queue` returned, but the unbounded progress channel
+      could still have buffered events the printer task hadn't drained
+      yet, so the summary interleaved mid-percentage. Fixed by awaiting the
+      printer task (after dropping the last sender) before printing
+      anything else — see `crates/penne/src/bin/penne.rs`.
+      Verified both automatically (`tests/cli_download_end_to_end.rs`,
+      captured stdout — the test harness's pipe isn't a TTY, so this
+      exercises the non-interactive one-line-per-percent path
+      deterministically) and manually under a real pty via `script`.
 - [ ] Exit codes distinguishing "fully complete", "complete after repair",
       and "incomplete/missing data" — a downloader's most important signal.
 - [ ] `--verbose`/`--quiet`, matching `pesto`'s conventions.

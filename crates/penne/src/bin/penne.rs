@@ -8,10 +8,12 @@
 //! (Phase 3), file assembly (Phase 4), PAR2 verify/repair (Phase 6), and
 //! archive extraction (Phase 7).
 
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use penne::progress::ProgressEvent;
 
 #[derive(Parser)]
 #[command(
@@ -125,9 +127,32 @@ async fn download(
     );
     let dest_dir = out_dir.unwrap_or(config.download_dir);
 
-    let outcome =
-        penne::download::download_queue(&queue, &config.servers, &dest_dir, config.retries, None)
+    let total_segments: usize = queue.files.iter().map(|f| f.segments.len()).sum();
+    let (tx, rx) = penne::progress::channel();
+    let tx_for_assemble = tx.clone();
+    let progress_task = tokio::spawn(print_progress(rx, total_segments));
+
+    let outcome = penne::download::download_queue(
+        &queue,
+        &config.servers,
+        &dest_dir,
+        config.retries,
+        Some(tx),
+    )
+    .await?;
+
+    let assembled =
+        penne::assemble::assemble_all(&queue, &outcome.segments, &dest_dir, Some(&tx_for_assemble))
             .await?;
+    // The download's sender was consumed by `download_queue`; this is the
+    // last copy, so dropping it lets `print_progress`'s receive loop end.
+    // Awaiting it before printing anything else guarantees every live
+    // progress line has already been flushed, so the summary below can't
+    // interleave with it (the unbounded channel means `download_queue` can
+    // return well before `print_progress` finishes draining it).
+    drop(tx_for_assemble);
+    progress_task.await.ok();
+
     println!(
         "fetched {} segment(s); {} missing; {} corrupt",
         outcome.segments.len(),
@@ -144,8 +169,6 @@ async fn download(
         );
     }
 
-    let assembled =
-        penne::assemble::assemble_all(&queue, &outcome.segments, &dest_dir, None).await?;
     let mut needs_repair = 0u32;
     for (name, result) in &assembled {
         match result {
@@ -200,4 +223,56 @@ async fn download(
     penne::cache::clear(&dest_dir)?;
 
     Ok(())
+}
+
+/// Drain `rx` and print a live status line while fetch/assembly run,
+/// otherwise the terminal sits silent for however long a large release
+/// takes to download — which reads as a hang, not progress.
+///
+/// On an interactive terminal the status line overwrites itself in place
+/// (`\r`); redirected to a file or pipe, that would just fill a log with
+/// carriage returns, so it instead prints one line per whole percentage
+/// point.
+async fn print_progress(mut rx: penne::progress::ProgressReceiver, total_segments: usize) {
+    let interactive = std::io::stdout().is_terminal();
+    let mut done = 0usize;
+    let mut missing = 0usize;
+    let mut corrupt = 0usize;
+    let mut last_printed_pct = None;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            ProgressEvent::SegmentDownloaded { .. } => done += 1,
+            ProgressEvent::SegmentMissing { .. } => {
+                done += 1;
+                missing += 1;
+            }
+            ProgressEvent::SegmentCorrupt { .. } => {
+                done += 1;
+                corrupt += 1;
+            }
+            ProgressEvent::FileAssembled { file_name } => {
+                if interactive {
+                    print!("\r\x1b[2K");
+                }
+                println!("  assembled: {file_name}");
+                continue;
+            }
+        }
+
+        let pct = (done * 100).checked_div(total_segments).unwrap_or(100);
+        let line =
+            format!("fetching: {done}/{total_segments} segments ({pct}%) — {missing} missing, {corrupt} corrupt");
+        if interactive {
+            print!("\r\x1b[2K{line}");
+            std::io::stdout().flush().ok();
+        } else if last_printed_pct != Some(pct) {
+            println!("{line}");
+            last_printed_pct = Some(pct);
+        }
+    }
+
+    if interactive && total_segments > 0 {
+        println!();
+    }
 }

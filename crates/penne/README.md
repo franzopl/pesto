@@ -133,6 +133,15 @@ cargo run --bin penne -- download path/to/release.nzb \
 If anything is still incomplete or damaged after step 4, `penne download`
 exits non-zero and reports which files.
 
+### Progress
+
+While fetching, `penne download` prints a live status line (`fetching:
+1234/6968 segments (18%) — 3 missing, 0 corrupt`) instead of sitting silent
+until the whole queue is done — a large release can take a while, and no
+output for minutes looks like a hang even when it isn't. On an interactive
+terminal the line updates in place; redirected to a file or pipe, it prints
+one line per whole percentage point instead.
+
 ### Resume
 
 An interrupted `penne download` run doesn't start over: every successfully
