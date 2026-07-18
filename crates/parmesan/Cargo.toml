@@ -1,9 +1,9 @@
 [package]
 name = "parmesan-par2"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Fast, standalone PAR2 (Reed-Solomon) creation tool"
+description = "Fast, standalone PAR2 (Reed-Solomon) creation, verification and repair tool"
 license = "MIT"
 repository = "https://github.com/franzopl/pesto"
 homepage = "https://github.com/franzopl/pesto/tree/main/crates/parmesan"

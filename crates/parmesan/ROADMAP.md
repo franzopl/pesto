@@ -33,6 +33,7 @@ Used internally by [`pesto`](../../ROADMAP.md) and published as an independent c
 | `--comment` | Embed comment strings in the Creator packet (repeatable) |
 | `--recovery-offset` | Set the exponent of the first recovery block |
 | Published to crates.io | `parmesan-par2` v0.1.0 released 2026-05-23 |
+| PAR2 verify & repair | Phase 22; `parmesan-par2` v0.2.0, 2026-07-18 (not yet published to crates.io) |
 
 ---
 

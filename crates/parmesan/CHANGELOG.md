@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-18
+
 ### Added
 - **`parmesan verify <index.par2>`**: re-hashes files against an existing
   PAR2 recovery set (scanning its directory for every volume belonging to
