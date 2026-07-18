@@ -43,6 +43,7 @@ testable state.
 | 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
 | 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
 | 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
+| 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
 
 ---
 
@@ -183,15 +184,55 @@ back.
       and "incomplete/missing data" — a downloader's most important signal.
 - [ ] `--verbose`/`--quiet`, matching `pesto`'s conventions.
 
-## Phase 6 — PAR2 verify & repair
+## Phase 6 — PAR2 verify & repair ✅ (core done; on-demand extra-volume fetch still open)
 
-- [ ] `penne::repair::verify_and_repair` — call `pesto::par2` (i.e.
-      `parmesan`) verify on the assembled set; if damaged and `.par2` volumes
-      with enough recovery data were part of the `.nzb`, repair.
-- [ ] If verify finds damage but not enough *local* recovery blocks, and more
-      `.par2` volumes are listed in the `.nzb` but weren't downloaded yet
-      (common: clients skip par2 volumes unless needed), fetch the
-      additional volumes on demand before giving up.
+- [x] `penne::repair::find_par2_index` — any `.par2` file directly under the
+      download directory is a valid starting point for
+      `pesto::par2::recovery_set::RecoverySet::load` (index and every
+      recovery volume carry the same Main/File-Description/IFSC packets per
+      the PAR2 spec; only recovery blocks differ), which itself scans the
+      directory for the rest of the set.
+- [x] `penne::repair::verify_and_repair` — loads the recovery set, runs
+      `pesto::par2::verify::verify`, and calls
+      `pesto::par2::repair::repair` when repairable. Runs on
+      `tokio::task::spawn_blocking` (PAR2 is synchronous, CPU/IO-bound
+      Reed-Solomon work), mirroring the pattern `pesto`'s own poster already
+      uses for PAR2 (`crates/pesto/src/upload.rs`). Returns a `RepairOutcome`
+      distinguishing `NoRecoveryData` / `Ok` / `Repaired` / `NotRepairable`
+      instead of collapsing them into one boolean.
+- [x] **The actual payoff, proven by test:** an
+      `AssembleOutcome::Incomplete` file (Phase 4 wrote nothing at all for
+      it, since segments were missing) is exactly `parmesan`'s
+      `FileStatus::Missing` — `pesto::par2::repair::repair` recreates it
+      *whole* from recovery blocks, no reassembly needed. An
+      `AssembleOutcome::ChecksumMismatch` file is `FileStatus::Damaged` —
+      patched in place at only the bad slices.
+- [x] Wired into `penne download` (the CLI): runs `verify_and_repair` after
+      every `assemble_all`, unconditionally (not only when assembly reported
+      trouble — matching how a real downloader always PAR2-checks when data
+      is present). Prints per-file repair results; exits non-zero only on
+      `NotRepairable`, or on `NoRecoveryData` when something still needed
+      fixing.
+- [x] Test fixtures use *real* on-disk PAR2 bytes, not hand-built structs:
+      `tests/support/mod.rs` drives the actual encoder/packet-writer API
+      (`pesto::par2::{encoder, packet}`, fully public), adapted from
+      `crates/parmesan/src/test_support.rs` (`pub(crate)` there, unreachable
+      from another crate). `tests/repair.rs` covers intact / fully-missing /
+      damaged / not-repairable / no-`.par2`-present. A new
+      `tests/cli_download_end_to_end.rs` case
+      (`download_recovers_a_fully_missing_segment_via_par2`) drives the
+      *actual compiled binary* through a fake NNTP server that never serves
+      one segment of a two-part file, alongside its PAR2 index and recovery
+      volume (also fetched over NNTP, like a real `.nzb` would list them) —
+      and confirms `penne download` still produces the exact original file.
+- [ ] **Still open:** on-demand extra-volume fetching. Today, every `.par2`
+      volume listed in the `.nzb` is downloaded unconditionally along with
+      the data files (simple, correct, but wasteful for releases that ship
+      much more redundancy than any single run needs). Skipping volumes
+      up front and fetching more only if `verify` finds insufficient local
+      recovery blocks is a worthwhile optimization, not a correctness gap —
+      deferred until there's a queue/download API for fetching a delta
+      after the fact.
 
 ## Phase 7 — Archive extraction
 

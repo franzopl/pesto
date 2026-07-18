@@ -1,10 +1,11 @@
-//! `penne` CLI: reads a `.nzb`, downloads it, and assembles the result.
+//! `penne` CLI: reads a `.nzb`, downloads it, assembles the result, and
+//! verifies/repairs it with PAR2 if recovery data was part of the release.
 //!
-//! `info` and `download` are both functional end-to-end as of Phase 4:
-//! fetch (Phase 2), yEnc decode (Phase 3), and file assembly (Phase 4).
-//! Concurrency is still one connection per server (`ROADMAP.md` Phase 2's
-//! still-open item), and PAR2 repair / archive extraction are not wired up
-//! yet (Phases 6/7).
+//! `info` and `download` are both functional end-to-end as of Phase 6:
+//! fetch (Phase 2), yEnc decode (Phase 3), file assembly (Phase 4), and PAR2
+//! verify/repair (Phase 6). Concurrency is still one connection per server
+//! (`ROADMAP.md` Phase 2's still-open item), and archive extraction is not
+//! wired up yet (Phase 7).
 
 use std::path::{Path, PathBuf};
 
@@ -99,7 +100,7 @@ async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> R
 
     let assembled =
         penne::assemble::assemble_all(&queue, &outcome.segments, &dest_dir, None).await?;
-    let mut incomplete = 0;
+    let mut needs_repair = 0u32;
     for (name, result) in &assembled {
         match result {
             penne::assemble::AssembleOutcome::Complete => println!("  ok: {name}"),
@@ -107,20 +108,40 @@ async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> R
                 println!("  ok (unverified): {name}")
             }
             penne::assemble::AssembleOutcome::ChecksumMismatch { .. } => {
-                incomplete += 1;
-                println!("  DAMAGED: {name} ({result:?})");
+                needs_repair += 1;
+                println!("  damaged (will attempt PAR2 repair): {name} ({result:?})");
             }
             penne::assemble::AssembleOutcome::Incomplete { .. } => {
-                incomplete += 1;
-                println!("  INCOMPLETE: {name} ({result:?})");
+                needs_repair += 1;
+                println!("  incomplete (will attempt PAR2 repair): {name} ({result:?})");
             }
         }
     }
 
-    if incomplete > 0 {
-        anyhow::bail!(
-            "{incomplete} file(s) incomplete or damaged; PAR2 repair not wired up yet (ROADMAP.md Phase 6)"
-        );
+    match penne::repair::verify_and_repair(&dest_dir).await? {
+        penne::repair::RepairOutcome::Ok => println!("PAR2: all files verified intact"),
+        penne::repair::RepairOutcome::Repaired(plan) => {
+            for f in &plan.repaired_files {
+                println!(
+                    "  PAR2 repaired: {} ({} slice(s))",
+                    f.name, f.slices_repaired
+                );
+            }
+        }
+        penne::repair::RepairOutcome::NotRepairable(report) => {
+            anyhow::bail!(
+                "{} damaged slice(s) exceed available PAR2 recovery data ({} block(s)); download is incomplete",
+                report.total_bad_slices(),
+                report.available_recovery_blocks
+            );
+        }
+        penne::repair::RepairOutcome::NoRecoveryData => {
+            anyhow::ensure!(
+                needs_repair == 0,
+                "{needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
+            );
+        }
     }
+
     Ok(())
 }
