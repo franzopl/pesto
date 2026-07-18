@@ -7,24 +7,29 @@
 
 ## Project Overview (2026)
 
-This repository is now a **Cargo Workspace** containing three main crates:
+This repository is now a **Cargo Workspace** containing four main crates:
 
-- **`pesto`** — Core library + lightweight high-performance CLI (`pesto`)
+- **`pesto`** — Core library + lightweight high-performance CLI (`pesto`); posting only
 - **`upapasta`** — Full-featured Rust application with rich TUI, catalog, watch mode, metadata, and orchestration (replaces the old Python version)
 - **`parmesan`** — High-performance PAR2 library (create, verify, repair)
+- **`penne`** — NZB downloader CLI/engine: reads a `.nzb`, fetches articles over NNTP, reassembles files, verifies/repairs with PAR2 (see `crates/penne/ROADMAP.md`, early skeleton stage)
 
 `upapasta` uses the `pesto` library **directly** via Rust API (no subprocess calls or JSON parsing).
+`penne` likewise reuses `pesto` as a library (`.nzb` parsing, NNTP connection/auth) and `parmesan`
+(via `pesto::par2`) rather than duplicating that logic.
 
 ### Current Focus (Phase 40b+)
 
 We are now developing **UpaPasta v2 in Rust**. The Python version in `/home/francisco/dev/franzopl/upapasta` is considered legacy and will be retired once feature parity is reached.
+`penne` (branch `penne-dev`) is a parallel, independent effort — see its own `ROADMAP.md` for phasing.
 
 ## Architecture Principles
 
-- **`pesto`** remains minimal, extremely fast, and focused on the hot path (yEnc → article → NNTP pipeline).
-- **`upapasta`** is responsible for UX, business logic, catalog, watch mode, metadata enrichment (TMDb, NFO), and orchestration.
-- All shared types, config, and progress events live in `pesto` (as public API).
-- Prefer **direct library integration** over CLI spawning in `upapasta`.
+- **`pesto`** remains minimal, extremely fast, and focused on the hot path (yEnc → article → NNTP pipeline). Posting only — it never downloads.
+- **`upapasta`** is responsible for UX, business logic, catalog, watch mode, metadata enrichment (TMDb, NFO), and orchestration. It uploads and catalogues; it does not download Usenet content.
+- **`penne`** owns everything download-side: NZB parsing for retrieval, article fetch, yEnc decode, file assembly, PAR2 verify/repair, archive extraction. A web UI (SABnzbd-like) on top of `penne` is planned but deferred until the CLI/engine reach feature parity with a real downloader.
+- All shared types, config, and progress events live in `pesto` (as public API); `penne` reuses them instead of redefining its own NZB/NNTP primitives where the semantics are identical.
+- Prefer **direct library integration** over CLI spawning in `upapasta` and `penne`.
 - TUI must be responsive, keyboard-driven, and pleasant to use daily.
 
 ## Design Principles (Updated)
@@ -40,6 +45,7 @@ We are now developing **UpaPasta v2 in Rust**. The Python version in `/home/fran
 ```
 crates/
 ├── parmesan/          # PAR2 engine
+├── penne/             # NZB downloader CLI/engine (crates/penne/src/bin/penne.rs) — early skeleton
 ├── pesto/             # Core library + CLI binary (crates/pesto/src/bin/pesto.rs)
 └── upapasta/          # Main TUI application (our current focus)
 ```

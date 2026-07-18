@@ -1,0 +1,33 @@
+[package]
+name = "penne"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Fast NZB downloader: fetches articles over NNTP, reassembles files, verifies and repairs with PAR2."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["usenet", "nntp", "nzb", "yenc", "par2"]
+categories = ["command-line-utilities", "network-programming"]
+
+[lib]
+name = "penne"
+path = "src/lib.rs"
+
+[[bin]]
+name = "penne"
+path = "src/bin/penne.rs"
+
+[dependencies]
+pesto = { package = "pesto-poster", path = "../pesto" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "fs", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
