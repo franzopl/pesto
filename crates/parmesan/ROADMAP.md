@@ -403,11 +403,39 @@ confirmed byte-identical via MD5). What's still open:
 - [ ] **True `cargo-fuzz` harness** for `packet_reader.rs`: needs a nightly
       toolchain and the `cargo-fuzz` binary installed, neither present in
       this environment — left as a follow-up requiring that setup.
-- [ ] **Benchmarks**: `criterion` throughput (MB/s) per SIMD backend across
-      loss fractions (1%, 10%, 50%, at the repairable limit); direct
-      comparison against `par2cmdline-turbo` on the same machine; isolated
-      benchmark of matrix inversion cost for `m` from 10 to 5000 to calibrate
-      the practical limit before algebra cost dominates the MAC cost.
+- [x] **Benchmarks**: `criterion` harness at `benches/decode_throughput.rs`
+      (`cargo bench -p parmesan-par2`), three groups. Measured on the same
+      i5-10400 (SSSE3+AVX2, no GFNI/AVX-512) used for the exhaustive
+      correctness tests in 22e:
+      - `gf16_mac_mac` (dispatched `mac()`, i.e. AVX2 on this CPU): **7.85
+        GiB/s** at 64 KiB, **9.95 GiB/s** at 1 MiB — consistent with the
+        informal 11.46 GB/s (≈10.7 GiB/s) figure from the `--ignored` timing
+        test in 22e.
+      - `matrix_invert`: **m=10 → 2.83 µs, m=50 → 292 µs, m=100 → 2.31 ms,
+        m=250 → 38.5 ms, m=500 → 351 ms, m=1000 → 2.93 s.** This cleanly
+        confirms `O(m³)` scaling empirically (doubling `m` from 500→1000
+        costs 8.3×, versus 8× predicted) and gives a concrete number for
+        the "practical limit" this item asked to calibrate: with the
+        current naive Gauss-Jordan, a single inversion costs multiple
+        *seconds* once a few hundred blocks are simultaneously missing —
+        exactly the regime the deferred "incremental Gauss-Jordan"
+        optimisation (noted in `decoder.rs`) would need to target. Capped
+        at `m=1000` rather than the originally-asked 5000 — see the
+        benchmark file for why (~1.25×10¹¹ field multiplications at m=5000,
+        tens of minutes for one sample).
+      - `decoder_reconstruct` (600 slices × 64 KiB, varying missing count):
+        **missing=1 → 6.35 ms (9.85 MiB/s), missing=10 → 41.5 ms (15.1
+        MiB/s), missing=50 → 198.6 ms (15.7 MiB/s), missing=100 → 459.7 ms
+        (13.6 MiB/s)**. Cost is dominated by the "subtract known slices"
+        MAC pass (`O(total_slices × m)`) until `m` gets large enough for
+        `O(m³)` matrix inversion to compete — consistent with the
+        `matrix_invert` numbers above (2.3 ms of the 460 ms at m=100 is
+        inversion; the rest is MAC throughput on ~3.75 GB of subtracted
+        data).
+      - **Not done**: direct comparison against `par2cmdline-turbo` — only
+        vanilla `par2cmdline` 0.8.1 is installed in this environment (used
+        for the compatibility tests in 22h), not the `-turbo` fork that
+        actually makes performance claims worth comparing against.
 
 ### 22i — Documentation (Complexity: Low) ✅ Done
 
