@@ -1,13 +1,15 @@
 //! NNTP download client.
 //!
-//! Reuses [`pesto::nntp::Connection`] for the TCP/TLS handshake and
-//! `AUTHINFO USER`/`PASS` authentication — that part of the protocol is
-//! identical for posting and downloading, so it is not reimplemented here.
+//! Reuses [`pesto::nntp::Connection`] for the TCP/TLS handshake,
+//! `AUTHINFO USER`/`PASS` authentication and now `BODY` retrieval (added to
+//! `pesto::nntp` in Phase 2, since that part of the protocol is generic and
+//! not specific to `penne`'s download policy) — none of it is reimplemented
+//! here.
 //!
-//! `ARTICLE`/`BODY` retrieval is not implemented yet: `pesto::nntp` only
-//! speaks the `POST`/`STAT` commands it needs for uploading. Adding
-//! `GROUP`/`ARTICLE`/`BODY` (to `pesto::nntp::Connection` or a sibling
-//! module) is Phase 2 of `ROADMAP.md`.
+//! Articles are addressed purely by Message-ID (as `.nzb` files list them),
+//! so `GROUP`/`ARTICLE`-by-number are not needed: `BODY <message-id>` alone
+//! is sufficient, and headers beyond what the `.nzb` already carries
+//! (poster, date, subject) are of no use to a downloader.
 
 use anyhow::Result;
 use pesto::config::ServerEntry;
@@ -15,7 +17,6 @@ use pesto::nntp::Connection;
 
 /// A single NNTP connection dedicated to downloading.
 pub struct DownloadClient {
-    #[allow(dead_code)] // wired up once article retrieval lands (Phase 2)
     conn: Connection,
 }
 
@@ -30,13 +31,17 @@ impl DownloadClient {
         Ok(Self { conn })
     }
 
-    /// Fetch the raw (yEnc-encoded) body of a single article.
+    /// Fetch the raw (still yEnc-encoded) body of a single article.
     ///
-    /// Not implemented yet — see the module docs and `ROADMAP.md` Phase 2.
-    pub async fn body(&mut self, message_id: &str) -> Result<Vec<u8>> {
-        anyhow::bail!(
-            "ARTICLE/BODY retrieval not implemented yet (message-id {message_id}); \
-             see ROADMAP.md Phase 2"
-        )
+    /// Returns `Ok(None)` when this server does not have the article (the
+    /// caller should retry against a backup server, see
+    /// [`crate::download::download_queue`]).
+    pub async fn body(&mut self, message_id: &str) -> Result<Option<Vec<u8>>> {
+        self.conn.body(message_id).await
+    }
+
+    /// Send `QUIT` and close the connection.
+    pub async fn quit(mut self) {
+        self.conn.quit().await;
     }
 }

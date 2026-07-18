@@ -319,6 +319,64 @@ impl Connection {
         }
     }
 
+    /// Fetch the raw body of an article by Message-ID, using the `BODY`
+    /// command (RFC 3977 §6.2.3). Used by download-side clients (`penne`);
+    /// posting never needs to read an article back.
+    ///
+    /// The message-id may be passed with or without angle brackets. NNTP
+    /// dot-stuffing is undone and the terminating `.\r\n` line is not
+    /// included in the returned bytes.
+    ///
+    /// Returns `Ok(None)` on `430` (no such article on this server — the
+    /// caller should try a backup server); any other non-`222` code is
+    /// returned as an error.
+    pub async fn body(&mut self, message_id: &str) -> Result<Option<Vec<u8>>> {
+        let id = message_id.trim_start_matches('<').trim_end_matches('>');
+        let resp = self.command(&format!("BODY <{id}>")).await?;
+        match resp.code {
+            222 => Ok(Some(self.read_dot_terminated_block().await?)),
+            430 => Ok(None),
+            _ => bail!("unexpected BODY response: {} {}", resp.code, resp.text),
+        }
+    }
+
+    /// Read a multi-line, dot-terminated block (as returned by `BODY`/`ARTICLE`)
+    /// and undo NNTP dot-stuffing (RFC 3977 §3.1.1).
+    ///
+    /// Reads raw bytes rather than UTF-8 lines: yEnc article bodies are
+    /// 8-bit data and are not guaranteed to be valid UTF-8, so
+    /// [`AsyncBufReadExt::read_line`] (which requires valid UTF-8) would be
+    /// wrong here.
+    async fn read_dot_terminated_block(&mut self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            let n =
+                tokio::time::timeout(self.read_timeout, self.stream.read_until(b'\n', &mut line))
+                    .await
+                    .map_err(|_| {
+                        anyhow!(
+                            "NNTP read timed out after {}s (connection likely dead)",
+                            self.read_timeout.as_secs()
+                        )
+                    })?
+                    .context("reading NNTP body")?;
+            if n == 0 {
+                bail!("NNTP connection closed by server while reading body");
+            }
+            if is_dot_terminator(&line) {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix(b"..") {
+                out.push(b'.');
+                out.extend_from_slice(rest);
+            } else {
+                out.extend_from_slice(&line);
+            }
+        }
+        Ok(out)
+    }
+
     /// Send `QUIT` and let the connection drop. Errors are ignored.
     pub async fn quit(&mut self) {
         let _ = self.command("QUIT").await;
@@ -457,6 +515,16 @@ fn extract_returned_message_id(text: &str) -> Option<String> {
     }
     let end = text.find('>')?;
     Some(text[..=end].to_string())
+}
+
+/// Whether `line` is the dot-terminated block's end-of-data marker: a line
+/// that is exactly `.`, with either CRLF or bare LF termination.
+fn is_dot_terminator(line: &[u8]) -> bool {
+    let trimmed = line
+        .strip_suffix(b"\r\n")
+        .or_else(|| line.strip_suffix(b"\n"))
+        .unwrap_or(line);
+    trimmed == b"."
 }
 
 /// Apply NNTP dot-stuffing: any line that begins with `.` gets an extra `.`
@@ -763,6 +831,79 @@ mod tests {
             sent.contains("STAT <mid@host>"),
             "unexpected command: {sent}"
         );
+    }
+
+    // ── is_dot_terminator ─────────────────────────────────────────────────────
+
+    #[test]
+    fn dot_terminator_recognizes_crlf_and_bare_lf() {
+        assert!(is_dot_terminator(b".\r\n"));
+        assert!(is_dot_terminator(b".\n"));
+        assert!(!is_dot_terminator(b"..\r\n"));
+        assert!(!is_dot_terminator(b"..hello\r\n"));
+        assert!(!is_dot_terminator(b"hello\r\n"));
+    }
+
+    // ── body ──────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn body_returns_decoded_bytes_on_222() {
+        let (mut conn, _server) = mock_conn(
+            b"222 0 <mid@host> body\r\n\
+              line one\r\n\
+              ..dot-stuffed line\r\n\
+              line three\r\n\
+              .\r\n",
+        )
+        .await;
+        let body = conn.body("mid@host").await.unwrap().unwrap();
+        assert_eq!(
+            body,
+            b"line one\r\n.dot-stuffed line\r\nline three\r\n".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn body_returns_none_on_430() {
+        let (mut conn, _server) = mock_conn(b"430 No such article\r\n").await;
+        assert!(conn.body("missing@host").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn body_unexpected_code_returns_error() {
+        let (mut conn, _server) = mock_conn(b"503 Program fault\r\n").await;
+        let err = conn.body("mid@host").await.unwrap_err();
+        assert!(err.to_string().contains("unexpected BODY response"));
+    }
+
+    #[tokio::test]
+    async fn body_accepts_message_id_with_angle_brackets() {
+        let (mut conn, mut server) = mock_conn(b"222 0 <mid@host> body\r\ndata\r\n.\r\n").await;
+        let body = conn.body("<mid@host>").await.unwrap().unwrap();
+        assert_eq!(body, b"data\r\n".to_vec());
+
+        let mut buf = vec![0u8; 64];
+        let n = tokio::io::AsyncReadExt::read(&mut server, &mut buf)
+            .await
+            .unwrap();
+        let sent = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(
+            sent.contains("BODY <mid@host>"),
+            "unexpected command: {sent}"
+        );
+        assert!(!sent.contains("<<"), "double brackets in: {sent}");
+    }
+
+    #[tokio::test]
+    async fn body_handles_non_utf8_bytes() {
+        // yEnc bodies are 8-bit data; a byte sequence that is not valid UTF-8
+        // must still round-trip untouched.
+        let mut wire = b"222 0 <mid@host> body\r\n".to_vec();
+        wire.extend_from_slice(&[0xFF, 0xFE, b'a', b'\r', b'\n']);
+        wire.extend_from_slice(b".\r\n");
+        let (mut conn, _server) = mock_conn(&wire).await;
+        let body = conn.body("mid@host").await.unwrap().unwrap();
+        assert_eq!(body, vec![0xFF, 0xFE, b'a', b'\r', b'\n']);
     }
 
     #[tokio::test]

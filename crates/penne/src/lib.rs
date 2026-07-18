@@ -15,6 +15,7 @@
 pub mod assemble;
 pub mod client;
 pub mod config;
+pub mod download;
 pub mod extract;
 pub mod nzb;
 pub mod progress;

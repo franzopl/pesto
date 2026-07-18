@@ -39,6 +39,8 @@ testable state.
 | Phase | Topic |
 |-------|-------|
 | 0 | Foundation — workspace crate, CLI skeleton (`info`/`download`), config, `ROADMAP.md` |
+| 1 | NZB loading & queue model — `penne::nzb::load`/`summarize`, `penne::queue::build` |
+| 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
 
 ---
 
@@ -51,26 +53,46 @@ testable state.
 - [ ] Handle multi-`.nzb` batch input (a queue of queues) once single-file
       download works end-to-end.
 
-## Phase 2 — NNTP article retrieval
+## Phase 2 — NNTP article retrieval ✅ (core done; N-way concurrency still open)
 
 The first real gap versus `pesto`: posting never needed to *read* an article
 back.
 
-- [ ] Add `GROUP`, `ARTICLE`/`BODY`, `STAT` (already partially present) to
-      `pesto::nntp::Connection`, or a `penne`-local equivalent if the
-      semantics diverge enough (e.g. download wants raw body bytes, not a
-      parsed response) to not belong in `pesto`.
-- [ ] `penne::client::DownloadClient::body` — fetch one article's raw bytes
-      by Message-ID (replaces today's `bail!` stub).
-- [ ] Connection pool for downloading: N parallel connections pulling from
-      the queue built in Phase 1. Reuse `pesto::nntp::pool` patterns
-      (`ConnectionSlot`/`ConnectionPool`) if they transfer cleanly; downloading
-      differs from posting in one important way — a missing article should
-      retry against the *next configured server* (backup provider), not just
-      reconnect to the same one.
-- [ ] Missing-article handling: record which segments could not be fetched
-      from any server; surface them instead of silently producing a
-      truncated file.
+- [x] Add `BODY` to `pesto::nntp::Connection` (RFC 3977 §6.2.3), undoing dot-
+      stuffing over raw bytes (not `String`/`read_line`, since yEnc bodies are
+      8-bit data and not guaranteed valid UTF-8). Unit-tested with the same
+      `mock_conn` duplex-stream pattern the existing `POST`/`STAT` tests use,
+      including a non-UTF-8 byte round-trip.
+      `GROUP` and `ARTICLE`-by-number were deliberately **not** added:
+      `.nzb` files address every segment by Message-ID, so `BODY <message-id>`
+      alone is sufficient and a selected group is never needed.
+- [x] `penne::client::DownloadClient::body` — fetch one article's raw bytes
+      by Message-ID (replaces the old `bail!` stub); returns `Ok(None)` on a
+      `430` so the caller can fail over instead of erroring out.
+- [x] `penne::download::download_queue` — drains a `DownloadQueue` against a
+      list of servers, trying each **per segment** in priority order so one
+      provider missing a handful of articles doesn't sink a file a backup
+      server has intact. Connections are opened lazily (only servers actually
+      needed) and reused for the rest of the run.
+      Verified end-to-end against a local, in-process fake NNTP server over
+      real TCP (loopback only — see `tests/download_with_failover.rs`,
+      following the same pattern as `crates/pesto/tests/server_substituted_message_id.rs`):
+      single-server fetch, primary-missing-falls-back-to-backup, and
+      no-server-has-it.
+- [x] Missing-article handling: `DownloadOutcome::missing` records every
+      segment no configured server had, alongside `DownloadOutcome::bodies`
+      for what *was* fetched — nothing is silently dropped.
+- [ ] **Still open:** true N-parallel-connections-per-server concurrency,
+      mirroring `pesto::nntp::pool`'s `ConnectionSlot`/`ConnectionPool`.
+      Today's `download_queue` is one connection per server, drained
+      sequentially — correct, but not yet fast. This is the natural next
+      increment once Phase 3/4 give the fetched bytes somewhere to go
+      (decoding + assembly), so throughput work has something real to
+      measure against.
+- [ ] Wire `penne download` (the CLI) to actually call `download_queue`
+      instead of only printing a summary — reasonable to defer until
+      decoding (Phase 3) and assembly (Phase 4) exist, since fetched bytes
+      are still raw yEnc and cannot become a file yet.
 
 ## Phase 3 — yEnc decoding
 
