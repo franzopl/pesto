@@ -53,6 +53,13 @@ pub struct Connection {
     /// silently dropped TCP connection where the peer sends neither data nor a
     /// FIN/RST, which would otherwise block until the OS keepalive fires.
     read_timeout: Duration,
+    /// Cumulative bytes written to the stream over this connection's whole
+    /// life (command lines, article bodies, everything). Lets a caller
+    /// report how much traffic a run actually used — e.g. `penne`'s
+    /// `--stat` check, where the whole point is that it's cheap.
+    bytes_written: u64,
+    /// Cumulative bytes read from the stream, mirroring [`Self::bytes_written`].
+    bytes_read: u64,
 }
 
 impl Connection {
@@ -91,6 +98,8 @@ impl Connection {
         let mut conn = Connection {
             stream: BufReader::new(BufWriter::new(stream)),
             read_timeout: Duration::from_secs(timeout_secs),
+            bytes_written: 0,
+            bytes_read: 0,
         };
 
         // 200 = posting allowed, 201 = posting prohibited.
@@ -438,7 +447,9 @@ impl Connection {
                     self.read_timeout.as_secs()
                 )
             })?
-            .context("writing to NNTP stream")
+            .context("writing to NNTP stream")?;
+        self.bytes_written += buf.len() as u64;
+        Ok(())
     }
 
     /// Flush the stream, bounded by `read_timeout`. See [`write_all_timeout`].
@@ -473,9 +484,22 @@ impl Connection {
         if n == 0 {
             bail!("NNTP connection closed by server");
         }
+        self.bytes_read += n as u64;
         let resp = Response::parse(&line)?;
         trace!(code = resp.code, text = %resp.text, "←");
         Ok(resp)
+    }
+
+    /// Cumulative bytes written to this connection over its whole life
+    /// (every command line and article body sent).
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    /// Cumulative bytes read from this connection over its whole life
+    /// (every response line and article body received).
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read
     }
 }
 
@@ -564,6 +588,8 @@ impl Connection {
         Connection {
             stream: BufReader::new(BufWriter::new(Box::new(s))),
             read_timeout: Duration::from_secs(crate::config::DEFAULT_TIMEOUT_SECS),
+            bytes_written: 0,
+            bytes_read: 0,
         }
     }
 }
@@ -788,6 +814,22 @@ mod tests {
     async fn stat_article_not_found_returns_false() {
         let (mut conn, _server) = mock_conn(b"430 No such article\r\n").await;
         assert!(!conn.stat("missing@host").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn stat_tracks_exact_bytes_written_and_read() {
+        let response = b"223 0 <mid@host> Article exists\r\n";
+        let (mut conn, _server) = mock_conn(response).await;
+        assert!(conn.stat("mid@host").await.unwrap());
+
+        // Wire request is exactly "STAT <mid@host>\r\n" — `command()` writes
+        // the command text and "\r\n" as two separate `write_all_timeout`
+        // calls, both counted.
+        let expected_written = "STAT <mid@host>".len() as u64 + 2;
+        assert_eq!(conn.bytes_written(), expected_written);
+        // `read_line`'s returned count (and so `bytes_read`) includes the
+        // trailing "\r\n".
+        assert_eq!(conn.bytes_read(), response.len() as u64);
     }
 
     #[tokio::test]

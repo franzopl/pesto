@@ -114,6 +114,10 @@ cargo run --bin penne -- info path/to/release.nzb
 cargo run --bin penne -- download path/to/release.nzb \
     --out-dir ./downloads \
     --password hunter2
+
+# Just check whether every segment is still on the server — no download,
+# no disk writes. Exits non-zero if anything is missing.
+cargo run --bin penne -- download path/to/release.nzb --stat
 ```
 
 ### What `download` does, in order
@@ -143,6 +147,26 @@ cargo run --bin penne -- download path/to/release.nzb \
 
 If anything is still incomplete or damaged after step 5, `penne download`
 exits non-zero and reports which files.
+
+### `--stat`: check availability without downloading
+
+`penne download <nzb> --stat` runs only a completeness check: it `STAT`s
+(RFC 3977 §6.2.4) every segment against the configured server(s) — a small
+existence check, not an article transfer — and reports which files are
+complete and which are missing segments, without fetching, decoding,
+writing, or extracting anything. Exits non-zero if anything is missing, so
+it's useful to script ahead of a real download (e.g. skip a release that's
+already expired off the indexer's server). The final line reports exactly
+how many bytes the check itself used (KiB/MiB, not the release's size) —
+proof of just how cheap `STAT` is next to a real download:
+
+```
+checking 6968 segment(s) across 24 file(s)...
+  complete: movie.mkv (200/200 segments)
+  ...
+24 of 24 file(s) complete; 0 segment(s) missing
+used 218.7 KiB to check (6968 segment(s) via STAT — no article data was downloaded)
+```
 
 ### Progress
 

@@ -72,6 +72,16 @@ fn handle_connection(stream: TcpStream, known: HashMap<&'static str, Vec<u8>>) {
                     }
                 }
             }
+        } else if let Some(rest) = cmd.strip_prefix("STAT ") {
+            let id = rest.trim_start_matches('<').trim_end_matches('>');
+            let resp = if known.contains_key(id) {
+                format!("223 0 <{id}>\r\n")
+            } else {
+                "430 No such article\r\n".to_string()
+            };
+            if writer.write_all(resp.as_bytes()).is_err() {
+                return;
+            }
         } else if cmd == "QUIT" {
             let _ = writer.write_all(b"205 bye\r\n");
             return;
@@ -136,6 +146,16 @@ fn run_penne_download(nzb_path: &Path, config_path: &Path) -> Output {
         .arg("download")
         .arg(nzb_path)
         .args(["--config", config_path.to_str().unwrap()])
+        .output()
+        .unwrap()
+}
+
+fn run_penne_download_stat(nzb_path: &Path, config_path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_penne"))
+        .arg("download")
+        .arg(nzb_path)
+        .args(["--config", config_path.to_str().unwrap()])
+        .arg("--stat")
         .output()
         .unwrap()
 }
@@ -392,4 +412,55 @@ fn download_prints_live_progress_instead_of_staying_silent_until_done() {
         stderr.contains("assembled: movie.bin"),
         "stderr did not report the file being assembled:\n{stderr}"
     );
+}
+
+#[test]
+fn stat_reports_complete_and_downloads_nothing_when_every_segment_is_present() {
+    let mut known = HashMap::new();
+    known.insert("seg1@test", b"irrelevant, STAT never fetches this".to_vec());
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+    let nzb_path = write_nzb(dir.path(), vec![segment("movie.bin", 1, 1, "seg1@test", 4)]);
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download_stat(&nzb_path, &config_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("complete: movie.bin (1/1 segments)"));
+    assert!(stdout.contains("1 of 1 file(s) complete; 0 segment(s) missing"));
+    // The whole point of --stat is that it's cheap — report exactly how
+    // cheap, in a human-readable size, not just a raw byte count.
+    assert!(
+        stdout.contains("used ") && stdout.contains("to check (1 segment(s) via STAT"),
+        "stdout did not report bytes used for the check:\n{stdout}"
+    );
+    // --stat never downloads: the destination directory shouldn't even
+    // have been created, let alone contain a file.
+    assert!(!download_dir.exists());
+}
+
+#[test]
+fn stat_reports_incomplete_and_exits_non_zero_when_a_segment_is_missing() {
+    // The server knows nothing at all — every STAT comes back 430.
+    let addr = spawn_fake_server(HashMap::new());
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+    let nzb_path = write_nzb(dir.path(), vec![segment("movie.bin", 1, 1, "seg1@test", 4)]);
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download_stat(&nzb_path, &config_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "expected a non-zero exit when a segment is missing; stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("INCOMPLETE: movie.bin (0/1 segments)"));
+    assert!(!download_dir.exists());
 }

@@ -50,6 +50,7 @@ testable state.
 | 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
 | 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
 | 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
+| 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking. |
 
 ---
 
@@ -486,6 +487,55 @@ before `penne` could handle this at all:
   multi-volume ZIP isn't guessed at all (`crate::extract` has no
   multi-volume ZIP support to hand a guessed sequence to in the first
   place).
+
+## Phase 12 — Availability check ✅
+
+- [x] `pesto::nntp::Connection::stat` (RFC 3977 §6.2.4, already implemented
+      for posting's own streaming check queue) exposed on
+      `penne::client::DownloadClient::stat`, and a new `penne::check` module
+      built on top: `check_queue(queue, servers, retries)` verifies every
+      segment is present on at least one configured server via `STAT`
+      alone — no body transfer, no yEnc decode, nothing written to disk.
+      Deliberately its own implementation rather than a generalisation of
+      `download::download_queue`: mirrors its shape (per-server priority
+      order, up to `server.connections` workers per server via `JoinSet`,
+      retry-with-backoff on a transient error, `430` never retried) but
+      there's no body to decode and no bytes to cache for resume, so
+      forcing both into one function would trade a little duplication for a
+      meaningfully more complicated shared one.
+- [x] `penne download --stat`: short-circuits before any destination
+      directory is touched (nothing is ever written — `--out-dir`/
+      `download_dir` aren't even resolved), runs `check_queue`, and prints a
+      per-file `complete`/`INCOMPLETE` report plus an overall summary.
+      Exits non-zero when anything is missing, so it's scriptable ahead of
+      a real download (e.g. skip grabbing a release that's already expired
+      off the indexer's server).
+      Verified in `tests/check.rs` (all present; some missing, reported per
+      file and overall; failover to a backup server for segments the
+      primary lacks; genuinely missing everywhere) against a fake NNTP
+      server that only understands `STAT`, and end-to-end in
+      `tests/cli_download_end_to_end.rs` through the actual compiled
+      binary, confirming `--stat` never creates the output directory at
+      all.
+- [x] **Bytes-used reporting**: a completeness check that just prints
+      "complete"/"INCOMPLETE" doesn't make the actual point of `--stat`
+      (that it's *cheap*) visible. `pesto::nntp::Connection` now tracks
+      cumulative `bytes_written`/`bytes_read` for its whole life (every
+      `write_all_timeout` call and every `read_response` line, so every
+      command — not just `STAT` — is covered for free), exposed via
+      `Connection::bytes_written()`/`bytes_read()` and
+      `DownloadClient::bytes_written()`/`bytes_read()`. `check_queue`
+      threads a `bytes_used` accumulator through `worker_loop`/
+      `stat_with_retry`, adding a connection's running total right before
+      it's dropped (not just once at the end), so a mid-check reconnect
+      after a transient error never loses the bytes the abandoned
+      connection already spent. `penne download --stat` prints the total
+      via `pesto::progress::format_size`. Verified with an exact-byte-count
+      unit test in `crates/pesto/src/nntp/mod.rs` (`stat_tracks_exact_bytes_written_and_read`)
+      pinning the wire format's byte count precisely, a matching exact-count
+      integration test in `tests/check.rs` against a real TCP round trip,
+      and an end-to-end assertion that the report line appears in
+      `tests/cli_download_end_to_end.rs`.
 
 ---
 

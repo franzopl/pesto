@@ -40,6 +40,24 @@ impl DownloadClient {
         self.conn.body(message_id).await
     }
 
+    /// Check whether an article is present on this server via `STAT` (RFC
+    /// 3977 §6.2.4) — a small existence check, not an article transfer. Used
+    /// by [`crate::check::check_queue`] to verify a release is still fully
+    /// grabbable without downloading it.
+    pub async fn stat(&mut self, message_id: &str) -> Result<bool> {
+        self.conn.stat(message_id).await
+    }
+
+    /// Cumulative bytes written to this connection over its whole life.
+    pub fn bytes_written(&self) -> u64 {
+        self.conn.bytes_written()
+    }
+
+    /// Cumulative bytes read from this connection over its whole life.
+    pub fn bytes_read(&self) -> u64 {
+        self.conn.bytes_read()
+    }
+
     /// Send `QUIT` and close the connection.
     pub async fn quit(mut self) {
         self.conn.quit().await;

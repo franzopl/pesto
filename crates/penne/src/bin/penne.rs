@@ -57,6 +57,13 @@ enum Command {
         /// releases that don't carry the password in the `.nzb` itself.
         #[arg(long)]
         password: Option<String>,
+        /// Only check that every segment is still present on the
+        /// configured server(s), via `STAT` (RFC 3977 §6.2.4) — no
+        /// download, decode, PAR2, or extraction. Much cheaper over the
+        /// wire than a real download, since STAT never transfers the
+        /// article body.
+        #[arg(long)]
+        stat: bool,
     },
 }
 
@@ -77,7 +84,8 @@ async fn main() -> Result<()> {
             nzb,
             out_dir,
             password,
-        }) => download(&nzb, out_dir, cli.config.flatten(), password).await,
+            stat,
+        }) => download(&nzb, out_dir, cli.config.flatten(), password, stat).await,
         None => {
             println!(
                 "penne — fast NZB downloader.\n\n\
@@ -105,6 +113,7 @@ async fn download(
     out_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
     password: Option<String>,
+    stat: bool,
 ) -> Result<()> {
     let parsed = penne::nzb::load(nzb)?;
     let queue = penne::queue::build(&parsed);
@@ -131,6 +140,11 @@ async fn download(
         "no [[servers]] configured in {}",
         config_path.display()
     );
+
+    if stat {
+        return check_availability(&queue, &config.servers, config.retries).await;
+    }
+
     let dest_dir = out_dir.unwrap_or(config.download_dir);
 
     let (tx, rx) = penne::progress::channel();
@@ -243,5 +257,61 @@ async fn download(
     // longer needed.
     penne::cache::clear(&dest_dir)?;
 
+    Ok(())
+}
+
+/// `penne download --stat`: verify every segment is still present on the
+/// configured server(s) without downloading anything, and report per-file
+/// completeness. Exits non-zero (via the returned `Err`) if anything is
+/// missing, so it's scriptable ahead of a real download.
+async fn check_availability(
+    queue: &penne::queue::DownloadQueue,
+    servers: &[pesto::config::ServerEntry],
+    retries: u32,
+) -> Result<()> {
+    let total_segments: usize = queue.files.iter().map(|f| f.segments.len()).sum();
+    println!(
+        "checking {} segment(s) across {} file(s)...",
+        total_segments,
+        queue.files.len()
+    );
+
+    let outcome = penne::check::check_queue(queue, servers, retries).await?;
+
+    let mut incomplete_files = 0u32;
+    for f in &outcome.files {
+        if f.is_complete() {
+            println!(
+                "  complete: {} ({}/{} segments)",
+                f.name, f.present_segments, f.total_segments
+            );
+        } else {
+            incomplete_files += 1;
+            println!(
+                "  INCOMPLETE: {} ({}/{} segments)",
+                f.name, f.present_segments, f.total_segments
+            );
+        }
+    }
+    for seg in &outcome.missing {
+        println!("    missing: {} part {}", seg.file_name, seg.part);
+    }
+
+    println!(
+        "{} of {} file(s) complete; {} segment(s) missing",
+        outcome.files.len() as u32 - incomplete_files,
+        outcome.files.len(),
+        outcome.missing.len()
+    );
+    println!(
+        "used {} to check ({} segment(s) via STAT — no article data was downloaded)",
+        pesto::progress::format_size(outcome.bytes_used),
+        total_segments,
+    );
+
+    anyhow::ensure!(
+        outcome.is_complete(),
+        "{incomplete_files} file(s) have missing segments"
+    );
     Ok(())
 }
