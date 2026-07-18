@@ -17,15 +17,13 @@ finds.
 
 ## Quick start
 
-1. Write a config file with at least one server (see
-   [Configuration](#configuration) below) — call it `penne.toml`.
-2. Run:
+```bash
+# Create the config interactively (see Configuration below).
+cargo run --bin penne -- --config
 
-   ```bash
-   cargo run --bin penne -- download path/to/release.nzb \
-       --config penne.toml \
-       --out-dir ./downloads
-   ```
+# Download, assemble, PAR2-verify/repair, and extract.
+cargo run --bin penne -- download path/to/release.nzb
+```
 
 `penne download` fetches every file the `.nzb` lists, assembles them,
 verifies/repairs with PAR2 if recovery data was included, and extracts any
@@ -35,8 +33,35 @@ chance to fix it.
 
 ## Configuration
 
-`--config` is **required** for `download` (there's nothing useful to do
-without server credentials) and points at a TOML file:
+Server credentials live in a TOML file. `penne --config` (no value) launches
+a guided wizard that writes one for you at the default location; skip
+straight to a manual example below if you'd rather write it by hand.
+
+### Default location
+
+When `--config <FILE>` isn't given, `penne` loads (and the wizard writes to)
+the OS-standard path:
+
+| OS | Path |
+|----|------|
+| Linux/macOS | `$XDG_CONFIG_HOME/penne/config.toml`, falling back to `~/.config/penne/config.toml` |
+| Windows | `%APPDATA%\penne\config.toml` |
+
+If nothing exists there, `penne download` fails with a clear message telling
+you to run `penne --config` or pass `--config <FILE>` explicitly — it never
+silently proceeds with no servers.
+
+### `--config` forms
+
+```bash
+penne --config              # interactive wizard; writes to the default path above
+penne download FILE.nzb     # loads the default path automatically
+penne download FILE.nzb --config custom.toml   # loads a specific file instead
+```
+
+`--config` is a global flag — it works before or after the subcommand.
+
+### File format
 
 ```toml
 # Where completed, assembled files are written. Overridden by --out-dir.
@@ -85,7 +110,6 @@ cargo run --bin penne -- info path/to/release.nzb
 
 # Download, assemble, PAR2-verify/repair, and extract.
 cargo run --bin penne -- download path/to/release.nzb \
-    --config penne.toml \
     --out-dir ./downloads   # optional; defaults to the config's download_dir
 ```
 

@@ -2,12 +2,11 @@
 //! verifies/repairs it with PAR2 if recovery data was part of the release,
 //! and extracts any archives (`.rar`/`.7z`/`.zip`) it finds.
 //!
-//! `info` and `download` are both functional end-to-end as of Phase 8: fetch
-//! (Phase 2, with per-segment retry/backoff and resume via
-//! [`penne::cache`] — Phase 8), yEnc decode (Phase 3), file assembly
-//! (Phase 4), PAR2 verify/repair (Phase 6), and archive extraction
-//! (Phase 7). Concurrency is still one connection per server (`ROADMAP.md`
-//! Phase 2's still-open item).
+//! `info` and `download` are both functional end-to-end: fetch (Phase 2,
+//! with per-segment retry/backoff, resume via [`penne::cache`], and
+//! N-parallel-connections-per-server concurrency — Phases 8/9), yEnc decode
+//! (Phase 3), file assembly (Phase 4), PAR2 verify/repair (Phase 6), and
+//! archive extraction (Phase 7).
 
 use std::path::{Path, PathBuf};
 
@@ -15,10 +14,27 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "penne", version, about = "Fast NZB downloader")]
+#[command(
+    name = "penne",
+    version,
+    about = "Fast NZB downloader",
+    long_about = "Fast NZB downloader.\n\n\
+Server credentials are read from a TOML config file. If --config is not \
+given, penne loads it from the OS-standard location: $XDG_CONFIG_HOME/penne/config.toml \
+(or, failing that, ~/.config/penne/config.toml) on Linux/macOS, or \
+%APPDATA%\\penne\\config.toml on Windows. Create that file interactively \
+with `penne --config`, or point at a specific file with `--config <FILE>`."
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+
+    /// TOML config file (server credentials, download directory). With no
+    /// value (`penne --config`), launch the interactive setup wizard
+    /// instead of running a command. When omitted entirely, the default
+    /// config path is used.
+    #[arg(long, global = true)]
+    config: Option<Option<PathBuf>>,
 }
 
 #[derive(Subcommand)]
@@ -36,9 +52,6 @@ enum Command {
         /// config file's `download_dir`, or the current directory.
         #[arg(long)]
         out_dir: Option<PathBuf>,
-        /// Path to a `penne` TOML config file (server credentials).
-        #[arg(long)]
-        config: PathBuf,
     },
 }
 
@@ -47,13 +60,24 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
+    // `penne --config` with no value: launch the interactive setup wizard,
+    // regardless of whether a subcommand was also given.
+    if matches!(cli.config, Some(None)) {
+        return penne::wizard::run();
+    }
+
     match cli.command {
-        Command::Info { nzb } => info(&nzb),
-        Command::Download {
-            nzb,
-            out_dir,
-            config,
-        } => download(&nzb, out_dir, &config).await,
+        Some(Command::Info { nzb }) => info(&nzb),
+        Some(Command::Download { nzb, out_dir }) => {
+            download(&nzb, out_dir, cli.config.flatten()).await
+        }
+        None => {
+            println!(
+                "penne — fast NZB downloader.\n\n\
+                 Run `penne --help` for usage, or `penne --config` to set up your servers."
+            );
+            Ok(())
+        }
     }
 }
 
@@ -69,11 +93,29 @@ fn info(nzb: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn download(nzb: &Path, out_dir: Option<PathBuf>, config_path: &Path) -> Result<()> {
+async fn download(
+    nzb: &Path,
+    out_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
     let parsed = penne::nzb::load(nzb)?;
     let queue = penne::queue::build(&parsed);
 
-    let config_toml = std::fs::read_to_string(config_path)
+    let config_path = match config_path {
+        Some(path) => path,
+        None => {
+            let default = penne::config::default_config_path()
+                .context("cannot locate a config directory: set $HOME or $XDG_CONFIG_HOME")?;
+            anyhow::ensure!(
+                default.exists(),
+                "no config found at {}; run `penne --config` to create one, or pass --config <FILE>",
+                default.display()
+            );
+            eprintln!("using config: {}", default.display());
+            default
+        }
+    };
+    let config_toml = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
     let config = penne::config::RawConfig::parse(&config_toml)?.resolve()?;
     anyhow::ensure!(

@@ -47,6 +47,7 @@ testable state.
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
 | 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
+| 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
 
 ---
 
@@ -354,7 +355,24 @@ back.
 
 ## Phase 10 — Packaging & release
 
-- [ ] `README.md` usage docs (mirrors `pesto`'s and `parmesan`'s structure).
+- [x] `README.md` usage docs (mirrors `pesto`'s and `parmesan`'s structure):
+      quick start, full config reference, default config path per OS,
+      what `download` does step by step, resume behavior.
+- [x] `penne::config::{config_dir, default_config_path}` — same
+      XDG-Base-Directory-then-`$HOME` resolution as
+      `pesto::config::default_config_path`, one directory over
+      (`$XDG_CONFIG_HOME/penne/config.toml`, `~/.config/penne/config.toml`,
+      or `%APPDATA%\penne\config.toml` on Windows). The env-var fallback
+      logic is factored into a pure, unit-tested helper rather than tested
+      by mutating process-global env vars (unsafe under parallel tests).
+- [x] `penne --config` interactive setup wizard (`penne::wizard`), mirroring
+      `pesto`'s `ui::wizard` — prompts for host/port/TLS/connections/
+      credentials/download directory/retries and writes the TOML to the
+      default path, asking before overwriting an existing one. `--config` is
+      now a global `Option<Option<PathBuf>>` flag: no value → wizard
+      (regardless of whether a subcommand was also given); a path → load
+      that file; omitted entirely → the default path, with a clear error
+      (not a silent no-servers run) if nothing exists there yet.
 - [ ] Add `penne` to the release workflow once it has a stable CLI surface
       (see `.github/workflows/release.yml` / `release-parmesan.yml` for the
       pattern to follow).

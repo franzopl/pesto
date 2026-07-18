@@ -4,6 +4,7 @@
 //! and `pesto` can share the same `[[servers]]` TOML block in a combined
 //! config file, instead of redefining host/port/TLS/auth fields here.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -12,6 +13,53 @@ use serde::{Deserialize, Serialize};
 
 /// Default number of parallel download connections.
 pub const DEFAULT_CONNECTIONS: usize = 8;
+
+/// Directory containing the default config file (its parent), when one can
+/// be determined for this OS/environment.
+pub fn config_dir() -> Option<PathBuf> {
+    default_config_path().and_then(|p| p.parent().map(PathBuf::from))
+}
+
+/// Path of the config file `penne` loads when `--config` is given with no
+/// value, or omitted entirely.
+///
+/// On Unix: follows the XDG Base Directory spec
+/// (`$XDG_CONFIG_HOME/penne/config.toml`), falling back to
+/// `$HOME/.config/penne/config.toml`. On Windows: `%APPDATA%\penne\config.toml`.
+/// Mirrors `pesto::config::default_config_path`, one directory over.
+pub fn default_config_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(|appdata| PathBuf::from(appdata).join("penne").join("config.toml"))
+    }
+    #[cfg(not(windows))]
+    {
+        config_path_from_env(
+            std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()),
+            std::env::var_os("HOME"),
+        )
+    }
+}
+
+/// Pure helper behind [`default_config_path`] on Unix, factored out so the
+/// XDG-vs-`$HOME` fallback logic is testable without mutating process-global
+/// environment variables (unsafe to do from parallel tests).
+#[cfg(not(windows))]
+fn config_path_from_env(
+    xdg_config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Option<PathBuf> {
+    if let Some(xdg) = xdg_config_home {
+        return Some(PathBuf::from(xdg).join("penne").join("config.toml"));
+    }
+    home.map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("penne")
+            .join("config.toml")
+    })
+}
 
 /// Fully resolved download configuration.
 #[derive(Debug, Clone)]
@@ -152,5 +200,28 @@ mod tests {
         "#;
         let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
         assert_eq!(config.servers[0].connections, DEFAULT_CONNECTIONS);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_path_prefers_xdg_config_home_over_dollar_home() {
+        let path = config_path_from_env(Some("/xdg".into()), Some("/home/user".into()));
+        assert_eq!(path, Some(PathBuf::from("/xdg/penne/config.toml")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_path_falls_back_to_home_dot_config() {
+        let path = config_path_from_env(None, Some("/home/user".into()));
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/home/user/.config/penne/config.toml"))
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_path_none_when_neither_env_var_is_set() {
+        assert_eq!(config_path_from_env(None, None), None);
     }
 }
