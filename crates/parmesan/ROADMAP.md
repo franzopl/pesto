@@ -325,16 +325,29 @@ including full round-trips through the real `RecoveryEncoder` and the real
 CLI binary (multi-file create → corrupt/delete → verify → repair → verify,
 confirmed byte-identical via MD5). What's still open:
 
-- [ ] **Cross round-trip**: create with `parmesan`, corrupt slices, repair
-      with real `par2cmdline` → byte-identical to the original, and the
-      reverse (create with `par2cmdline`, repair with `parmesan`).
+- [x] **Cross round-trip**: `crates/parmesan/tests/par2cmdline_compat.rs`
+      (ignored by default — shells out to a real `par2` binary; run with
+      `cargo test -p parmesan-par2 --test par2cmdline_compat -- --ignored`).
+      Verified locally against `par2cmdline` 0.8.1 (Ubuntu's `par2` package),
+      multi-file, both directions: `parmesan create` → corrupt one file,
+      delete another → `par2cmdline repair` → byte-identical (MD5); and
+      `par2cmdline create` → same damage → `parmesan repair` →
+      byte-identical. A third test confirms `parmesan verify` reports OK
+      (exit 0) on an untouched `par2cmdline`-created set. This is the
+      strongest evidence so far that the File-ID ordering fix is actually
+      correct, not just self-consistent within `parmesan`.
+- [ ] **Wider fixture matrix**: more file counts/sizes/slice sizes, Unicode
+      names, single-file sets, sets with more damage than one byte per file.
 - [ ] **Fixture corpus**: small set of real `.par2` files (varying slice
       sizes, volume counts, Unicode names) versioned under
       `crates/parmesan/tests/fixtures/`, exercised in every CI run without
       requiring an external binary.
 - [ ] **Optional CI job with the real binary**: non-blocking job (runs on
-      `main`) installing `par2cmdline-turbo` for the cross round-trip above
-      against dynamically generated fixtures.
+      `main`) installing `par2cmdline` (or `-turbo`) and running the ignored
+      tests above with `--ignored`. `.github/workflows/ci.yml` currently has
+      a single `check` job (fmt/clippy/test); this would be an additive
+      job, deliberately not wired up yet — CI pipeline changes get a
+      separate go-ahead rather than riding along with a feature commit.
 - [ ] **Fuzzing**: `cargo-fuzz` target on `packet_reader.rs` (must never
       panic, over-allocate, or read out of bounds on arbitrary bytes);
       `proptest` on `matrix.rs` (any valid missing/available index set must
