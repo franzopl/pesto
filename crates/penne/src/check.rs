@@ -30,6 +30,7 @@ use pesto::config::ServerEntry;
 use tokio::task::JoinSet;
 
 use crate::client::DownloadClient;
+use crate::config::ServerTier;
 use crate::queue::DownloadQueue;
 
 /// One segment's `STAT` just resolved, for a live progress bar —
@@ -100,24 +101,25 @@ struct WorkItem {
     message_id: String,
 }
 
-/// Check every segment in `queue` against `servers`, tried in priority
-/// order, up to `server.connections` workers concurrently per server. A
+/// Check every segment in `queue` against `tiers`, tried in priority order;
+/// within each tier, every member server's own `connections` workers run
+/// concurrently, pooled together — see [`crate::config::ServerTier`]. A
 /// segment confirmed missing (`430`) from every configured server lands in
 /// [`CheckOutcome::missing`]; everything else counts as present.
 ///
 /// `progress`, when given, gets one [`CheckProgress`] event per segment as
 /// its fate is *finally* decided — a "present" event fires as soon as any
 /// server confirms it; a "missing" event only fires once every configured
-/// server has been tried and none had it, mirroring
+/// tier has been tried and none had it, mirroring
 /// [`crate::download::download_queue`]'s own emit points exactly (never
-/// emit "missing" for a segment a backup server might still have).
+/// emit "missing" for a segment a backup tier might still have).
 pub async fn check_queue(
     queue: &DownloadQueue,
-    servers: &[ServerEntry],
+    tiers: &[ServerTier],
     retries: u32,
     progress: Option<CheckProgressSender>,
 ) -> Result<CheckOutcome> {
-    anyhow::ensure!(!servers.is_empty(), "no servers configured");
+    anyhow::ensure!(!tiers.is_empty(), "no servers configured");
 
     let mut totals: HashMap<String, u32> = HashMap::new();
     let mut pending: Vec<WorkItem> = Vec::new();
@@ -135,22 +137,14 @@ pub async fn check_queue(
     let mut present: HashMap<String, u32> = HashMap::new();
     let mut bytes_used = 0u64;
 
-    let last_server_idx = servers.len() - 1;
-    for (idx, server) in servers.iter().enumerate() {
+    let last_tier_idx = tiers.len() - 1;
+    for (idx, tier) in tiers.iter().enumerate() {
         if pending.is_empty() {
             break;
         }
-        let worker_count = server.connections.max(1);
-        let is_last_server = idx == last_server_idx;
-        let (found, leftover, bytes) = drain_one_server(
-            server,
-            pending,
-            retries,
-            worker_count,
-            &progress,
-            is_last_server,
-        )
-        .await;
+        let is_last_tier = idx == last_tier_idx;
+        let (found, leftover, bytes) =
+            drain_one_tier(tier, pending, retries, &progress, is_last_tier).await;
         bytes_used += bytes;
         for item in found {
             *present.entry(item.file_name).or_insert(0) += 1;
@@ -196,50 +190,61 @@ fn emit(progress: &Option<CheckProgressSender>, present: bool) {
     }
 }
 
-/// Drain `pending` against `server` using `worker_count` concurrent
-/// connections. Returns `(found, leftover, bytes_used)`: `found` is
-/// everything this server confirmed present; `leftover` is everything it
-/// didn't (missing, or a STAT attempt that exhausted its retries), for the
-/// next server in priority order to try; `bytes_used` is every byte sent or
-/// received across every connection this server's workers opened.
+/// Drain `pending` against every member of `tier`, each contributing its
+/// own `connections` concurrent workers to one shared queue — see
+/// [`crate::config::ServerTier`]. Returns `(found, leftover, bytes_used)`:
+/// `found` is everything this tier confirmed present; `leftover` is
+/// everything nobody in it did (missing, or a STAT attempt that exhausted
+/// its retries), for the next tier in priority order to try; `bytes_used`
+/// is every byte sent or received across every connection this tier's
+/// workers opened.
 ///
 /// `progress` is threaded down into each worker so a "present" event fires
 /// the instant *that item* resolves — not batched up and only emitted once
-/// this whole function returns. All of `worker_count` workers pull from one
-/// shared queue and only stop once it's empty, so without per-item
-/// emission every worker's task finishes within the same instant at the
-/// very end of the pass regardless of queue size, making the progress bar
-/// sit still for the entire check and then jump straight to 100%.
+/// this whole function returns. Every worker (across every member server)
+/// pulls from one shared queue and only stops once it's empty, so without
+/// per-item emission every worker's task finishes within the same instant
+/// at the very end of the pass regardless of queue size, making the
+/// progress bar sit still for the entire check and then jump straight to
+/// 100%.
 ///
-/// `is_last_server` matters for the same reason: a "missing" verdict is
-/// only final once every configured server has had a turn, but for the
-/// *last* one, that's true the instant each item resolves — so on the last
-/// server, a "missing" event fires per-item too, instead of every leftover
-/// item silently piling up for a single batch emitted after this whole
-/// function (and therefore the whole multi-server check) returns. On a
-/// single-server setup (the common case) every pass is the last pass, so
+/// `is_last_tier` matters for the same reason: a "missing" verdict is only
+/// final once every configured tier has had a turn, but for the *last*
+/// one, that's true the instant each item resolves — so on the last tier,
+/// a "missing" event fires per-item too, instead of every leftover item
+/// silently piling up for a single batch emitted after this whole function
+/// (and therefore the whole multi-tier check) returns. On a
+/// single-tier setup (the common case) every pass is the last pass, so
 /// this is the difference between a release with many missing articles
 /// updating the bar throughout the check or not moving until the very end.
-async fn drain_one_server(
-    server: &ServerEntry,
+async fn drain_one_tier(
+    tier: &ServerTier,
     pending: Vec<WorkItem>,
     retries: u32,
-    worker_count: usize,
     progress: &Option<CheckProgressSender>,
-    is_last_server: bool,
+    is_last_tier: bool,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
 
+    // The *tier-wide* worker count, not any one member's own — worker_loop's
+    // fair-share batching (see its own doc comment) needs to know how many
+    // workers are actually pulling from the shared queue in total, or a
+    // pooled tier's later members would starve exactly the way un-pooled
+    // servers used to before that fix.
+    let worker_count: usize = tier.members.iter().map(|s| s.connections.max(1)).sum();
+
     let mut workers = JoinSet::new();
-    for _ in 0..worker_count {
-        workers.spawn(worker_loop(
-            queue.clone(),
-            server.clone(),
-            retries,
-            progress.clone(),
-            is_last_server,
-            worker_count,
-        ));
+    for server in &tier.members {
+        for _ in 0..server.connections.max(1) {
+            workers.spawn(worker_loop(
+                queue.clone(),
+                server.clone(),
+                retries,
+                progress.clone(),
+                is_last_tier,
+                worker_count,
+            ));
+        }
     }
 
     let mut found = Vec::new();

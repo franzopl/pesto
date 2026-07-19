@@ -12,6 +12,7 @@ use pesto::yenc::{encode_part, PartSpec};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
 
+use penne::config::ServerTier;
 use penne::download::download_queue;
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
@@ -224,7 +225,7 @@ async fn resume_skips_the_network_for_a_segment_already_cached() {
     // The only configured server knows *nothing* — if download_queue tried
     // the network for this segment it would come back missing.
     let addr = spawn_fake_server(HashMap::new()).await;
-    let servers = vec![server_entry(addr)];
+    let servers = vec![ServerTier::solo(server_entry(addr))];
     let queue = queue_with_one_segment("art1@test");
 
     let outcome = download_queue(&queue, &servers, dest_dir.path(), 0, None)
@@ -242,7 +243,7 @@ async fn a_freshly_fetched_segment_is_cached_for_a_future_run() {
     let addr = spawn_fake_server(known).await;
 
     let dest_dir = tempfile::tempdir().unwrap();
-    let servers = vec![server_entry(addr)];
+    let servers = vec![ServerTier::solo(server_entry(addr))];
     let queue = queue_with_one_segment("art1@test");
 
     assert!(penne::cache::load(dest_dir.path(), "art1@test").is_none());
@@ -263,7 +264,7 @@ async fn retries_recover_from_a_transient_connection_failure() {
     let addr = spawn_flaky_then_ok_server(known, 2);
 
     let dest_dir = tempfile::tempdir().unwrap();
-    let servers = vec![server_entry(addr)];
+    let servers = vec![ServerTier::solo(server_entry(addr))];
     let queue = queue_with_one_segment("art1@test");
 
     let outcome = download_queue(&queue, &servers, dest_dir.path(), 3, None)
@@ -280,7 +281,7 @@ async fn exhausting_retries_gives_up_and_reports_missing() {
     let addr = spawn_flaky_then_ok_server(HashMap::new(), u32::MAX);
 
     let dest_dir = tempfile::tempdir().unwrap();
-    let servers = vec![server_entry(addr)];
+    let servers = vec![ServerTier::solo(server_entry(addr))];
     let queue = queue_with_one_segment("art1@test");
 
     let outcome = download_queue(&queue, &servers, dest_dir.path(), 1, None)

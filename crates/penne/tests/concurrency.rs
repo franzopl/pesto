@@ -18,6 +18,7 @@ use pesto::yenc::{encode_part, PartSpec};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+use penne::config::ServerTier;
 use penne::download::download_queue;
 use penne::progress::{channel, ProgressEvent};
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
@@ -31,27 +32,40 @@ fn spawn_slow_server(
 ) -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
+    let addr = spawn_slow_server_sharing(known, delay, in_flight.clone(), peak.clone());
+    (addr, in_flight, peak)
+}
 
+/// Same as [`spawn_slow_server`], but the caller supplies (and can share
+/// across more than one spawned server) the in-flight/peak counters,
+/// rather than each server getting its own — the tool
+/// `two_pooled_servers_are_drained_concurrently_as_one_tier` needs below to
+/// prove concurrency *across* two distinct fake servers, not just within
+/// one.
+fn spawn_slow_server_sharing(
+    known: HashMap<String, Vec<u8>>,
+    delay: Duration,
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+) -> SocketAddr {
     let listener_std = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener_std.set_nonblocking(true).unwrap();
     let addr = listener_std.local_addr().unwrap();
     let listener = TcpListener::from_std(listener_std).unwrap();
 
-    let in_flight_task = in_flight.clone();
-    let peak_task = peak.clone();
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
             let known = known.clone();
-            let in_flight = in_flight_task.clone();
-            let peak = peak_task.clone();
+            let in_flight = in_flight.clone();
+            let peak = peak.clone();
             tokio::spawn(handle_connection(stream, known, delay, in_flight, peak));
         }
     });
 
-    (addr, in_flight, peak)
+    addr
 }
 
 async fn handle_connection(
@@ -179,9 +193,15 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     let dest_dir = tempfile::tempdir().unwrap();
 
     let started = std::time::Instant::now();
-    let outcome = download_queue(&queue, &[server], dest_dir.path(), 0, None)
-        .await
-        .unwrap();
+    let outcome = download_queue(
+        &queue,
+        &[ServerTier::solo(server)],
+        dest_dir.path(),
+        0,
+        None,
+    )
+    .await
+    .unwrap();
     let elapsed = started.elapsed();
 
     assert!(outcome.missing.is_empty());
@@ -205,6 +225,85 @@ async fn multiple_connections_to_one_server_run_concurrently() {
         elapsed < DELAY * (SEGMENTS as u32) / 2,
         "took {elapsed:?}, expected well under {:?} if truly sequential",
         DELAY * SEGMENTS as u32
+    );
+}
+
+/// `ROADMAP.md` Phase 15's `level`+`group` item: two *distinct* servers
+/// pooled into one [`ServerTier`] are drained together as a single
+/// combined worker budget, not one finishing its whole pass before the
+/// other starts (which is still exactly what happens *across* tiers —
+/// this only changes behavior *within* one).
+///
+/// Proof: both fake servers share the *same* in-flight/peak counters
+/// (`spawn_slow_server_sharing`). Each server gets `CONNECTIONS_PER_SERVER
+/// = 2` connections; if pooling genuinely merges their budgets into one
+/// shared queue, peak concurrent in-flight requests can reach above 2 —
+/// impossible if the two were (bug: still) treated as separate sequential
+/// tiers, where only one server's ≤2 connections could ever be active at
+/// once.
+#[tokio::test]
+async fn two_pooled_servers_are_drained_concurrently_as_one_tier() {
+    const SEGMENTS: usize = 8;
+    const CONNECTIONS_PER_SERVER: usize = 2;
+    const DELAY: Duration = Duration::from_millis(80);
+
+    let mut known = HashMap::new();
+    let mut segments = Vec::new();
+    for i in 0..SEGMENTS {
+        let id = format!("seg{i}@test");
+        known.insert(
+            id.clone(),
+            yenc_body("movie.bin", format!("data{i}").as_bytes()),
+        );
+        segments.push(QueuedSegment {
+            message_id: id,
+            part: i as u32 + 1,
+            bytes: 5,
+        });
+    }
+
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    // Both servers know every segment, so either one alone could in
+    // principle serve the whole queue — what's under test is *scheduling*
+    // (are both used at once?), not failover.
+    let addr_a = spawn_slow_server_sharing(known.clone(), DELAY, in_flight.clone(), peak.clone());
+    let addr_b = spawn_slow_server_sharing(known, DELAY, in_flight, peak.clone());
+
+    let queue = DownloadQueue {
+        files: vec![QueuedFile {
+            name: "movie.bin".to_string(),
+            segments,
+        }],
+    };
+    let member = |addr: SocketAddr| ServerEntry {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        ssl: false,
+        connections: CONNECTIONS_PER_SERVER,
+        username: None,
+        password: None,
+        retry_delay: 0,
+        timeout: 5,
+    };
+    let tier = ServerTier {
+        members: vec![member(addr_a), member(addr_b)],
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+
+    let outcome = download_queue(&queue, &[tier], dest_dir.path(), 0, None)
+        .await
+        .unwrap();
+
+    assert!(outcome.missing.is_empty());
+    assert!(outcome.corrupt.is_empty());
+    assert_eq!(outcome.segments.len(), SEGMENTS);
+
+    assert!(
+        peak.load(Ordering::SeqCst) > CONNECTIONS_PER_SERVER,
+        "expected in-flight requests from both pooled servers to overlap \
+         (peak > {CONNECTIONS_PER_SERVER}), peak was {}",
+        peak.load(Ordering::SeqCst)
     );
 }
 
@@ -256,10 +355,9 @@ async fn progress_events_arrive_while_the_download_is_still_running() {
     let dest_path = dest_dir.path().to_path_buf();
 
     let (tx, mut rx) = channel();
-    let handle =
-        tokio::spawn(
-            async move { download_queue(&queue, &[server], &dest_path, 0, Some(tx)).await },
-        );
+    let handle = tokio::spawn(async move {
+        download_queue(&queue, &[ServerTier::solo(server)], &dest_path, 0, Some(tx)).await
+    });
 
     // The `Started` event fires immediately; skip past it to the first
     // real per-segment event.
@@ -335,10 +433,9 @@ async fn missing_progress_events_arrive_while_the_download_is_still_running() {
     let dest_path = dest_dir.path().to_path_buf();
 
     let (tx, mut rx) = channel();
-    let handle =
-        tokio::spawn(
-            async move { download_queue(&queue, &[server], &dest_path, 0, Some(tx)).await },
-        );
+    let handle = tokio::spawn(async move {
+        download_queue(&queue, &[ServerTier::solo(server)], &dest_path, 0, Some(tx)).await
+    });
 
     loop {
         let ev = tokio::time::timeout(Duration::from_millis(200), rx.recv())
@@ -428,10 +525,9 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
     let dest_path = dest_dir.path().to_path_buf();
 
     let (tx, mut rx) = channel();
-    let handle =
-        tokio::spawn(
-            async move { download_queue(&queue, &[server], &dest_path, 0, Some(tx)).await },
-        );
+    let handle = tokio::spawn(async move {
+        download_queue(&queue, &[ServerTier::solo(server)], &dest_path, 0, Some(tx)).await
+    });
 
     loop {
         let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())

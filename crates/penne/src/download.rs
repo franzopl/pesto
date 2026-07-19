@@ -15,13 +15,17 @@
 //!
 //! **Concurrency (`ROADMAP.md` Phase 2's long-standing open item, closed in
 //! Phase 9):** each server is drained by up to `server.connections` workers
-//! running at once — real throughput, not one segment at a time. Servers
-//! are still tried strictly in priority order (all of server 1's workers
-//! finish their pass before server 2's start), since "missing from this
-//! server" is an expected, per-segment condition for a downloader, not a
-//! failure to rotate away from the way `pesto::nntp::pool` does for
-//! posting — a backup provider only gets asked about the segments the
-//! primary didn't have.
+//! running at once — real throughput, not one segment at a time. Priority
+//! *tiers* (`ROADMAP.md` Phase 15's `level`+`group` item —
+//! [`crate::config::ServerTier`]) are still tried strictly in order (every
+//! member of tier 1 finishes its pass before tier 2 starts), since "missing
+//! from this tier" is an expected, per-segment condition for a downloader,
+//! not a failure to rotate away from the way `pesto::nntp::pool` does for
+//! posting — a backup tier only gets asked about the segments the primary
+//! didn't have. *Within* a tier, every member server's connections are
+//! drained together as one combined worker pool sharing a single queue —
+//! that's what pooling two equal-priority servers actually buys over
+//! giving them each their own tier.
 //!
 //! Two resilience mechanisms live here (`ROADMAP.md` Phase 8):
 //! - **Cache-first fetch:** before any network request, [`crate::cache`] is
@@ -46,6 +50,7 @@ use tokio::task::JoinSet;
 use crate::assemble::{self, AssembleOutcome};
 use crate::cache;
 use crate::client::DownloadClient;
+use crate::config::ServerTier;
 use crate::progress::{ProgressEvent, ProgressSender};
 use crate::queue::{DownloadQueue, QueuedFile};
 
@@ -119,27 +124,28 @@ struct PassContext {
     shared: Arc<SharedState>,
 }
 
-/// Fetch and decode every segment in `queue` from `servers`, tried in
-/// priority order. Within each server's pass, up to `server.connections`
-/// workers run concurrently. A decode failure on one server's copy is not
-/// fatal: the next configured server is tried before giving up on the
-/// segment, since the failure may be specific to that one transfer.
+/// Fetch and decode every segment in `queue` from `tiers`, tried in
+/// priority order. Within each tier, up to every member server's own
+/// `connections` workers run concurrently, pooled together — see
+/// [`ServerTier`]. A decode failure on one server's copy is not fatal: the
+/// next tier is tried before giving up on the segment, since the failure
+/// may be specific to that one transfer.
 ///
 /// Each file is also written to disk ([`crate::assemble::assemble`]) the
 /// instant every one of its segments has reached a terminal state —
-/// fetched, or definitively unfetchable after the last configured server —
+/// fetched, or definitively unfetchable after the last configured tier —
 /// rather than waiting for every other file in the queue too. `retries`
 /// bounds how many times a connection/fetch error against one server is
 /// retried (with that server's own `retry_delay` between attempts) before
-/// moving to the next server.
+/// moving to the next tier.
 pub async fn download_queue(
     queue: &DownloadQueue,
-    servers: &[ServerEntry],
+    tiers: &[ServerTier],
     dest_dir: &Path,
     retries: u32,
     progress: Option<ProgressSender>,
 ) -> Result<DownloadOutcome> {
-    anyhow::ensure!(!servers.is_empty(), "no servers configured");
+    anyhow::ensure!(!tiers.is_empty(), "no servers configured");
 
     emit(&progress, || ProgressEvent::Started {
         files: queue
@@ -221,15 +227,13 @@ pub async fn download_queue(
         shared,
     });
 
-    let last_server_idx = servers.len() - 1;
-    for (idx, server) in servers.iter().enumerate() {
+    let last_tier_idx = tiers.len() - 1;
+    for (idx, tier) in tiers.iter().enumerate() {
         if pending.is_empty() {
             break;
         }
-        let worker_count = server.connections.max(1);
-        let is_last_server = idx == last_server_idx;
-        let (fetched, leftover) =
-            drain_one_server(server, pending, worker_count, is_last_server, &ctx).await?;
+        let is_last_tier = idx == last_tier_idx;
+        let (fetched, leftover) = drain_one_tier(tier, pending, is_last_tier, &ctx).await?;
 
         for item in fetched {
             last_decode_err.remove(&item.message_id);
@@ -344,31 +348,33 @@ fn emit(progress: &Option<ProgressSender>, event: impl FnOnce() -> ProgressEvent
     }
 }
 
-/// Drain `pending` against `server` using `worker_count` concurrent
-/// connections. Returns `(fetched, leftover)`: `fetched` lists every item
-/// that was fetched and decoded (its `DecodedPart` already landed in
+/// Drain `pending` against every member of `tier`, each contributing its
+/// own `connections` concurrent workers to one shared queue — see
+/// [`ServerTier`]. Returns `(fetched, leftover)`: `fetched` lists every
+/// item that was fetched and decoded (its `DecodedPart` already landed in
 /// `shared.segments`, and — if it completed its file — that file has
-/// already been assembled); `leftover` is everything this server didn't
-/// resolve (missing, or fetched-but-undecodable — paired with the decode
-/// error when that's why), for the next server in priority order to try.
+/// already been assembled); `leftover` is everything nobody in this tier
+/// resolved (missing, or fetched-but-undecodable — paired with the decode
+/// error when that's why), for the next tier in priority order to try.
 ///
 /// `progress` is threaded down into each worker so a `SegmentDownloaded`
 /// event fires the instant *that item* is fetched and decoded — not
-/// batched up and only emitted once this whole function returns. All of
-/// `worker_count` workers pull from one shared queue and only stop once
-/// it's empty, so without per-item emission every worker's task finishes
-/// within the same instant at the very end of the pass regardless of queue
-/// size, making the progress panel sit still for the whole fetch and then
-/// jump straight to 100% (found and fixed via the identical bug in
-/// `penne::check::drain_one_server` — see that module's history).
+/// batched up and only emitted once this whole function returns. Every
+/// worker (across every member server) pulls from one shared queue and
+/// only stops once it's empty, so without per-item emission every worker's
+/// task finishes within the same instant at the very end of the pass
+/// regardless of queue size, making the progress panel sit still for the
+/// whole fetch and then jump straight to 100% (found and fixed via the
+/// identical bug in `penne::check::drain_one_tier` — see that module's
+/// history).
 ///
-/// `is_last_server` mirrors `penne::check`'s fix too: a "missing"/"corrupt"
-/// verdict is normally only final once every configured server has had a
+/// `is_last_tier` mirrors `penne::check`'s fix too: a "missing"/"corrupt"
+/// verdict is normally only final once every configured tier has had a
 /// turn, but for the *last* one that's true the instant each item
 /// resolves, so it emits per-item there too instead of leaving every
-/// leftover item to pile up for one batch after the whole multi-server
-/// check returns — the difference between a mostly-missing release
-/// updating the panel throughout the download or not moving until the end.
+/// leftover item to pile up for one batch after the whole multi-tier check
+/// returns — the difference between a mostly-missing release updating the
+/// panel throughout the download or not moving until the end.
 ///
 /// Returns the first I/O error hit while assembling a completed file, if
 /// any — a real disk failure (out of space, permission revoked) is treated
@@ -376,23 +382,25 @@ fn emit(progress: &Option<ProgressSender>, event: impl FnOnce() -> ProgressEvent
 /// `assemble()`'s own errors already propagated when called from
 /// `bin/penne.rs` directly. Any workers still in flight when that happens
 /// are aborted when the `JoinSet` is dropped.
-async fn drain_one_server(
-    server: &ServerEntry,
+async fn drain_one_tier(
+    tier: &ServerTier,
     pending: Vec<WorkItem>,
-    worker_count: usize,
-    is_last_server: bool,
+    is_last_tier: bool,
     ctx: &Arc<PassContext>,
 ) -> Result<(Vec<WorkItem>, Vec<(WorkItem, Option<String>)>)> {
     let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
 
     let mut workers = JoinSet::new();
-    for _ in 0..worker_count {
-        workers.spawn(worker_loop(
-            queue.clone(),
-            server.clone(),
-            is_last_server,
-            ctx.clone(),
-        ));
+    for server in &tier.members {
+        let worker_count = server.connections.max(1);
+        for _ in 0..worker_count {
+            workers.spawn(worker_loop(
+                queue.clone(),
+                server.clone(),
+                is_last_tier,
+                ctx.clone(),
+            ));
+        }
     }
 
     let mut fetched = Vec::new();

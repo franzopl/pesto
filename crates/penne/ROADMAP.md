@@ -955,21 +955,54 @@ scope per `CLAUDE.md`, not the download engine).
       against a real tempdir — no mocking needed since no real disk has
       exabytes free; `check` creates a destination directory that doesn't
       exist yet).
-- [ ] **`level` + `group` server pools.** `penne`'s server list today is
-      strictly sequential priority (Phase 9: "all of server 1's workers
+- [x] **`level` + `group` server pools.** `penne`'s server list previously
+      was strictly sequential priority (Phase 9: "all of server 1's workers
       finish before server 2's start", deliberately unlike a rotate-on-error
       pool). `nzbget`'s `ServerPool` generalizes this with two fields per
-      server: `level` (the priority tier `penne` already has) and `group`
+      server: `level` (the priority tier `penne` already had) and `group`
       (servers sharing a `level` *and* `group` are pooled and used
-      interchangeably, not one-as-fallback-for-the-other). Covers a real
-      case `penne` can't express today: two equal-priority accounts (e.g.
-      two blocks of connections on the same provider, or two mirror
+      interchangeably, not one-as-fallback-for-the-other) — covering a real
+      case `penne` couldn't express before: two equal-priority accounts
+      (e.g. two blocks of connections on the same provider, or two mirror
       providers) that should share worker load, not act as primary/backup.
-      Needs a `group` field on `RawServer`/`penne::config`, plus changing
-      `drain_one_server`'s per-server sequencing (`penne::download`,
-      `penne::check`) to treat a `group` as one pool of
-      `Σ connections`-many workers instead of iterating servers one at a
-      time.
+      `penne` didn't need a separate numeric `level`: priority tier order
+      was, and still is, purely the order `[[servers]]` entries appear in
+      the TOML file — only `group` (`RawServer::group`, new, `Option<u32>`)
+      needed adding, to cluster *adjacent* entries sharing a value into one
+      pool. New `penne::config::ServerTier { members: Vec<ServerEntry> }`
+      is what a "tier" is now (a `ServerTier::solo(entry)` for an
+      ungrouped server, `Config.server_tiers: Vec<ServerTier>` replacing
+      the old flat `Config.servers: Vec<ServerEntry>`); `RawConfig::resolve`
+      builds tiers by walking `[[servers]]` in order and merging an entry
+      into the tier being built only when its `group` matches the
+      *immediately preceding* one — non-adjacent same-`group` entries each
+      start their own tier instead of being merged, a documented
+      simplification (list group members next to each other) rather than
+      trying to support scattered grouping.
+      `penne::download::download_queue` and `penne::check::check_queue`
+      both had their `drain_one_server` renamed to `drain_one_tier`,
+      spawning `server.connections` workers *per member* of the tier (not
+      just one server) onto one shared work queue — `check_queue`'s
+      fairness-batching math (`STAT_PIPELINE_DEPTH`'s `worker_count`-th-of-
+      the-queue cap, from the fairness bug fixed in Phase 12) had to switch
+      from one member's own `connections` to the tier's *combined* total,
+      or a pooled tier's later members would starve exactly the bug that
+      fix already closed for un-pooled servers.
+      All 6 existing integration test files that call `download_queue`/
+      `check_queue` directly were updated to wrap their server lists in
+      `ServerTier::solo(...)` — a mechanical, behavior-preserving change
+      (each server keeps its own solitary tier, identical to pre-grouping
+      behavior) verified by the full existing suite passing unchanged.
+      The actual new behavior is proven by a new
+      `two_pooled_servers_are_drained_concurrently_as_one_tier`
+      (`tests/concurrency.rs`): two *distinct* fake NNTP servers, each
+      given 2 connections and pooled into one tier, share one in-flight/
+      peak-concurrency counter across both — peak observed concurrency
+      exceeding 2 (either server's own connection count alone) is only
+      possible if both were genuinely drained together, impossible under
+      the old one-tier-per-server model or a grouping bug that silently
+      used only one member. `crates/penne/README.md` documents the new
+      `group` field with a worked example.
 - [ ] **Incremental extraction, `DirectUnpack`-style.** `nzbget` starts
       unpacking each RAR/7z volume the instant *that volume* finishes
       downloading, running in parallel with the rest of the queue still in

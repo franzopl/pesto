@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 
+use penne::config::ServerTier;
 use penne::download::download_queue;
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
@@ -150,7 +151,7 @@ async fn fetches_and_decodes_from_the_only_configured_server() {
     let addr = spawn_fake_server(known);
 
     let queue = queue_with_one_segment("art1@test");
-    let servers = vec![server_entry(addr)];
+    let servers = vec![ServerTier::solo(server_entry(addr))];
 
     let dir = tempfile::tempdir().unwrap();
     let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
@@ -172,7 +173,10 @@ async fn falls_back_to_backup_when_primary_is_missing() {
     let backup = spawn_fake_server(backup_known);
 
     let queue = queue_with_one_segment("art1@test");
-    let servers = vec![server_entry(primary), server_entry(backup)];
+    let servers = vec![
+        ServerTier::solo(server_entry(primary)),
+        ServerTier::solo(server_entry(backup)),
+    ];
 
     let dir = tempfile::tempdir().unwrap();
     let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
@@ -199,7 +203,10 @@ async fn falls_back_to_backup_when_primary_serves_a_corrupt_copy() {
     let backup = spawn_fake_server(backup_known);
 
     let queue = queue_with_one_segment("art1@test");
-    let servers = vec![server_entry(primary), server_entry(backup)];
+    let servers = vec![
+        ServerTier::solo(server_entry(primary)),
+        ServerTier::solo(server_entry(backup)),
+    ];
 
     let dir = tempfile::tempdir().unwrap();
     let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
@@ -220,7 +227,7 @@ async fn records_corrupt_when_no_server_has_a_decodable_copy() {
     let addr = spawn_fake_server(known);
 
     let queue = queue_with_one_segment("art1@test");
-    let servers = vec![server_entry(addr)];
+    let servers = vec![ServerTier::solo(server_entry(addr))];
 
     let dir = tempfile::tempdir().unwrap();
     let outcome = download_queue(&queue, &servers, dir.path(), 0, None)
@@ -239,7 +246,10 @@ async fn records_missing_when_no_server_has_it() {
     let b = spawn_fake_server(HashMap::new());
 
     let queue = queue_with_one_segment("ghost@test");
-    let servers = vec![server_entry(a), server_entry(b)];
+    let servers = vec![
+        ServerTier::solo(server_entry(a)),
+        ServerTier::solo(server_entry(b)),
+    ];
 
     let dir = tempfile::tempdir().unwrap();
     let outcome = download_queue(&queue, &servers, dir.path(), 0, None)

@@ -136,13 +136,13 @@ async fn download(
         .with_context(|| format!("reading {}", config_path.display()))?;
     let config = penne::config::RawConfig::parse(&config_toml)?.resolve()?;
     anyhow::ensure!(
-        !config.servers.is_empty(),
+        !config.server_tiers.is_empty(),
         "no [[servers]] configured in {}",
         config_path.display()
     );
 
     if stat {
-        return check_availability(&queue, &config.servers, config.retries).await;
+        return check_availability(&queue, &config.server_tiers, config.retries).await;
     }
 
     let dest_dir = out_dir.unwrap_or(config.download_dir);
@@ -162,7 +162,7 @@ async fn download(
 
     let outcome = penne::download::download_queue(
         &queue,
-        &config.servers,
+        &config.server_tiers,
         &dest_dir,
         config.retries,
         Some(tx),
@@ -297,7 +297,7 @@ async fn download(
 /// missing, so it's scriptable ahead of a real download.
 async fn check_availability(
     queue: &penne::queue::DownloadQueue,
-    servers: &[pesto::config::ServerEntry],
+    tiers: &[penne::config::ServerTier],
     retries: u32,
 ) -> Result<()> {
     let total_segments: usize = queue.files.iter().map(|f| f.segments.len()).sum();
@@ -310,7 +310,7 @@ async fn check_availability(
     let (tx, rx) = penne::check::channel();
     let progress_task = penne::ui::check::spawn_renderer(rx, total_segments as u32);
 
-    let outcome = penne::check::check_queue(queue, servers, retries, Some(tx)).await?;
+    let outcome = penne::check::check_queue(queue, tiers, retries, Some(tx)).await?;
     // `check_queue` owns the only sender clone, so it's already dropped by
     // the time it returns — the renderer's channel closes on its own and
     // this simply waits for its final redraw to flush.

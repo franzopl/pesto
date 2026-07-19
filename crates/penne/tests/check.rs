@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use penne::check::{channel, check_queue};
+use penne::config::ServerTier;
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
 /// Spawn a fake NNTP server that only understands `STAT` and `QUIT`.
@@ -168,7 +169,7 @@ async fn every_segment_present_reports_complete() {
     let addr = spawn_fake_server(known);
 
     let queue = queue_with(&[("movie.bin", &["a1@x", "a2@x"]), ("movie.par2", &["b1@x"])]);
-    let outcome = check_queue(&queue, &[server_entry(addr)], 0, None)
+    let outcome = check_queue(&queue, &[ServerTier::solo(server_entry(addr))], 0, None)
         .await
         .unwrap();
 
@@ -190,7 +191,7 @@ async fn missing_segments_are_reported_per_file_and_overall() {
     let addr = spawn_fake_server(known);
 
     let queue = queue_with(&[("movie.bin", &["a1@x", "a2@x"]), ("movie.par2", &["b1@x"])]);
-    let outcome = check_queue(&queue, &[server_entry(addr)], 0, None)
+    let outcome = check_queue(&queue, &[ServerTier::solo(server_entry(addr))], 0, None)
         .await
         .unwrap();
 
@@ -214,7 +215,10 @@ async fn falls_back_to_backup_server_for_segments_the_primary_lacks() {
     let backup = spawn_fake_server(backup_known);
 
     let queue = queue_with(&[("movie.bin", &["a1@x"])]);
-    let servers = vec![server_entry(primary), server_entry(backup)];
+    let servers = vec![
+        ServerTier::solo(server_entry(primary)),
+        ServerTier::solo(server_entry(backup)),
+    ];
     let outcome = check_queue(&queue, &servers, 0, None).await.unwrap();
 
     assert!(outcome.is_complete());
@@ -227,7 +231,7 @@ async fn bytes_used_reflects_the_exact_wire_cost_of_the_check() {
     let addr = spawn_fake_server(known);
 
     let queue = queue_with(&[("movie.bin", &["a1@x"])]);
-    let outcome = check_queue(&queue, &[server_entry(addr)], 0, None)
+    let outcome = check_queue(&queue, &[ServerTier::solo(server_entry(addr))], 0, None)
         .await
         .unwrap();
 
@@ -252,7 +256,7 @@ async fn emits_one_progress_event_per_segment_with_the_right_present_flag() {
     // b1@x is never in `known`, so it resolves missing.
     let queue = queue_with(&[("movie.bin", &["a1@x", "a2@x"]), ("movie.par2", &["b1@x"])]);
     let (tx, mut rx) = channel();
-    let outcome = check_queue(&queue, &[server_entry(addr)], 0, Some(tx))
+    let outcome = check_queue(&queue, &[ServerTier::solo(server_entry(addr))], 0, Some(tx))
         .await
         .unwrap();
     assert_eq!(outcome.missing.len(), 1);
@@ -276,7 +280,10 @@ async fn no_server_has_it_reports_missing_after_trying_every_server() {
     let backup = spawn_fake_server(HashSet::new());
 
     let queue = queue_with(&[("movie.bin", &["a1@x"])]);
-    let servers = vec![server_entry(primary), server_entry(backup)];
+    let servers = vec![
+        ServerTier::solo(server_entry(primary)),
+        ServerTier::solo(server_entry(backup)),
+    ];
     let outcome = check_queue(&queue, &servers, 0, None).await.unwrap();
 
     assert!(!outcome.is_complete());
@@ -324,7 +331,10 @@ async fn progress_events_arrive_while_the_check_is_still_running() {
     server.connections = CONNECTIONS;
 
     let (tx, mut rx) = channel();
-    let handle = tokio::spawn(async move { check_queue(&queue, &[server], 0, Some(tx)).await });
+    let handle =
+        tokio::spawn(
+            async move { check_queue(&queue, &[ServerTier::solo(server)], 0, Some(tx)).await },
+        );
 
     // Total expected wall time is roughly SEGMENTS/CONNECTIONS * DELAY =
     // 250ms. Waiting up to 200ms for the *first* event, then checking the
@@ -387,7 +397,10 @@ async fn missing_progress_events_arrive_while_the_check_is_still_running() {
     server.connections = CONNECTIONS;
 
     let (tx, mut rx) = channel();
-    let handle = tokio::spawn(async move { check_queue(&queue, &[server], 0, Some(tx)).await });
+    let handle =
+        tokio::spawn(
+            async move { check_queue(&queue, &[ServerTier::solo(server)], 0, Some(tx)).await },
+        );
 
     let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
         .await

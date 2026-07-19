@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use penne::check::check_queue;
+use penne::config::ServerTier;
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
 /// Spawn a fake NNTP server whose `STAT` handler sleeps `delay` before
@@ -137,7 +138,9 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     };
 
     let started = std::time::Instant::now();
-    let outcome = check_queue(&queue, &[server], 0, None).await.unwrap();
+    let outcome = check_queue(&queue, &[ServerTier::solo(server)], 0, None)
+        .await
+        .unwrap();
     let elapsed = started.elapsed();
 
     assert!(outcome.is_complete());

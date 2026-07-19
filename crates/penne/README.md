@@ -102,6 +102,36 @@ same `[[servers]]` shape `pesto` uses (see the root
 fields, so a combined config file can share the block between the two tools
 if you use both.
 
+**Pooling equal-priority servers with `group`:** two *adjacent*
+`[[servers]]` entries sharing the same `group` value are drained together
+as one combined worker pool instead of one strictly finishing before the
+next starts — for two equal-priority accounts (e.g. two blocks of
+connections on the same provider, or two mirror providers) that should
+share load rather than act as primary/backup:
+
+```toml
+[[servers]]
+host = "account-a.example.com"
+group = 1
+connections = 10
+
+[[servers]]
+host = "account-b.example.com"
+group = 1
+connections = 10
+
+# Not in group 1, and not adjacent to it either way: its own tier, tried
+# only once both pooled servers above have been asked.
+[[servers]]
+host = "backup.example.com"
+```
+
+Omit `group` (the default) to keep a server as its own solitary priority
+tier — unaffected, and how every `[[servers]]` entry behaves without this
+field. Servers sharing a `group` value that *aren't* adjacent in the file
+each get their own tier instead of being pooled — list group members next
+to each other.
+
 ## Usage
 
 ```bash

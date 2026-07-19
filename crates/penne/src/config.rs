@@ -64,9 +64,11 @@ fn config_path_from_env(
 /// Fully resolved download configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Servers to download from, in priority order (first is primary, the
-    /// rest are used as backfill for missing articles).
-    pub servers: Vec<ServerEntry>,
+    /// Priority tiers to download from, in order (the first tier is
+    /// primary, the rest are backfill for whatever segments it's missing).
+    /// Each tier holds one or more servers sharing that priority — see
+    /// [`ServerTier`].
+    pub server_tiers: Vec<ServerTier>,
     /// Directory where completed files are written.
     pub download_dir: PathBuf,
     /// Default number of parallel NNTP connections for a server that
@@ -77,6 +79,35 @@ pub struct Config {
     /// [`crate::download::download_queue`]). Each server's own
     /// `retry_delay` governs the pause between attempts.
     pub retries: u32,
+}
+
+/// One priority tier: one or more servers sharing the same priority,
+/// drained together as a single combined worker pool (each member
+/// contributing its own `connections`) rather than one strictly after
+/// another.
+///
+/// `nzbget`'s `ServerPool` calls this a `level`+`group` pair (`ROADMAP.md`
+/// Phase 15) — a `level` is the priority tier (what `penne` already
+/// expressed purely through list position before this), and a `group`
+/// pools servers *within* a level. `penne` doesn't need a separate numeric
+/// `level`: [`RawConfig::resolve`] already derives tier order from
+/// `[[servers]]`'s own order in the TOML file, so grouping only needs to
+/// cluster *adjacent* entries that share a [`RawServer::group`] value —
+/// see that field's doc comment for the exact rule.
+#[derive(Debug, Clone)]
+pub struct ServerTier {
+    pub members: Vec<ServerEntry>,
+}
+
+impl ServerTier {
+    /// A tier of exactly one server — today's behavior before grouping
+    /// existed, and still what an ungrouped `[[servers]]` entry resolves
+    /// to.
+    pub fn solo(entry: ServerEntry) -> Self {
+        ServerTier {
+            members: vec![entry],
+        }
+    }
 }
 
 /// On-disk TOML representation of a `[[servers]]` entry, before defaults are
@@ -93,6 +124,19 @@ pub struct RawServer {
     pub connections: Option<usize>,
     /// Seconds to wait between retry attempts against this server.
     pub retry_delay: Option<u64>,
+    /// Pool this server with the *adjacent* `[[servers]]` entries sharing
+    /// the same `group` value: instead of one strictly finishing its pass
+    /// before the next starts, every member's connections are drained
+    /// together as one combined worker pool at that shared priority.
+    /// Covers two equal-priority accounts (e.g. two blocks of connections
+    /// on the same provider, or two mirror providers) that should share
+    /// worker load rather than act as primary/backup. Omitted (the
+    /// default) keeps this server its own solitary priority tier, exactly
+    /// as before this field existed. Servers with the *same* `group` value
+    /// that are **not** adjacent in the file each start their own tier
+    /// instead of being pooled — list group members next to each other.
+    #[serde(default)]
+    pub group: Option<u32>,
 }
 
 /// On-disk TOML representation of the whole config file.
@@ -120,10 +164,17 @@ impl RawConfig {
     /// config file nor a CLI override provides one.
     pub fn resolve(self) -> Result<Config> {
         let default_connections = self.connections.unwrap_or(DEFAULT_CONNECTIONS);
-        let servers = self
-            .servers
-            .into_iter()
-            .map(|s| ServerEntry {
+
+        // Clusters *adjacent* `[[servers]]` entries sharing a `group` value
+        // into one `ServerTier`; every other entry (an ungrouped one, or one
+        // whose `group` differs from the tier being built) starts a new
+        // solitary tier — see `RawServer::group`'s doc comment for why
+        // adjacency is what's required, not just a matching value anywhere
+        // in the file.
+        let mut server_tiers: Vec<ServerTier> = Vec::new();
+        let mut current_group: Option<u32> = None;
+        for s in self.servers {
+            let entry = ServerEntry {
                 host: s.host,
                 port: s.port.unwrap_or(if s.ssl { 563 } else { 119 }),
                 ssl: s.ssl,
@@ -132,11 +183,23 @@ impl RawConfig {
                 password: s.password,
                 retry_delay: s.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
                 timeout: 120,
-            })
-            .collect();
+            };
+            let joins_current_tier =
+                matches!((s.group, current_group), (Some(g), Some(cg)) if g == cg);
+            if joins_current_tier {
+                server_tiers
+                    .last_mut()
+                    .expect("current_group only set once a tier already exists")
+                    .members
+                    .push(entry);
+            } else {
+                server_tiers.push(ServerTier::solo(entry));
+                current_group = s.group;
+            }
+        }
 
         Ok(Config {
-            servers,
+            server_tiers,
             download_dir: self.download_dir.unwrap_or_else(|| PathBuf::from(".")),
             connections: default_connections,
             retries: self.retries.unwrap_or(DEFAULT_RETRIES),
@@ -161,9 +224,10 @@ mod tests {
         "#;
         let raw = RawConfig::parse(toml).unwrap();
         let config = raw.resolve().unwrap();
-        assert_eq!(config.servers.len(), 1);
-        assert_eq!(config.servers[0].host, "news.example.com");
-        assert_eq!(config.servers[0].port, 563);
+        assert_eq!(config.server_tiers.len(), 1);
+        assert_eq!(config.server_tiers[0].members.len(), 1);
+        assert_eq!(config.server_tiers[0].members[0].host, "news.example.com");
+        assert_eq!(config.server_tiers[0].members[0].port, 563);
         assert_eq!(config.download_dir, PathBuf::from("/downloads"));
     }
 
@@ -172,7 +236,7 @@ mod tests {
         let raw = RawConfig::parse("").unwrap();
         let config = raw.resolve().unwrap();
         assert_eq!(config.download_dir, PathBuf::from("."));
-        assert!(config.servers.is_empty());
+        assert!(config.server_tiers.is_empty());
     }
 
     #[test]
@@ -188,8 +252,11 @@ mod tests {
             connections = 3
         "#;
         let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
-        assert_eq!(config.servers[0].connections, 20);
-        assert_eq!(config.servers[1].connections, 3);
+        // No `group` on either entry: each stays its own solitary tier,
+        // exactly as before grouping existed.
+        assert_eq!(config.server_tiers.len(), 2);
+        assert_eq!(config.server_tiers[0].members[0].connections, 20);
+        assert_eq!(config.server_tiers[1].members[0].connections, 3);
     }
 
     #[test]
@@ -199,7 +266,78 @@ mod tests {
             host = "news.example.com"
         "#;
         let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
-        assert_eq!(config.servers[0].connections, DEFAULT_CONNECTIONS);
+        assert_eq!(
+            config.server_tiers[0].members[0].connections,
+            DEFAULT_CONNECTIONS
+        );
+    }
+
+    #[test]
+    fn adjacent_servers_sharing_a_group_are_pooled_into_one_tier() {
+        let toml = r#"
+            [[servers]]
+            host = "account-a.example.com"
+            group = 1
+            connections = 5
+
+            [[servers]]
+            host = "account-b.example.com"
+            group = 1
+            connections = 3
+
+            [[servers]]
+            host = "backup.example.com"
+        "#;
+        let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
+        assert_eq!(config.server_tiers.len(), 2);
+        assert_eq!(config.server_tiers[0].members.len(), 2);
+        assert_eq!(
+            config.server_tiers[0].members[0].host,
+            "account-a.example.com"
+        );
+        assert_eq!(
+            config.server_tiers[0].members[1].host,
+            "account-b.example.com"
+        );
+        assert_eq!(config.server_tiers[1].members.len(), 1);
+        assert_eq!(config.server_tiers[1].members[0].host, "backup.example.com");
+    }
+
+    #[test]
+    fn non_adjacent_servers_sharing_a_group_are_not_pooled() {
+        // account-a and account-c share group 1 but aren't next to each
+        // other in the file — each starts its own tier instead, per
+        // `RawServer::group`'s documented adjacency requirement.
+        let toml = r#"
+            [[servers]]
+            host = "account-a.example.com"
+            group = 1
+
+            [[servers]]
+            host = "account-b.example.com"
+            group = 2
+
+            [[servers]]
+            host = "account-c.example.com"
+            group = 1
+        "#;
+        let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
+        assert_eq!(config.server_tiers.len(), 3);
+        assert!(config.server_tiers.iter().all(|t| t.members.len() == 1));
+    }
+
+    #[test]
+    fn ungrouped_servers_each_get_their_own_solitary_tier() {
+        let toml = r#"
+            [[servers]]
+            host = "a.example.com"
+
+            [[servers]]
+            host = "b.example.com"
+        "#;
+        let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
+        assert_eq!(config.server_tiers.len(), 2);
+        assert!(config.server_tiers.iter().all(|t| t.members.len() == 1));
     }
 
     #[cfg(not(windows))]
