@@ -232,7 +232,10 @@ async fn resume_skips_the_network_for_a_segment_already_cached() {
         .await
         .unwrap();
     assert!(outcome.missing.is_empty());
-    assert_eq!(outcome.segments.get("art1@test").unwrap().data, data);
+    let written = tokio::fs::read(dest_dir.path().join("movie.bin"))
+        .await
+        .unwrap();
+    assert_eq!(written, data);
 }
 
 #[tokio::test]
@@ -271,7 +274,10 @@ async fn retries_recover_from_a_transient_connection_failure() {
         .await
         .unwrap();
     assert!(outcome.missing.is_empty(), "{outcome:?}");
-    assert_eq!(outcome.segments.get("art1@test").unwrap().data, data);
+    let written = tokio::fs::read(dest_dir.path().join("movie.bin"))
+        .await
+        .unwrap();
+    assert_eq!(written, data);
 }
 
 #[tokio::test]

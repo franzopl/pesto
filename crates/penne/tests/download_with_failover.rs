@@ -159,9 +159,13 @@ async fn fetches_and_decodes_from_the_only_configured_server() {
         .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
-    let decoded = outcome.segments.get("art1@test").unwrap();
-    assert_eq!(decoded.data, data);
-    assert!(decoded.crc_matches());
+    assert!(outcome.segments.contains("art1@test"));
+    // The decoded bytes themselves are no longer held in `outcome.segments`
+    // (Phase 16's per-segment streaming — written to disk and dropped
+    // immediately instead), so correctness is verified against the
+    // assembled file on disk.
+    let written = tokio::fs::read(dir.path().join("movie.bin")).await.unwrap();
+    assert_eq!(written, data);
 }
 
 #[tokio::test]
@@ -184,7 +188,8 @@ async fn falls_back_to_backup_when_primary_is_missing() {
         .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
-    assert_eq!(outcome.segments.get("art1@test").unwrap().data, data);
+    let written = tokio::fs::read(dir.path().join("movie.bin")).await.unwrap();
+    assert_eq!(written, data);
 }
 
 #[tokio::test]
@@ -214,7 +219,8 @@ async fn falls_back_to_backup_when_primary_serves_a_corrupt_copy() {
         .unwrap();
     assert!(outcome.missing.is_empty());
     assert!(outcome.corrupt.is_empty());
-    assert_eq!(outcome.segments.get("art1@test").unwrap().data, data);
+    let written = tokio::fs::read(dir.path().join("movie.bin")).await.unwrap();
+    assert_eq!(written, data);
 }
 
 #[tokio::test]

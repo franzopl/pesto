@@ -53,6 +53,8 @@ testable state.
 | 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`; `STAT` commands pipelined (depth 20) to amortize round-trip latency on top of connection concurrency. |
 | 13 (partial) | Post-download visibility & assembly speedup — status lines before deobfuscate/verify/extract instead of silence; `assemble()` skips redundant per-segment `seek()` calls (~3x faster writes on a real disk, measured with `fsync`). PAR2 verify parallelization still open. |
 | 14 | Streaming assembly — `download_queue` now writes each file to disk the instant its own segments resolve, interleaved with the rest of the fetch, instead of batching every file's write into one pass after the whole queue finishes. Closes the "fetch-and-write-incrementally" item flagged as deferred back in Phase 8. |
+| 15 | `nzbget`-inspired hardening — disk-space guard before download; PAR2-redundancy-aware early health warning ahead of the expensive verify pass (rescoped from a pre-download check, which turned out infeasible — see the phase itself); `level`+`group` server pools letting equal-priority servers share one worker pool instead of one strictly following another. |
+| 16 | `sabnzbd`-inspired hardening — categorized, actionable NNTP connect/auth error messages; PAR2 quick-check deriving a file's expected CRC-32 from IFSC data alone (new `pesto::yenc::crc32_combine`), skipping a full re-hash on the common all-intact path; per-segment streaming writes, closing the memory-scaling gap Phase 14 left for single-large-file releases. |
 
 ---
 
@@ -873,7 +875,7 @@ progressively?"
 
 ---
 
-## Phase 15 — Health-aware downloads, disk guard, server pools (planned)
+## Phase 15 — Health-aware downloads, disk guard, server pools ✅
 
 Inspired by a study of [`nzbget`](https://github.com/nzbgetcom/nzbget)'s core
 downloader (`daemon/nntp`, `daemon/queue`, `daemon/connect`) — four ideas
@@ -1018,7 +1020,7 @@ scope per `CLAUDE.md`, not the download engine).
 
 ---
 
-## Phase 16 — PAR2 quick-check, per-segment streaming writes, clearer NNTP errors (planned)
+## Phase 16 — PAR2 quick-check, per-segment streaming writes, clearer NNTP errors ✅
 
 Inspired by a study of [`sabnzbd`](https://github.com/sabnzbd/sabnzbd)'s core
 downloader (`sabnzbd/downloader.py`, `decoder.py`, `articlecache.py`,
@@ -1082,28 +1084,90 @@ worth adopting, independent of Phase 15's `nzbget`-derived one:
       `tests/repair.rs`'s two new end-to-end cases (`quick_check_reports_ok_...`
       and the wrong-CRC32-falls-back case above) proving the gate is wired
       correctly through the public API, not just correct in isolation.
-- [ ] **Per-segment streaming writes, not just per-file.** Phase 14 made
+- [x] **Per-segment streaming writes, not just per-file.** Phase 14 made
       `download_queue` assemble a file the instant *all* of its own segments
       resolve, instead of waiting for the whole queue — but for a
       single-file release (one large MKV/ISO split into thousands of
-      segments, fetched in parallel across many connections), that's no
-      improvement: every decoded segment still accumulates in the one shared
-      `Mutex<HashMap<String, DecodedPart>>` (`crates/penne/src/download.rs:107`)
-      until that one file's last segment lands, holding close to the whole
-      file in RAM at peak. `sabnzbd`'s `ArticleCache` exists to bound exactly
-      this, but needs to be genuinely complex because `sabnzbd` doesn't know
-      a file's real (deobfuscated) name until its first article arrives.
-      `penne` doesn't have that constraint — `assemble()` already writes to a
-      fixed temp path (`<name>.penne-part`) regardless of obfuscation, with
-      real-name recovery deferred to Phase 11's post-assembly pass — so it
-      can do something simpler than `sabnzbd`: write each segment to the
-      open temp file the moment *that segment* is decoded, not once its
-      whole file completes. Requires restructuring `assemble()` from "takes
-      a complete `decoded` map up front" to "owns an open file handle and is
-      fed segments incrementally, deciding `Complete`/`Incomplete` only once
-      the file's segment count is known to be exhausted" — a real structural
-      change, not a tuning knob, but it closes the memory-scaling gap Phase
-      14 left for the single-large-file case.
+      segments, fetched in parallel across many connections), that was no
+      improvement: every decoded segment accumulated in one shared
+      `Mutex<HashMap<String, DecodedPart>>` until that one file's last
+      segment landed, holding close to the whole file in RAM at peak.
+      `sabnzbd`'s `ArticleCache` exists to bound exactly this, but needs to
+      be genuinely complex because `sabnzbd` doesn't know a file's real
+      (deobfuscated) name until its first article arrives. `penne` doesn't
+      have that constraint — `assemble()` already wrote to a fixed temp path
+      (`<name>.penne-part`) regardless of obfuscation, with real-name
+      recovery deferred to Phase 11's post-assembly pass — so it could do
+      something simpler than `sabnzbd`: write each segment to the open temp
+      file the moment *that segment* is decoded, not once its whole file
+      completes.
+      `crate::assemble::assemble` (the "takes a complete `decoded` map up
+      front" batch function) was replaced outright — not kept alongside —
+      by `StreamingAssembly::{new, write_segment, finish}`: `new` opens
+      nothing (lazy, on first successful write); `write_segment` seeks (only
+      when needed, preserving Phase 13's optimization) and writes one
+      segment's bytes immediately, then keeps only a few bytes of
+      bookkeeping (that segment's own CRC-32 and length — never its data);
+      `finish` decides `AssembleOutcome` once every part is known to have
+      landed or definitively never will. The one non-obvious piece: the
+      whole-file CRC-32 can't be fed into a running hasher as bytes arrive
+      anymore, since segments now genuinely arrive in any order — so `finish`
+      instead folds every part's own CRC-32 together via the new
+      `pesto::yenc::crc32_combine` (Phase 16's PAR2-quick-check primitive,
+      reused here for an unrelated purpose) in ascending part order, which
+      is mathematically guaranteed — and empirically verified, both in
+      `crc32_combine`'s own tests and in a new
+      `whole_file_crc32_matches_a_single_pass_hash_regardless_of_write_order`
+      here — to equal hashing the concatenated bytes directly.
+      `download_queue`'s `SharedState` gained `streams: HashMap<String,
+      tokio::sync::Mutex<Option<StreamingAssembly>>>` (one per file, built
+      up front like `remaining`) — an *async* mutex, since writes now happen
+      mid-await, and per-*file* rather than one lock over the whole map, so
+      two different files finishing around the same time from different
+      worker tasks are never serialized against each other; only concurrent
+      writes to the *same* file (which can genuinely happen — nothing stops
+      two workers from popping different segments of one file off the
+      shared per-tier queue at the same time) wait their turn.
+      `DownloadOutcome::segments` changed from `HashMap<String, DecodedPart>`
+      to `HashSet<String>` (Message-IDs only) — holding every segment's
+      *decoded bytes* queue-wide for the whole run, as that field previously
+      did, was exactly the memory-scaling problem this phase exists to fix,
+      so it could no longer stay as it was; `AssembleOutcome` (already
+      inspectable via `outcome.assembled`) is the source of truth for
+      per-file content verification now.
+      **A real bug found and fixed via a pre-existing integration test,
+      not just new ones:** `write_segment` initially keyed its per-part
+      bookkeeping by `DecodedPart::part` (the yEnc article's own claimed
+      `=ypart number=`) rather than the queue's own numbering
+      (`QueuedSegment::part`). `tests/concurrency.rs`'s shared `yenc_body`
+      test helper encodes every synthetic segment with a hardcoded
+      `PartSpec { number: 1, total: 1, .. }` regardless of which logical
+      segment it represents — harmless for the old batch `assemble()`
+      (which looked segments up by Message-ID, using `part.part` only for
+      cosmetic `bad_parts` reporting), but with per-part bookkeeping keyed
+      by that same field, every write after the first silently collapsed
+      into the same slot, making `finish` wrongly report every later part
+      "missing" — caught by `a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue`
+      (a `20`-segment file, all sharing that hardcoded claim) failing its
+      final "file exists on disk" assertion. Fixed by threading the queue's
+      own part number down through `resolve_segment` (`WorkItem::part` was
+      already available at every call site) as an explicit `write_segment`
+      argument, decoupled entirely from whatever the article itself claims
+      — pinned by a new regression test,
+      `keys_bookkeeping_by_the_queue_part_number_not_the_articles_own_claim`,
+      that deliberately reproduces three segments all claiming
+      `number=1`.
+      All three integration test files that inspected `outcome.segments`'
+      decoded content directly (`tests/download_with_failover.rs`,
+      `tests/resilience.rs`) were updated to read the assembled file back
+      from disk instead — a strictly stronger check (confirms the real
+      end-to-end write path, not just the decode step) and the only option
+      once decoded bytes stopped being held queue-wide.
+      Verified with the existing `tests/concurrency.rs` suite (unaffected
+      behaviorally, including the streaming-assembly and pooled-tier
+      proofs from Phases 14 and 15) plus the new tests above, and the full
+      workspace suite run repeatedly to rule out timing flakiness in the
+      concurrency-sensitive paths touched.
 - [x] **Categorized, actionable NNTP error messages.** Audit confirmed
       `pesto::nntp` previously just forwarded the server's raw response code
       and text on a connect/auth failure (`bail!("AUTHINFO USER rejected:

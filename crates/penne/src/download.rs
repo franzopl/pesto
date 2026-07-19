@@ -4,14 +4,22 @@
 //! `pesto::yenc::decode_part` (Phase 3), trying servers in priority order
 //! per segment — so a primary provider missing, or serving a truncated copy
 //! of, a handful of articles doesn't fail a file a backup server has intact.
-//! File assembly ([`crate::assemble::assemble`]) is driven from *inside*
-//! this module: each file is written to disk the instant its own last
-//! segment resolves (success or, on the last configured server, definitive
-//! failure), rather than waiting for the entire queue to finish first — see
-//! `ROADMAP.md`'s streaming-assembly phase for why. `outcome.segments`
-//! still ends up fully populated exactly as before (several integration
-//! tests depend on inspecting it directly), it's just filled in
-//! incrementally now instead of in one batch at the end.
+//!
+//! **Per-segment streaming assembly (`ROADMAP.md` Phase 16):** each
+//! decoded segment is written to its file's temp file
+//! ([`crate::assemble::StreamingAssembly`]) the instant it's decoded, not
+//! once every segment for that file has arrived. Phase 14 already moved
+//! assembly from "wait for the whole queue" to "wait for one file's
+//! segments"; for a release that's a single large file (a multi-GB video
+//! split into thousands of segments, fetched in parallel), that was no
+//! improvement — every decoded segment still piled up in memory until that
+//! one file's last segment landed. Now nothing is held beyond one
+//! in-flight segment's bytes per worker: [`DecodedPart`] is written and
+//! dropped immediately, and only a few bytes of bookkeeping (its own
+//! CRC-32 and length) survive until the file's last segment triggers
+//! [`crate::assemble::StreamingAssembly::finish`]. `outcome.segments` is
+//! now just the *set* of Message-IDs that were fetched (not their decoded
+//! bytes) — see [`DownloadOutcome::segments`]'s own doc comment.
 //!
 //! **Concurrency (`ROADMAP.md` Phase 2's long-standing open item, closed in
 //! Phase 9):** each server is drained by up to `server.connections` workers
@@ -37,17 +45,18 @@
 //!   transient hiccup shouldn't immediately write off a server that
 //!   otherwise has the article.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use pesto::config::ServerEntry;
-use pesto::yenc::{decode_part, DecodedPart};
+use pesto::yenc::decode_part;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 
-use crate::assemble::{self, AssembleOutcome};
+use crate::assemble::{AssembleOutcome, StreamingAssembly};
 use crate::cache;
 use crate::client::DownloadClient;
 use crate::config::ServerTier;
@@ -79,10 +88,15 @@ pub struct CorruptSegment {
 /// Result of draining a [`DownloadQueue`] against a set of servers.
 #[derive(Debug, Default)]
 pub struct DownloadOutcome {
-    /// Successfully fetched and decoded segments, keyed by Message-ID. Check
-    /// [`DecodedPart::crc_matches`] before trusting the content — a segment
-    /// can decode structurally fine yet still fail its own checksum.
-    pub segments: HashMap<String, DecodedPart>,
+    /// Message-IDs of every segment that was successfully fetched and
+    /// decoded. Only the identifier is kept, not the decoded bytes: those
+    /// are written to their file's [`StreamingAssembly`] and dropped
+    /// immediately (Phase 16's per-segment streaming — see the module doc
+    /// comment) rather than held in memory until the whole file completes,
+    /// the way an earlier version of this map did. Check
+    /// [`AssembleOutcome`] (in [`Self::assembled`]) for whether a given
+    /// file's content actually verified.
+    pub segments: HashSet<String>,
     /// Segments no configured server had.
     pub missing: Vec<MissingSegment>,
     /// Segments fetched but not decodable from any server that had them.
@@ -109,7 +123,23 @@ struct WorkItem {
 struct SharedState {
     files_by_name: HashMap<String, QueuedFile>,
     remaining: Mutex<HashMap<String, u32>>,
-    segments: Mutex<HashMap<String, DecodedPart>>,
+    /// One [`StreamingAssembly`] per file, built once up front (mirroring
+    /// `files_by_name`/`remaining`) and fed segments as they're decoded.
+    /// The inner `AsyncMutex` is per-*file* (not one lock over the whole
+    /// map) so two different files finishing around the same time from
+    /// different worker tasks are never serialized against each other —
+    /// only concurrent writes to the *same* file's segments (which really
+    /// can happen: nothing stops two workers from popping different
+    /// segments of the same file off the shared per-tier queue at the same
+    /// time) need to wait their turn. `Option` so the last segment's
+    /// worker can `.take()` the assembly out to call
+    /// [`StreamingAssembly::finish`] on an owned value — guaranteed to
+    /// happen exactly once per file by the same `remaining`-hits-zero
+    /// check that already gated the old batch [`assemble::assemble`] call.
+    streams: HashMap<String, AsyncMutex<Option<StreamingAssembly>>>,
+    /// Message-IDs of segments successfully fetched and decoded this run —
+    /// see [`DownloadOutcome::segments`].
+    fetched: Mutex<HashSet<String>>,
     assembled: Mutex<HashMap<String, AssembleOutcome>>,
 }
 
@@ -174,7 +204,17 @@ pub async fn download_queue(
                 .map(|f| (f.name.clone(), f.segments.len() as u32))
                 .collect(),
         ),
-        segments: Mutex::new(HashMap::new()),
+        streams: queue
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    AsyncMutex::new(Some(StreamingAssembly::new(f, dest_dir))),
+                )
+            })
+            .collect(),
+        fetched: Mutex::new(HashSet::new()),
         assembled: Mutex::new(HashMap::new()),
     });
 
@@ -195,9 +235,9 @@ pub async fn download_queue(
                     resolve_segment(
                         &file.name,
                         &seg.message_id,
+                        seg.part,
                         Some(decoded),
                         &shared,
-                        dest_dir,
                         &progress,
                     )
                     .await?;
@@ -280,33 +320,47 @@ pub async fn download_queue(
         .unwrap_or_else(|_| panic!("every worker task joined before this point"));
     let shared = Arc::try_unwrap(ctx.shared)
         .unwrap_or_else(|_| panic!("every worker task joined before this point"));
-    outcome.segments = shared.segments.into_inner().expect("mutex not poisoned");
+    outcome.segments = shared.fetched.into_inner().expect("mutex not poisoned");
     outcome.assembled = shared.assembled.into_inner().expect("mutex not poisoned");
 
     Ok(outcome)
 }
 
 /// Record one segment's resolution — `Some(decoded)` on success, `None` on
-/// a terminal failure (no more servers left to try) — and, if it was the
-/// file's last unresolved segment, assemble that file immediately using
-/// whatever landed in `shared.segments` for it. [`assemble::assemble`]
-/// itself reports [`AssembleOutcome::Incomplete`] if anything's still
-/// missing, exactly as it would if called after the whole queue finished —
-/// the only thing that changes here is *when* it's called.
+/// a terminal failure (no more servers left to try). On success, the
+/// segment is written to its file's [`StreamingAssembly`] immediately (and
+/// `decoded` dropped right after — its bytes are never held beyond this
+/// call). If this was the file's last unresolved segment,
+/// [`StreamingAssembly::finish`] is called to decide that file's
+/// [`AssembleOutcome`] — reporting `Incomplete` if anything's still
+/// missing, exactly as the old batch [`assemble::assemble`] would have —
+/// the only thing that changed is *when* each segment's bytes reach disk.
 async fn resolve_segment(
     file_name: &str,
     message_id: &str,
-    decoded: Option<DecodedPart>,
+    part: u32,
+    decoded: Option<pesto::yenc::DecodedPart>,
     shared: &SharedState,
-    dest_dir: &Path,
     progress: &Option<ProgressSender>,
 ) -> Result<()> {
     if let Some(decoded) = decoded {
+        // Written and dropped immediately — its bytes never join any
+        // queue-wide collection, unlike the batch-era `shared.segments`
+        // map this replaced (Phase 16's per-segment streaming). `part` (the
+        // queue's own numbering, not the decoded article's own claim) is
+        // what keys `StreamingAssembly`'s bookkeeping — see
+        // `write_segment`'s doc comment for why that distinction matters.
+        let mut guard = shared.streams[file_name].lock().await;
+        guard
+            .as_mut()
+            .expect("stream not yet finished for this file")
+            .write_segment(part, &decoded)
+            .await?;
         shared
-            .segments
+            .fetched
             .lock()
             .expect("mutex not poisoned")
-            .insert(message_id.to_string(), decoded);
+            .insert(message_id.to_string());
     }
 
     let now_zero = {
@@ -321,19 +375,22 @@ async fn resolve_segment(
         return Ok(());
     }
 
-    let file = &shared.files_by_name[file_name];
-    let local: HashMap<String, DecodedPart> = {
-        let segments = shared.segments.lock().expect("mutex not poisoned");
-        file.segments
-            .iter()
-            .filter_map(|s| {
-                segments
-                    .get(&s.message_id)
-                    .map(|d| (s.message_id.clone(), d.clone()))
-            })
-            .collect()
+    // Exactly one `resolve_segment` call ever observes `now_zero == true`
+    // for a given file, guaranteed by the atomic decrement-and-check above
+    // (the same invariant the old batch assembler relied on) — so this
+    // `.take()` can never race with another call finishing the same file.
+    let assembly = {
+        let mut guard = shared.streams[file_name].lock().await;
+        guard
+            .take()
+            .expect("exactly one resolve_segment call observes now_zero, per the remaining-counter invariant")
     };
-    let result = assemble::assemble(file, &local, dest_dir, progress.as_ref()).await?;
+    let expected_parts: Vec<u32> = shared.files_by_name[file_name]
+        .segments
+        .iter()
+        .map(|s| s.part)
+        .collect();
+    let result = assembly.finish(&expected_parts, progress.as_ref()).await?;
     shared
         .assembled
         .lock()
@@ -469,9 +526,9 @@ async fn worker_loop(
                     resolve_segment(
                         &item.file_name,
                         &item.message_id,
+                        item.part,
                         None,
                         &ctx.shared,
-                        &ctx.dest_dir,
                         &ctx.progress,
                     )
                     .await?;
@@ -490,9 +547,9 @@ async fn worker_loop(
                     resolve_segment(
                         &item.file_name,
                         &item.message_id,
+                        item.part,
                         None,
                         &ctx.shared,
-                        &ctx.dest_dir,
                         &ctx.progress,
                     )
                     .await?;
@@ -515,9 +572,9 @@ async fn worker_loop(
                 resolve_segment(
                     &item.file_name,
                     &item.message_id,
+                    item.part,
                     Some(decoded),
                     &ctx.shared,
-                    &ctx.dest_dir,
                     &ctx.progress,
                 )
                 .await?;
@@ -533,9 +590,9 @@ async fn worker_loop(
                     resolve_segment(
                         &item.file_name,
                         &item.message_id,
+                        item.part,
                         None,
                         &ctx.shared,
-                        &ctx.dest_dir,
                         &ctx.progress,
                     )
                     .await?;
