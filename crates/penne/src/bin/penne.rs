@@ -210,8 +210,12 @@ async fn download(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("release");
+    println!("checking for obfuscated/misnamed files...");
     let rename_report =
         penne::deobfuscate::run(&dest_dir, &queue, &assembled, synthetic_base).await?;
+    if rename_report.renames.is_empty() {
+        println!("  nothing to rename");
+    }
     for r in &rename_report.renames {
         let label = match r.reason {
             penne::deobfuscate::RenameReason::Par2Volume => "par2 file",
@@ -221,8 +225,12 @@ async fn download(
         println!("  {label}: {} -> {}", r.old_name, r.new_name);
     }
 
+    println!(
+        "verifying with PAR2 (re-hashing downloaded files against recovery data — \
+         this can take a while for large releases)..."
+    );
     match penne::repair::verify_and_repair(&dest_dir).await? {
-        penne::repair::RepairOutcome::Ok => println!("PAR2: all files verified intact"),
+        penne::repair::RepairOutcome::Ok => println!("  PAR2: all files verified intact"),
         penne::repair::RepairOutcome::Repaired(plan) => {
             for f in &plan.repaired_files {
                 println!(
@@ -239,6 +247,7 @@ async fn download(
             );
         }
         penne::repair::RepairOutcome::NoRecoveryData => {
+            println!("  no PAR2 recovery data found; skipping verification");
             anyhow::ensure!(
                 needs_repair == 0,
                 "{needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
@@ -246,8 +255,12 @@ async fn download(
         }
     }
 
+    println!("checking for archives to extract...");
     let password = password.as_deref().or(parsed.meta.password.as_deref());
     let extracted = penne::extract::extract_all(&dest_dir, password).await?;
+    if extracted.is_empty() {
+        println!("  nothing to extract");
+    }
     for archive in &extracted {
         println!("  extracted: {} ({:?})", archive.base_name, archive.kind);
     }

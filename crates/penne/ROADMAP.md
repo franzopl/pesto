@@ -51,6 +51,7 @@ testable state.
 | 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
 | 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
 | 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`; `STAT` commands pipelined (depth 20) to amortize round-trip latency on top of connection concurrency. |
+| 13 (partial) | Post-download visibility & assembly speedup — status lines before deobfuscate/verify/extract instead of silence; `assemble()` skips redundant per-segment `seek()` calls (~3x faster writes on a real disk, measured with `fsync`). PAR2 verify parallelization still open. |
 
 ---
 
@@ -707,6 +708,93 @@ before `penne` could handle this at all:
       (`sleep` before responding), not *transit delay*, and pipelining
       specifically amortizes the latter. Verify against a real, distant
       NNTP provider rather than a synthetic local benchmark.
+
+---
+
+## Phase 13 — Post-download phases: visible status, and a real assembly speedup
+
+Reported: after a real `penne download` finished fetching (progress panel
+reached 100%), the terminal went silent and appeared to hang for a long
+time before finally printing `PAR2: all files verified intact`.
+
+- [x] **Silent post-fetch phases.** Deobfuscation, PAR2 verify/repair, and
+      archive extraction each ran with zero status output — no "starting
+      X" line, nothing — so however long they took was indistinguishable
+      from a hang. `download()` (`crates/penne/src/bin/penne.rs`) now
+      prints a line before each phase starts (`"checking for
+      obfuscated/misnamed files..."`, `"verifying with PAR2 (re-hashing
+      downloaded files against recovery data — this can take a while for
+      large releases)..."`, `"checking for archives to extract..."`), plus
+      an explicit `"nothing to rename"`/`"nothing to extract"` when a phase
+      finds nothing to do, so a quiet phase reads as "checked, found
+      nothing" rather than "did this even run?".
+- [x] **Found the real cause of the multi-minute wait**: benchmarked
+      `pesto::par2::verify::verify` (re-hashes every byte of every
+      downloaded file against the PAR2 recovery set — necessarily reads the
+      whole release again) against a synthetic 500 MiB file with a real
+      PAR2 index. In `--release`: 567 MiB/s, ~12s extrapolated to a 6.6 GiB
+      release. In an unoptimized debug build (`cargo build` with no
+      `--release`, i.e. `target/debug/penne`): **49 MiB/s — ~135s (over 2
+      minutes) extrapolated to the same 6.6 GiB release**, matching the
+      reported freeze almost exactly. `verify()` is CPU-bound (MD5 +
+      CRC32 per slice, no I/O wait to hide the cost behind), so it's
+      squarely the kind of code where an unoptimized build is dramatically
+      slower — this wasn't a `penne`-specific inefficiency so much as
+      running real work through a debug build never meant for it.
+      **Not fixed by code** (there's no bug to fix — `cargo build --release`
+      already solves the bulk of the wait); the status-line fix above
+      ensures whatever build is in use, the phase is at least visible
+      instead of silent.
+- [x] **Debug-build theory ruled out; found the actual cause by timing a
+      real run.** The installed `penne` turned out to already be a
+      `--release` build (stale — predating the status-line fix above, which
+      is why the earlier run showed no phase output at all). Re-running the
+      same 6.6 GiB release with every line timestamped gave a precise
+      breakdown: fetch 3:14, **a 95-second gap with zero output between
+      "fetching: 100%" and the first `assembled:` line**, the rest of
+      assembly 5.5s, deobfuscate 2.6s, verify 15.6s (matching the
+      `--release` benchmark above almost exactly — confirming verify was
+      never the culprit), extract instant. The 95s gap — writing the one
+      largest file (6337 segments) — was the real "freeze."
+      Root-caused to two independent, compounding factors:
+      1. `assemble()` (`crates/penne/src/assemble.rs`) called `.seek()`
+         before *every* segment write, even though `file.segments` is
+         already sorted by part (`crate::queue::build`) and therefore
+         already contiguous — the cursor left by one `write_all` is
+         already exactly where the next part needs to start, the
+         overwhelming common case. Benchmarked both ways with real
+         `tokio::fs` calls (each of which dispatches through a
+         blocking-thread-pool round trip) and a forced `fsync`, since an
+         un-fsynced benchmark just measures page-cache absorption, not
+         real disk throughput: on a fast NVMe SSD the redundant seeks cost
+         nothing measurable (~3000 MiB/s either way — noise). On the
+         reporter's real disk, seek-per-write measured **52.2 MiB/s**
+         (closely matching the ~66 MiB/s implied by the real 95s/6.3GiB
+         gap) versus **152.7 MiB/s — a ~3x improvement** — skipping the
+         seek whenever the cursor's already correct, only actually seeking
+         on a genuine gap or out-of-order part (defensive; shouldn't
+         happen given the sort, but kept correct either way — see
+         `writing_segments_out_of_insertion_order_still_assembles_correctly`
+         in `assemble.rs`'s existing test suite, unaffected by this
+         change).
+      2. **Separately, and not fixed by the above**: the reporter's
+         download disk (`btrfs`, ~30 TB volume) was measured at ~100% full
+         (28 GiB free). btrfs is well known to degrade sharply on writes
+         when nearly full (COW/extent-allocation search cost), which alone
+         could dominate real-world throughput independent of anything in
+         `penne`. Flagged to the reporter directly — freeing space on that
+         volume is outside this codebase's scope to fix.
+- [ ] **Still open**: `verify()` remains single-threaded and sequential
+      across files even in `--release` — `parmesan` already depends on
+      `rayon` (used extensively by the encoder for Reed-Solomon), so
+      parallelizing slice verification is a contained, believable further
+      win if the ~12–16s `--release` figure for a single very large file
+      is ever still worth cutting down. A live progress readout for the
+      verify phase (mirroring `pesto`'s existing
+      `Par2EncodeStarted`/`Par2InputProgress` events on the posting side)
+      is a separate, larger piece of work spanning `parmesan`,
+      `penne::repair`, and `penne::ui` — deferred until the status-line
+      fix plus the assembly speedup above prove insufficient on their own.
 
 ---
 
