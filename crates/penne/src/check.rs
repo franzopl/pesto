@@ -238,6 +238,7 @@ async fn drain_one_server(
             retries,
             progress.clone(),
             is_last_server,
+            worker_count,
         ));
     }
 
@@ -254,9 +255,32 @@ async fn drain_one_server(
     (found, leftover, bytes_used)
 }
 
-/// One worker's whole pass over `queue`: pop an item, `STAT` it against
-/// `server` (retrying per [`stat_with_retry`]), repeat until the queue is
-/// empty. Keeps one connection open for the entire pass.
+/// Above this many items, a worker splits its batch into several pipelined
+/// round trips instead of one. `STAT` carries no payload — a command is a
+/// few dozen bytes, a response likewise — so unlike POST pipelining (capped
+/// low by how much article data is worth buffering ahead of encode speed,
+/// see [`pesto::config::types::MAX_AUTO_PIPELINE_DEPTH`]), there's nothing
+/// to balance a much higher depth against. This is what actually hides
+/// round-trip latency: with `server.connections` workers alone, wall time
+/// is `segments / connections * RTT`; pipelining `STAT_PIPELINE_DEPTH`
+/// commands per round trip divides that further, roughly
+/// `segments / (connections * STAT_PIPELINE_DEPTH) * RTT`.
+const STAT_PIPELINE_DEPTH: usize = 20;
+
+/// One worker's whole pass over `queue`: pop a batch, pipeline-`STAT` it
+/// against `server` in one round trip (retrying the *whole batch* per
+/// [`stat_batch_with_retry`] on a connection/transport error), repeat until
+/// the queue is empty. Keeps one connection open for the entire pass.
+///
+/// Each pop takes at most [`STAT_PIPELINE_DEPTH`] items, *and* never more
+/// than a `worker_count`-th of whatever's left in the queue right then —
+/// without that second cap, a worker that wins the lock first could grab
+/// the entire remaining queue in one batch whenever it's no bigger than
+/// `STAT_PIPELINE_DEPTH` (always eventually true, since every queue drains
+/// to nothing), leaving every other worker with nothing to do and
+/// defeating `server.connections` concurrency right when it matters most:
+/// finishing the tail of a check together instead of one connection
+/// mopping it up alone.
 ///
 /// Emits a "present" [`CheckProgress`] event as soon as each item resolves
 /// present. A "missing" event fires per-item too, but only when
@@ -268,6 +292,7 @@ async fn worker_loop(
     retries: u32,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
+    worker_count: usize,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let mut client: Option<DownloadClient> = None;
     let mut found = Vec::new();
@@ -275,30 +300,39 @@ async fn worker_loop(
     let mut bytes_used = 0u64;
 
     loop {
-        let item = {
+        let batch: Vec<WorkItem> = {
             let mut q = queue.lock().expect("queue mutex poisoned");
-            q.pop_front()
+            let fair_share = q.len().div_ceil(worker_count.max(1));
+            let n = STAT_PIPELINE_DEPTH.min(q.len()).min(fair_share);
+            q.drain(..n).collect()
         };
-        let Some(item) = item else { break };
+        if batch.is_empty() {
+            break;
+        }
 
-        match stat_with_retry(
-            &mut client,
-            &server,
-            &item.message_id,
-            retries,
-            &mut bytes_used,
-        )
-        .await
-        {
-            Ok(true) => {
-                emit(&progress, true);
-                found.push(item);
-            }
-            Ok(false) | Err(_) => {
-                if is_last_server {
-                    emit(&progress, false);
+        match stat_batch_with_retry(&mut client, &server, &batch, retries, &mut bytes_used).await {
+            Ok(results) => {
+                for (item, present) in batch.into_iter().zip(results) {
+                    if present {
+                        emit(&progress, true);
+                        found.push(item);
+                    } else {
+                        if is_last_server {
+                            emit(&progress, false);
+                        }
+                        leftover.push(item);
+                    }
                 }
-                leftover.push(item);
+            }
+            Err(_) => {
+                // Exhausted retries against this server for the whole
+                // batch; the next server in priority order gets a turn.
+                for item in batch {
+                    if is_last_server {
+                        emit(&progress, false);
+                    }
+                    leftover.push(item);
+                }
             }
         }
     }
@@ -311,23 +345,32 @@ async fn worker_loop(
     (found, leftover, bytes_used)
 }
 
-/// `STAT` `message_id` against `server` over `client` (connected lazily on
-/// first use), retrying a connection or transport error up to `retries`
-/// times. `Ok(false)` (the server explicitly doesn't have the article,
-/// `430`) is never retried — that is a definitive answer, not a transient
-/// failure. Mirrors [`crate::download::fetch_with_retry`]'s retry shape.
+/// Pipeline-`STAT` every item in `batch` against `server` over `client`
+/// (connected lazily on first use) in one round trip, retrying the *whole
+/// batch* up to `retries` times on a connection/transport error. Returns
+/// one `bool` per item, in the same order as `batch`.
+///
+/// A batch either succeeds completely or fails completely: once a read
+/// fails partway through, the connection is desynced (subsequent bytes on
+/// the wire no longer line up with the remaining expected responses), so
+/// there's no way to trust any response after that point even if earlier
+/// ones in the same batch looked fine. Retrying the whole (small, capped at
+/// [`STAT_PIPELINE_DEPTH`]) batch on a fresh connection is simpler and
+/// safer than trying to salvage a partial one — mirrors
+/// [`crate::download::fetch_with_retry`]'s per-item retry shape, just at
+/// batch granularity.
 ///
 /// Every byte a connection transferred is added to `bytes_used` right
 /// before that connection is dropped (on a transport error) — not just
 /// once at the very end — so a reconnect mid-retry never loses the bytes
 /// the abandoned connection already spent.
-async fn stat_with_retry(
+async fn stat_batch_with_retry(
     client: &mut Option<DownloadClient>,
     server: &ServerEntry,
-    message_id: &str,
+    batch: &[WorkItem],
     retries: u32,
     bytes_used: &mut u64,
-) -> Result<bool> {
+) -> Result<Vec<bool>> {
     let mut last_err = None;
 
     for attempt in 0..=retries {
@@ -346,8 +389,8 @@ async fn stat_with_retry(
         }
 
         let c = client.as_mut().expect("just connected above");
-        match c.stat(message_id).await {
-            Ok(result) => return Ok(result),
+        match stat_batch_once(c, batch).await {
+            Ok(results) => return Ok(results),
             Err(e) => {
                 *bytes_used += c.bytes_written() + c.bytes_read();
                 *client = None;
@@ -357,4 +400,21 @@ async fn stat_with_retry(
     }
 
     Err(last_err.expect("loop always runs at least once and only exits early on Ok"))
+}
+
+/// One pipelined round trip: enqueue every item's `STAT`, flush once, then
+/// read back one response per item in order. Fails atomically — see
+/// [`stat_batch_with_retry`]'s doc comment for why a partial batch is never
+/// returned.
+async fn stat_batch_once(client: &mut DownloadClient, batch: &[WorkItem]) -> Result<Vec<bool>> {
+    for item in batch {
+        client.enqueue_stat(&item.message_id).await?;
+    }
+    client.flush_pipeline().await?;
+
+    let mut results = Vec::with_capacity(batch.len());
+    for _ in batch {
+        results.push(client.read_stat_response().await?);
+    }
+    Ok(results)
 }

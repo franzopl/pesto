@@ -48,6 +48,28 @@ impl DownloadClient {
         self.conn.stat(message_id).await
     }
 
+    /// Queue one `STAT` command for NNTP pipelining, without flushing or
+    /// reading a response — see [`pesto::nntp::Connection::enqueue_stat`].
+    /// [`crate::check::check_queue`] uses this to hide round-trip latency
+    /// across a whole batch of segments at once instead of paying it per
+    /// segment.
+    pub async fn enqueue_stat(&mut self, message_id: &str) -> Result<()> {
+        self.conn.enqueue_stat(message_id).await
+    }
+
+    /// Flush every command queued via [`enqueue_stat`](Self::enqueue_stat)
+    /// to the wire. Call once per batch, before any
+    /// [`read_stat_response`](Self::read_stat_response) calls.
+    pub async fn flush_pipeline(&mut self) -> Result<()> {
+        self.conn.flush_pipeline().await
+    }
+
+    /// Read one response for a pipelined `STAT` batch, in the same order
+    /// the commands were enqueued.
+    pub async fn read_stat_response(&mut self) -> Result<bool> {
+        self.conn.read_stat_response().await
+    }
+
     /// Cumulative bytes written to this connection over its whole life.
     pub fn bytes_written(&self) -> u64 {
         self.conn.bytes_written()

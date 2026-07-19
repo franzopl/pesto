@@ -156,9 +156,13 @@ existence check, not an article transfer — and reports which files are
 complete and which are missing segments, without fetching, decoding,
 writing, or extracting anything. Exits non-zero if anything is missing, so
 it's useful to script ahead of a real download (e.g. skip a release that's
-already expired off the indexer's server). A live progress bar (segments
-checked, not bytes/speed — nothing is ever fetched) tracks the check on an
-interactive terminal, same as `download`'s own panel. A concise summary
+already expired off the indexer's server). `STAT` commands are pipelined
+(several queued and sent per round trip, not one-request-one-response) on
+top of `connections`' usual concurrency, so a check's wall time scales with
+round-trip latency far less than a naive implementation would. A live
+progress bar (segments checked, not bytes/speed — nothing is ever fetched)
+tracks the check on an interactive terminal, same as `download`'s own
+panel. A concise summary
 closes the run, leading with the percentage of articles actually present —
 the number that matters most at a glance — plus how many bytes the check
 itself used (KiB/MiB, not the release's size, proof of just how cheap

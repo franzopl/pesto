@@ -50,7 +50,7 @@ testable state.
 | 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
 | 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
 | 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
-| 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`. |
+| 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`; `STAT` commands pipelined (depth 20) to amortize round-trip latency on top of connection concurrency. |
 
 ---
 
@@ -658,6 +658,55 @@ before `penne` could handle this at all:
       has *nothing* — and manually under a real pty against a fully-missing
       2000-segment release: the bar now climbs smoothly with a live
       "N missing" counter instead of sitting at 0% for the whole check.
+- [x] **`STAT` pipelining**, in response to "is there a way to make `--stat`
+      faster": with `server.connections` workers alone, wall time is
+      `segments / connections * RTT` — real gains beyond raising
+      `connections` (itself capped by whatever the provider actually
+      allows) require cutting round trips, not adding more of them.
+      `pesto::nntp::Connection` gains `enqueue_stat`/`read_stat_response`
+      (`flush_pipeline` was already there, shared with `pesto`'s existing
+      POST pipelining), mirroring that pattern exactly: queue N commands
+      on the wire without reading, flush once, then read N responses back
+      in the order they were sent (NNTP guarantees that ordering over one
+      connection). Unlike POST pipelining — capped at
+      `MAX_AUTO_PIPELINE_DEPTH = 8` because each pipelined item carries
+      real article data worth balancing against encode/read speed — a
+      `STAT` command is a few dozen bytes with no payload at all, so
+      `penne::check::STAT_PIPELINE_DEPTH` uses a flat, much higher `20`:
+      there's nothing to weigh a deeper pipeline against.
+      `worker_loop` now pops a *batch* (not one item) per round trip and
+      retries the whole batch atomically on a connection/transport error
+      (see that function's doc comment for why: once one read in a batch
+      fails, the connection is desynced and no later response in the same
+      batch can be trusted, pipelined or not — simpler and safer to just
+      redo the whole small batch on a fresh connection than to salvage a
+      partial one).
+      **Found and fixed a real fairness bug while testing this**: capping
+      each pop at `STAT_PIPELINE_DEPTH` alone let whichever worker won the
+      queue lock first grab the *entire* remaining queue in one batch
+      whenever it was no bigger than the pipeline depth — which is always
+      eventually true, since every queue drains to nothing — starving
+      every other worker right at the tail of a check and defeating
+      `server.connections` concurrency exactly when finishing together
+      matters. Fixed by also capping each pop at a `worker_count`-th of
+      whatever's left (`q.len().div_ceil(worker_count)`), so batches
+      shrink gracefully as the queue empties instead of collapsing to one
+      worker doing everything alone.
+      Verified with new unit tests in `crates/pesto/src/nntp/mod.rs`
+      (`pipelined_stat_sends_batch_then_reads_responses_in_order`,
+      exact-byte-count accounting, and the pipelined "unexpected code"
+      error path) against a scripted mock connection, and confirmed the
+      full existing `penne::check` test suite — including both progress-
+      streaming regression tests from the fix above — still passes
+      unchanged, proving the switch to batched pipelining didn't regress
+      per-item progress granularity or correctness.
+      **Known limitation, not solved here:** demonstrating the actual
+      wall-clock speedup requires real network round-trip time, which a
+      loopback test can't faithfully simulate — the fake servers used
+      throughout this test suite model *server processing delay*
+      (`sleep` before responding), not *transit delay*, and pipelining
+      specifically amortizes the latter. Verify against a real, distant
+      NNTP provider rather than a synthetic local benchmark.
 
 ---
 

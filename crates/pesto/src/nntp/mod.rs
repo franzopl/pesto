@@ -328,6 +328,44 @@ impl Connection {
         }
     }
 
+    /// Queue one `STAT` command on the wire for NNTP pipelining, without
+    /// flushing or reading a response. After enqueueing a batch, call
+    /// [`flush_pipeline`] once, then [`read_stat_response`] once per
+    /// command — in the same order they were enqueued, since NNTP is a
+    /// strict request/response protocol over one connection: the server's
+    /// answers arrive in the order the requests did.
+    ///
+    /// Unlike [`enqueue_post`], `STAT` needs no analogous "optimistic
+    /// assumption" about the first response code — it's already a single
+    /// request/single response command (see [`read_stat_response`]).
+    /// Pipelining pays off enormously here specifically because a `STAT`
+    /// carries no payload at all (a POST's pipeline depth is capped low by
+    /// how much article data is worth buffering ahead of encode/read
+    /// speed; a `STAT` command is a few dozen bytes with nothing to
+    /// balance against), so hiding round-trip latency is the entire
+    /// benefit and a much higher depth is both safe and effective.
+    pub async fn enqueue_stat(&mut self, message_id: &str) -> Result<()> {
+        let id = message_id.trim_start_matches('<').trim_end_matches('>');
+        self.write_all_timeout(format!("STAT <{id}>\r\n").as_bytes())
+            .await
+    }
+
+    /// Read one `STAT` response for a pipelined batch queued via
+    /// [`enqueue_stat`]. Same semantics as [`stat`]: `Ok(true)` on `223`,
+    /// `Ok(false)` on `430`.
+    pub async fn read_stat_response(&mut self) -> Result<bool> {
+        let resp = self.read_response().await?;
+        match resp.code {
+            223 => Ok(true),
+            430 => Ok(false),
+            _ => bail!(
+                "unexpected STAT response (pipelined): {} {}",
+                resp.code,
+                resp.text
+            ),
+        }
+    }
+
     /// Fetch the raw body of an article by Message-ID, using the `BODY`
     /// command (RFC 3977 §6.2.3). Used by download-side clients (`penne`);
     /// posting never needs to read an article back.
@@ -847,6 +885,52 @@ mod tests {
         // `read_line`'s returned count (and so `bytes_read`) includes the
         // trailing "\r\n".
         assert_eq!(conn.bytes_read(), response.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn pipelined_stat_sends_batch_then_reads_responses_in_order() {
+        // Three responses queued up ahead of time, as if the server
+        // answered all three `STAT`s before the client read any of them —
+        // exactly what pipelining is for. `read_stat_response` must return
+        // them in the same order the commands were enqueued.
+        let responses = b"223 0 <a@x>\r\n430 No such article\r\n223 0 <c@x>\r\n";
+        let (mut conn, _server) = mock_conn(responses).await;
+
+        conn.enqueue_stat("a@x").await.unwrap();
+        conn.enqueue_stat("b@x").await.unwrap();
+        conn.enqueue_stat("c@x").await.unwrap();
+        conn.flush_pipeline().await.unwrap();
+
+        assert!(conn.read_stat_response().await.unwrap());
+        assert!(!conn.read_stat_response().await.unwrap());
+        assert!(conn.read_stat_response().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn pipelined_stat_tracks_exact_bytes_written_and_read() {
+        let responses = b"223 0 <a@x>\r\n223 0 <b@x>\r\n";
+        let (mut conn, _server) = mock_conn(responses).await;
+
+        conn.enqueue_stat("a@x").await.unwrap();
+        conn.enqueue_stat("b@x").await.unwrap();
+        conn.flush_pipeline().await.unwrap();
+        conn.read_stat_response().await.unwrap();
+        conn.read_stat_response().await.unwrap();
+
+        let expected_written = ("STAT <a@x>\r\n".len() + "STAT <b@x>\r\n".len()) as u64;
+        assert_eq!(conn.bytes_written(), expected_written);
+        assert_eq!(conn.bytes_read(), responses.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn pipelined_stat_unexpected_code_returns_error() {
+        let (mut conn, _server) = mock_conn(b"503 Program fault\r\n").await;
+        conn.enqueue_stat("a@x").await.unwrap();
+        conn.flush_pipeline().await.unwrap();
+        let err = conn.read_stat_response().await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unexpected STAT response (pipelined)"));
     }
 
     #[test]
