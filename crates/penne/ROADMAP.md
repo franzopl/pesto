@@ -904,15 +904,30 @@ scope per `CLAUDE.md`, not the download engine).
       `--stat`-style pass) that estimates repairability from missing
       segments vs. available recovery blocks and aborts early with a clear
       message, rather than burning bandwidth on an unrecoverable release.
-- [ ] **Disk-space guard.** `penne` currently has no free-space check
-      anywhere (`grep -ri disk.?space crates/penne/src` finds nothing) — a
-      multi-GiB release can fail mid-write purely from running out of disk,
-      indistinguishable at a glance from a real bug (this is adjacent to,
-      but distinct from, the near-full-btrfs slowdown noted in Phase 13).
-      Mirrors `nzbget`'s `DiskSpace` option: before starting a download (and
-      periodically during a long one), check free space on the destination
-      filesystem against the queue's total byte count and fail clearly
-      up front instead of partway through `assemble()`.
+- [x] **Disk-space guard.** New `penne::diskspace` module:
+      `required_bytes` sums every queued segment's wire (yEnc-encoded) byte
+      count — a slight overestimate of decoded output size, the safe
+      direction to round — and `check` stats free space on the destination
+      filesystem (via the `fs4` crate's `available_space`, the small
+      cross-platform wrapper around `statvfs`/`GetDiskFreeSpaceExW` this
+      needed; `penne` had no such primitive before). Wired into `penne
+      download` (`bin/penne.rs`) right after `dest_dir` is resolved, before
+      any network I/O starts — `dest_dir` is created eagerly there too
+      (idempotent; `assemble()` would need it imminently regardless),
+      since `available_space` requires an existing path to stat. Not
+      applicable to `--stat` (returns before `dest_dir` is even resolved,
+      unaffected). Only the pre-flight check was implemented — periodic
+      re-checking during a long download was judged unnecessary for a first
+      cut (the pre-flight check already catches the common case: a release
+      that was never going to fit) and can be added later if a real
+      long-running download is observed to exhaust space *after* passing
+      the pre-flight check. Verified with unit tests in
+      `penne::diskspace::tests` (`required_bytes` sums across every
+      file/segment and is zero for an empty queue; `check` reports enough
+      space for a tiny requirement and not enough for an impossible one
+      against a real tempdir — no mocking needed since no real disk has
+      exabytes free; `check` creates a destination directory that doesn't
+      exist yet).
 - [ ] **`level` + `group` server pools.** `penne`'s server list today is
       strictly sequential priority (Phase 9: "all of server 1's workers
       finish before server 2's start", deliberately unlike a rotate-on-error
@@ -996,17 +1011,43 @@ worth adopting, independent of Phase 15's `nzbget`-derived one:
       the file's segment count is known to be exhausted" — a real structural
       change, not a tuning knob, but it closes the memory-scaling gap Phase
       14 left for the single-large-file case.
-- [ ] **Categorized, actionable NNTP error messages.** `sabnzbd`'s
-      `downloader.py` (`clues_login`/`clues_too_many`/`clues_too_many_ip`/
-      `clues_pay`) pattern-matches server error text into specific causes
-      (bad credentials, too many simultaneous connections, too many
-      connections from this IP, payment/quota required) instead of just
-      surfacing the raw NNTP response. This is the `CLAUDE.md` design
-      principle already in force ("Network, authentication and I/O errors
-      must produce actionable messages, not panics") applied to a spot that
-      may not fully live up to it yet — audit what `penne`/`pesto::nntp`
-      actually surface today for these cases before scoping the work; likely
-      a small, self-contained addition regardless.
+- [x] **Categorized, actionable NNTP error messages.** Audit confirmed
+      `pesto::nntp` previously just forwarded the server's raw response code
+      and text on a connect/auth failure (`bail!("AUTHINFO USER rejected:
+      {code} {text}")` and friends) — accurate, but not actionable. New
+      `pesto::nntp::{ErrorHint, classify_error}` mirrors `sabnzbd`'s
+      `clues_login`/`clues_too_many`/`clues_too_many_ip`/`clues_pay`
+      (`downloader.py`), pattern-matching a response's code and text into
+      one of `TooManyConnections`/`TooManyIpAddresses`/`LoginFailed`/
+      `PaymentRequired` with a fixed, non-interpolated message for each —
+      wired into the greeting check in `Connection::connect` and both
+      `AUTHINFO USER`/`AUTHINFO PASS` rejection paths in
+      `Connection::authenticate` via a small `with_hint` formatter. Lives in
+      `pesto::nntp` rather than `penne` since it's protocol-level response
+      classification, not download-specific policy (same reasoning
+      `penne`'s own design decisions already use), and benefits `pesto`'s
+      posting-side connection errors too, not just `penne`'s.
+      Two real bugs were caught by the port's own unit tests, not present in
+      `sabnzbd`'s source but introduced while adapting its four separate
+      `clues_*` functions into one priority-ordered `match`: (1) codes
+      452/481/482/381 are reserved for login failure unconditionally in both
+      `sabnzbd`'s elif chain and this port, which makes `PaymentRequired`
+      unreachable via code 482 — a test asserting otherwise was wrong, not
+      the classifier; fixed by testing that code's actual behavior instead
+      (`code_482_always_classifies_as_login_failed_regardless_of_text`).
+      (2) `sabnzbd`'s `clues_pay` includes `"exceeded"` as a clue, which
+      collides with byte/download-quota wording ("download limit exceeded")
+      that has nothing to do with account payment — harmless in `sabnzbd`
+      because `clues_pay` there only picks a retry-penalty duration inside a
+      generic "Cannot connect" branch, never a distinct user-facing message;
+      became a real false-positive once promoted to
+      `ErrorHint::PaymentRequired`'s own message here, so `"exceeded"` was
+      dropped from that clue list (see `classify_error`'s doc comment).
+      `ErrorHint::message()` never interpolates the server's own response
+      text — verified by `hint_message_never_contains_the_classified_text`
+      — preserving `authenticate`'s pre-existing guarantee that a password
+      is never echoed back in an error, even though `classify_error` itself
+      inspects the raw `AUTHINFO PASS` response text to pick a hint.
 
 Considered and **not** adopted: `sabnzbd`'s single-thread `select`-loop
 connection model and `sabctools` C-extension yEnc decoding (both already

@@ -147,6 +147,16 @@ async fn download(
 
     let dest_dir = out_dir.unwrap_or(config.download_dir);
 
+    let required = penne::diskspace::required_bytes(&queue);
+    let space = penne::diskspace::check(&dest_dir, required)?;
+    anyhow::ensure!(
+        space.is_enough(),
+        "not enough free disk space in {}: need {}, only {} available",
+        dest_dir.display(),
+        pesto::progress::format_size(space.required),
+        pesto::progress::format_size(space.available)
+    );
+
     let (tx, rx) = penne::progress::channel();
     let progress_task = penne::ui::terminal::spawn_renderer(rx);
 

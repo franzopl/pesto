@@ -46,6 +46,94 @@ impl Response {
     }
 }
 
+/// A likely cause for an NNTP server error, classified from its response
+/// code and text. Mirrors `sabnzbd`'s `clues_login`/`clues_too_many`/
+/// `clues_too_many_ip`/`clues_pay` (`sabnzbd/downloader.py`), which turn a
+/// raw provider error into a specific, actionable diagnosis instead of just
+/// forwarding the response text verbatim — the same "fail clearly, not with
+/// a bare code" spirit this project's own design principles already call
+/// for. Checked in the same priority `sabnzbd` uses in
+/// `Downloader.finish_connect_nw`: a connection-limit clue is checked
+/// before the generic login-failure clue, since a provider phrasing a
+/// connection limit with a word like "access denied" would otherwise be
+/// misclassified as a bad-credentials problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorHint {
+    TooManyConnections,
+    TooManyIpAddresses,
+    LoginFailed,
+    PaymentRequired,
+}
+
+impl ErrorHint {
+    /// A short, actionable message for this hint. Never includes any part
+    /// of the server's own response text, so it is safe to attach even to
+    /// errors from commands that may carry credentials (`AUTHINFO PASS`).
+    pub fn message(self) -> &'static str {
+        match self {
+            ErrorHint::TooManyConnections => {
+                "the server is rejecting new connections — lower `connections` for it in your config"
+            }
+            ErrorHint::TooManyIpAddresses => {
+                "the server reports logins from too many different IP addresses for this account — it may be shared or already in use elsewhere"
+            }
+            ErrorHint::LoginFailed => {
+                "check the username/password for this server in your config"
+            }
+            ErrorHint::PaymentRequired => {
+                "this account may need renewal or has exceeded its quota with this provider"
+            }
+        }
+    }
+}
+
+/// Classify an NNTP error response into a likely cause. `text` is only
+/// pattern-matched here — never echoed back by [`ErrorHint::message`] — so
+/// this is safe to call even on a response that might carry credentials.
+pub fn classify_error(code: u16, text: &str) -> Option<ErrorHint> {
+    let lower = text.to_lowercase();
+    let has_any = |clues: &[&str]| clues.iter().any(|c| lower.contains(c));
+
+    if matches!(code, 502 | 400 | 481 | 482)
+        && has_any(&["exceed", "connections", "too many", "threads", "limit"])
+        && !lower.contains("download")
+        && !lower.contains("byte")
+    {
+        return Some(ErrorHint::TooManyConnections);
+    }
+    if matches!(code, 502 | 481 | 482) && has_any(&["simultaneous ip", "multiple ip"]) {
+        return Some(ErrorHint::TooManyIpAddresses);
+    }
+    if matches!(code, 452 | 481 | 482 | 381)
+        || (matches!(code, 500 | 502)
+            && has_any(&["username", "password", "invalid", "authen", "access denied"]))
+    {
+        return Some(ErrorHint::LoginFailed);
+    }
+    // Note: 482 is deliberately absent here (unlike the `TooManyConnections`/
+    // `LoginFailed` code sets above) — it's already caught unconditionally by
+    // `LoginFailed`'s code-only branch, so by the time a response reaches
+    // this check its code can only ever be 502. "exceeded" is deliberately
+    // *not* a clue here (unlike `sabnzbd`'s `clues_pay`, which included it):
+    // it collides with byte/download-quota wording ("download limit
+    // exceeded") that has nothing to do with account payment status, and
+    // `sabnzbd` gets away with the overlap only because `clues_pay` there
+    // picks a retry penalty, never a distinct user-facing message the way
+    // `ErrorHint::PaymentRequired` is used here.
+    if code == 502 && has_any(&["credits", "paym", "expired"]) {
+        return Some(ErrorHint::PaymentRequired);
+    }
+    None
+}
+
+/// Appends a [`classify_error`] hint to `base`, if one applies.
+fn with_hint(code: u16, text: &str, base: String) -> String {
+    match classify_error(code, text) {
+        Some(hint) => format!("{base} — {}", hint.message()),
+        None => base,
+    }
+}
+
 /// A single NNTP session.
 pub struct Connection {
     stream: BufReader<BufWriter<Box<dyn Stream>>>,
@@ -105,11 +193,11 @@ impl Connection {
         // 200 = posting allowed, 201 = posting prohibited.
         let greeting = conn.read_response().await?;
         if greeting.code != 200 && greeting.code != 201 {
-            bail!(
+            let base = format!(
                 "unexpected NNTP greeting: {} {}",
-                greeting.code,
-                greeting.text
+                greeting.code, greeting.text
             );
+            bail!(with_hint(greeting.code, &greeting.text, base));
         }
         debug!(code = greeting.code, text = "<redacted>", "server greeting");
         Ok(conn)
@@ -127,17 +215,23 @@ impl Connection {
                 return Ok(());
             }
             381 => {}
-            _ => bail!("AUTHINFO USER rejected: {} {}", resp.code, resp.text),
+            _ => {
+                let base = format!("AUTHINFO USER rejected: {} {}", resp.code, resp.text);
+                bail!(with_hint(resp.code, &resp.text, base));
+            }
         }
 
         // Password is kept out of log output; only the command prefix is logged.
         debug!("sending AUTHINFO PASS <redacted>");
         let resp = self.send_command("AUTHINFO PASS ", password).await?;
         if resp.code != 281 {
-            bail!(
+            // resp.text is only pattern-matched inside with_hint/classify_error,
+            // never included verbatim in the message — see that fn's doc comment.
+            let base = format!(
                 "authentication rejected by server (code {}); check the configured username and password",
                 resp.code
             );
+            bail!(with_hint(resp.code, &resp.text, base));
         }
         debug!("authenticated");
         Ok(())
@@ -672,6 +766,97 @@ mod tests {
     fn rejects_malformed_responses() {
         assert!(Response::parse("xx oops\r\n").is_err());
         assert!(Response::parse("\r\n").is_err());
+    }
+
+    // ── classify_error ───────────────────────────────────────────────────────
+
+    #[test]
+    fn classifies_too_many_connections() {
+        assert_eq!(
+            classify_error(502, "Too many connections from your account"),
+            Some(ErrorHint::TooManyConnections)
+        );
+        assert_eq!(
+            classify_error(400, "Connection limit exceeded"),
+            Some(ErrorHint::TooManyConnections)
+        );
+    }
+
+    #[test]
+    fn too_many_connections_excludes_download_and_byte_quota_wording() {
+        // "exceed"/"limit" alone would false-positive on a byte-quota message;
+        // sabnzbd's own clue explicitly carves this out.
+        assert_eq!(
+            classify_error(502, "Download limit exceeded for this month"),
+            None
+        );
+        assert_eq!(classify_error(502, "Byte limit exceeded"), None);
+    }
+
+    #[test]
+    fn classifies_too_many_ip_addresses() {
+        assert_eq!(
+            classify_error(481, "Login denied, simultaneous IP addresses detected"),
+            Some(ErrorHint::TooManyIpAddresses)
+        );
+    }
+
+    #[test]
+    fn classifies_login_failure() {
+        assert_eq!(
+            classify_error(481, "Authentication failed"),
+            Some(ErrorHint::LoginFailed)
+        );
+        assert_eq!(
+            classify_error(452, "Authorization required"),
+            Some(ErrorHint::LoginFailed)
+        );
+        assert_eq!(
+            classify_error(502, "Invalid username or password"),
+            Some(ErrorHint::LoginFailed)
+        );
+    }
+
+    #[test]
+    fn classifies_payment_required() {
+        assert_eq!(
+            classify_error(502, "Account expired, please renew"),
+            Some(ErrorHint::PaymentRequired)
+        );
+        // Not 482 here: that code is already caught unconditionally by
+        // `LoginFailed`'s code-only branch (see `classify_error`'s comment) —
+        // `PaymentRequired` is only ever reachable via 502.
+        assert_eq!(
+            classify_error(502, "Insufficient credits remaining"),
+            Some(ErrorHint::PaymentRequired)
+        );
+    }
+
+    #[test]
+    fn code_482_always_classifies_as_login_failed_regardless_of_text() {
+        // 452/481/482/381 are treated as login failure unconditionally,
+        // matching sabnzbd's own elif chain — a provider using 482 for an
+        // unrelated reason (e.g. quota) still gets the login hint, since
+        // that code is reserved for authentication problems by RFC 4643.
+        assert_eq!(
+            classify_error(482, "Insufficient credits remaining"),
+            Some(ErrorHint::LoginFailed)
+        );
+    }
+
+    #[test]
+    fn unrecognized_error_text_classifies_to_none() {
+        assert_eq!(classify_error(502, "Service temporarily unavailable"), None);
+    }
+
+    #[test]
+    fn hint_message_never_contains_the_classified_text() {
+        // ErrorHint::message() is a fixed string per variant; guard against a
+        // future edit accidentally interpolating the server's own text into
+        // it, which would defeat the AUTHINFO PASS credential-safety guarantee.
+        let secret = "hunter2-the-actual-password";
+        let hint = classify_error(481, &format!("Authentication failed for {secret}")).unwrap();
+        assert!(!hint.message().contains(secret));
     }
 
     #[test]

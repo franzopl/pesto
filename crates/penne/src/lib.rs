@@ -18,6 +18,7 @@ pub mod check;
 pub mod client;
 pub mod config;
 pub mod deobfuscate;
+pub mod diskspace;
 pub mod download;
 pub mod extract;
 pub mod nzb;
