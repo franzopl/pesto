@@ -99,7 +99,7 @@ struct Candidate {
     path: PathBuf,
 }
 
-/// Recover real file names for the release [`crate::assemble::assemble_all`]
+/// Recover real file names for the release [`crate::download::download_queue`]
 /// just wrote under `dest_dir`. `synthetic_base` (typically the `.nzb`
 /// file's own stem — often a real, human-readable name even when the
 /// release's *internal* subjects are obfuscated) seeds names for files the

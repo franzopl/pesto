@@ -367,3 +367,99 @@ async fn missing_progress_events_arrive_while_the_download_is_still_running() {
     let outcome = handle.await.unwrap().unwrap();
     assert_eq!(outcome.missing.len(), SEGMENTS);
 }
+
+/// Regression test for the streaming-assembly phase: a file whose segments
+/// all resolve early must be written to disk (and its `FileAssembled` event
+/// emitted) right away, while other files in the same queue are still being
+/// fetched — not held in memory until the whole multi-file queue finishes.
+#[tokio::test]
+async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() {
+    const SLOW_SEGMENTS: usize = 20;
+    const CONNECTIONS: usize = 4;
+    const DELAY: Duration = Duration::from_millis(50);
+
+    let mut known = HashMap::new();
+    known.insert(
+        "fast0@test".to_string(),
+        yenc_body("fast.bin", b"fast-data"),
+    );
+    let mut slow_segments = Vec::new();
+    for i in 0..SLOW_SEGMENTS {
+        let id = format!("slow{i}@test");
+        known.insert(
+            id.clone(),
+            yenc_body("slow.bin", format!("d{i}").as_bytes()),
+        );
+        slow_segments.push(QueuedSegment {
+            message_id: id,
+            part: i as u32 + 1,
+            bytes: 5,
+        });
+    }
+    let (addr, _in_flight, _peak) = spawn_slow_server(known, DELAY);
+
+    let queue = DownloadQueue {
+        files: vec![
+            QueuedFile {
+                name: "fast.bin".to_string(),
+                segments: vec![QueuedSegment {
+                    message_id: "fast0@test".to_string(),
+                    part: 1,
+                    bytes: 5,
+                }],
+            },
+            QueuedFile {
+                name: "slow.bin".to_string(),
+                segments: slow_segments,
+            },
+        ],
+    };
+    let server = ServerEntry {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        ssl: false,
+        connections: CONNECTIONS,
+        username: None,
+        password: None,
+        retry_delay: 0,
+        timeout: 5,
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().to_path_buf();
+
+    let (tx, mut rx) = channel();
+    let handle =
+        tokio::spawn(
+            async move { download_queue(&queue, &[server], &dest_path, 0, Some(tx)).await },
+        );
+
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for fast.bin to be assembled")
+            .expect("channel closed before fast.bin was assembled");
+        if let ProgressEvent::FileAssembled { file_name } = &ev {
+            assert_eq!(file_name, "fast.bin");
+            break;
+        }
+    }
+
+    // `slow.bin` has far more segments than `fast.bin` and shares the same
+    // per-request delay, so the whole download can't possibly be done yet —
+    // proving `fast.bin` was assembled mid-run, not batched at the end.
+    assert!(
+        !handle.is_finished(),
+        "download_queue already finished by the time fast.bin's FileAssembled event was \
+         consumed — assembly is still batched at the end instead of streamed per-file"
+    );
+    assert!(
+        dest_dir.path().join("fast.bin").exists(),
+        "fast.bin should already be on disk while slow.bin is still downloading"
+    );
+
+    let outcome = handle.await.unwrap().unwrap();
+    assert_eq!(outcome.segments.len(), SLOW_SEGMENTS + 1);
+    assert!(outcome.assembled.contains_key("fast.bin"));
+    assert!(outcome.assembled.contains_key("slow.bin"));
+    assert!(dest_dir.path().join("slow.bin").exists());
+}

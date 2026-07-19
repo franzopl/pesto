@@ -52,6 +52,7 @@ testable state.
 | 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
 | 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`; `STAT` commands pipelined (depth 20) to amortize round-trip latency on top of connection concurrency. |
 | 13 (partial) | Post-download visibility & assembly speedup — status lines before deobfuscate/verify/extract instead of silence; `assemble()` skips redundant per-segment `seek()` calls (~3x faster writes on a real disk, measured with `fsync`). PAR2 verify parallelization still open. |
+| 14 | Streaming assembly — `download_queue` now writes each file to disk the instant its own segments resolve, interleaved with the rest of the fetch, instead of batching every file's write into one pass after the whole queue finishes. Closes the "fetch-and-write-incrementally" item flagged as deferred back in Phase 8. |
 
 ---
 
@@ -331,13 +332,14 @@ back.
       of re-downloading everything. `penne download` clears the cache once
       a run completes fully (assembled, PAR2-clean or repaired, extracted)
       — its only purpose is resuming *that* download.
-      This is deliberately **not** the "resumable unit is 'segments not yet
-      fetched', not 'files not yet posted'" design taken further into a
-      full fetch-and-write-incrementally pipeline merge with
-      `crate::assemble` (which would also solve holding a whole file's
-      decoded bytes in memory before writing — a real scalability concern
-      for multi-GB releases, tracked under Phase 9). The cache achieves the
-      same resumability outcome without that larger refactor's risk.
+      At the time this phase was written, this was deliberately **not** the
+      "resumable unit is 'segments not yet fetched', not 'files not yet
+      posted'" design taken further into a full fetch-and-write-
+      incrementally pipeline merge with `crate::assemble` — the cache alone
+      achieved the same resumability outcome without that larger refactor's
+      risk. That merge was eventually done anyway, driven by a separate
+      concern (the *wall-clock* stall of writing every file in one batch at
+      the very end) rather than resumability — see Phase 14.
 - [x] **Retry/backoff per segment, configurable:** a connection or fetch
       error against one server (not a definitive `430` — that is retried by
       trying the *next server*, never the same one again) is retried up to
@@ -795,6 +797,79 @@ time before finally printing `PAR2: all files verified intact`.
       is a separate, larger piece of work spanning `parmesan`,
       `penne::repair`, and `penne::ui` — deferred until the status-line
       fix plus the assembly speedup above prove insufficient on their own.
+
+---
+
+## Phase 14 — Streaming assembly ✅
+
+Reported after Phase 13's fixes: a real download still visibly paused
+between "fetch reaches 100%" and files actually appearing on disk, for
+releases with many files. Asked directly: "does it need to wait for the
+whole download to finish before writing a file? can't it write
+progressively?"
+
+- [x] **Root design change**: `download_queue` (`crates/penne/src/download.rs`)
+      now assembles each file ([`crate::assemble::assemble`]) the instant
+      every one of its own segments reaches a terminal state — fetched, or
+      (only once the last configured server has been tried) definitively
+      unfetchable — instead of returning every decoded segment first and
+      leaving `bin/penne.rs` to call `assemble_all` over the whole queue
+      afterward as a separate pass. For a multi-file release, most files
+      finish fetching (and are written to disk) well before the last file's
+      last segment lands, spreading disk I/O across the download's
+      wall-clock time instead of dumping it all at the end.
+- [x] **Key discovery that kept this simple**: `assemble()` already
+      tolerates out-of-order segment arrival — it writes each segment at
+      its own byte offset (`DecodedPart::begin`), and feeds the running
+      CRC-32 hasher by iterating `file.segments` in the queue's fixed
+      ascending-part order, not by map insertion order (proven by the
+      pre-existing `writing_segments_out_of_insertion_order_still_
+      assembles_correctly` test). So no reorder buffer or extra re-hash
+      pass was needed — `assemble()` itself required **zero changes** to
+      its write/hash logic; only *when* it gets called, per-file, moved
+      earlier.
+- [x] **Implementation**: `download_queue` now builds three pieces of
+      shared state up front — `remaining` (segments-not-yet-terminal per
+      file), `segments` (the same fully-populated map `DownloadOutcome`
+      always returned, just filled in incrementally now instead of after
+      the whole run), and `assembled` (one `AssembleOutcome` per file). A
+      new `resolve_segment` helper, called both from the cache-hit prepass
+      and from `worker_loop` on every segment resolution, decrements
+      `remaining` and — for whichever call brings a file's count to exactly
+      zero — assembles that file immediately using whatever landed in
+      `segments` for it. `worker_loop`/`drain_one_server` now propagate a
+      real I/O error from `assemble()` (already possible before, just
+      unreachable from inside `download_queue`) instead of only returning
+      plain tuples.
+      `DownloadOutcome` gains one field, `assembled: HashMap<String,
+      AssembleOutcome>`; `segments`/`missing`/`corrupt` are unchanged in
+      shape and behavior — several integration tests (`tests/resilience.rs`,
+      `tests/concurrency.rs`, `tests/download_with_failover.rs`) call
+      `download_queue` directly and assert on `outcome.segments` after it
+      returns, so that field had to stay fully populated exactly as before
+      rather than being drained early to save memory. This means the change
+      is about *when* writes happen, not peak memory usage — a reasonable
+      trade given the reported problem was the visible end-of-run stall,
+      not RAM pressure.
+      `assemble_all` (the old "loop `assemble` over every file" wrapper)
+      became dead code once its only caller moved into `download_queue`
+      itself, and was removed; `assemble()` (the per-file function) is
+      unchanged and now called from `download.rs` instead of `bin/penne.rs`.
+      `bin/penne.rs`'s `download()` simplified as a result: the
+      `tx_for_assemble` clone/drop dance that used to keep the progress
+      channel open across the two separate phases is gone — `download_queue`
+      now owns the only sender clone for the whole run, so the channel
+      closes naturally when it returns.
+- [x] Verified with a new regression test,
+      `a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue`
+      (`tests/concurrency.rs`): a queue with one single-segment file and one
+      many-segment file against a fake server sharing one per-request delay,
+      asserting the fast file's `FileAssembled` event — and its presence on
+      disk — arrives while the background download task is still running
+      (`!handle.is_finished()`), the same technique Phase 12's progress-
+      streaming regression tests already used. The full existing test suite
+      (including every test that calls `download_queue` directly and
+      inspects `outcome.segments`) continues to pass unchanged.
 
 ---
 

@@ -4,9 +4,14 @@
 //! `pesto::yenc::decode_part` (Phase 3), trying servers in priority order
 //! per segment — so a primary provider missing, or serving a truncated copy
 //! of, a handful of articles doesn't fail a file a backup server has intact.
-//! File assembly (Phase 4) consumes the [`pesto::yenc::DecodedPart`]s this
-//! returns; this module does no disk I/O of its own, beyond consulting
-//! [`crate::cache`] for resume (Phase 8).
+//! File assembly ([`crate::assemble::assemble`]) is driven from *inside*
+//! this module: each file is written to disk the instant its own last
+//! segment resolves (success or, on the last configured server, definitive
+//! failure), rather than waiting for the entire queue to finish first — see
+//! `ROADMAP.md`'s streaming-assembly phase for why. `outcome.segments`
+//! still ends up fully populated exactly as before (several integration
+//! tests depend on inspecting it directly), it's just filled in
+//! incrementally now instead of in one batch at the end.
 //!
 //! **Concurrency (`ROADMAP.md` Phase 2's long-standing open item, closed in
 //! Phase 9):** each server is drained by up to `server.connections` workers
@@ -38,10 +43,11 @@ use pesto::config::ServerEntry;
 use pesto::yenc::{decode_part, DecodedPart};
 use tokio::task::JoinSet;
 
+use crate::assemble::{self, AssembleOutcome};
 use crate::cache;
 use crate::client::DownloadClient;
 use crate::progress::{ProgressEvent, ProgressSender};
-use crate::queue::DownloadQueue;
+use crate::queue::{DownloadQueue, QueuedFile};
 
 /// A segment that no configured server had.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +82,11 @@ pub struct DownloadOutcome {
     pub missing: Vec<MissingSegment>,
     /// Segments fetched but not decodable from any server that had them.
     pub corrupt: Vec<CorruptSegment>,
+    /// One assembly outcome per file, keyed by `.nzb` filename — written to
+    /// disk incrementally as each file's segments resolved, not in one pass
+    /// after every file was fetched. Always has one entry per file in the
+    /// queue by the time this is returned.
+    pub assembled: HashMap<String, AssembleOutcome>,
 }
 
 /// One segment still needing to be fetched, with just enough owned data
@@ -87,17 +98,40 @@ struct WorkItem {
     message_id: String,
 }
 
+/// Per-file completion tracking shared across the cache-hit prepass and
+/// every server's worker pool, so a file can be assembled the instant its
+/// own last segment resolves rather than after the whole queue finishes.
+struct SharedState {
+    files_by_name: HashMap<String, QueuedFile>,
+    remaining: Mutex<HashMap<String, u32>>,
+    segments: Mutex<HashMap<String, DecodedPart>>,
+    assembled: Mutex<HashMap<String, AssembleOutcome>>,
+}
+
+/// Everything about a download that stays constant across every server
+/// pass, bundled so `drain_one_server`/`worker_loop` don't have to take it
+/// as a long list of separate parameters (only `is_last_server` actually
+/// varies pass to pass, so it stays a separate argument).
+struct PassContext {
+    dest_dir: PathBuf,
+    retries: u32,
+    progress: Option<ProgressSender>,
+    shared: Arc<SharedState>,
+}
+
 /// Fetch and decode every segment in `queue` from `servers`, tried in
 /// priority order. Within each server's pass, up to `server.connections`
 /// workers run concurrently. A decode failure on one server's copy is not
 /// fatal: the next configured server is tried before giving up on the
 /// segment, since the failure may be specific to that one transfer.
 ///
-/// `dest_dir` is used only to consult/populate the resume cache
-/// ([`crate::cache`]) — no other file I/O happens here. `retries` bounds how
-/// many times a connection/fetch error against one server is retried (with
-/// that server's own `retry_delay` between attempts) before moving to the
-/// next server.
+/// Each file is also written to disk ([`crate::assemble::assemble`]) the
+/// instant every one of its segments has reached a terminal state —
+/// fetched, or definitively unfetchable after the last configured server —
+/// rather than waiting for every other file in the queue too. `retries`
+/// bounds how many times a connection/fetch error against one server is
+/// retried (with that server's own `retry_delay` between attempts) before
+/// moving to the next server.
 pub async fn download_queue(
     queue: &DownloadQueue,
     servers: &[ServerEntry],
@@ -121,6 +155,23 @@ pub async fn download_queue(
 
     let mut outcome = DownloadOutcome::default();
 
+    let shared = Arc::new(SharedState {
+        files_by_name: queue
+            .files
+            .iter()
+            .map(|f| (f.name.clone(), f.clone()))
+            .collect(),
+        remaining: Mutex::new(
+            queue
+                .files
+                .iter()
+                .map(|f| (f.name.clone(), f.segments.len() as u32))
+                .collect(),
+        ),
+        segments: Mutex::new(HashMap::new()),
+        assembled: Mutex::new(HashMap::new()),
+    });
+
     // Cache hits are resolved up front, sequentially — they're pure disk
     // reads, not worth spinning up a worker pool for — so no network
     // worker ever spends a slot on a segment already resumed from a
@@ -135,7 +186,15 @@ pub async fn download_queue(
                         part: seg.part,
                         bytes: decoded.data.len() as u64,
                     });
-                    outcome.segments.insert(seg.message_id.clone(), decoded);
+                    resolve_segment(
+                        &file.name,
+                        &seg.message_id,
+                        Some(decoded),
+                        &shared,
+                        dest_dir,
+                        &progress,
+                    )
+                    .await?;
                     continue;
                 }
                 // A corrupted cache entry (shouldn't happen, but a killed
@@ -155,6 +214,13 @@ pub async fn download_queue(
     // tried) can tell the two apart.
     let mut last_decode_err: HashMap<String, String> = HashMap::new();
 
+    let ctx = Arc::new(PassContext {
+        dest_dir: dest_dir.to_path_buf(),
+        retries,
+        progress,
+        shared,
+    });
+
     let last_server_idx = servers.len() - 1;
     for (idx, server) in servers.iter().enumerate() {
         if pending.is_empty() {
@@ -162,20 +228,11 @@ pub async fn download_queue(
         }
         let worker_count = server.connections.max(1);
         let is_last_server = idx == last_server_idx;
-        let (fetched, leftover) = drain_one_server(
-            server,
-            pending,
-            dest_dir,
-            retries,
-            worker_count,
-            &progress,
-            is_last_server,
-        )
-        .await;
+        let (fetched, leftover) =
+            drain_one_server(server, pending, worker_count, is_last_server, &ctx).await?;
 
-        for (item, decoded) in fetched {
+        for item in fetched {
             last_decode_err.remove(&item.message_id);
-            outcome.segments.insert(item.message_id, decoded);
         }
 
         pending = Vec::with_capacity(leftover.len());
@@ -189,10 +246,12 @@ pub async fn download_queue(
 
     // Every item still here failed even the last configured server, so
     // `worker_loop` (told it was draining the last server) has already
-    // emitted its `SegmentMissing`/`SegmentCorrupt` progress event for each
-    // — this just builds the precise final report from the full
-    // cross-server `last_decode_err` history, which is more authoritative
-    // than any single pass's own view (see that map's own doc comment).
+    // emitted its `SegmentMissing`/`SegmentCorrupt` progress event for each,
+    // and already called `resolve_segment` for it (so every file has by now
+    // been assembled) — this just builds the precise final report from the
+    // full cross-server `last_decode_err` history, which is more
+    // authoritative than any single pass's own view (see that map's own doc
+    // comment).
     for item in pending {
         match last_decode_err.remove(&item.message_id) {
             Some(error) => {
@@ -213,7 +272,70 @@ pub async fn download_queue(
         }
     }
 
+    let ctx = Arc::try_unwrap(ctx)
+        .unwrap_or_else(|_| panic!("every worker task joined before this point"));
+    let shared = Arc::try_unwrap(ctx.shared)
+        .unwrap_or_else(|_| panic!("every worker task joined before this point"));
+    outcome.segments = shared.segments.into_inner().expect("mutex not poisoned");
+    outcome.assembled = shared.assembled.into_inner().expect("mutex not poisoned");
+
     Ok(outcome)
+}
+
+/// Record one segment's resolution — `Some(decoded)` on success, `None` on
+/// a terminal failure (no more servers left to try) — and, if it was the
+/// file's last unresolved segment, assemble that file immediately using
+/// whatever landed in `shared.segments` for it. [`assemble::assemble`]
+/// itself reports [`AssembleOutcome::Incomplete`] if anything's still
+/// missing, exactly as it would if called after the whole queue finished —
+/// the only thing that changes here is *when* it's called.
+async fn resolve_segment(
+    file_name: &str,
+    message_id: &str,
+    decoded: Option<DecodedPart>,
+    shared: &SharedState,
+    dest_dir: &Path,
+    progress: &Option<ProgressSender>,
+) -> Result<()> {
+    if let Some(decoded) = decoded {
+        shared
+            .segments
+            .lock()
+            .expect("mutex not poisoned")
+            .insert(message_id.to_string(), decoded);
+    }
+
+    let now_zero = {
+        let mut remaining = shared.remaining.lock().expect("mutex not poisoned");
+        let count = remaining
+            .get_mut(file_name)
+            .expect("file present in remaining map");
+        *count -= 1;
+        *count == 0
+    };
+    if !now_zero {
+        return Ok(());
+    }
+
+    let file = &shared.files_by_name[file_name];
+    let local: HashMap<String, DecodedPart> = {
+        let segments = shared.segments.lock().expect("mutex not poisoned");
+        file.segments
+            .iter()
+            .filter_map(|s| {
+                segments
+                    .get(&s.message_id)
+                    .map(|d| (s.message_id.clone(), d.clone()))
+            })
+            .collect()
+    };
+    let result = assemble::assemble(file, &local, dest_dir, progress.as_ref()).await?;
+    shared
+        .assembled
+        .lock()
+        .expect("mutex not poisoned")
+        .insert(file_name.to_string(), result);
+    Ok(())
 }
 
 fn emit(progress: &Option<ProgressSender>, event: impl FnOnce() -> ProgressEvent) {
@@ -223,8 +345,10 @@ fn emit(progress: &Option<ProgressSender>, event: impl FnOnce() -> ProgressEvent
 }
 
 /// Drain `pending` against `server` using `worker_count` concurrent
-/// connections. Returns `(fetched, leftover)`: `fetched` pairs each item
-/// with its decoded body; `leftover` is everything this server didn't
+/// connections. Returns `(fetched, leftover)`: `fetched` lists every item
+/// that was fetched and decoded (its `DecodedPart` already landed in
+/// `shared.segments`, and — if it completed its file — that file has
+/// already been assembled); `leftover` is everything this server didn't
 /// resolve (missing, or fetched-but-undecodable — paired with the decode
 /// error when that's why), for the next server in priority order to try.
 ///
@@ -245,18 +369,20 @@ fn emit(progress: &Option<ProgressSender>, event: impl FnOnce() -> ProgressEvent
 /// leftover item to pile up for one batch after the whole multi-server
 /// check returns — the difference between a mostly-missing release
 /// updating the panel throughout the download or not moving until the end.
+///
+/// Returns the first I/O error hit while assembling a completed file, if
+/// any — a real disk failure (out of space, permission revoked) is treated
+/// as fatal for the whole run rather than silently dropped, matching how
+/// `assemble()`'s own errors already propagated when called from
+/// `bin/penne.rs` directly. Any workers still in flight when that happens
+/// are aborted when the `JoinSet` is dropped.
 async fn drain_one_server(
     server: &ServerEntry,
     pending: Vec<WorkItem>,
-    dest_dir: &Path,
-    retries: u32,
     worker_count: usize,
-    progress: &Option<ProgressSender>,
     is_last_server: bool,
-) -> (
-    Vec<(WorkItem, DecodedPart)>,
-    Vec<(WorkItem, Option<String>)>,
-) {
+    ctx: &Arc<PassContext>,
+) -> Result<(Vec<WorkItem>, Vec<(WorkItem, Option<String>)>)> {
     let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
 
     let mut workers = JoinSet::new();
@@ -264,10 +390,8 @@ async fn drain_one_server(
         workers.spawn(worker_loop(
             queue.clone(),
             server.clone(),
-            dest_dir.to_path_buf(),
-            retries,
-            progress.clone(),
             is_last_server,
+            ctx.clone(),
         ));
     }
 
@@ -280,12 +404,13 @@ async fn drain_one_server(
         // sitting in `queue` and will be picked up by whichever worker
         // empties it next (or, if it panicked mid-item, that one item is
         // lost from this pass — acceptably rare against "never panics").
-        if let Ok((f, l)) = result {
+        if let Ok(inner) = result {
+            let (f, l) = inner?;
             fetched.extend(f);
             leftover.extend(l);
         }
     }
-    (fetched, leftover)
+    Ok((fetched, leftover))
 }
 
 /// One worker's whole pass over `queue`: pop an item, fetch+decode it
@@ -300,17 +425,19 @@ async fn drain_one_server(
 /// failed), a reasonable live approximation; the authoritative
 /// classification `download_queue` ultimately reports still comes from its
 /// own full cross-server `last_decode_err` history, unaffected by this.
+///
+/// Every segment that reaches a terminal state here — a successful decode,
+/// or (only when `is_last_server`) a definitive failure — is handed to
+/// [`resolve_segment`], which assembles that segment's file immediately
+/// once it was the last one it was waiting on. This is what makes files
+/// land on disk throughout the download instead of only once every server
+/// has been fully drained.
 async fn worker_loop(
     queue: Arc<Mutex<VecDeque<WorkItem>>>,
     server: ServerEntry,
-    dest_dir: PathBuf,
-    retries: u32,
-    progress: Option<ProgressSender>,
     is_last_server: bool,
-) -> (
-    Vec<(WorkItem, DecodedPart)>,
-    Vec<(WorkItem, Option<String>)>,
-) {
+    ctx: Arc<PassContext>,
+) -> Result<(Vec<WorkItem>, Vec<(WorkItem, Option<String>)>)> {
     let mut client: Option<DownloadClient> = None;
     let mut fetched = Vec::new();
     let mut leftover = Vec::new();
@@ -322,14 +449,24 @@ async fn worker_loop(
         };
         let Some(item) = item else { break };
 
-        let body = match fetch_with_retry(&mut client, &server, &item.message_id, retries).await {
+        let body = match fetch_with_retry(&mut client, &server, &item.message_id, ctx.retries).await
+        {
             Ok(Some(body)) => body,
             Ok(None) => {
                 if is_last_server {
-                    emit(&progress, || ProgressEvent::SegmentMissing {
+                    emit(&ctx.progress, || ProgressEvent::SegmentMissing {
                         file_name: item.file_name.clone(),
                         part: item.part,
                     });
+                    resolve_segment(
+                        &item.file_name,
+                        &item.message_id,
+                        None,
+                        &ctx.shared,
+                        &ctx.dest_dir,
+                        &ctx.progress,
+                    )
+                    .await?;
                 }
                 leftover.push((item, None));
                 continue;
@@ -338,10 +475,19 @@ async fn worker_loop(
                 // Exhausted retries against this server; the next server in
                 // priority order gets a turn.
                 if is_last_server {
-                    emit(&progress, || ProgressEvent::SegmentMissing {
+                    emit(&ctx.progress, || ProgressEvent::SegmentMissing {
                         file_name: item.file_name.clone(),
                         part: item.part,
                     });
+                    resolve_segment(
+                        &item.file_name,
+                        &item.message_id,
+                        None,
+                        &ctx.shared,
+                        &ctx.dest_dir,
+                        &ctx.progress,
+                    )
+                    .await?;
                 }
                 leftover.push((item, None));
                 continue;
@@ -352,21 +498,39 @@ async fn worker_loop(
             Ok(decoded) => {
                 // Cache the raw body, not the decoded form — see the module
                 // docs on `crate::cache` for why.
-                let _ = cache::store(&dest_dir, &item.message_id, &body);
-                emit(&progress, || ProgressEvent::SegmentDownloaded {
+                let _ = cache::store(&ctx.dest_dir, &item.message_id, &body);
+                emit(&ctx.progress, || ProgressEvent::SegmentDownloaded {
                     file_name: item.file_name.clone(),
                     part: item.part,
                     bytes: decoded.data.len() as u64,
                 });
-                fetched.push((item, decoded));
+                resolve_segment(
+                    &item.file_name,
+                    &item.message_id,
+                    Some(decoded),
+                    &ctx.shared,
+                    &ctx.dest_dir,
+                    &ctx.progress,
+                )
+                .await?;
+                fetched.push(item);
             }
             Err(e) => {
                 if is_last_server {
-                    emit(&progress, || ProgressEvent::SegmentCorrupt {
+                    emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),
                         part: item.part,
                         error: e.to_string(),
                     });
+                    resolve_segment(
+                        &item.file_name,
+                        &item.message_id,
+                        None,
+                        &ctx.shared,
+                        &ctx.dest_dir,
+                        &ctx.progress,
+                    )
+                    .await?;
                 }
                 leftover.push((item, Some(e.to_string())));
             }
@@ -377,7 +541,7 @@ async fn worker_loop(
         c.quit().await;
     }
 
-    (fetched, leftover)
+    Ok((fetched, leftover))
 }
 
 /// Fetch `message_id` from `server` over `client` (this worker's own

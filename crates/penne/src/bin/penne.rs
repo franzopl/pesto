@@ -148,7 +148,6 @@ async fn download(
     let dest_dir = out_dir.unwrap_or(config.download_dir);
 
     let (tx, rx) = penne::progress::channel();
-    let tx_for_assemble = tx.clone();
     let progress_task = penne::ui::terminal::spawn_renderer(rx);
 
     let outcome = penne::download::download_queue(
@@ -159,17 +158,12 @@ async fn download(
         Some(tx),
     )
     .await?;
-
-    let assembled =
-        penne::assemble::assemble_all(&queue, &outcome.segments, &dest_dir, Some(&tx_for_assemble))
-            .await?;
-    // The download's sender was consumed by `download_queue`; this is the
-    // last copy, so dropping it lets `print_progress`'s receive loop end.
-    // Awaiting it before printing anything else guarantees every live
-    // progress line has already been flushed, so the summary below can't
-    // interleave with it (the unbounded channel means `download_queue` can
-    // return well before `print_progress` finishes draining it).
-    drop(tx_for_assemble);
+    // `download_queue` now assembles every file internally as it completes,
+    // so its own progress sender is the only copy left by the time it
+    // returns — the channel closes on its own, and awaiting the renderer
+    // here just waits for its last redraw to flush before the summary below
+    // prints (avoiding any interleaving with the unbounded channel's
+    // draining).
     progress_task.await.ok();
 
     println!(
@@ -189,7 +183,7 @@ async fn download(
     }
 
     let mut needs_repair = 0u32;
-    for (name, result) in &assembled {
+    for (name, result) in &outcome.assembled {
         match result {
             penne::assemble::AssembleOutcome::Complete => println!("  ok: {name}"),
             penne::assemble::AssembleOutcome::CompleteUnverified => {
@@ -212,7 +206,7 @@ async fn download(
         .unwrap_or("release");
     println!("checking for obfuscated/misnamed files...");
     let rename_report =
-        penne::deobfuscate::run(&dest_dir, &queue, &assembled, synthetic_base).await?;
+        penne::deobfuscate::run(&dest_dir, &queue, &outcome.assembled, synthetic_base).await?;
     if rename_report.renames.is_empty() {
         println!("  nothing to rename");
     }

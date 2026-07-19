@@ -7,7 +7,10 @@
 //! item). The whole-file CRC-32 is accumulated incrementally with
 //! `pesto::yenc::Crc32` while writing, in ascending part order (guaranteed
 //! by [`crate::queue::build`]), rather than by re-reading the file back —
-//! cheap regardless of file size.
+//! cheap regardless of file size. This same out-of-order tolerance is what
+//! lets [`crate::download::download_queue`] call [`assemble`] on each file
+//! the instant its own segments resolve, rather than waiting for the whole
+//! queue to finish first.
 //!
 //! Writes go to a temporary sibling path first, renamed into place only once
 //! every segment has landed, so a killed download never leaves behind a
@@ -22,7 +25,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::progress::{ProgressEvent, ProgressSender};
-use crate::queue::{DownloadQueue, QueuedFile};
+use crate::queue::QueuedFile;
 
 /// Result of assembling one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,23 +52,6 @@ pub enum AssembleOutcome {
     /// written at all — a partial file that looks complete is worse than no
     /// file.
     Incomplete { missing_parts: Vec<u32> },
-}
-
-/// Assemble every file in `queue` for which every segment is present in
-/// `decoded`, writing under `dest_dir`. Returns one [`AssembleOutcome`] per
-/// file, keyed by its `.nzb` filename.
-pub async fn assemble_all(
-    queue: &DownloadQueue,
-    decoded: &HashMap<String, DecodedPart>,
-    dest_dir: &Path,
-    progress: Option<&ProgressSender>,
-) -> Result<HashMap<String, AssembleOutcome>> {
-    let mut outcomes = HashMap::with_capacity(queue.files.len());
-    for file in &queue.files {
-        let outcome = assemble(file, decoded, dest_dir, progress).await?;
-        outcomes.insert(file.name.clone(), outcome);
-    }
-    Ok(outcomes)
 }
 
 /// Write `file`'s segments (already fetched and yEnc-decoded, keyed by
@@ -362,45 +348,5 @@ mod tests {
         }
         // Still written to disk — a candidate for repair, not discarded.
         assert!(dir.path().join("f.bin").exists());
-    }
-
-    #[tokio::test]
-    async fn assemble_all_reports_one_outcome_per_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut decoded = HashMap::new();
-        decoded.insert(
-            "id1@test".to_string(),
-            decoded_part("a.bin", 1, 1, 0, b"a-data", None),
-        );
-        // b.bin's only segment is never fetched.
-
-        let queue = DownloadQueue {
-            files: vec![
-                queued_file("a.bin", &[1]),
-                QueuedFile {
-                    name: "b.bin".to_string(),
-                    segments: vec![QueuedSegment {
-                        message_id: "b1@test".to_string(),
-                        part: 1,
-                        bytes: 0,
-                    }],
-                },
-            ],
-        };
-
-        let outcomes = assemble_all(&queue, &decoded, dir.path(), None)
-            .await
-            .unwrap();
-        assert_eq!(outcomes.len(), 2);
-        assert!(matches!(
-            outcomes["a.bin"],
-            AssembleOutcome::Complete | AssembleOutcome::CompleteUnverified
-        ));
-        assert_eq!(
-            outcomes["b.bin"],
-            AssembleOutcome::Incomplete {
-                missing_parts: vec![1]
-            }
-        );
     }
 }
