@@ -873,6 +873,151 @@ progressively?"
 
 ---
 
+## Phase 15 — Health-aware downloads, disk guard, server pools (planned)
+
+Inspired by a study of [`nzbget`](https://github.com/nzbgetcom/nzbget)'s core
+downloader (`daemon/nntp`, `daemon/queue`, `daemon/connect`) — four ideas
+worth adopting, prioritized by value vs. how much they reuse infrastructure
+`penne` already has. Other `nzbget` mechanisms considered and deliberately
+**not** adopted: `ArticleCache` write-behind buffering (speculative without
+profiling data — Phase 9 already reached the same conclusion for `penne`'s
+own buffer-pool item), `ArticleContentAnalyzer`-during-fetch renaming
+(`penne::deobfuscate`'s PAR2-hash matching is already more rigorous than
+`nzbget`'s regex-heuristic fallback; only the timing differs, and that's low
+value alone), the hanging-download watchdog (no observed case of a stuck
+transfer surviving `penne`'s existing per-request timeout/retry), and
+persistent cross-run quota tracking (belongs to `upapasta`'s catalog/history
+scope per `CLAUDE.md`, not the download engine).
+
+- [ ] **Health-based early abort.** `nzbget`'s `QueueCoordinator::CheckHealth`
+      compares the running success/failure ratio against a critical
+      threshold derived from how much PAR2 recovery data the release
+      actually shipped, and pauses/deletes/parks the download *before* it
+      finishes if the failure rate already exceeds what the available
+      recovery blocks could repair — instead of fetching everything and
+      only discovering `NotRepairable` after the fact (`penne::repair`
+      today). `penne` already has the two halves needed to build this
+      without new protocol work: `penne::check::check_queue` (Phase 12)
+      can report missing-segment counts without transferring bodies, and
+      `pesto::par2::recovery_set::RecoverySet` exposes recovery-block
+      counts. Wire a health check into `download_queue` (or a pre-flight
+      `--stat`-style pass) that estimates repairability from missing
+      segments vs. available recovery blocks and aborts early with a clear
+      message, rather than burning bandwidth on an unrecoverable release.
+- [ ] **Disk-space guard.** `penne` currently has no free-space check
+      anywhere (`grep -ri disk.?space crates/penne/src` finds nothing) — a
+      multi-GiB release can fail mid-write purely from running out of disk,
+      indistinguishable at a glance from a real bug (this is adjacent to,
+      but distinct from, the near-full-btrfs slowdown noted in Phase 13).
+      Mirrors `nzbget`'s `DiskSpace` option: before starting a download (and
+      periodically during a long one), check free space on the destination
+      filesystem against the queue's total byte count and fail clearly
+      up front instead of partway through `assemble()`.
+- [ ] **`level` + `group` server pools.** `penne`'s server list today is
+      strictly sequential priority (Phase 9: "all of server 1's workers
+      finish before server 2's start", deliberately unlike a rotate-on-error
+      pool). `nzbget`'s `ServerPool` generalizes this with two fields per
+      server: `level` (the priority tier `penne` already has) and `group`
+      (servers sharing a `level` *and* `group` are pooled and used
+      interchangeably, not one-as-fallback-for-the-other). Covers a real
+      case `penne` can't express today: two equal-priority accounts (e.g.
+      two blocks of connections on the same provider, or two mirror
+      providers) that should share worker load, not act as primary/backup.
+      Needs a `group` field on `RawServer`/`penne::config`, plus changing
+      `drain_one_server`'s per-server sequencing (`penne::download`,
+      `penne::check`) to treat a `group` as one pool of
+      `Σ connections`-many workers instead of iterating servers one at a
+      time.
+- [ ] **Incremental extraction, `DirectUnpack`-style.** `nzbget` starts
+      unpacking each RAR/7z volume the instant *that volume* finishes
+      downloading, running in parallel with the rest of the queue still in
+      flight, rather than waiting for the whole NZB. This is the same shift
+      Phase 14 already made for assembly ("why wait for the whole queue to
+      write one file?") applied one phase further down the pipeline.
+      Currently `penne::extract::extract_all` runs as one pass after PAR2
+      verify/repair completes for everything (`penne download`'s fixed
+      phase order: assemble → deobfuscate → repair → extract). Sequence
+      this after Phases 5 (exit-code granularity) and 6's remaining
+      on-demand-volume item settle, since it changes the CLI's phase
+      structure more than the other three items here.
+
+---
+
+## Phase 16 — PAR2 quick-check, per-segment streaming writes, clearer NNTP errors (planned)
+
+Inspired by a study of [`sabnzbd`](https://github.com/sabnzbd/sabnzbd)'s core
+downloader (`sabnzbd/downloader.py`, `decoder.py`, `articlecache.py`,
+`par2file.py`). Its single-threaded `select`-loop connection model and
+C-extension (`sabctools`) yEnc decoding taught nothing new — `tokio` and
+native Rust already are the better version of both — but three ideas are
+worth adopting, independent of Phase 15's `nzbget`-derived one:
+
+- [ ] **PAR2 quick-check via CRC32 combination, skipping full re-hash on the
+      common path.** `sabnzbd`'s `par2file.parse_par2_file` reads each
+      file's `IFSC` packets (already parsed by `parmesan` —
+      `crates/parmesan/src/packet.rs`) and *combines* their per-slice CRC32
+      values algebraically (`crc32_multiply`/`crc32_combine`/
+      `crc32_zero_unpad` — the standard CRC32-combine algorithm) into what
+      the whole file's CRC32 would be if every slice matches, then compares
+      that against the file's actual CRC32 — no MD5, no re-reading the
+      file's bytes at all. `penne::assemble` already accumulates a
+      whole-file CRC-32 incrementally while writing
+      (`crates/penne/src/assemble.rs:86`); `penne::repair::verify_and_repair`
+      currently always calls `pesto::par2::verify::verify` unconditionally,
+      which re-reads and MD5-hashes every file from scratch (Phase 13
+      measured ~12s for a 6.6 GiB release in `--release`, dominated by that
+      re-read). Add a CRC32-combine primitive to `pesto::yenc::Crc32` (the
+      only missing building block — IFSC data is already available) and try
+      the quick check first in `verify_and_repair`: a file whose already-known
+      CRC32 matches the PAR2-derived value is provably intact without a
+      single extra byte read, falling back to the existing full `verify()`
+      only when it doesn't. Turns the common case (a fully intact download)
+      from "reread and MD5 everything" into "compare two `u32`s already in
+      hand".
+- [ ] **Per-segment streaming writes, not just per-file.** Phase 14 made
+      `download_queue` assemble a file the instant *all* of its own segments
+      resolve, instead of waiting for the whole queue — but for a
+      single-file release (one large MKV/ISO split into thousands of
+      segments, fetched in parallel across many connections), that's no
+      improvement: every decoded segment still accumulates in the one shared
+      `Mutex<HashMap<String, DecodedPart>>` (`crates/penne/src/download.rs:107`)
+      until that one file's last segment lands, holding close to the whole
+      file in RAM at peak. `sabnzbd`'s `ArticleCache` exists to bound exactly
+      this, but needs to be genuinely complex because `sabnzbd` doesn't know
+      a file's real (deobfuscated) name until its first article arrives.
+      `penne` doesn't have that constraint — `assemble()` already writes to a
+      fixed temp path (`<name>.penne-part`) regardless of obfuscation, with
+      real-name recovery deferred to Phase 11's post-assembly pass — so it
+      can do something simpler than `sabnzbd`: write each segment to the
+      open temp file the moment *that segment* is decoded, not once its
+      whole file completes. Requires restructuring `assemble()` from "takes
+      a complete `decoded` map up front" to "owns an open file handle and is
+      fed segments incrementally, deciding `Complete`/`Incomplete` only once
+      the file's segment count is known to be exhausted" — a real structural
+      change, not a tuning knob, but it closes the memory-scaling gap Phase
+      14 left for the single-large-file case.
+- [ ] **Categorized, actionable NNTP error messages.** `sabnzbd`'s
+      `downloader.py` (`clues_login`/`clues_too_many`/`clues_too_many_ip`/
+      `clues_pay`) pattern-matches server error text into specific causes
+      (bad credentials, too many simultaneous connections, too many
+      connections from this IP, payment/quota required) instead of just
+      surfacing the raw NNTP response. This is the `CLAUDE.md` design
+      principle already in force ("Network, authentication and I/O errors
+      must produce actionable messages, not panics") applied to a spot that
+      may not fully live up to it yet — audit what `penne`/`pesto::nntp`
+      actually surface today for these cases before scoping the work; likely
+      a small, self-contained addition regardless.
+
+Considered and **not** adopted: `sabnzbd`'s single-thread `select`-loop
+connection model and `sabctools` C-extension yEnc decoding (both already
+superseded by `tokio` + native Rust), server-block-with-scheduled-unblock
+timers (`plan_server`/`trigger_server` — already covered in spirit by
+Phase 8's per-segment retry/backoff), and account expiration/quota
+monitoring (`check_server_expiration`/`check_server_quota` — catalog/history
+scope, belongs to `upapasta` per `CLAUDE.md`, not the download engine).
+
+---
+
 ## Later — Web UI
 
 Explicitly deferred until the phases above reach feature parity with a real
