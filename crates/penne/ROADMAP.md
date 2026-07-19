@@ -889,21 +889,48 @@ transfer surviving `penne`'s existing per-request timeout/retry), and
 persistent cross-run quota tracking (belongs to `upapasta`'s catalog/history
 scope per `CLAUDE.md`, not the download engine).
 
-- [ ] **Health-based early abort.** `nzbget`'s `QueueCoordinator::CheckHealth`
-      compares the running success/failure ratio against a critical
-      threshold derived from how much PAR2 recovery data the release
-      actually shipped, and pauses/deletes/parks the download *before* it
-      finishes if the failure rate already exceeds what the available
-      recovery blocks could repair — instead of fetching everything and
-      only discovering `NotRepairable` after the fact (`penne::repair`
-      today). `penne` already has the two halves needed to build this
-      without new protocol work: `penne::check::check_queue` (Phase 12)
-      can report missing-segment counts without transferring bodies, and
-      `pesto::par2::recovery_set::RecoverySet` exposes recovery-block
-      counts. Wire a health check into `download_queue` (or a pre-flight
-      `--stat`-style pass) that estimates repairability from missing
-      segments vs. available recovery blocks and aborts early with a clear
-      message, rather than burning bandwidth on an unrecoverable release.
+- [x] **Health-based early abort — rescoped from pre-download to
+      post-fetch, gating the expensive PAR2 verify pass.** The originally
+      planned form (abort *before* downloading, mirroring `nzbget`'s
+      `QueueCoordinator::CheckHealth`) turned out not to be feasible:
+      `pesto::par2::recovery_set::RecoverySet::load` needs the `.par2`
+      index and its recovery volumes already sitting on disk to know how
+      much recovery data even exists, and nothing is on disk before a
+      download begins — a chicken-and-egg problem `nzbget` itself sidesteps
+      the same way, since `CheckHealth` is actually called
+      per-completed-article as a download *progresses*, never as a
+      pre-flight step, contrary to how this file originally summarized it.
+      Genuine mid-download bandwidth savings (cancelling not-yet-started
+      files once a release is already provably hopeless) would need real
+      surgery on `download_queue`'s shared-state worker-pool architecture
+      (Phase 9) to check health incrementally — judged too large a change
+      to justify here.
+      What was actually built, new `penne::health` module: `damaged_bytes`
+      sums the wire byte size of exactly the segments still needing repair
+      after assembly (an `Incomplete` file's `missing_parts`, or a
+      `ChecksumMismatch` file's `bad_parts` — not the whole file, which
+      would overcount a mostly-intact file with only a few bad slices);
+      `evaluate` finds any PAR2 recovery set already on disk (reusing
+      `penne::repair::find_par2_index`) and compares that against
+      `recovery_blocks.len() * slice_size`, an upper bound on what those
+      blocks could reconstruct. Wired into `penne download` (`bin/penne.rs`)
+      right before the "verifying with PAR2" step: when the estimate
+      already looks hopeless, prints a warning *before* paying for
+      `verify_and_repair`'s full re-hash of every file, rather than making
+      the user wait through it first only to learn the same thing. Always
+      only a warning, never a skip: `HealthCheck::looks_repairable`'s doc
+      comment spells out why — `damaged_bytes` is a slight overestimate
+      (wire size vs. decoded size, the same rounding direction as
+      `penne::diskspace::required_bytes`), so a `false` here is not
+      authoritative enough to skip the byte-exact `verify()` outright, only
+      reliable enough to warn early. Verified with unit tests in
+      `penne::health::tests` (exact bad-parts-only byte counting, multiple
+      damaged files summing correctly, complete files contributing
+      nothing, no-PAR2-present evaluating to `None`) and integration tests
+      in `tests/health.rs` against a real on-disk PAR2 recovery set built
+      via `tests/support::build_fixture_set` (repairable and
+      not-repairable cases, matching the exact `recovery_blocks.len() *
+      slice_size` arithmetic against a known fixture).
 - [x] **Disk-space guard.** New `penne::diskspace` module:
       `required_bytes` sums every queued segment's wire (yEnc-encoded) byte
       count — a slight overestimate of decoded output size, the safe

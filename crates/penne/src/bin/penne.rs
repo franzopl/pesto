@@ -229,6 +229,20 @@ async fn download(
         println!("  {label}: {} -> {}", r.old_name, r.new_name);
     }
 
+    if needs_repair > 0 {
+        let damaged = penne::health::damaged_bytes(&queue, &outcome.assembled);
+        if let Some(health) = penne::health::evaluate(&dest_dir, damaged)? {
+            if !health.looks_repairable() {
+                println!(
+                    "  warning: {} missing/damaged, but only ~{} of PAR2 recovery data found \
+                     — repair is unlikely to succeed",
+                    pesto::progress::format_size(health.damaged_bytes),
+                    pesto::progress::format_size(health.available_recovery_bytes)
+                );
+            }
+        }
+    }
+
     println!(
         "verifying with PAR2 (re-hashing downloaded files against recovery data — \
          this can take a while for large releases)..."
