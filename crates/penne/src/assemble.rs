@@ -31,12 +31,19 @@ use crate::queue::QueuedFile;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssembleOutcome {
     /// Every segment was present, written, and the whole-file CRC-32 (when
-    /// one was known) matched.
-    Complete,
+    /// one was known) matched. `actual_crc32` is that already-computed
+    /// value — kept around (not just checked and discarded) so
+    /// [`crate::health`]/`penne`'s PAR2 quick-check (`ROADMAP.md` Phase 16)
+    /// can compare a file's integrity against PAR2 recovery data without
+    /// paying to re-read and re-hash it from disk.
+    Complete { actual_crc32: u32 },
     /// Every segment was present and written, but no whole-file CRC-32 was
     /// available to check against (some encoders never emit one on `=yend`
     /// for a multi-part file, though `pesto`'s own poster always does).
-    CompleteUnverified,
+    /// `actual_crc32` is still the real computed value, for the same
+    /// reason as [`Self::Complete`] — there was simply nothing to compare
+    /// it against here.
+    CompleteUnverified { actual_crc32: u32 },
     /// The file was written, but is suspect: either the whole-file CRC-32
     /// didn't match, or one or more parts failed their own CRC-32 (a
     /// structurally valid yEnc decode whose content doesn't match the
@@ -162,13 +169,17 @@ pub async fn assemble(
                 bad_parts,
             }
         }
-        Some(_) => AssembleOutcome::Complete,
+        Some(_) => AssembleOutcome::Complete {
+            actual_crc32: actual,
+        },
         None if !bad_parts.is_empty() => AssembleOutcome::ChecksumMismatch {
             expected: None,
             actual,
             bad_parts,
         },
-        None => AssembleOutcome::CompleteUnverified,
+        None => AssembleOutcome::CompleteUnverified {
+            actual_crc32: actual,
+        },
     };
     Ok(outcome)
 }
@@ -254,7 +265,12 @@ mod tests {
 
         let file = queued_file("movie.bin", &[1, 2]);
         let outcome = assemble(&file, &decoded, dir.path(), None).await.unwrap();
-        assert_eq!(outcome, AssembleOutcome::Complete);
+        assert_eq!(
+            outcome,
+            AssembleOutcome::Complete {
+                actual_crc32: whole_crc
+            }
+        );
 
         let written = tokio::fs::read(dir.path().join("movie.bin")).await.unwrap();
         assert_eq!(written, b"hello world!".to_vec());
@@ -322,7 +338,12 @@ mod tests {
 
         let file = queued_file("f.bin", &[1]);
         let outcome = assemble(&file, &decoded, dir.path(), None).await.unwrap();
-        assert_eq!(outcome, AssembleOutcome::CompleteUnverified);
+        assert_eq!(
+            outcome,
+            AssembleOutcome::CompleteUnverified {
+                actual_crc32: pesto::yenc::crc32(&data)
+            }
+        );
     }
 
     #[tokio::test]

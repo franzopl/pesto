@@ -25,6 +25,7 @@ pub mod health;
 pub mod nzb;
 pub mod progress;
 pub mod queue;
+pub mod quickcheck;
 pub mod repair;
 pub mod ui;
 pub mod wizard;

@@ -994,28 +994,61 @@ C-extension (`sabctools`) yEnc decoding taught nothing new — `tokio` and
 native Rust already are the better version of both — but three ideas are
 worth adopting, independent of Phase 15's `nzbget`-derived one:
 
-- [ ] **PAR2 quick-check via CRC32 combination, skipping full re-hash on the
-      common path.** `sabnzbd`'s `par2file.parse_par2_file` reads each
-      file's `IFSC` packets (already parsed by `parmesan` —
-      `crates/parmesan/src/packet.rs`) and *combines* their per-slice CRC32
-      values algebraically (`crc32_multiply`/`crc32_combine`/
-      `crc32_zero_unpad` — the standard CRC32-combine algorithm) into what
-      the whole file's CRC32 would be if every slice matches, then compares
-      that against the file's actual CRC32 — no MD5, no re-reading the
-      file's bytes at all. `penne::assemble` already accumulates a
-      whole-file CRC-32 incrementally while writing
-      (`crates/penne/src/assemble.rs:86`); `penne::repair::verify_and_repair`
-      currently always calls `pesto::par2::verify::verify` unconditionally,
-      which re-reads and MD5-hashes every file from scratch (Phase 13
-      measured ~12s for a 6.6 GiB release in `--release`, dominated by that
-      re-read). Add a CRC32-combine primitive to `pesto::yenc::Crc32` (the
-      only missing building block — IFSC data is already available) and try
-      the quick check first in `verify_and_repair`: a file whose already-known
-      CRC32 matches the PAR2-derived value is provably intact without a
-      single extra byte read, falling back to the existing full `verify()`
-      only when it doesn't. Turns the common case (a fully intact download)
-      from "reread and MD5 everything" into "compare two `u32`s already in
-      hand".
+- [x] **PAR2 quick-check via CRC32 combination, skipping full re-hash on the
+      common path.** New `pesto::yenc::crc32_combine(crc1, crc2, len2)` —
+      the classic Mark Adler / `zlib` `crc32_combine` algorithm (GF(2)
+      operator squaring), ported rather than trusted blind: verified
+      empirically against `crc32fast` itself across ~200 length-pair
+      combinations, not just derivation-by-inspection. Reimplemented
+      `sabnzbd`'s idea (`par2file.parse_par2_file`) with one deliberate
+      simplification: instead of `sabctools`' extra "undo zero padding"
+      primitive (`crc32_zero_unpad`, needed because PAR2 zero-pads a
+      file's last slice before hashing it), new `penne::quickcheck` pads
+      the *real*, already-known file CRC-32 **forward** to the same slice
+      boundary via `crc32_combine` and compares like for like — every
+      slice's IFSC CRC-32, including the last, genuinely is `crc32(exactly
+      slice_size bytes)` once padded, so no inverse operator is needed at
+      all. `expected_padded_crc32` folds a `FileEntry`'s `slice_checksums`
+      (`parmesan`'s already-parsed IFSC data); `looks_intact` is the public
+      comparison. Required restructuring `AssembleOutcome::Complete`/
+      `CompleteUnverified` to carry `actual_crc32: u32` (previously unit
+      variants — the CRC-32 `assemble()` already computes was checked and
+      discarded, not kept around for a later caller to reuse), rippling
+      through `penne::health`, `penne::deobfuscate`, and `bin/penne.rs`'s
+      match arms.
+      `penne::repair::verify_and_repair` gained an `assembled: &HashMap<String,
+      AssembleOutcome>` parameter and a `quick_check_all` gate: only when
+      *every* file in the recovery set has a known real CRC-32 that
+      `looks_intact` confirms does it report `RepairOutcome::Ok` directly,
+      skipping `pesto::par2::verify::verify`'s full re-read-and-MD5-hash
+      entirely (Phase 13 measured that pass at ~12s for a 6.6 GiB release
+      in `--release`). Any file that's unknown, inconclusive (no IFSC
+      data), or mismatched falls back to the full verify pass for
+      *every* file — there's no partial-verify entry point, and the
+      common case this exists for (fully intact) is exactly the case
+      where that doesn't matter.
+      **Scope, stated honestly in `penne::quickcheck`'s doc comment:** this
+      only re-validates the CRC-32 computed *at write time* from decoded
+      segments — it never re-reads the file as it currently sits on disk,
+      so corruption introduced *after* a successful assemble (disk bitrot,
+      a stray process) would pass the quick-check yet fail a real
+      `verify()`. Deliberate: this answers "did the download itself
+      succeed", not "is the file still intact right now" — a user
+      specifically worried about at-rest corruption still has the full
+      `verify()` available; nothing here removes it, only avoids paying
+      for it unconditionally on every successful run. Pinned by
+      `a_known_crc32_that_does_not_match_par2_data_falls_back_to_a_real_repair`
+      (`tests/repair.rs`) that a wrong/stale claimed CRC-32 still triggers
+      real repair rather than being trusted blindly.
+      Verified at three levels: `pesto::yenc`'s own `crc32_combine` tests
+      (empirical, against `crc32fast`); `penne::quickcheck` unit tests plus
+      `tests/quickcheck.rs` integration tests against a *real* PAR2 index
+      built by `parmesan`'s actual encoder (`tests/support::build_fixture_set`),
+      including a file length that is **not** a multiple of `slice_size` —
+      the exact case the forward-padding approach exists for; and
+      `tests/repair.rs`'s two new end-to-end cases (`quick_check_reports_ok_...`
+      and the wrong-CRC32-falls-back case above) proving the gate is wired
+      correctly through the public API, not just correct in isolation.
 - [ ] **Per-segment streaming writes, not just per-file.** Phase 14 made
       `download_queue` assemble a file the instant *all* of its own segments
       resolve, instead of waiting for the whole queue — but for a

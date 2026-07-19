@@ -195,8 +195,8 @@ async fn download(
     let mut needs_repair = 0u32;
     for (name, result) in &outcome.assembled {
         match result {
-            penne::assemble::AssembleOutcome::Complete => println!("  ok: {name}"),
-            penne::assemble::AssembleOutcome::CompleteUnverified => {
+            penne::assemble::AssembleOutcome::Complete { .. } => println!("  ok: {name}"),
+            penne::assemble::AssembleOutcome::CompleteUnverified { .. } => {
                 println!("  ok (unverified): {name}")
             }
             penne::assemble::AssembleOutcome::ChecksumMismatch { .. } => {
@@ -247,7 +247,7 @@ async fn download(
         "verifying with PAR2 (re-hashing downloaded files against recovery data — \
          this can take a while for large releases)..."
     );
-    match penne::repair::verify_and_repair(&dest_dir).await? {
+    match penne::repair::verify_and_repair(&dest_dir, &outcome.assembled).await? {
         penne::repair::RepairOutcome::Ok => println!("  PAR2: all files verified intact"),
         penne::repair::RepairOutcome::Repaired(plan) => {
             for f in &plan.repaired_files {

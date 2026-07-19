@@ -122,8 +122,8 @@ pub async fn run(
         .filter(|f| {
             matches!(
                 assembled.get(&f.name),
-                Some(AssembleOutcome::Complete)
-                    | Some(AssembleOutcome::CompleteUnverified)
+                Some(AssembleOutcome::Complete { .. })
+                    | Some(AssembleOutcome::CompleteUnverified { .. })
                     | Some(AssembleOutcome::ChecksumMismatch { .. })
             )
         })
@@ -392,7 +392,7 @@ mod tests {
     fn complete_map(names: &[&str]) -> HashMap<String, AssembleOutcome> {
         names
             .iter()
-            .map(|n| (n.to_string(), AssembleOutcome::Complete))
+            .map(|n| (n.to_string(), AssembleOutcome::Complete { actual_crc32: 0 }))
             .collect()
     }
 

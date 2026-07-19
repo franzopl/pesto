@@ -72,7 +72,9 @@ pub fn damaged_bytes(queue: &DownloadQueue, assembled: &HashMap<String, Assemble
         let bad_parts: &[u32] = match outcome {
             AssembleOutcome::Incomplete { missing_parts } => missing_parts,
             AssembleOutcome::ChecksumMismatch { bad_parts, .. } => bad_parts,
-            AssembleOutcome::Complete | AssembleOutcome::CompleteUnverified => continue,
+            AssembleOutcome::Complete { .. } | AssembleOutcome::CompleteUnverified { .. } => {
+                continue
+            }
         };
         total += file
             .segments
@@ -163,7 +165,10 @@ mod tests {
             files: vec![file_with_segments("a.bin", &[100, 200])],
         };
         let mut assembled = HashMap::new();
-        assembled.insert("a.bin".to_string(), AssembleOutcome::Complete);
+        assembled.insert(
+            "a.bin".to_string(),
+            AssembleOutcome::Complete { actual_crc32: 0 },
+        );
         assert_eq!(damaged_bytes(&queue, &assembled), 0);
     }
 
