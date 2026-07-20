@@ -303,7 +303,7 @@ fn strip_part_suffix(subject: &str) -> String {
     if let Some(pos) = subject.rfind(" yEnc") {
         let tail = &subject[pos + 5..];
         if tail.is_empty() || tail.starts_with(" (") {
-            return unquote(&subject[..pos]);
+            return unquote(strip_filenum_prefix(&subject[..pos]));
         }
     }
 
@@ -315,6 +315,33 @@ fn strip_part_suffix(subject: &str) -> String {
         }
     }
     subject.to_string()
+}
+
+/// Strip a leading `[filenum/files] - ` counter, if present.
+///
+/// `nyuu`'s default subject template is
+/// `[{filenum}/{files}] - "{filename}" yEnc ({part}/{parts})` — that
+/// `[N/M] - ` counter sits *outside* the quoted real name, so without this,
+/// `strip_part_suffix`'s `unquote` never fires (the string starts with `[`,
+/// not `"`) and the counter ends up baked into the "real" file name
+/// `penne::assemble` later joins onto a directory path — a `/` inside
+/// `[01/14]` then splits into a bogus nested directory instead of staying
+/// part of one path component. Falls back to `s` unchanged for any subject
+/// that isn't actually this shape (including `pesto`'s own, which never
+/// emits this prefix — see `ROADMAP.md` "Subject file counter").
+fn strip_filenum_prefix(s: &str) -> &str {
+    (|| {
+        let rest = s.strip_prefix('[')?;
+        let (counter, after) = rest.split_once(']')?;
+        let is_counter = !counter.is_empty()
+            && counter
+                .split('/')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        is_counter
+            .then_some(())
+            .and_then(|()| after.strip_prefix(" - "))
+    })()
+    .unwrap_or(s)
 }
 
 /// Reverse the XML entity escaping applied by [`escape`].
@@ -745,5 +772,32 @@ mod tests {
     #[test]
     fn strip_part_suffix_legacy_format() {
         assert_eq!(strip_part_suffix("name (1/3)"), "name");
+    }
+
+    #[test]
+    fn strip_part_suffix_strips_nyuu_style_filenum_prefix() {
+        // nyuu's default subject template: `[{filenum}/{files}] - "{filename}"
+        // yEnc ({part}/{parts})`. Without stripping the prefix, this used to
+        // leave `[01/14] - ` glued onto the "real" file name — a `/` inside
+        // it then split into a bogus nested directory once `penne::assemble`
+        // joined it onto a destination path.
+        assert_eq!(
+            strip_part_suffix("[01/14] - \"tlvUQcjvcf3NdsD6sIYfofH3.par2\" yEnc (1/1)"),
+            "tlvUQcjvcf3NdsD6sIYfofH3.par2"
+        );
+        assert_eq!(
+            strip_part_suffix("[9/14] - \"movie.mkv\" yEnc (3/2133)"),
+            "movie.mkv"
+        );
+    }
+
+    #[test]
+    fn strip_part_suffix_leaves_a_bracket_that_is_not_a_filenum_counter_alone() {
+        // Only strip when `[...]` truly looks like a `N/M` counter — a real
+        // file name that happens to start with brackets must survive as-is.
+        assert_eq!(
+            strip_part_suffix("\"[LEAK] movie.mkv\" yEnc (1/1)"),
+            "[LEAK] movie.mkv"
+        );
     }
 }
