@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-20
+
+### Added
+- **`verify::verify_with_progress`**: same as `verify`, but calls a
+  callback after every slice is read and checksummed (a missing file's
+  slices are accounted for in one step), so a caller driving a long
+  verify pass over a large release can show live progress instead of
+  going silent until the whole pass finishes. `verify` itself is
+  unchanged — it now just calls `verify_with_progress` with a no-op
+  callback. New `VerifyProgress` struct carries the current file name plus
+  `slices_done`/`total_slices` counted across the whole recovery set, so a
+  single overall progress bar needs no per-file bookkeeping of its own.
+
 ## [0.2.0] — 2026-07-18
 
 ### Added

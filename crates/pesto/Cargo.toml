@@ -20,7 +20,7 @@ name = "pesto"
 path = "src/bin/pesto.rs"
 
 [dependencies]
-parmesan = { package = "parmesan-par2", version = "0.2.0", path = "../parmesan", default-features = false }
+parmesan = { package = "parmesan-par2", version = "0.3.0", path = "../parmesan", default-features = false }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 md-5 = "0.10"
