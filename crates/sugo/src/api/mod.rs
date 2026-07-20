@@ -33,7 +33,7 @@ pub async fn get_handler(
         "queue" => queue::handle(&state, &params).await,
         "history" => history::handle(&state, &params).await,
         "fullstatus" => fullstatus::handle(&state).await,
-        "get_config" => get_config::handle(),
+        "get_config" => get_config::handle(&state).await,
         "addurl" => addurl::handle(&state, &params).await,
         other => error_response(&format!("mode '{other}' not supported")),
     }

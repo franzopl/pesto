@@ -1,20 +1,33 @@
-<div id="queue-list" hx-get="/dashboard/queue" hx-trigger="load, every 3s" hx-swap="outerHTML">
-  <table>
-    <thead><tr><th>Name</th><th>Status</th><th>Progress</th></tr></thead>
-    <tbody>
-      {% for row in queue %}
-      <tr>
-        <td>{{ row.name }}</td>
-        <td><span class="status{% if row.status == "Failed" %} failed{% endif %}">{{ row.status }}</span></td>
-        <td>
-          <div class="progress"><div style="width: {{ row.percentage }}%"></div></div>
-          {{ row.percentage }}%
-        </td>
-      </tr>
-      {% endfor %}
-      {% if queue.is_empty() %}
-      <tr><td colspan="3">Queue is empty.</td></tr>
-      {% endif %}
-    </tbody>
-  </table>
+{% if queue.is_empty() %}
+<p class="empty">Queue is empty.</p>
+{% endif %}
+{% for row in queue %}
+<div class="job-card">
+  <div class="job-card-header">
+    <span class="job-name">{{ row.name }}</span>
+    <span class="status {{ row.status_class }}">{{ row.status }}</span>
+  </div>
+  <div class="progress"><div style="width: {{ row.percentage }}%"></div></div>
+  <div class="job-meta">
+    <span>{{ row.percentage }}%</span>
+    <span>{{ row.bytes_text }}</span>
+    {% if !row.speed_text.is_empty() %}<span>{{ row.speed_text }}</span>{% endif %}
+    {% if !row.eta_text.is_empty() %}<span>ETA {{ row.eta_text }}</span>{% endif %}
+  </div>
+  {% if let Some(text) = row.verify_text %}
+  <div class="job-verify">{{ text }}</div>
+  {% endif %}
+  {% if !row.files.is_empty() %}
+  <div class="job-files">
+    {% for f in row.files %}
+    <div class="job-file{% if f.done %} done{% endif %}">
+      <span class="job-file-name">{{ f.name }}</span><span>{{ f.percentage }}%</span>
+    </div>
+    {% endfor %}
+    {% if row.files_more > 0 %}
+    <div class="job-file-more">+{{ row.files_more }} more</div>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>
+{% endfor %}

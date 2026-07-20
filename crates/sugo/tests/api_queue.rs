@@ -110,6 +110,15 @@ async fn queue_reflects_a_staged_job() {
         .unwrap();
     let json = body_json(resp).await;
     assert_eq!(json["queue"]["noofslots"], 1);
-    assert_eq!(json["queue"]["slots"][0]["status"], "Queued");
-    assert_eq!(json["queue"]["slots"][0]["filename"], "release");
+    let slot = &json["queue"]["slots"][0];
+    assert_eq!(slot["status"], "Queued");
+    assert_eq!(slot["filename"], "release");
+    // Real formatting (`pesto::progress::format_size`/`format_duration`),
+    // not the hand-rolled `{:.2} MB` and hardcoded `"0:00:00"` this used to
+    // be — a freshly staged (not yet running) job has no ETA yet, so
+    // `timeleft` still reads its placeholder, but `size` now scales units
+    // properly instead of always assuming megabytes.
+    assert_eq!(slot["size"], "10 B");
+    assert_eq!(slot["sizeleft"], "10 B");
+    assert_eq!(slot["timeleft"], "0:00:00");
 }

@@ -31,8 +31,25 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/history", get(web::history::page))
         .route("/settings", get(web::settings::page))
         .route("/settings/servers", post(web::settings::add_server))
+        .route(
+            "/settings/servers/{index}",
+            post(web::settings::update_server),
+        )
+        .route(
+            "/settings/servers/{index}/delete",
+            post(web::settings::delete_server),
+        )
+        .route("/settings/general", post(web::settings::update_general))
+        .route("/settings/categories", post(web::settings::add_category))
+        .route(
+            "/settings/categories/{index}/delete",
+            post(web::settings::delete_category),
+        )
+        .route("/settings/apikey", post(web::settings::regenerate_api_key))
         .route("/api", get(api::get_handler).post(api::post_handler))
         .route("/events/{job_id}", get(sse::handler))
+        .route("/events/queue", get(sse::queue_handler))
+        .route("/events/notifications", get(sse::notifications_handler))
         .route("/static/htmx.min.js", get(static_assets::htmx_js))
         .route("/static/htmx-sse.js", get(static_assets::htmx_sse_js))
         .route("/static/style.css", get(static_assets::style_css))

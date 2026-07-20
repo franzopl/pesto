@@ -75,6 +75,19 @@ async fn a_staged_job_downloads_and_lands_in_history() {
                     finished.status,
                     finished.message
                 );
+                assert_eq!(
+                    finished.files.len(),
+                    1,
+                    "expected one per-file progress entry"
+                );
+                assert!(
+                    finished
+                        .files
+                        .iter()
+                        .all(|f| f.done && f.bytes_done == f.bytes_total),
+                    "every file should be marked done with bytes_done == bytes_total: {:?}",
+                    finished.files
+                );
                 break;
             }
         }

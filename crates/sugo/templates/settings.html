@@ -3,22 +3,21 @@
 {% block content %}
 <div class="card">
   <h2>Servers</h2>
-  <table>
-    <thead><tr><th>Host</th><th>Port</th><th>SSL</th><th>Connections</th></tr></thead>
-    <tbody>
-      {% for s in servers %}
-      <tr>
-        <td>{{ s.host }}</td>
-        <td>{{ s.port }}</td>
-        <td>{{ s.ssl }}</td>
-        <td>{{ s.connections }}</td>
-      </tr>
-      {% endfor %}
-      {% if servers.is_empty() %}
-      <tr><td colspan="4">No servers configured yet.</td></tr>
-      {% endif %}
-    </tbody>
-  </table>
+  {% for s in servers %}
+  <form class="server-row" method="post" action="/settings/servers/{{ s.index }}">
+    <input type="text" name="host" value="{{ s.host }}" placeholder="host" required>
+    <input type="text" name="port" value="{{ s.port }}" placeholder="port" class="narrow">
+    <label class="checkbox"><input type="checkbox" name="ssl" value="true" {% if s.ssl %}checked{% endif %}> SSL</label>
+    <input type="text" name="username" value="{{ s.username }}" placeholder="username">
+    <input type="password" name="password" placeholder="(unchanged)">
+    <input type="text" name="connections" value="{{ s.connections }}" placeholder="conns" class="narrow">
+    <button type="submit">Save</button>
+    <button type="submit" formaction="/settings/servers/{{ s.index }}/delete" class="danger">Delete</button>
+  </form>
+  {% endfor %}
+  {% if servers.is_empty() %}
+  <p class="empty">No servers configured yet.</p>
+  {% endif %}
 </div>
 
 <div class="card">
@@ -26,11 +25,64 @@
   <form method="post" action="/settings/servers">
     <p><input type="text" name="host" placeholder="news.example.com" required></p>
     <p><input type="text" name="port" placeholder="563 (blank = default for SSL/plain)"></p>
-    <p><label><input type="checkbox" name="ssl" value="true"> SSL</label></p>
+    <p><label class="checkbox"><input type="checkbox" name="ssl" value="true"> SSL</label></p>
     <p><input type="text" name="username" placeholder="username"></p>
     <p><input type="password" name="password" placeholder="password"></p>
     <p><input type="text" name="connections" placeholder="8"></p>
     <p><button type="submit">Add server</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>General</h2>
+  <form method="post" action="/settings/general">
+    <p><label>Download directory<br><input type="text" name="download_dir" value="{{ download_dir }}" placeholder="(default: data dir)"></label></p>
+    <p><label>Retries<br><input type="text" name="retries" value="{{ retries }}" placeholder="default"></label></p>
+    <p><label>Connections<br><input type="text" name="connections" value="{{ connections }}" placeholder="default"></label></p>
+    <p><label>Processing mode<br>
+      <select name="mode">
+        <option value="download" {% if mode == "download" %}selected{% endif %}>download (fetch + assemble only)</option>
+        <option value="repair" {% if mode == "repair" %}selected{% endif %}>repair (+ PAR2 verify/repair)</option>
+        <option value="unpack" {% if mode == "unpack" %}selected{% endif %}>unpack (+ extract archives)</option>
+        <option value="delete" {% if mode == "delete" %}selected{% endif %}>delete (+ clean up archives/PAR2)</option>
+      </select>
+    </label></p>
+    <p><button type="submit">Save</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Categories</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Directory</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>*</td><td><em>default</em></td><td></td></tr>
+      {% for c in categories %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td>{% if c.dir.is_empty() %}<em>default</em>{% else %}{{ c.dir }}{% endif %}</td>
+        <td>
+          <form method="post" action="/settings/categories/{{ c.index }}/delete">
+            <button type="submit" class="danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/settings/categories">
+    <p><input type="text" name="name" placeholder="movies" required></p>
+    <p><input type="text" name="dir" placeholder="/downloads/movies (blank = default)"></p>
+    <p><button type="submit">Add category</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>API key</h2>
+  <p>Used by <code>/api</code> calls and by SABnzbd-compatible clients (Sonarr, Radarr, ...).</p>
+  <p><code>{{ api_key }}</code></p>
+  <form method="post" action="/settings/apikey" onsubmit="return confirm('Regenerate the API key? Every client using the current one will need updating.');">
+    <button type="submit">Regenerate</button>
   </form>
 </div>
 {% endblock %}

@@ -48,6 +48,6 @@ fn slot_json(job: &Job) -> serde_json::Value {
         "fail_message": job.message.clone().unwrap_or_default(),
         "storage": job.dest_dir.to_string_lossy(),
         "bytes": job.total_bytes,
-        "size": format!("{:.2} MB", job.total_bytes as f64 / 1_048_576.0),
+        "size": pesto::progress::format_size(job.total_bytes),
     })
 }

@@ -9,6 +9,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Live dashboard over SSE, no more polling.** `/events/queue` re-renders
+  the queue partial server-side on every job-state change and pushes it as
+  HTML; the dashboard's `hx-ext="sse"` wiring swaps it in instantly instead
+  of waiting out the old 3-second `hx-trigger="every 3s"` poll (kept as a
+  15s defensive fallback in case SSE ever drops silently). Newly staged
+  jobs (`addfile`/`addurl`/browser upload) broadcast immediately so they
+  show up before the worker even picks them up.
+- **Richer progress**: per-file breakdown (`job::JobFileProgress`), speed
+  (a simple EMA) and ETA, downloaded/total bytes as text
+  (`pesto::progress::format_size`), and a live PAR2 verify detail
+  (`job::JobVerifyProgress` — "verifying X: N/M blocks" for whichever file
+  is currently being checked; see the crate's docs for why this is
+  per-current-file, not a release-wide percentage). All throttled to at
+  most one flush per ~350ms at the source
+  (`job::pipeline::FLUSH_INTERVAL`), so every consumer (the API, the SSE
+  streams) inherits a sane update cadence for free.
+- **Toast notifications** on job completion/failure, via
+  `/events/notifications` + a small inline script in `templates/base.html`
+  — the one place this crate uses hand-written JS.
+- **Settings CRUD**: edit and delete existing `[[servers]]` entries (not
+  just add), general config (`download_dir`/`retries`/`connections`/
+  `mode`), `[[web.categories]]` (a category maps to its own destination
+  directory — `job::stage_and_create` resolves a job's `dest_dir` against
+  it), and API key regeneration. Every mutation writes straight back to
+  the config file. `mode=get_config` now lists the real configured
+  categories instead of a hardcoded stub.
+- `mode=queue`'s `size`/`sizeleft`/`timeleft` now use
+  `pesto::progress::format_size`/`format_duration` (real ETA-derived
+  countdown) instead of hand-rolled megabyte math and a hardcoded
+  `"0:00:00"`.
+
 First vertical slice of the SABnzbd-API-compatible web UI planned in
 `penne`'s own `ROADMAP.md` ("Later — Web UI"): a separate crate consuming
 `penne` as a library, the same relationship `upapasta` has with `pesto`.
@@ -38,7 +69,7 @@ First vertical slice of the SABnzbd-API-compatible web UI planned in
 
 ### Deferred
 
-Per the plan's explicit scope for this first slice: live progress for the
-PAR2 verify/extraction phases (only the status transition is reported
-today, not a percentage), per-category routing and priorities, `set_config`,
-`addlocalfile`, `rss`, and connection pooling across jobs.
+Archive extraction still has no live progress (`penne::extract` doesn't
+parse `7z`/`unrar` stdout — only the status transition is reported); category
+*priorities* (as opposed to categories themselves, which now exist);
+`set_config`, `addlocalfile`, `rss`; and connection pooling across jobs.

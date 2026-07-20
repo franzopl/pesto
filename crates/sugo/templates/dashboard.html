@@ -3,14 +3,30 @@
 {% block content %}
 <div class="card">
   <h2>Add NZB</h2>
-  <form class="upload" hx-post="/dashboard/upload" hx-target="#queue-list" hx-swap="outerHTML" hx-encoding="multipart/form-data">
+  <form class="upload" hx-post="/dashboard/upload" hx-swap="none" hx-encoding="multipart/form-data">
     <input type="file" name="file" accept=".nzb" required>
+    <select name="cat">
+      <option value="">*</option>
+      {% for c in categories %}
+      <option value="{{ c }}">{{ c }}</option>
+      {% endfor %}
+    </select>
     <button type="submit">Add</button>
   </form>
 </div>
 
 <div class="card">
   <h2>Queue{% if paused %} (paused){% endif %}</h2>
-  {% include "partials/queue_list.html" %}
+  <div id="queue-list" hx-ext="sse" sse-connect="/events/queue">
+    <div
+      id="queue-cards"
+      sse-swap="message"
+      hx-swap="innerHTML"
+      hx-get="/dashboard/queue"
+      hx-trigger="every 15s"
+    >
+      {% include "partials/queue_list.html" %}
+    </div>
+  </div>
 </div>
 {% endblock %}

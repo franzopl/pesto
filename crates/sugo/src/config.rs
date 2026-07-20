@@ -20,6 +20,17 @@ use serde::{Deserialize, Serialize};
 /// Default bind address when `[web].bind_addr` isn't set.
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8085";
 
+/// One `[[web.categories]]` entry: a SABnzbd-style category name and,
+/// optionally, its own destination directory. `dir: None` means jobs in
+/// this category use the same default as an uncategorized job
+/// (`[core].download_dir`/`<job name>`) — a category can exist purely for
+/// organization without redirecting where files land.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CategoryConfig {
+    pub name: String,
+    pub dir: Option<String>,
+}
+
 /// The `[web]` TOML table.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WebSection {
@@ -32,6 +43,11 @@ pub struct WebSection {
     /// Where job state (`state.json`), uploaded `.nzb` staging files, and
     /// (unless `[core].download_dir` overrides it) completed downloads live.
     pub data_dir: Option<PathBuf>,
+    /// `[[web.categories]]` entries, in config-file order. `"*"` (the
+    /// default every job without an explicit category uses) is always
+    /// implied and never needs to be listed here.
+    #[serde(default)]
+    pub categories: Vec<CategoryConfig>,
 }
 
 /// Resolved configuration: server credentials/download settings ([`penne`]'s
@@ -99,6 +115,17 @@ impl WebConfig {
         }
         if let Some(v) = &self.web.data_dir {
             out.push_str(&format!("data_dir = {:?}\n", v.to_string_lossy()));
+        }
+        // Array-of-tables entries must come after every preceding scalar
+        // `[web]` key above — TOML would otherwise parse a later `key =
+        // value` line as belonging to the last `[[web.categories]]` entry
+        // instead of back to `[web]` itself.
+        for cat in &self.web.categories {
+            out.push_str("\n[[web.categories]]\n");
+            out.push_str(&format!("name = {:?}\n", cat.name));
+            if let Some(dir) = &cat.dir {
+                out.push_str(&format!("dir = {dir:?}\n"));
+            }
         }
         Ok(out)
     }
@@ -181,5 +208,56 @@ mod tests {
         let config = WebConfig::parse("").unwrap();
         assert_eq!(config.bind_addr(), DEFAULT_BIND_ADDR);
         assert_eq!(config.api_key(), None);
+    }
+
+    #[test]
+    fn parses_categories_from_the_web_table() {
+        let toml = r#"
+            [web]
+            api_key = "secret"
+
+            [[web.categories]]
+            name = "movies"
+            dir = "/downloads/movies"
+
+            [[web.categories]]
+            name = "misc"
+        "#;
+        let config = WebConfig::parse(toml).unwrap();
+        assert_eq!(config.web.categories.len(), 2);
+        assert_eq!(config.web.categories[0].name, "movies");
+        assert_eq!(
+            config.web.categories[0].dir.as_deref(),
+            Some("/downloads/movies")
+        );
+        assert_eq!(config.web.categories[1].name, "misc");
+        assert_eq!(config.web.categories[1].dir, None);
+    }
+
+    #[test]
+    fn to_toml_round_trips_servers_and_categories() {
+        let mut config = WebConfig::parse(
+            r#"
+            [[servers]]
+            host = "news.example.com"
+
+            [web]
+            bind_addr = "0.0.0.0:9000"
+            api_key = "secret"
+        "#,
+        )
+        .unwrap();
+        config.web.categories.push(CategoryConfig {
+            name: "movies".to_string(),
+            dir: Some("/downloads/movies".to_string()),
+        });
+
+        let toml = config.to_toml().unwrap();
+        let reparsed = WebConfig::parse(&toml).unwrap();
+        assert_eq!(reparsed.core.servers.len(), 1);
+        assert_eq!(reparsed.core.servers[0].host, "news.example.com");
+        assert_eq!(reparsed.bind_addr(), "0.0.0.0:9000");
+        assert_eq!(reparsed.api_key(), Some("secret"));
+        assert_eq!(reparsed.web.categories, config.web.categories);
     }
 }

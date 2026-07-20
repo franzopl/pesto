@@ -9,6 +9,7 @@ use super::render;
 pub struct HistoryRow {
     pub name: String,
     pub status: &'static str,
+    pub status_class: &'static str,
     pub message: String,
     pub size: String,
 }
@@ -27,8 +28,9 @@ pub async fn page(State(state): State<SharedState>) -> Response {
         .map(|j| HistoryRow {
             name: j.name.clone(),
             status: j.status.sabnzbd_label(),
+            status_class: j.status.css_class(),
             message: j.message.clone().unwrap_or_default(),
-            size: format!("{:.2} MB", j.total_bytes as f64 / 1_048_576.0),
+            size: pesto::progress::format_size(j.total_bytes),
         })
         .collect();
     drop(store);

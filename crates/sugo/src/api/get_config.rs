@@ -1,22 +1,29 @@
 use axum::response::Response;
 use serde_json::json;
 
+use crate::state::SharedState;
+
 use super::ok_response;
 
-/// Minimal stub: Sonarr/Radarr's "Test" step for a SABnzbd download client
-/// calls this during setup (mainly to list categories). Real per-category
-/// configuration is deferred — every job today uses category `"*"` (see
-/// [`crate::job::stage_and_create`]) — but returning a well-formed, if
-/// mostly empty, config keeps that autoconfigure handshake from failing.
-pub fn handle() -> Response {
+/// Sonarr/Radarr's "Test" step for a SABnzbd download client calls this
+/// during setup, mainly to list categories — lists the real configured
+/// ones (`[[web.categories]]`), always including `"*"` first (every job
+/// without an explicit category lands there, and it's never itself listed
+/// in config).
+pub async fn handle(state: &SharedState) -> Response {
+    let config = state.config.read().await;
+    let mut categories = vec![json!({"name": "*", "dir": "", "priority": 0})];
+    categories.extend(
+        config.web.categories.iter().map(
+            |c| json!({"name": c.name, "dir": c.dir.clone().unwrap_or_default(), "priority": 0}),
+        ),
+    );
     ok_response(json!({
         "config": {
             "misc": {
                 "complete_dir": "",
             },
-            "categories": [
-                {"name": "*", "dir": "", "priority": 0},
-            ],
+            "categories": categories,
         }
     }))
 }

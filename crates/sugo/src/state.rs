@@ -43,9 +43,12 @@ pub enum JobEventPayload {
         bytes_done: u64,
         total_bytes: u64,
         percentage: f64,
+        speed_bps: f64,
+        eta_seconds: Option<u64>,
     },
     Finished {
         status: JobStatus,
+        name: String,
     },
 }
 
@@ -67,5 +70,23 @@ impl AppState {
     /// not an error.
     pub fn broadcast(&self, job_id: Uuid, payload: JobEventPayload) {
         let _ = self.events.send(JobEvent { job_id, payload });
+    }
+
+    /// Announces a freshly staged job so `/events/queue` re-renders and
+    /// shows it right away, instead of waiting for the worker to actually
+    /// pick it up (which may be a while behind a busy queue) before the
+    /// dashboard reflects the upload at all.
+    pub fn broadcast_queued(&self, job_id: Uuid, total_bytes: u64) {
+        self.broadcast(
+            job_id,
+            JobEventPayload::Progress {
+                status: JobStatus::Queued,
+                bytes_done: 0,
+                total_bytes,
+                percentage: 0.0,
+                speed_bps: 0.0,
+                eta_seconds: None,
+            },
+        );
     }
 }

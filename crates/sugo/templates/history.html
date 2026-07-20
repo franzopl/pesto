@@ -10,7 +10,7 @@
       <tr>
         <td>{{ row.name }}</td>
         <td>
-          <span class="status{% if row.status == "Failed" %} failed{% endif %}">{{ row.status }}</span>
+          <span class="status {{ row.status_class }}">{{ row.status }}</span>
           {% if !row.message.is_empty() %}&mdash; {{ row.message }}{% endif %}
         </td>
         <td>{{ row.size }}</td>

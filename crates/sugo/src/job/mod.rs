@@ -43,6 +43,45 @@ impl JobStatus {
             JobStatus::Failed => "Failed",
         }
     }
+
+    /// Lowercase, CSS-class-friendly form of [`Self::sabnzbd_label`] (e.g.
+    /// `status-downloading`), computed here rather than with an askama
+    /// template filter — one obviously-correct Rust match beats depending
+    /// on a filter's exact casing behavior.
+    pub fn css_class(self) -> &'static str {
+        match self {
+            JobStatus::Queued => "status-queued",
+            JobStatus::Downloading => "status-downloading",
+            JobStatus::Verifying => "status-verifying",
+            JobStatus::Extracting => "status-extracting",
+            JobStatus::Completed => "status-completed",
+            JobStatus::Failed => "status-failed",
+        }
+    }
+}
+
+/// One file in the release, tracked incrementally as its segments arrive —
+/// seeded from `penne::progress::ProgressEvent::Started`, updated by
+/// `SegmentDownloaded`/`FileAssembled`. Lets the UI show per-file progress,
+/// not just one job-wide bar.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobFileProgress {
+    pub name: String,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    pub done: bool,
+}
+
+/// The PAR2 verify pass's live position, from
+/// `penne::repair::VerifyProgress` — scoped to whichever file is
+/// *currently* being verified, not a release-wide total (there's no cheap
+/// way to know the grand total up front without loading the whole recovery
+/// set ourselves; see the plan's "known, accepted approximation").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobVerifyProgress {
+    pub file_name: String,
+    pub slices_done: usize,
+    pub total_slices: usize,
 }
 
 /// One NZB, queued/running/finished. Doubles as both the "active queue
@@ -56,6 +95,19 @@ pub struct Job {
     pub status: JobStatus,
     pub total_bytes: u64,
     pub bytes_done: u64,
+    /// Bytes/second, a simple EMA over the download forwarder's throttled
+    /// flushes (`job::pipeline`). `0.0` when unknown (not yet downloading,
+    /// or between flushes).
+    #[serde(default)]
+    pub speed_bps: f64,
+    /// `None` when speed is `0.0` (nothing to divide by) or the job isn't
+    /// downloading.
+    #[serde(default)]
+    pub eta_seconds: Option<u64>,
+    #[serde(default)]
+    pub files: Vec<JobFileProgress>,
+    #[serde(default)]
+    pub verify: Option<JobVerifyProgress>,
     pub dest_dir: PathBuf,
     /// Where the uploaded/fetched `.nzb` was staged
     /// (`<data_dir>/jobs/<id>.nzb`).
@@ -112,23 +164,39 @@ pub async fn stage_and_create(
         .unwrap_or("release")
         .to_string();
 
-    let downloads_root = {
+    let category = category
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| "*".to_string());
+    let base_dir = {
         let config = state.config.read().await;
-        config
-            .core
-            .download_dir
-            .clone()
-            .unwrap_or_else(|| state.data_dir.join("downloads"))
+        let category_dir = config
+            .web
+            .categories
+            .iter()
+            .find(|c| c.name == category)
+            .and_then(|c| c.dir.clone());
+        match category_dir {
+            Some(dir) => PathBuf::from(dir),
+            None => config
+                .core
+                .download_dir
+                .clone()
+                .unwrap_or_else(|| state.data_dir.join("downloads")),
+        }
     };
-    let dest_dir = downloads_root.join(&name);
+    let dest_dir = base_dir.join(&name);
 
     Ok(Job {
         id,
         name,
-        category: category.unwrap_or_else(|| "*".to_string()),
+        category,
         status: JobStatus::Queued,
         total_bytes: summary.total_bytes,
         bytes_done: 0,
+        speed_bps: 0.0,
+        eta_seconds: None,
+        files: Vec::new(),
+        verify: None,
         dest_dir,
         nzb_path,
         submitted_at: now_millis(),
@@ -214,6 +282,66 @@ impl JobStore {
 mod tests {
     use super::*;
 
+    fn minimal_nzb_bytes() -> Vec<u8> {
+        let groups = vec!["alt.binaries.test".to_string()];
+        let segments = vec![pesto::poster::PostedSegment {
+            file_name: "movie.bin".into(),
+            file_path: "movie.bin".into(),
+            subject_name: "movie.bin".into(),
+            file_size: 10,
+            part: 1,
+            total: 1,
+            message_id: "<art1@test>".into(),
+            bytes: 10,
+            from: "poster <p@x>".into(),
+            date: (None, None),
+            full_crc32: 0,
+            server_idx: 0,
+        }];
+        pesto::nzb::generate(&groups, &segments, &pesto::nzb::NzbMeta::default()).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn stage_and_create_resolves_dest_dir_from_a_matching_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let category_dir = dir.path().join("movies-dir");
+        let mut config = crate::config::WebConfig::default();
+        config.web.categories.push(crate::config::CategoryConfig {
+            name: "movies".to_string(),
+            dir: Some(category_dir.to_string_lossy().to_string()),
+        });
+        let state = crate::state::AppState::new(config, dir.path().join("data"), None);
+
+        let job = stage_and_create(
+            &state,
+            "release.nzb",
+            Some("movies".to_string()),
+            minimal_nzb_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(job.dest_dir, category_dir.join("release"));
+    }
+
+    #[tokio::test]
+    async fn stage_and_create_falls_back_to_download_dir_for_an_unconfigured_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::WebConfig::default();
+        config.core.download_dir = Some(dir.path().join("downloads"));
+        let state = crate::state::AppState::new(config, dir.path().join("data"), None);
+
+        let job = stage_and_create(
+            &state,
+            "release.nzb",
+            Some("tv".to_string()),
+            minimal_nzb_bytes(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(job.dest_dir, dir.path().join("downloads").join("release"));
+        assert_eq!(job.category, "tv");
+    }
+
     fn dummy_job(name: &str) -> Job {
         Job {
             id: Uuid::new_v4(),
@@ -222,6 +350,10 @@ mod tests {
             status: JobStatus::Queued,
             total_bytes: 100,
             bytes_done: 0,
+            speed_bps: 0.0,
+            eta_seconds: None,
+            files: Vec::new(),
+            verify: None,
             dest_dir: PathBuf::from("/tmp/dest"),
             nzb_path: PathBuf::from("/tmp/job.nzb"),
             submitted_at: now_millis(),

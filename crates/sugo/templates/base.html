@@ -20,5 +20,35 @@
   <main>
     {% block content %}{% endblock %}
   </main>
+  <div id="toast-container"></div>
+  <script>
+    // The one place this app uses hand-written JS (see the plan's Design
+    // Decision 2): an SSE stream of job-finished events, turned into a
+    // transient toast. Everything else is server-rendered HTML swapped in
+    // by htmx.
+    (function () {
+      var container = document.getElementById("toast-container");
+      var source = new EventSource("/events/notifications");
+      source.onmessage = function (event) {
+        var data;
+        try {
+          data = JSON.parse(event.data);
+        } catch (e) {
+          return;
+        }
+        var failed = data.status === "Failed";
+        var toast = document.createElement("div");
+        toast.className = "toast" + (failed ? " toast-error" : "");
+        toast.textContent = (failed ? "✗ " : "✓ ") + data.name + " — " + data.status;
+        container.appendChild(toast);
+        setTimeout(function () {
+          toast.classList.add("toast-out");
+          setTimeout(function () {
+            toast.remove();
+          }, 300);
+        }, 6000);
+      };
+    })();
+  </script>
 </body>
 </html>

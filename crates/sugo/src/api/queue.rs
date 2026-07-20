@@ -55,8 +55,13 @@ async fn list(state: &SharedState) -> Response {
 }
 
 fn slot_json(job: &Job) -> serde_json::Value {
+    let bytes_left = job.total_bytes.saturating_sub(job.bytes_done);
     let mb = job.total_bytes as f64 / 1_048_576.0;
-    let mb_left = job.total_bytes.saturating_sub(job.bytes_done) as f64 / 1_048_576.0;
+    let mb_left = bytes_left as f64 / 1_048_576.0;
+    let timeleft = job
+        .eta_seconds
+        .map(|s| pesto::ui::render::format_duration(s as f64))
+        .unwrap_or_else(|| "0:00:00".to_string());
     json!({
         "nzo_id": job.id.to_string(),
         "filename": job.name,
@@ -65,9 +70,9 @@ fn slot_json(job: &Job) -> serde_json::Value {
         "priority": "Normal",
         "mb": format!("{mb:.2}"),
         "mbleft": format!("{mb_left:.2}"),
-        "size": format!("{mb:.2} MB"),
-        "sizeleft": format!("{mb_left:.2} MB"),
+        "size": pesto::progress::format_size(job.total_bytes),
+        "sizeleft": pesto::progress::format_size(bytes_left),
         "percentage": format!("{:.0}", job.percentage()),
-        "timeleft": "0:00:00",
+        "timeleft": timeleft,
     })
 }

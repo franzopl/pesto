@@ -105,3 +105,15 @@ pub fn test_web_config(download_dir: &Path, port: u16, api_key: &str) -> WebConf
 pub fn build_state(data_dir: PathBuf, config: WebConfig) -> SharedState {
     AppState::new(config, data_dir, None)
 }
+
+/// Same as [`build_state`], but with a real `config_path` so settings
+/// mutations (`crate::web::settings`) actually have somewhere to persist
+/// to — needed by any test that checks a settings edit survived a
+/// `WebConfig::to_toml()` round trip on disk.
+pub fn build_state_with_config_path(
+    data_dir: PathBuf,
+    config: WebConfig,
+    config_path: PathBuf,
+) -> SharedState {
+    AppState::new(config, data_dir, Some(config_path))
+}

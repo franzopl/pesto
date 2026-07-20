@@ -41,13 +41,14 @@ pub async fn handle(
 
     match job::stage_and_create(state, &filename, category, bytes).await {
         Ok(new_job) => {
-            let id = new_job.id.to_string();
+            let (job_id, total_bytes) = (new_job.id, new_job.total_bytes);
             {
                 let mut store = state.jobs.write().await;
                 store.enqueue(new_job);
                 let _ = store.save();
             }
-            ok_response(json!({"status": true, "nzo_ids": [id]}))
+            state.broadcast_queued(job_id, total_bytes);
+            ok_response(json!({"status": true, "nzo_ids": [job_id.to_string()]}))
         }
         Err(e) => error_response(&format!("failed to process nzb: {e}")),
     }

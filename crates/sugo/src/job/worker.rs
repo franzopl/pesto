@@ -42,11 +42,12 @@ pub fn spawn(state: Arc<AppState>) {
             };
             active.finished_at = Some(crate::job::now_millis());
             let status = active.status;
+            let name = active.name.clone();
             store.finish_active(active);
             let _ = store.save();
             drop(store);
 
-            state.broadcast(job_id, JobEventPayload::Finished { status });
+            state.broadcast(job_id, JobEventPayload::Finished { status, name });
         }
     });
 }
