@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (penne)
+- **Named/selectable `[[servers]]` entries**: an entry can carry a `name`
+  for `--server <NAME>` (repeatable) to run `penne download`/`--stat`
+  against one or more specific configured providers instead of always
+  drawing on every configured server, and `explicit_only = true` to
+  exclude a quota/block account from that default set unless named
+  directly — for a provider that must never be a silent automatic
+  fallback.
+- **Config-driven default `--mode`**: the config file can now set `mode`
+  (`download`/`repair`/`unpack`/`delete`) as the default processing level
+  for `penne download`, still overridable per run with `--mode`; the
+  interactive `penne --config` wizard now prompts for it, explaining what
+  each level does.
+
 ---
 
 ## [0.3.60] — 2026-07-15
