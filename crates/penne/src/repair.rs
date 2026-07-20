@@ -27,7 +27,7 @@
 //! why this only ever *skips* verification in the fully-intact case, never
 //! decides which files are damaged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -71,19 +71,38 @@ pub enum RepairOutcome {
     NotRepairable(VerifyReport),
 }
 
-/// Find a `.par2` file directly under `dir`.
+/// Find a `.par2` file directly under `dir` that belongs to *this*
+/// release — i.e. whose file name is in `known_files`.
 ///
 /// Per the PAR2 spec, every file in a recovery set — the index and every
 /// recovery volume alike — carries the same Main/File-Description/IFSC
 /// packets; only the recovery blocks differ between volumes. So any single
-/// `.par2` file is a valid starting point for [`RecoverySet::load`], which
-/// itself scans `dir` for the rest of the set. This does not validate that
-/// the file is actually well-formed PAR2 — [`RecoverySet::load`] does that.
-pub fn find_par2_index(dir: &Path) -> Result<Option<PathBuf>> {
+/// `.par2` file *belonging to the set* is a valid starting point for
+/// [`RecoverySet::load`], which itself scans `dir` for the rest of the set.
+/// This does not validate that the file is actually well-formed PAR2 —
+/// [`RecoverySet::load`] does that.
+///
+/// `known_files` matters because `dir` is not necessarily scoped to one
+/// release: `penne download`'s destination directory defaults to a single
+/// shared `download_dir`, so leftover `.par2` files from a *previous*,
+/// unrelated download can still be sitting right next to this release's
+/// own files. Picking the first `.par2` file `read_dir` happens to return
+/// — filesystem order, not creation order — would then hand
+/// [`RecoverySet::load`] a completely different release's recovery set:
+/// it would "verify" fine (that other release is presumably already
+/// intact) while this release's real damage goes unrepaired, silently.
+/// Restricting candidates to `known_files` (the file names this download's
+/// own queue actually produced) rules that out.
+pub fn find_par2_index(dir: &Path, known_files: &HashSet<String>) -> Result<Option<PathBuf>> {
     let mut found = None;
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
+        let is_known = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| known_files.contains(n));
         if path.is_file()
+            && is_known
             && path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("par2"))
@@ -106,24 +125,37 @@ pub fn find_par2_index(dir: &Path) -> Result<Option<PathBuf>> {
 /// An empty map (or one missing an entry) just means the quick-check can't
 /// apply to that file; behavior falls back to the full verify pass exactly
 /// as if this parameter didn't exist.
+///
+/// `known_files` is passed straight to [`find_par2_index`] — see its doc
+/// comment for why `dir` alone isn't a safe enough scope. Deliberately a
+/// separate parameter from `assembled` rather than derived from its keys:
+/// the caller may have renamed files on disk since `assembled` was built
+/// (e.g. [`crate::deobfuscate::run`] recovering real names for an
+/// obfuscated release), in which case `assembled`'s keys are stale and
+/// `known_files` must reflect the current on-disk names instead.
 pub async fn verify_and_repair(
     dir: &Path,
     assembled: &HashMap<String, AssembleOutcome>,
+    known_files: &HashSet<String>,
     progress: Option<VerifyProgressSender>,
 ) -> Result<RepairOutcome> {
     let dir = dir.to_path_buf();
     let assembled = assembled.clone();
-    tokio::task::spawn_blocking(move || verify_and_repair_blocking(&dir, &assembled, progress))
-        .await
-        .context("PAR2 verify/repair task panicked")?
+    let known_files = known_files.clone();
+    tokio::task::spawn_blocking(move || {
+        verify_and_repair_blocking(&dir, &assembled, &known_files, progress)
+    })
+    .await
+    .context("PAR2 verify/repair task panicked")?
 }
 
 fn verify_and_repair_blocking(
     dir: &Path,
     assembled: &HashMap<String, AssembleOutcome>,
+    known_files: &HashSet<String>,
     progress: Option<VerifyProgressSender>,
 ) -> Result<RepairOutcome> {
-    let Some(index) = find_par2_index(dir)? else {
+    let Some(index) = find_par2_index(dir, known_files)? else {
         return Ok(RepairOutcome::NoRecoveryData);
     };
 
@@ -190,7 +222,11 @@ mod tests {
         std::fs::write(dir.path().join("movie.vol03+04.par2"), b"not real par2").unwrap();
         std::fs::write(dir.path().join("movie.mkv"), b"data").unwrap();
 
-        let found = find_par2_index(dir.path()).unwrap();
+        let known: HashSet<String> = ["movie.vol03+04.par2", "movie.mkv"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let found = find_par2_index(dir.path(), &known).unwrap();
         assert_eq!(found, Some(dir.path().join("movie.vol03+04.par2")));
     }
 
@@ -199,6 +235,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("movie.mkv"), b"data").unwrap();
 
-        assert_eq!(find_par2_index(dir.path()).unwrap(), None);
+        let known: HashSet<String> = ["movie.mkv".to_string()].into_iter().collect();
+        assert_eq!(find_par2_index(dir.path(), &known).unwrap(), None);
+    }
+
+    #[test]
+    fn ignores_a_par2_file_left_over_from_a_different_release_in_a_shared_directory() {
+        // `download_dir` is shared across every `penne download` run unless
+        // `--out-dir` is given, so a previous, unrelated release's `.par2`
+        // files can still be sitting in the same directory. Without
+        // `known_files` scoping, `read_dir`'s (filesystem-order-dependent)
+        // first `.par2` match could point `RecoverySet::load` at that
+        // unrelated release entirely, silently skipping this one's own.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("other-release.par2"), b"not real par2").unwrap();
+        std::fs::write(dir.path().join("movie.mkv"), b"data").unwrap();
+
+        let known: HashSet<String> = ["movie.mkv".to_string()].into_iter().collect();
+        assert_eq!(find_par2_index(dir.path(), &known).unwrap(), None);
     }
 }

@@ -5,11 +5,19 @@
 
 mod support;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use penne::assemble::AssembleOutcome;
 use penne::repair::{verify_and_repair, RepairOutcome};
 use support::{build_fixture_set, FixtureFile};
+
+/// [`build_fixture_set`] always writes its index as `base.par2`, regardless
+/// of the fixture files' own names — that alone is enough for
+/// `find_par2_index` to bootstrap from, since `RecoverySet::load` scans the
+/// rest of the directory for the matching recovery set itself.
+fn known_index_file() -> HashSet<String> {
+    ["base.par2".to_string()].into_iter().collect()
+}
 
 #[tokio::test]
 async fn intact_files_report_ok() {
@@ -22,7 +30,7 @@ async fn intact_files_report_ok() {
         4,
     );
 
-    let outcome = verify_and_repair(&dir, &HashMap::new(), None)
+    let outcome = verify_and_repair(&dir, &HashMap::new(), &known_index_file(), None)
         .await
         .unwrap();
     assert!(matches!(outcome, RepairOutcome::Ok));
@@ -46,7 +54,7 @@ async fn recreates_a_file_left_unwritten_by_assemble() {
     );
     std::fs::remove_file(dir.join("a.bin")).unwrap();
 
-    let outcome = verify_and_repair(&dir, &HashMap::new(), None)
+    let outcome = verify_and_repair(&dir, &HashMap::new(), &known_index_file(), None)
         .await
         .unwrap();
     match outcome {
@@ -79,7 +87,7 @@ async fn patches_a_file_damaged_in_transit() {
     corrupted[10] ^= 0xFF;
     std::fs::write(&path, &corrupted).unwrap();
 
-    let outcome = verify_and_repair(&dir, &HashMap::new(), None)
+    let outcome = verify_and_repair(&dir, &HashMap::new(), &known_index_file(), None)
         .await
         .unwrap();
     assert!(matches!(outcome, RepairOutcome::Repaired(_)));
@@ -101,7 +109,7 @@ async fn reports_not_repairable_when_damage_exceeds_recovery_data() {
     let path = dir.join("a.bin");
     std::fs::write(&path, vec![0u8; 500]).unwrap(); // wipe every slice
 
-    let outcome = verify_and_repair(&dir, &HashMap::new(), None)
+    let outcome = verify_and_repair(&dir, &HashMap::new(), &known_index_file(), None)
         .await
         .unwrap();
     assert!(matches!(outcome, RepairOutcome::NotRepairable(_)));
@@ -114,7 +122,7 @@ async fn reports_no_recovery_data_when_no_par2_file_is_present() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("movie.mkv"), b"just a file, no par2").unwrap();
 
-    let outcome = verify_and_repair(dir.path(), &HashMap::new(), None)
+    let outcome = verify_and_repair(dir.path(), &HashMap::new(), &HashSet::new(), None)
         .await
         .unwrap();
     assert!(matches!(outcome, RepairOutcome::NoRecoveryData));
@@ -146,7 +154,9 @@ async fn quick_check_reports_ok_when_assembled_crc32_matches_par2_data() {
         },
     );
 
-    let outcome = verify_and_repair(&dir, &assembled, None).await.unwrap();
+    let outcome = verify_and_repair(&dir, &assembled, &known_index_file(), None)
+        .await
+        .unwrap();
     assert!(matches!(outcome, RepairOutcome::Ok));
 
     std::fs::remove_dir_all(&dir).ok();
@@ -179,7 +189,9 @@ async fn a_known_crc32_that_does_not_match_par2_data_falls_back_to_a_real_repair
         AssembleOutcome::Complete { actual_crc32: 0 }, // deliberately wrong
     );
 
-    let outcome = verify_and_repair(&dir, &assembled, None).await.unwrap();
+    let outcome = verify_and_repair(&dir, &assembled, &known_index_file(), None)
+        .await
+        .unwrap();
     assert!(matches!(outcome, RepairOutcome::Repaired(_)));
     assert_eq!(std::fs::read(&path).unwrap(), original);
 

@@ -20,7 +20,7 @@
 //! this is only ever used to *warn*, never to skip `verify_and_repair`
 //! outright.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -87,14 +87,20 @@ pub fn damaged_bytes(queue: &DownloadQueue, assembled: &HashMap<String, Assemble
 }
 
 /// Look for a PAR2 recovery set under `dest_dir` (the same discovery
-/// [`crate::repair`] uses) and, if one is found, compare `damaged` bytes
-/// against how much its recovery blocks could plausibly reconstruct.
+/// [`crate::repair`] uses, scoped to `known_files` for the same reason —
+/// see [`find_par2_index`]'s doc comment) and, if one is found, compare
+/// `damaged` bytes against how much its recovery blocks could plausibly
+/// reconstruct.
 ///
 /// `Ok(None)` when no PAR2 index is present at all — there is nothing to
 /// compare against, and [`crate::repair::verify_and_repair`] already
 /// reports that case on its own (`RepairOutcome::NoRecoveryData`).
-pub fn evaluate(dest_dir: &Path, damaged_bytes: u64) -> Result<Option<HealthCheck>> {
-    let Some(index_path) = find_par2_index(dest_dir)? else {
+pub fn evaluate(
+    dest_dir: &Path,
+    damaged_bytes: u64,
+    known_files: &HashSet<String>,
+) -> Result<Option<HealthCheck>> {
+    let Some(index_path) = find_par2_index(dest_dir, known_files)? else {
         return Ok(None);
     };
     let recovery_set = RecoverySet::load(&index_path)
@@ -202,7 +208,8 @@ mod tests {
     fn no_par2_index_evaluates_to_none() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.bin"), b"data").unwrap();
-        assert_eq!(evaluate(dir.path(), 1_000).unwrap(), None);
+        let known: HashSet<String> = ["a.bin".to_string()].into_iter().collect();
+        assert_eq!(evaluate(dir.path(), 1_000, &known).unwrap(), None);
     }
 
     #[test]

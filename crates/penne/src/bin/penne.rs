@@ -229,9 +229,26 @@ async fn download(
         println!("  {label}: {} -> {}", r.old_name, r.new_name);
     }
 
+    // The file names this release's PAR2 verification/repair is allowed to
+    // touch under `dest_dir` — which can be shared across every `penne
+    // download` run, so it may still hold leftover files from an unrelated,
+    // previous release (see `penne::repair::find_par2_index`'s doc comment).
+    // Starts from `outcome.assembled`'s keys (this run's own queue), then
+    // applies the renames above so it reflects the names actually on disk
+    // now, not the pre-deobfuscation ones.
+    let known_files: std::collections::HashSet<String> = {
+        let mut names: std::collections::HashSet<String> =
+            outcome.assembled.keys().cloned().collect();
+        for r in &rename_report.renames {
+            names.remove(&r.old_name);
+            names.insert(r.new_name.clone());
+        }
+        names
+    };
+
     if needs_repair > 0 {
         let damaged = penne::health::damaged_bytes(&queue, &outcome.assembled);
-        if let Some(health) = penne::health::evaluate(&dest_dir, damaged)? {
+        if let Some(health) = penne::health::evaluate(&dest_dir, damaged, &known_files)? {
             if !health.looks_repairable() {
                 println!(
                     "  warning: {} missing/damaged, but only ~{} of PAR2 recovery data found \
@@ -246,8 +263,13 @@ async fn download(
     println!("checking PAR2 recovery data...");
     let (verify_tx, verify_rx) = penne::repair::channel();
     let verify_progress_task = penne::ui::verify::spawn_renderer(verify_rx);
-    let repair_outcome =
-        penne::repair::verify_and_repair(&dest_dir, &outcome.assembled, Some(verify_tx)).await?;
+    let repair_outcome = penne::repair::verify_and_repair(
+        &dest_dir,
+        &outcome.assembled,
+        &known_files,
+        Some(verify_tx),
+    )
+    .await?;
     // `true` here means a real, byte-exact verify pass ran (the quick-check
     // couldn't prove the release intact from already-known CRC-32s alone),
     // so at least one progress line was drawn during it already.
