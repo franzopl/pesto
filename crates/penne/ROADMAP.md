@@ -55,6 +55,7 @@ testable state.
 | 14 | Streaming assembly — `download_queue` now writes each file to disk the instant its own segments resolve, interleaved with the rest of the fetch, instead of batching every file's write into one pass after the whole queue finishes. Closes the "fetch-and-write-incrementally" item flagged as deferred back in Phase 8. |
 | 15 | `nzbget`-inspired hardening — disk-space guard before download; PAR2-redundancy-aware early health warning ahead of the expensive verify pass (rescoped from a pre-download check, which turned out infeasible — see the phase itself); `level`+`group` server pools letting equal-priority servers share one worker pool instead of one strictly following another. |
 | 16 | `sabnzbd`-inspired hardening — categorized, actionable NNTP connect/auth error messages; PAR2 quick-check deriving a file's expected CRC-32 from IFSC data alone (new `pesto::yenc::crc32_combine`), skipping a full re-hash on the common all-intact path; per-segment streaming writes, closing the memory-scaling gap Phase 14 left for single-large-file releases. |
+| 17 | Processing modes — `--mode {download,repair,unpack,delete}` gates PAR2 verify/repair, extraction, and a new post-extraction cleanup step behind `sabnzbd`-style cumulative processing levels; new `penne::cleanup::purge_archives_and_par2` deletes archive volumes and PAR2 recovery data once extraction succeeds. |
 
 ---
 
@@ -1213,6 +1214,44 @@ timers (`plan_server`/`trigger_server` — already covered in spirit by
 Phase 8's per-segment retry/backoff), and account expiration/quota
 monitoring (`check_server_expiration`/`check_server_quota` — catalog/history
 scope, belongs to `upapasta` per `CLAUDE.md`, not the download engine).
+
+---
+
+## Phase 17 — Processing modes (`--mode`) ✅
+
+- [x] **`--mode {download,repair,unpack,delete}`, mirroring `sabnzbd`'s
+      per-category Download/+Repair/+Unpack/+Delete processing levels.**
+      Before this, `penne download` always ran the full pipeline — fetch,
+      PAR2 verify/repair, extract — with no way to stop earlier, and no
+      way to go further than extraction either. New `ProcessingMode` enum
+      (`crates/penne/src/bin/penne.rs`) is declared in cumulative order
+      and derives `Ord`, so each pipeline stage is gated behind a single
+      `mode >= ProcessingMode::X` check instead of a separate boolean flag
+      per stage: `download` only fetches and assembles; `repair` adds PAR2
+      verify/repair; `unpack` adds archive extraction (the default,
+      byte-for-byte the same behavior as before `--mode` existed); `delete`
+      adds a final cleanup pass.
+- [x] **New `penne::cleanup::purge_archives_and_par2`.** Deletes every
+      archive volume and `.par2` file once extraction has already
+      succeeded, leaving only the release's other files (extracted media,
+      subtitles, `.nfo`, etc.). Reuses `extract::classify` (now
+      `pub(crate)`) for the archive-volume rules instead of duplicating
+      them. Scoped to the same `known_files` set `find_par2_index` already
+      uses (Phase 16's shared-`download_dir` fix) — a destructive delete
+      must never touch a different, unrelated release's files sitting in
+      the same directory.
+- [x] **Below `--mode repair`, a missing/damaged file only warns.**
+      Previously any incomplete/damaged file after assembly was always
+      headed for a PAR2 repair attempt, and the run failed if that
+      attempt (or the absence of PAR2 data) couldn't fix it. At `--mode
+      download`, there's no repair attempt to begin with, so that failure
+      mode doesn't apply — the run reports the problem and exits `0`
+      instead, and the resume cache is deliberately *not* cleared in that
+      case (it normally is, once a run finishes clean) so a later `--mode
+      repair` run can still avoid refetching.
+- [x] `README.md` rewritten with a "Processing modes" section (table +
+      examples) and the per-step pipeline list updated to note which
+      `--mode` each step needs.
 
 ---
 

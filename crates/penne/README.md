@@ -5,8 +5,10 @@
 Companion to [`pesto`](../pesto) (which posts) and
 [`parmesan`](../parmesan) (which handles PAR2). Reads a `.nzb`, fetches its
 articles over parallel NNTP connections, reassembles the original files,
-verifies/repairs them with PAR2, and extracts any `.rar`/`.7z`/`.zip` it
-finds.
+verifies/repairs them with PAR2, extracts any `.rar`/`.7z`/`.zip` it finds,
+and — if asked — cleans up the compressed volumes and PAR2 recovery data
+afterward. `--mode` picks how far down that pipeline a run goes; see
+[Processing modes](#processing-modes) below.
 
 > **Status:** the core pipeline is complete and tested end-to-end — fetch,
 > yEnc decode, assembly, PAR2 verify/repair, archive extraction, resume, and
@@ -168,15 +170,46 @@ cargo run --bin penne -- download path/to/release.nzb --stat
    cover (or when there's no PAR2 at all) gets a best-effort guess from
    archive magic bytes (`.rar`/`.7z`/`.zip`) plus `.nzb` file order — clearly
    reported as a guess, distinct from a PAR2-confirmed recovery.
-5. **PAR2 verify/repair**, if any `.par2` file is present among the
-   downloaded files (including ones just tagged in step 4): files left
-   unwritten in step 3 can be recreated *whole* from recovery data; files
-   with a bad checksum are patched at just the damaged parts.
-6. **Extract** any `.rar`/`.7z`/`.zip` found (including multi-volume sets),
-   using `--password` if given, else the `.nzb`'s own embedded password.
+5. **PAR2 verify/repair** (`--mode repair` or higher), if any `.par2` file
+   is present among the downloaded files (including ones just tagged in
+   step 4): files left unwritten in step 3 can be recreated *whole* from
+   recovery data; files with a bad checksum are patched at just the
+   damaged parts.
+6. **Extract** (`--mode unpack` or higher, the default) any
+   `.rar`/`.7z`/`.zip` found (including multi-volume sets), using
+   `--password` if given, else the `.nzb`'s own embedded password.
+7. **Clean up** (`--mode delete` only): once extraction succeeds, delete
+   every compressed volume and `.par2` file, leaving only the release's
+   other files (the extracted media, subtitles, `.nfo`, etc.).
 
-If anything is still incomplete or damaged after step 5, `penne download`
-exits non-zero and reports which files.
+At `--mode repair` or higher, anything still incomplete or damaged after
+step 5 makes `penne download` exit non-zero and report which files. Below
+that (`--mode download`), a missing/damaged file only prints a warning —
+the run still succeeds, and the resume cache (see below) is kept instead
+of cleared, so a later `--mode repair` run can pick up without refetching.
+
+### Processing modes
+
+`--mode` picks how far down the pipeline above a run goes, mirroring
+`sabnzbd`'s per-category Download/+Repair/+Unpack/+Delete processing
+levels — each mode does everything the previous one does, plus one more
+step:
+
+| `--mode`   | Fetch/assemble | PAR2 verify/repair | Extract | Delete archives + PAR2 |
+|------------|:--:|:--:|:--:|:--:|
+| `download` | ✓ |    |    |    |
+| `repair`   | ✓ | ✓  |    |    |
+| `unpack` (default) | ✓ | ✓ | ✓ |    |
+| `delete`   | ✓ | ✓ | ✓ | ✓ |
+
+```bash
+# Just fetch and assemble — no PAR2, no extraction.
+cargo run --bin penne -- download path/to/release.nzb --mode download
+
+# Fetch, verify/repair, and once everything's intact, drop the archives
+# and PAR2 recovery data, keeping only the release's actual content.
+cargo run --bin penne -- download path/to/release.nzb --mode delete
+```
 
 ### `--stat`: check availability without downloading
 
@@ -225,7 +258,10 @@ An interrupted `penne download` run doesn't start over: every successfully
 fetched article body is cached under `<out-dir>/.penne-cache/`, keyed by
 Message-ID. Re-running the same command against the same `.nzb`/`--out-dir`
 skips the network entirely for anything already cached. The cache is deleted
-automatically once a run completes fully.
+automatically once a run completes with nothing left incomplete or
+damaged — at `--mode download`, that only happens if the fetch itself was
+already fully clean; otherwise it's kept so a later `--mode repair` (or
+higher) run can still use it.
 
 ## Roadmap
 
