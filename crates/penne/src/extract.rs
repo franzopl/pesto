@@ -189,7 +189,11 @@ fn extract_with_unrar(archive: &Path, dest_dir: &Path, password: Option<&str>) -
 /// `Some(n)` for one numbered volume of a split archive — the entry point
 /// among a group of files sharing a `(kind, base_name)` is whichever one has
 /// `None`, or failing that the smallest `Some(n)`.
-fn classify(file_name: &str) -> Option<(ArchiveKind, String, Option<u32>)> {
+///
+/// `pub(crate)`, not private: [`crate::cleanup`] reuses this to recognize
+/// every archive volume worth deleting after a successful extraction,
+/// without duplicating the file-name rules this module already owns.
+pub(crate) fn classify(file_name: &str) -> Option<(ArchiveKind, String, Option<u32>)> {
     let lower = file_name.to_ascii_lowercase();
 
     if let Some(base) = lower.strip_suffix(".zip") {

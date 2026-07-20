@@ -15,6 +15,7 @@
 pub mod assemble;
 pub mod cache;
 pub mod check;
+pub mod cleanup;
 pub mod client;
 pub mod config;
 pub mod deobfuscate;

@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +35,28 @@ struct Cli {
     /// config path is used.
     #[arg(long, global = true)]
     config: Option<Option<PathBuf>>,
+}
+
+/// How much post-processing `penne download` does after fetching a
+/// release, mirroring `sabnzbd`'s per-category "Download" / "+Repair" /
+/// "+Unpack" / "+Delete" processing levels — each level does everything
+/// the previous one does, plus one more step. Declared in that order so
+/// `PartialOrd`/`Ord` (derived) give the cumulative `mode >= X` checks
+/// `download` gates each step behind.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ProcessingMode {
+    /// Fetch and assemble only. No PAR2 verify/repair, no extraction.
+    Download,
+    /// Download, plus PAR2 verify/repair when recovery data is present.
+    /// No extraction.
+    Repair,
+    /// Repair, plus extracting any .rar/.7z/.zip found. This is `penne
+    /// download`'s default — unchanged from before --mode existed.
+    Unpack,
+    /// Unpack, plus deleting the compressed volumes and PAR2 recovery
+    /// data once extraction succeeds, leaving only the release's other
+    /// files.
+    Delete,
 }
 
 #[derive(Subcommand)]
@@ -64,6 +86,15 @@ enum Command {
         /// article body.
         #[arg(long)]
         stat: bool,
+        /// How much post-processing to do after fetching, mirroring
+        /// `sabnzbd`'s per-category processing levels. Each level does
+        /// everything the previous one does, plus one more step:
+        /// `download` (fetch + assemble only) -> `repair` (+ PAR2
+        /// verify/repair) -> `unpack` (+ extract archives) -> `delete`
+        /// (+ delete the compressed volumes and PAR2 recovery data once
+        /// extraction succeeds, leaving only the release's other files).
+        #[arg(long, value_enum, default_value_t = ProcessingMode::Unpack)]
+        mode: ProcessingMode,
     },
 }
 
@@ -85,7 +116,8 @@ async fn main() -> Result<()> {
             out_dir,
             password,
             stat,
-        }) => download(&nzb, out_dir, cli.config.flatten(), password, stat).await,
+            mode,
+        }) => download(&nzb, out_dir, cli.config.flatten(), password, stat, mode).await,
         None => {
             println!(
                 "penne — fast NZB downloader.\n\n\
@@ -114,6 +146,7 @@ async fn download(
     config_path: Option<PathBuf>,
     password: Option<String>,
     stat: bool,
+    mode: ProcessingMode,
 ) -> Result<()> {
     let parsed = penne::nzb::load(nzb)?;
     let queue = penne::queue::build(&parsed);
@@ -192,6 +225,11 @@ async fn download(
         );
     }
 
+    let repair_note = if mode >= ProcessingMode::Repair {
+        "will attempt PAR2 repair"
+    } else {
+        "PAR2 repair skipped, --mode download"
+    };
     let mut needs_repair = 0u32;
     for (name, result) in &outcome.assembled {
         match result {
@@ -201,11 +239,11 @@ async fn download(
             }
             penne::assemble::AssembleOutcome::ChecksumMismatch { .. } => {
                 needs_repair += 1;
-                println!("  damaged (will attempt PAR2 repair): {name} ({result:?})");
+                println!("  damaged ({repair_note}): {name} ({result:?})");
             }
             penne::assemble::AssembleOutcome::Incomplete { .. } => {
                 needs_repair += 1;
-                println!("  incomplete (will attempt PAR2 repair): {name} ({result:?})");
+                println!("  incomplete ({repair_note}): {name} ({result:?})");
             }
         }
     }
@@ -246,77 +284,112 @@ async fn download(
         names
     };
 
-    if needs_repair > 0 {
-        let damaged = penne::health::damaged_bytes(&queue, &outcome.assembled);
-        if let Some(health) = penne::health::evaluate(&dest_dir, damaged, &known_files)? {
-            if !health.looks_repairable() {
-                println!(
-                    "  warning: {} missing/damaged, but only ~{} of PAR2 recovery data found \
-                     — repair is unlikely to succeed",
-                    pesto::progress::format_size(health.damaged_bytes),
-                    pesto::progress::format_size(health.available_recovery_bytes)
+    if mode >= ProcessingMode::Repair {
+        if needs_repair > 0 {
+            let damaged = penne::health::damaged_bytes(&queue, &outcome.assembled);
+            if let Some(health) = penne::health::evaluate(&dest_dir, damaged, &known_files)? {
+                if !health.looks_repairable() {
+                    println!(
+                        "  warning: {} missing/damaged, but only ~{} of PAR2 recovery data found \
+                         — repair is unlikely to succeed",
+                        pesto::progress::format_size(health.damaged_bytes),
+                        pesto::progress::format_size(health.available_recovery_bytes)
+                    );
+                }
+            }
+        }
+
+        println!("checking PAR2 recovery data...");
+        let (verify_tx, verify_rx) = penne::repair::channel();
+        let verify_progress_task = penne::ui::verify::spawn_renderer(verify_rx);
+        let repair_outcome = penne::repair::verify_and_repair(
+            &dest_dir,
+            &outcome.assembled,
+            &known_files,
+            Some(verify_tx),
+        )
+        .await?;
+        // `true` here means a real, byte-exact verify pass ran (the
+        // quick-check couldn't prove the release intact from
+        // already-known CRC-32s alone), so at least one progress line was
+        // drawn during it already.
+        let ran_full_verify = verify_progress_task.await.unwrap_or(false);
+        match repair_outcome {
+            penne::repair::RepairOutcome::Ok if !ran_full_verify => {
+                println!("  quick-check passed from already-known checksums; full re-hash skipped")
+            }
+            penne::repair::RepairOutcome::Ok => println!("  PAR2: all files verified intact"),
+            penne::repair::RepairOutcome::Repaired(plan) => {
+                for f in &plan.repaired_files {
+                    println!(
+                        "  PAR2 repaired: {} ({} slice(s))",
+                        f.name, f.slices_repaired
+                    );
+                }
+            }
+            penne::repair::RepairOutcome::NotRepairable(report) => {
+                anyhow::bail!(
+                    "{} damaged slice(s) exceed available PAR2 recovery data ({} block(s)); download is incomplete",
+                    report.total_bad_slices(),
+                    report.available_recovery_blocks
+                );
+            }
+            penne::repair::RepairOutcome::NoRecoveryData => {
+                println!("  no PAR2 recovery data found; skipping verification");
+                anyhow::ensure!(
+                    needs_repair == 0,
+                    "{needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
                 );
             }
         }
+    } else if needs_repair > 0 {
+        println!(
+            "  warning: {needs_repair} file(s) incomplete or damaged; rerun with --mode repair \
+             (or higher) to fix them"
+        );
     }
 
-    println!("checking PAR2 recovery data...");
-    let (verify_tx, verify_rx) = penne::repair::channel();
-    let verify_progress_task = penne::ui::verify::spawn_renderer(verify_rx);
-    let repair_outcome = penne::repair::verify_and_repair(
-        &dest_dir,
-        &outcome.assembled,
-        &known_files,
-        Some(verify_tx),
-    )
-    .await?;
-    // `true` here means a real, byte-exact verify pass ran (the quick-check
-    // couldn't prove the release intact from already-known CRC-32s alone),
-    // so at least one progress line was drawn during it already.
-    let ran_full_verify = verify_progress_task.await.unwrap_or(false);
-    match repair_outcome {
-        penne::repair::RepairOutcome::Ok if !ran_full_verify => {
-            println!("  quick-check passed from already-known checksums; full re-hash skipped")
+    if mode >= ProcessingMode::Unpack {
+        println!("checking for archives to extract...");
+        let password = password.as_deref().or(parsed.meta.password.as_deref());
+        let extracted = penne::extract::extract_all(&dest_dir, password).await?;
+        if extracted.is_empty() {
+            println!("  nothing to extract");
         }
-        penne::repair::RepairOutcome::Ok => println!("  PAR2: all files verified intact"),
-        penne::repair::RepairOutcome::Repaired(plan) => {
-            for f in &plan.repaired_files {
-                println!(
-                    "  PAR2 repaired: {} ({} slice(s))",
-                    f.name, f.slices_repaired
-                );
+        for archive in &extracted {
+            println!("  extracted: {} ({:?})", archive.base_name, archive.kind);
+        }
+    } else {
+        let mode_name = match mode {
+            ProcessingMode::Download => "download",
+            ProcessingMode::Repair => "repair",
+            ProcessingMode::Unpack | ProcessingMode::Delete => {
+                unreachable!("mode < Unpack means Download or Repair")
             }
+        };
+        println!("skipping archive extraction, --mode {mode_name}");
+    }
+
+    if mode >= ProcessingMode::Delete {
+        println!("cleaning up archives and PAR2 recovery data...");
+        let deleted = penne::cleanup::purge_archives_and_par2(&dest_dir, &known_files).await?;
+        if deleted.is_empty() {
+            println!("  nothing to clean up");
         }
-        penne::repair::RepairOutcome::NotRepairable(report) => {
-            anyhow::bail!(
-                "{} damaged slice(s) exceed available PAR2 recovery data ({} block(s)); download is incomplete",
-                report.total_bad_slices(),
-                report.available_recovery_blocks
-            );
-        }
-        penne::repair::RepairOutcome::NoRecoveryData => {
-            println!("  no PAR2 recovery data found; skipping verification");
-            anyhow::ensure!(
-                needs_repair == 0,
-                "{needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
-            );
+        for name in &deleted {
+            println!("  deleted: {name}");
         }
     }
 
-    println!("checking for archives to extract...");
-    let password = password.as_deref().or(parsed.meta.password.as_deref());
-    let extracted = penne::extract::extract_all(&dest_dir, password).await?;
-    if extracted.is_empty() {
-        println!("  nothing to extract");
+    // Below `--mode repair`, nothing here verified whether the fetch was
+    // actually complete — if it wasn't, the resume cache must survive so a
+    // later, higher `--mode` run can still avoid refetching. At `--mode
+    // repair` or above, reaching this point without having already bailed
+    // out means everything that needed fixing got fixed, so the cache is
+    // safe to drop.
+    if mode >= ProcessingMode::Repair || needs_repair == 0 {
+        penne::cache::clear(&dest_dir)?;
     }
-    for archive in &extracted {
-        println!("  extracted: {} ({:?})", archive.base_name, archive.kind);
-    }
-
-    // Everything that needed fixing got fixed (we'd have bailed above
-    // otherwise), so the cached article bodies kept for resume are no
-    // longer needed.
-    penne::cache::clear(&dest_dir)?;
 
     Ok(())
 }

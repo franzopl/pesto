@@ -160,6 +160,16 @@ fn run_penne_download_stat(nzb_path: &Path, config_path: &Path) -> Output {
         .unwrap()
 }
 
+fn run_penne_download_with_mode(nzb_path: &Path, config_path: &Path, mode: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_penne"))
+        .arg("download")
+        .arg(nzb_path)
+        .args(["--config", config_path.to_str().unwrap()])
+        .args(["--mode", mode])
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn download_fetches_decodes_and_writes_the_file() {
     let data = b"hello from penne end-to-end test".to_vec();
@@ -449,6 +459,213 @@ fn stat_reports_complete_and_downloads_nothing_when_every_segment_is_present() {
     // --stat never downloads: the destination directory shouldn't even
     // have been created, let alone contain a file.
     assert!(!download_dir.exists());
+}
+
+#[test]
+fn mode_download_skips_par2_repair_and_leaves_an_incomplete_file_unwritten() {
+    // Same fixture as `download_recovers_a_fully_missing_segment_via_par2`
+    // (one segment of `movie.bin` never arrives, but PAR2 recovery data
+    // could rebuild it) — except this time `--mode download` should never
+    // even try. The run must still succeed (missing/damaged files are only
+    // a warning below `--mode repair`, not a hard failure), but the file
+    // stays unwritten, exactly as `assemble::AssembleOutcome::Incomplete`
+    // leaves it.
+    let original: Vec<u8> = (0..512u32).map(|i| i as u8).collect();
+    let slice_size = 64;
+    let total_slices = original.len() / slice_size;
+    let fixture_dir = build_fixture_set(
+        &[FixtureFile {
+            name: "movie.bin",
+            data: original.clone(),
+        }],
+        slice_size,
+        total_slices,
+    );
+    let par2_index = std::fs::read(fixture_dir.join("base.par2")).unwrap();
+    let par2_vol =
+        std::fs::read(fixture_dir.join(format!("base.vol000+{total_slices:03}.par2"))).unwrap();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+
+    let half = original.len() / 2;
+    let part1 = encode_part(
+        "movie.bin",
+        original.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 2,
+            offset: 0,
+        },
+        &original[..half],
+        128,
+        None,
+    );
+    let par2_index_encoded = encode_part(
+        "base.par2",
+        par2_index.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &par2_index,
+        128,
+        None,
+    );
+    let par2_vol_encoded = encode_part(
+        &format!("base.vol000+{total_slices:03}.par2"),
+        par2_vol.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &par2_vol,
+        128,
+        None,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("seg1@test", part1.body);
+    known.insert("par2idx@test", par2_index_encoded.body);
+    known.insert("par2vol@test", par2_vol_encoded.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+
+    let nzb_path = write_nzb(
+        dir.path(),
+        vec![
+            segment("movie.bin", 1, 2, "seg1@test", half as u64),
+            segment(
+                "movie.bin",
+                2,
+                2,
+                "seg2@test",
+                (original.len() - half) as u64,
+            ),
+            segment("base.par2", 1, 1, "par2idx@test", par2_index.len() as u64),
+            segment(
+                &format!("base.vol000+{total_slices:03}.par2"),
+                1,
+                1,
+                "par2vol@test",
+                par2_vol.len() as u64,
+            ),
+        ],
+    );
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download_with_mode(&nzb_path, &config_path, "download");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("rerun with --mode repair"),
+        "stdout did not warn about the unrepaired file:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("checking PAR2 recovery data..."),
+        "PAR2 verification ran despite --mode download:\n{stdout}"
+    );
+    assert!(!download_dir.join("movie.bin").exists());
+}
+
+#[test]
+fn mode_delete_removes_par2_recovery_data_once_everything_is_intact() {
+    let original: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
+    let slice_size = 64;
+    let fixture_dir = build_fixture_set(
+        &[FixtureFile {
+            name: "movie.bin",
+            data: original.clone(),
+        }],
+        slice_size,
+        1,
+    );
+    let par2_index = std::fs::read(fixture_dir.join("base.par2")).unwrap();
+    let par2_vol = std::fs::read(fixture_dir.join("base.vol000+001.par2")).unwrap();
+    std::fs::remove_dir_all(&fixture_dir).ok();
+
+    let movie_encoded = encode_part(
+        "movie.bin",
+        original.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &original,
+        128,
+        None,
+    );
+    let par2_index_encoded = encode_part(
+        "base.par2",
+        par2_index.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &par2_index,
+        128,
+        None,
+    );
+    let par2_vol_encoded = encode_part(
+        "base.vol000+001.par2",
+        par2_vol.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &par2_vol,
+        128,
+        None,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("movie@test", movie_encoded.body);
+    known.insert("par2idx@test", par2_index_encoded.body);
+    known.insert("par2vol@test", par2_vol_encoded.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+
+    let nzb_path = write_nzb(
+        dir.path(),
+        vec![
+            segment("movie.bin", 1, 1, "movie@test", original.len() as u64),
+            segment("base.par2", 1, 1, "par2idx@test", par2_index.len() as u64),
+            segment(
+                "base.vol000+001.par2",
+                1,
+                1,
+                "par2vol@test",
+                par2_vol.len() as u64,
+            ),
+        ],
+    );
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download_with_mode(&nzb_path, &config_path, "delete");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(download_dir.join("movie.bin")).unwrap(),
+        original
+    );
+    assert!(!download_dir.join("base.par2").exists());
+    assert!(!download_dir.join("base.vol000+001.par2").exists());
 }
 
 #[test]
