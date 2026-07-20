@@ -15,7 +15,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
+use penne::config::ProcessingMode;
 
 #[derive(Parser)]
 #[command(
@@ -39,28 +40,6 @@ struct Cli {
     /// config path is used.
     #[arg(long, global = true)]
     config: Option<Option<PathBuf>>,
-}
-
-/// How much post-processing `penne download` does after fetching a
-/// release, mirroring `sabnzbd`'s per-category "Download" / "+Repair" /
-/// "+Unpack" / "+Delete" processing levels — each level does everything
-/// the previous one does, plus one more step. Declared in that order so
-/// `PartialOrd`/`Ord` (derived) give the cumulative `mode >= X` checks
-/// `download` gates each step behind.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum ProcessingMode {
-    /// Fetch and assemble only. No PAR2 verify/repair, no extraction.
-    Download,
-    /// Download, plus PAR2 verify/repair when recovery data is present.
-    /// No extraction.
-    Repair,
-    /// Repair, plus extracting any .rar/.7z/.zip found. This is `penne
-    /// download`'s default — unchanged from before --mode existed.
-    Unpack,
-    /// Unpack, plus deleting the compressed volumes and PAR2 recovery
-    /// data once extraction succeeds, leaving only the release's other
-    /// files.
-    Delete,
 }
 
 #[derive(Subcommand)]
@@ -90,6 +69,15 @@ enum Command {
         /// article body.
         #[arg(long)]
         stat: bool,
+        /// Use only the named [[servers]] entry for this run (matched by
+        /// its `name` field in the config file), instead of every
+        /// configured server. Repeat to pick more than one; they keep
+        /// their relative order from the config file. Handy for a quick
+        /// `--stat` against one particular provider without editing the
+        /// config. Omit to use every configured server, as before this
+        /// flag existed.
+        #[arg(long = "server")]
+        server: Vec<String>,
         /// How much post-processing to do after fetching, mirroring
         /// `sabnzbd`'s per-category processing levels. Each level does
         /// everything the previous one does, plus one more step:
@@ -97,8 +85,10 @@ enum Command {
         /// verify/repair) -> `unpack` (+ extract archives) -> `delete`
         /// (+ delete the compressed volumes and PAR2 recovery data once
         /// extraction succeeds, leaving only the release's other files).
-        #[arg(long, value_enum, default_value_t = ProcessingMode::Unpack)]
-        mode: ProcessingMode,
+        /// Defaults to the config file's `mode`, or `unpack` if that's
+        /// unset too.
+        #[arg(long, value_enum)]
+        mode: Option<ProcessingMode>,
     },
 }
 
@@ -120,8 +110,20 @@ async fn main() -> Result<()> {
             out_dir,
             password,
             stat,
+            server,
             mode,
-        }) => download(&nzb, out_dir, cli.config.flatten(), password, stat, mode).await,
+        }) => {
+            download(
+                &nzb,
+                out_dir,
+                cli.config.flatten(),
+                password,
+                stat,
+                &server,
+                mode,
+            )
+            .await
+        }
         None => {
             println!(
                 "penne — fast NZB downloader.\n\n\
@@ -150,7 +152,8 @@ async fn download(
     config_path: Option<PathBuf>,
     password: Option<String>,
     stat: bool,
-    mode: ProcessingMode,
+    server_names: &[String],
+    cli_mode: Option<ProcessingMode>,
 ) -> Result<()> {
     let parsed = penne::nzb::load(nzb)?;
     let queue = penne::queue::build(&parsed);
@@ -171,12 +174,15 @@ async fn download(
     };
     let config_toml = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
-    let config = penne::config::RawConfig::parse(&config_toml)?.resolve()?;
+    let config = penne::config::RawConfig::parse(&config_toml)?
+        .select(server_names)?
+        .resolve()?;
     anyhow::ensure!(
         !config.server_tiers.is_empty(),
         "no [[servers]] configured in {}",
         config_path.display()
     );
+    let mode = cli_mode.unwrap_or(config.mode);
 
     if stat {
         return check_availability(&queue, &config.server_tiers, config.retries).await;

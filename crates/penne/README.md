@@ -77,6 +77,16 @@ connections = 8
 # to the next configured server. Default: 3.
 retries = 3
 
+# Optional: default processing mode for `penne download` when --mode isn't
+# given on the command line (--mode always overrides this per run). One of:
+#   "download" - fetch and assemble only; no PAR2 verify/repair, no extraction
+#   "repair"   - download, plus PAR2 verify/repair when recovery data is present
+#   "unpack"   - repair, plus extracting any .rar/.7z/.zip found (built-in default)
+#   "delete"   - unpack, plus deleting the compressed volumes and PAR2 recovery
+#                data once extraction succeeds, leaving only the release's other files
+# See Processing modes below for the full picture. Default: "unpack".
+mode = "unpack"
+
 [[servers]]
 host = "news.example.com"
 # port = 563          # 563 = TLS, 119 = plaintext. Default: 563 if ssl, else 119.
@@ -133,6 +143,65 @@ tier — unaffected, and how every `[[servers]]` entry behaves without this
 field. Servers sharing a `group` value that *aren't* adjacent in the file
 each get their own tier instead of being pooled — list group members next
 to each other.
+
+**Naming a server for `--server`:** give any `[[servers]]` entry a `name` to
+pick it out for a single run instead of drawing on every configured server:
+
+```toml
+[[servers]]
+name = "blocknews"
+host = "usnews.blocknews.net"
+ssl = true
+username = "user"
+password = "pass"
+
+[[servers]]
+name = "newshosting"
+host = "news.newshosting.com"
+ssl = true
+username = "user2"
+password = "pass2"
+```
+
+```bash
+# Use only the "blocknews" entry for this run.
+cargo run --bin penne -- download path/to/release.nzb --stat --server blocknews
+
+# Repeat --server to pick more than one; they keep their relative order
+# from the config file (so failover/group semantics are unaffected).
+cargo run --bin penne -- download path/to/release.nzb --server blocknews --server newshosting
+```
+
+Omitting `--server` uses every configured server, exactly as before this
+flag existed. Requesting a name that no entry has errors out immediately,
+listing the names that do exist.
+
+**Keeping an account out of the automatic mix with `explicit_only`:** an
+entry with `explicit_only = true` is skipped whenever `--server` is
+omitted, and only ever used when named directly. For a block/quota account
+that must never be drawn on as a silent fallback:
+
+```toml
+[[servers]]
+name = "blocknews"
+host = "usnews.blocknews.net"
+ssl = true
+username = "user"
+password = "pass"
+explicit_only = true
+```
+
+```bash
+# Plain `penne download`/`--stat` never touches "blocknews" — only "main"
+# (or whatever other non-explicit_only servers are configured) is used.
+cargo run --bin penne -- download path/to/release.nzb --stat
+
+# Only this run uses it, because it's named explicitly.
+cargo run --bin penne -- download path/to/release.nzb --stat --server blocknews
+```
+
+`explicit_only` requires `name` — otherwise there'd be no way to ever
+select the entry, and `penne` refuses to load the config.
 
 ## Usage
 
@@ -210,6 +279,13 @@ cargo run --bin penne -- download path/to/release.nzb --mode download
 # and PAR2 recovery data, keeping only the release's actual content.
 cargo run --bin penne -- download path/to/release.nzb --mode delete
 ```
+
+Precedence: `--mode` on the command line wins when given; otherwise the
+config file's `mode` (see File format above) is used; if neither is set,
+`penne` falls back to `unpack`, unchanged from before this config field
+existed. Set `mode` in the config file once to change your everyday
+default (e.g. to `download` if you routinely handle PAR2/extraction with
+other tools) without typing `--mode` on every run.
 
 ### `--stat`: check availability without downloading
 

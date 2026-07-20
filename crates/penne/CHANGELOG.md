@@ -7,6 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Named servers + `--server` selector.** A `[[servers]]` entry can carry a
+  `name`; `penne download --server <NAME>` (repeatable) restricts a single
+  run to just the named entries instead of drawing on every configured
+  server, in their config-file order. Lets one config file hold several
+  independent providers and pick which one to use per run (e.g. a quick
+  `--stat` against a specific provider) with a single flag, instead of
+  hand-editing the config or keeping separate config files around. Omitting
+  `--server` is unchanged: every configured server is used, as before this
+  flag existed.
+- **`explicit_only` servers.** A named `[[servers]]` entry can set
+  `explicit_only = true` to be skipped by the default server set (whenever
+  `--server` is omitted) and used only when named directly via
+  `--server <NAME>` — for a block/quota account that must never be drawn on
+  automatically as a silent fallback. Requires `name`; rejected at config
+  load otherwise, since such an entry could never be selected.
+- **Configurable default `--mode`.** The config file can set `mode`
+  ("download", "repair", "unpack", or "delete") as the default processing
+  level for `penne download` when `--mode` isn't given on the command line.
+  `--mode` still overrides it per run; omitting both falls back to
+  `unpack`, unchanged from before this field existed.
+
 ## [0.1.0] — 2026-07-20
 
 First tagged release. `penne` is a fast, `.nzb`-driven NZB downloader for
