@@ -41,7 +41,7 @@ use crate::assemble::AssembleOutcome;
 /// accounted for, for a live progress bar — mirrors [`crate::check::CheckProgress`].
 /// Never sent when [`quick_check_all`] skips the full pass entirely, since
 /// then there's nothing to report progress on.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VerifyProgress {
     pub file_name: String,
     pub slices_done: usize,

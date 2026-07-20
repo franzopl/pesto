@@ -4,6 +4,7 @@ members = [
     "crates/parmesan",
     "crates/penne",
     "crates/pesto",
+    "crates/sugo",
     "crates/upapasta",
 ]
 

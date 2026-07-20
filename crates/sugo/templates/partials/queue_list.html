@@ -1,0 +1,20 @@
+<div id="queue-list" hx-get="/dashboard/queue" hx-trigger="load, every 3s" hx-swap="outerHTML">
+  <table>
+    <thead><tr><th>Name</th><th>Status</th><th>Progress</th></tr></thead>
+    <tbody>
+      {% for row in queue %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td><span class="status{% if row.status == "Failed" %} failed{% endif %}">{{ row.status }}</span></td>
+        <td>
+          <div class="progress"><div style="width: {{ row.percentage }}%"></div></div>
+          {{ row.percentage }}%
+        </td>
+      </tr>
+      {% endfor %}
+      {% if queue.is_empty() %}
+      <tr><td colspan="3">Queue is empty.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>

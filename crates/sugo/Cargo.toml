@@ -1,0 +1,42 @@
+[package]
+name = "sugo"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "SABnzbd-API-compatible web UI for penne, the Usenet NZB downloader."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["usenet", "nntp", "nzb", "web", "sabnzbd"]
+categories = ["command-line-utilities", "network-programming", "web-programming"]
+
+[lib]
+name = "sugo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sugo"
+path = "src/bin/sugo.rs"
+
+[dependencies]
+penne = { path = "../penne" }
+pesto = { package = "pesto-poster", path = "../pesto" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "fs", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.8", features = ["multipart"] }
+askama = "0.12"
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

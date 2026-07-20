@@ -38,7 +38,7 @@ use crate::queue::DownloadQueue;
 /// [`crate::progress::ProgressEvent`]: that enum's variants
 /// (`SegmentDownloaded`, `FileAssembled`, ...) describe fetching and
 /// writing bytes, none of which a `STAT`-only check ever does.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct CheckProgress {
     pub present: bool,
 }

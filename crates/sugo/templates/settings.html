@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Settings - sugo{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Servers</h2>
+  <table>
+    <thead><tr><th>Host</th><th>Port</th><th>SSL</th><th>Connections</th></tr></thead>
+    <tbody>
+      {% for s in servers %}
+      <tr>
+        <td>{{ s.host }}</td>
+        <td>{{ s.port }}</td>
+        <td>{{ s.ssl }}</td>
+        <td>{{ s.connections }}</td>
+      </tr>
+      {% endfor %}
+      {% if servers.is_empty() %}
+      <tr><td colspan="4">No servers configured yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Add server</h2>
+  <form method="post" action="/settings/servers">
+    <p><input type="text" name="host" placeholder="news.example.com" required></p>
+    <p><input type="text" name="port" placeholder="563 (blank = default for SSL/plain)"></p>
+    <p><label><input type="checkbox" name="ssl" value="true"> SSL</label></p>
+    <p><input type="text" name="username" placeholder="username"></p>
+    <p><input type="password" name="password" placeholder="password"></p>
+    <p><input type="text" name="connections" placeholder="8"></p>
+    <p><button type="submit">Add server</button></p>
+  </form>
+</div>
+{% endblock %}

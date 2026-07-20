@@ -1,0 +1,100 @@
+:root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --fg: #1a1a1a;
+    --card: #ffffff;
+    --border: #e0e0e0;
+    --accent: #2f6fed;
+    --muted: #6b6b6b;
+    --danger: #c0392b;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #121212;
+        --fg: #eaeaea;
+        --card: #1c1c1e;
+        --border: #2e2e30;
+        --muted: #9a9a9a;
+    }
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--card);
+}
+
+header h1 { font-size: 1.1rem; margin: 0; }
+
+nav a {
+    margin-left: 1rem;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.9rem;
+}
+
+nav a:hover, nav a.active { color: var(--accent); }
+
+main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 1.5rem;
+}
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+th { color: var(--muted); font-weight: 600; }
+
+.progress {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border);
+    overflow: hidden;
+}
+.progress > div {
+    height: 100%;
+    background: var(--accent);
+}
+
+.status { font-size: 0.8rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: var(--border); }
+.status.failed { background: var(--danger); color: white; }
+
+form.upload { display: flex; gap: 0.5rem; align-items: center; }
+
+button, input[type="submit"] {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+}
+
+input[type="text"], input[type="file"], input[type="password"] {
+    padding: 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--fg);
+}

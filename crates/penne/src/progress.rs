@@ -2,10 +2,11 @@
 //! [`pesto::progress`] so a future TUI/web frontend can consume both engines
 //! the same way.
 
+use serde::Serialize;
 use tokio::sync::mpsc;
 
 /// One file in the run, as announced by [`ProgressEvent::Started`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
     pub name: String,
     pub segments: u32,
@@ -13,7 +14,8 @@ pub struct FileEntry {
 }
 
 /// A single progress update.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
 pub enum ProgressEvent {
     /// The run begins. Carries the full work plan, mirroring
     /// [`pesto::progress::ProgressEvent::Started`] so a future TUI/web

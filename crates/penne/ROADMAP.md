@@ -1257,7 +1257,8 @@ scope, belongs to `upapasta` per `CLAUDE.md`, not the download engine).
 
 ## Later — Web UI
 
-Explicitly deferred until the phases above reach feature parity with a real
-NZB downloader. When it starts, it should be a **separate crate** consuming
-`penne` as a library (same relationship `upapasta` has with `pesto`), not
-code embedded in this crate. No design work on it belongs in this file yet.
+Started ahead of full CLI feature parity, as a **separate crate**,
+`crates/sugo`, consuming `penne` as a library (same relationship
+`upapasta` has with `pesto`) — exactly as planned here. See
+`crates/sugo/README.md` and its own `CHANGELOG.md` for what's
+implemented; no design work on it belongs in this file.

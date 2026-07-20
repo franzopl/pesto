@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Queue - sugo{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Add NZB</h2>
+  <form class="upload" hx-post="/dashboard/upload" hx-target="#queue-list" hx-swap="outerHTML" hx-encoding="multipart/form-data">
+    <input type="file" name="file" accept=".nzb" required>
+    <button type="submit">Add</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Queue{% if paused %} (paused){% endif %}</h2>
+  {% include "partials/queue_list.html" %}
+</div>
+{% endblock %}
