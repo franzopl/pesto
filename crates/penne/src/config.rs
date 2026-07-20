@@ -8,11 +8,40 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use pesto::config::{ServerEntry, DEFAULT_RETRIES, DEFAULT_RETRY_DELAY};
 use serde::{Deserialize, Serialize};
 
 /// Default number of parallel download connections.
 pub const DEFAULT_CONNECTIONS: usize = 8;
+
+/// How much post-processing `penne download` does after fetching a
+/// release, mirroring `sabnzbd`'s per-category "Download" / "+Repair" /
+/// "+Unpack" / "+Delete" processing levels — each level does everything
+/// the previous one does, plus one more step. Declared in that order so
+/// `PartialOrd`/`Ord` (derived) give the cumulative `mode >= X` checks the
+/// CLI gates each step behind. Lives here (rather than in the `penne`
+/// binary) so [`RawConfig::mode`] can set a config-file default, read the
+/// same as any other config field, and overridden per run by `--mode`.
+#[derive(
+    ValueEnum, Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessingMode {
+    /// Fetch and assemble only. No PAR2 verify/repair, no extraction.
+    Download,
+    /// Download, plus PAR2 verify/repair when recovery data is present.
+    /// No extraction.
+    Repair,
+    /// Repair, plus extracting any .rar/.7z/.zip found. The built-in
+    /// default when neither `--mode` nor the config file's `mode` is set.
+    #[default]
+    Unpack,
+    /// Unpack, plus deleting the compressed volumes and PAR2 recovery
+    /// data once extraction succeeds, leaving only the release's other
+    /// files.
+    Delete,
+}
 
 /// Directory containing the default config file (its parent), when one can
 /// be determined for this OS/environment.
@@ -79,6 +108,10 @@ pub struct Config {
     /// [`crate::download::download_queue`]). Each server's own
     /// `retry_delay` governs the pause between attempts.
     pub retries: u32,
+    /// Default processing mode for `penne download` when `--mode` isn't
+    /// given on the command line. Falls back to [`ProcessingMode::Unpack`]
+    /// when the config file doesn't set `mode` either.
+    pub mode: ProcessingMode,
 }
 
 /// One priority tier: one or more servers sharing the same priority,
@@ -124,6 +157,23 @@ pub struct RawServer {
     pub connections: Option<usize>,
     /// Seconds to wait between retry attempts against this server.
     pub retry_delay: Option<u64>,
+    /// Short identifier for this entry, used to pick it out with
+    /// `--server <NAME>` for a single run instead of drawing on every
+    /// configured server — see [`RawConfig::select`]. Purely a CLI
+    /// selector: unrelated to failover order or `group` pooling, both of
+    /// which stay config-file-order based regardless of what's selected.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Exclude this entry from the default server set used when
+    /// `--server` isn't given at all — it only participates when named
+    /// explicitly via `--server <NAME>`. For accounts with a limited quota
+    /// or block of traffic that shouldn't be drawn on automatically as a
+    /// silent fallback, only on purpose. Requires `name` to be set,
+    /// otherwise there would be no way to ever select it. Default: false
+    /// (the entry is part of the default set, as every `[[servers]]` entry
+    /// was before this field existed).
+    #[serde(default)]
+    pub explicit_only: bool,
     /// Pool this server with the *adjacent* `[[servers]]` entries sharing
     /// the same `group` value: instead of one strictly finishing its pass
     /// before the next starts, every member's connections are drained
@@ -150,6 +200,10 @@ pub struct RawConfig {
     pub connections: Option<usize>,
     /// Retry attempts per segment per server before failing over.
     pub retries: Option<u32>,
+    /// Default processing mode ("download", "repair", "unpack", or
+    /// "delete") for `penne download` when `--mode` isn't given on the
+    /// command line. Falls back to [`ProcessingMode::Unpack`] when unset.
+    pub mode: Option<ProcessingMode>,
 }
 
 impl RawConfig {
@@ -158,11 +212,57 @@ impl RawConfig {
         toml::from_str(contents).context("parsing penne config TOML")
     }
 
+    /// Keep only the `[[servers]]` entries whose `name` matches one of
+    /// `names`, in their original config-file order (selection doesn't
+    /// reorder — see `RawServer::name`'s doc comment for why). Passing an
+    /// empty slice selects the default set instead: every server *except*
+    /// the ones marked `explicit_only` (see that field's doc comment) —
+    /// unmarked servers behave exactly as before this selector existed.
+    ///
+    /// Errors if a requested name doesn't match any configured server,
+    /// listing the names that do exist so the typo is obvious. An
+    /// `explicit_only` entry named directly is included without error —
+    /// that's the whole point of naming it.
+    pub fn select(mut self, names: &[String]) -> Result<Self> {
+        if names.is_empty() {
+            self.servers.retain(|s| !s.explicit_only);
+            return Ok(self);
+        }
+        let available: Vec<&str> = self
+            .servers
+            .iter()
+            .filter_map(|s| s.name.as_deref())
+            .collect();
+        for requested in names {
+            if !available.contains(&requested.as_str()) {
+                let known = if available.is_empty() {
+                    "none of its [[servers]] entries have a `name` set".to_string()
+                } else {
+                    format!("configured names: {}", available.join(", "))
+                };
+                anyhow::bail!("no [[servers]] entry named \"{requested}\" in this config; {known}");
+            }
+        }
+        self.servers.retain(|s| {
+            s.name
+                .as_deref()
+                .is_some_and(|n| names.iter().any(|req| req == n))
+        });
+        Ok(self)
+    }
+
     /// Resolve into a fully-defaulted [`Config`].
     ///
     /// `download_dir` falls back to the current directory when neither the
     /// config file nor a CLI override provides one.
     pub fn resolve(self) -> Result<Config> {
+        anyhow::ensure!(
+            self.servers
+                .iter()
+                .all(|s| !s.explicit_only || s.name.is_some()),
+            "a [[servers]] entry has `explicit_only = true` but no `name`; \
+             it would then never be selectable via --server, so give it one"
+        );
         let default_connections = self.connections.unwrap_or(DEFAULT_CONNECTIONS);
 
         // Clusters *adjacent* `[[servers]]` entries sharing a `group` value
@@ -203,6 +303,7 @@ impl RawConfig {
             download_dir: self.download_dir.unwrap_or_else(|| PathBuf::from(".")),
             connections: default_connections,
             retries: self.retries.unwrap_or(DEFAULT_RETRIES),
+            mode: self.mode.unwrap_or_default(),
         })
     }
 }
@@ -237,6 +338,21 @@ mod tests {
         let config = raw.resolve().unwrap();
         assert_eq!(config.download_dir, PathBuf::from("."));
         assert!(config.server_tiers.is_empty());
+    }
+
+    #[test]
+    fn mode_defaults_to_unpack_when_unset() {
+        let config = RawConfig::parse("").unwrap().resolve().unwrap();
+        assert_eq!(config.mode, ProcessingMode::Unpack);
+    }
+
+    #[test]
+    fn mode_is_read_from_the_config_file() {
+        let config = RawConfig::parse("mode = \"repair\"")
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert_eq!(config.mode, ProcessingMode::Repair);
     }
 
     #[test]
@@ -338,6 +454,107 @@ mod tests {
         let config = RawConfig::parse(toml).unwrap().resolve().unwrap();
         assert_eq!(config.server_tiers.len(), 2);
         assert!(config.server_tiers.iter().all(|t| t.members.len() == 1));
+    }
+
+    #[test]
+    fn select_with_no_names_keeps_every_server() {
+        let toml = r#"
+            [[servers]]
+            host = "a.example.com"
+            name = "a"
+
+            [[servers]]
+            host = "b.example.com"
+            name = "b"
+        "#;
+        let raw = RawConfig::parse(toml).unwrap().select(&[]).unwrap();
+        assert_eq!(raw.servers.len(), 2);
+    }
+
+    #[test]
+    fn select_keeps_only_the_named_entries_in_config_order() {
+        let toml = r#"
+            [[servers]]
+            host = "a.example.com"
+            name = "a"
+
+            [[servers]]
+            host = "b.example.com"
+            name = "b"
+
+            [[servers]]
+            host = "c.example.com"
+            name = "c"
+        "#;
+        let raw = RawConfig::parse(toml)
+            .unwrap()
+            .select(&["c".to_string(), "a".to_string()])
+            .unwrap();
+        assert_eq!(raw.servers.len(), 2);
+        assert_eq!(raw.servers[0].host, "a.example.com");
+        assert_eq!(raw.servers[1].host, "c.example.com");
+    }
+
+    #[test]
+    fn select_errors_on_an_unknown_name() {
+        let toml = r#"
+            [[servers]]
+            host = "a.example.com"
+            name = "a"
+        "#;
+        let err = RawConfig::parse(toml)
+            .unwrap()
+            .select(&["nope".to_string()])
+            .unwrap_err();
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn explicit_only_server_is_excluded_from_the_default_set() {
+        let toml = r#"
+            [[servers]]
+            name = "main"
+            host = "main.example.com"
+
+            [[servers]]
+            name = "block"
+            host = "block.example.com"
+            explicit_only = true
+        "#;
+        let raw = RawConfig::parse(toml).unwrap().select(&[]).unwrap();
+        assert_eq!(raw.servers.len(), 1);
+        assert_eq!(raw.servers[0].host, "main.example.com");
+    }
+
+    #[test]
+    fn explicit_only_server_is_included_when_named_directly() {
+        let toml = r#"
+            [[servers]]
+            name = "main"
+            host = "main.example.com"
+
+            [[servers]]
+            name = "block"
+            host = "block.example.com"
+            explicit_only = true
+        "#;
+        let raw = RawConfig::parse(toml)
+            .unwrap()
+            .select(&["block".to_string()])
+            .unwrap();
+        assert_eq!(raw.servers.len(), 1);
+        assert_eq!(raw.servers[0].host, "block.example.com");
+    }
+
+    #[test]
+    fn resolve_rejects_an_explicit_only_server_without_a_name() {
+        let toml = r#"
+            [[servers]]
+            host = "block.example.com"
+            explicit_only = true
+        "#;
+        let err = RawConfig::parse(toml).unwrap().resolve().unwrap_err();
+        assert!(err.to_string().contains("explicit_only"));
     }
 
     #[cfg(not(windows))]
