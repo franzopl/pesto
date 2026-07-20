@@ -243,11 +243,19 @@ async fn download(
         }
     }
 
-    println!(
-        "verifying with PAR2 (re-hashing downloaded files against recovery data — \
-         this can take a while for large releases)..."
-    );
-    match penne::repair::verify_and_repair(&dest_dir, &outcome.assembled).await? {
+    println!("checking PAR2 recovery data...");
+    let (verify_tx, verify_rx) = penne::repair::channel();
+    let verify_progress_task = penne::ui::verify::spawn_renderer(verify_rx);
+    let repair_outcome =
+        penne::repair::verify_and_repair(&dest_dir, &outcome.assembled, Some(verify_tx)).await?;
+    // `true` here means a real, byte-exact verify pass ran (the quick-check
+    // couldn't prove the release intact from already-known CRC-32s alone),
+    // so at least one progress line was drawn during it already.
+    let ran_full_verify = verify_progress_task.await.unwrap_or(false);
+    match repair_outcome {
+        penne::repair::RepairOutcome::Ok if !ran_full_verify => {
+            println!("  quick-check passed from already-known checksums; full re-hash skipped")
+        }
         penne::repair::RepairOutcome::Ok => println!("  PAR2: all files verified intact"),
         penne::repair::RepairOutcome::Repaired(plan) => {
             for f in &plan.repaired_files {

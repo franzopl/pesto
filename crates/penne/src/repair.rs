@@ -33,9 +33,28 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use pesto::par2::recovery_set::RecoverySet;
 use pesto::par2::repair::{repair as par2_repair, RepairOptions, RepairPlan};
-use pesto::par2::verify::{verify as par2_verify, VerifyReport};
+use pesto::par2::verify::{verify_with_progress as par2_verify_with_progress, VerifyReport};
 
 use crate::assemble::AssembleOutcome;
+
+/// One slice (or a whole missing file) the full PAR2 verify pass has just
+/// accounted for, for a live progress bar — mirrors [`crate::check::CheckProgress`].
+/// Never sent when [`quick_check_all`] skips the full pass entirely, since
+/// then there's nothing to report progress on.
+#[derive(Debug, Clone)]
+pub struct VerifyProgress {
+    pub file_name: String,
+    pub slices_done: usize,
+    pub total_slices: usize,
+}
+
+pub type VerifyProgressSender = tokio::sync::mpsc::UnboundedSender<VerifyProgress>;
+pub type VerifyProgressReceiver = tokio::sync::mpsc::UnboundedReceiver<VerifyProgress>;
+
+/// Create a fresh verify-progress channel.
+pub fn channel() -> (VerifyProgressSender, VerifyProgressReceiver) {
+    tokio::sync::mpsc::unbounded_channel()
+}
 
 /// Outcome of checking a downloaded release against its PAR2 recovery data.
 #[derive(Debug)]
@@ -90,10 +109,11 @@ pub fn find_par2_index(dir: &Path) -> Result<Option<PathBuf>> {
 pub async fn verify_and_repair(
     dir: &Path,
     assembled: &HashMap<String, AssembleOutcome>,
+    progress: Option<VerifyProgressSender>,
 ) -> Result<RepairOutcome> {
     let dir = dir.to_path_buf();
     let assembled = assembled.clone();
-    tokio::task::spawn_blocking(move || verify_and_repair_blocking(&dir, &assembled))
+    tokio::task::spawn_blocking(move || verify_and_repair_blocking(&dir, &assembled, progress))
         .await
         .context("PAR2 verify/repair task panicked")?
 }
@@ -101,6 +121,7 @@ pub async fn verify_and_repair(
 fn verify_and_repair_blocking(
     dir: &Path,
     assembled: &HashMap<String, AssembleOutcome>,
+    progress: Option<VerifyProgressSender>,
 ) -> Result<RepairOutcome> {
     let Some(index) = find_par2_index(dir)? else {
         return Ok(RepairOutcome::NoRecoveryData);
@@ -113,8 +134,16 @@ fn verify_and_repair_blocking(
         return Ok(RepairOutcome::Ok);
     }
 
-    let report = par2_verify(&set, dir)
-        .with_context(|| format!("verifying files under {}", dir.display()))?;
+    let report = par2_verify_with_progress(&set, dir, |p| {
+        if let Some(tx) = &progress {
+            let _ = tx.send(VerifyProgress {
+                file_name: p.file_name.to_string(),
+                slices_done: p.slices_done,
+                total_slices: p.total_slices,
+            });
+        }
+    })
+    .with_context(|| format!("verifying files under {}", dir.display()))?;
 
     if report.is_ok() {
         return Ok(RepairOutcome::Ok);

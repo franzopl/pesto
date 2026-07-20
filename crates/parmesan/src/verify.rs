@@ -83,20 +83,53 @@ impl VerifyReport {
 
 /// Verify every file in `set` against copies found under `base_dir`.
 pub fn verify(set: &RecoverySet, base_dir: &Path) -> Result<VerifyReport> {
+    verify_with_progress(set, base_dir, |_| {})
+}
+
+/// One slice (or an entire missing file, accounted for in one step) that
+/// [`verify_with_progress`] has just finished checking. `slices_done` and
+/// `total_slices` count across the *whole* recovery set, not just the
+/// current file, so callers can drive a single overall progress bar
+/// straight off this value without tracking per-file totals themselves.
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyProgress<'a> {
+    pub file_name: &'a str,
+    pub slices_done: usize,
+    pub total_slices: usize,
+}
+
+/// Same as [`verify`], but calls `on_progress` after every slice is read
+/// and checksummed (a missing file's slices are accounted for in one step,
+/// since there's nothing to read) — the only way to observe liveness
+/// during what can otherwise be a long, silent re-hash of every file in a
+/// large release.
+pub fn verify_with_progress(
+    set: &RecoverySet,
+    base_dir: &Path,
+    mut on_progress: impl FnMut(VerifyProgress),
+) -> Result<VerifyReport> {
     let slice_size = set.slice_size as usize;
+    let total_slices: usize = set.files.iter().map(|f| f.slice_checksums.len()).sum();
+    let mut slices_done = 0usize;
     let mut files = Vec::with_capacity(set.files.len());
 
     for entry in &set.files {
         let path = base_dir.join(&entry.name);
-        let total_slices = entry.slice_checksums.len();
+        let total_file_slices = entry.slice_checksums.len();
 
         if !path.is_file() {
+            slices_done += total_file_slices;
+            on_progress(VerifyProgress {
+                file_name: &entry.name,
+                slices_done,
+                total_slices,
+            });
             files.push(FileReport {
                 name: entry.name.clone(),
                 status: FileStatus::Missing,
-                total_slices,
-                bad_slices: total_slices,
-                bad_slice_indices: (0..total_slices).collect(),
+                total_slices: total_file_slices,
+                bad_slices: total_file_slices,
+                bad_slice_indices: (0..total_file_slices).collect(),
             });
             continue;
         }
@@ -112,6 +145,12 @@ pub fn verify(set: &RecoverySet, base_dir: &Path) -> Result<VerifyReport> {
             if read == 0 || got.md5 != expected.md5 || got.crc32 != expected.crc32 {
                 bad_slice_indices.push(i);
             }
+            slices_done += 1;
+            on_progress(VerifyProgress {
+                file_name: &entry.name,
+                slices_done,
+                total_slices,
+            });
         }
 
         files.push(FileReport {
@@ -121,7 +160,7 @@ pub fn verify(set: &RecoverySet, base_dir: &Path) -> Result<VerifyReport> {
             } else {
                 FileStatus::Damaged
             },
-            total_slices,
+            total_slices: total_file_slices,
             bad_slices: bad_slice_indices.len(),
             bad_slice_indices,
         });
