@@ -3,23 +3,25 @@
 {% block content %}
 <div class="card">
   <h2>History</h2>
-  <table>
-    <thead><tr><th>Name</th><th>Status</th><th>Size</th></tr></thead>
-    <tbody>
-      {% for row in history %}
-      <tr>
-        <td>{{ row.name }}</td>
-        <td>
-          <span class="status {{ row.status_class }}">{{ row.status }}</span>
-          {% if !row.message.is_empty() %}&mdash; {{ row.message }}{% endif %}
-        </td>
-        <td>{{ row.size }}</td>
-      </tr>
-      {% endfor %}
-      {% if history.is_empty() %}
-      <tr><td colspan="3">No completed jobs yet.</td></tr>
-      {% endif %}
-    </tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Status</th><th>Size</th></tr></thead>
+      <tbody>
+        {% for row in history %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td>
+            <span class="status {{ row.status_class }}">{{ row.status }}</span>
+            {% if !row.message.is_empty() %}&mdash; {{ row.message }}{% endif %}
+          </td>
+          <td>{{ row.size }}</td>
+        </tr>
+        {% endfor %}
+        {% if history.is_empty() %}
+        <tr><td colspan="3">No completed jobs yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endblock %}

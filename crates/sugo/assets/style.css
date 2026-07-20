@@ -75,6 +75,10 @@ h2 {
     margin: 0.5rem 0;
 }
 
+/* Lets a wide table scroll horizontally within its own card instead of
+   overflowing the page on a narrow screen. */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
 th { color: var(--muted); font-weight: 600; }
@@ -169,6 +173,7 @@ form.upload { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; 
 }
 .server-row:last-of-type { border-bottom: none; }
 .server-row input.narrow { width: 5.5rem; }
+.server-row-actions { display: flex; gap: 0.4rem; }
 label.checkbox { display: flex; align-items: center; gap: 0.3rem; font-size: 0.85rem; }
 
 button, input[type="submit"] {
@@ -224,3 +229,49 @@ code {
 }
 .toast-error { background: var(--danger); }
 .toast-out { opacity: 0; transform: translateY(8px); }
+
+/* Mobile */
+@media (max-width: 640px) {
+    main { padding: 0.75rem; }
+
+    header { padding: 0.6rem 0.9rem; flex-wrap: wrap; row-gap: 0.4rem; }
+    header h1 { font-size: 1rem; }
+    nav { display: flex; margin-left: -0.6rem; }
+    nav a { margin-left: 0.6rem; font-size: 0.82rem; }
+
+    .card { padding: 0.85rem; margin-bottom: 0.75rem; }
+    h2 { font-size: 0.95rem; }
+
+    /* Every form built to sit inline on desktop stacks full-width here —
+       upload, per-server edit rows, the toast container. */
+    form.upload,
+    .server-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    form.upload select,
+    form.upload input[type="file"],
+    form.upload button,
+    .server-row input,
+    .server-row select,
+    .server-row label.checkbox {
+        width: 100%;
+    }
+    .server-row input.narrow { width: 100%; }
+    .server-row-actions button { flex: 1; }
+
+    /* iOS Safari zooms in on focusing an input whose font-size is under
+       16px — this avoids that jarring jump without changing desktop
+       sizing (harmless once .server-row's inputs are already full width
+       above). */
+    input[type="text"], input[type="password"], select { font-size: 16px; }
+
+    /* Comfortable tap targets. */
+    button, input[type="submit"] { padding: 0.6rem 1rem; }
+
+    .job-card { padding: 0.65rem 0.8rem; }
+    .job-meta { gap: 0.5rem; }
+
+    #toast-container { left: 0.75rem; right: 0.75rem; bottom: 0.75rem; }
+    .toast { max-width: none; }
+}

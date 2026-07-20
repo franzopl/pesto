@@ -11,8 +11,10 @@
     <input type="text" name="username" value="{{ s.username }}" placeholder="username">
     <input type="password" name="password" placeholder="(unchanged)">
     <input type="text" name="connections" value="{{ s.connections }}" placeholder="conns" class="narrow">
-    <button type="submit">Save</button>
-    <button type="submit" formaction="/settings/servers/{{ s.index }}/delete" class="danger">Delete</button>
+    <div class="server-row-actions">
+      <button type="submit">Save</button>
+      <button type="submit" formaction="/settings/servers/{{ s.index }}/delete" class="danger">Delete</button>
+    </div>
   </form>
   {% endfor %}
   {% if servers.is_empty() %}
@@ -53,23 +55,25 @@
 
 <div class="card">
   <h2>Categories</h2>
-  <table>
-    <thead><tr><th>Name</th><th>Directory</th><th></th></tr></thead>
-    <tbody>
-      <tr><td>*</td><td><em>default</em></td><td></td></tr>
-      {% for c in categories %}
-      <tr>
-        <td>{{ c.name }}</td>
-        <td>{% if c.dir.is_empty() %}<em>default</em>{% else %}{{ c.dir }}{% endif %}</td>
-        <td>
-          <form method="post" action="/settings/categories/{{ c.index }}/delete">
-            <button type="submit" class="danger">Delete</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Directory</th><th></th></tr></thead>
+      <tbody>
+        <tr><td>*</td><td><em>default</em></td><td></td></tr>
+        {% for c in categories %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td>{% if c.dir.is_empty() %}<em>default</em>{% else %}{{ c.dir }}{% endif %}</td>
+          <td>
+            <form method="post" action="/settings/categories/{{ c.index }}/delete">
+              <button type="submit" class="danger">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
   <form method="post" action="/settings/categories">
     <p><input type="text" name="name" placeholder="movies" required></p>
     <p><input type="text" name="dir" placeholder="/downloads/movies (blank = default)"></p>
