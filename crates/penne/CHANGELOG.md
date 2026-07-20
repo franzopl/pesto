@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`HEAD`/`BODY`-based availability checks (`--stat=head`/`--stat=body`),
+  alongside the existing `STAT` check, plus `--sample <N>` to bound the
+  cost of a `body` check.** Prompted by a real report: a provider's `STAT`
+  index claimed 99.99% of a release was present, but every actual download
+  attempt failed. `pesto::nntp::Connection::head`/`penne::client::
+  DownloadClient::head` (RFC 3977 §6.2.2) fetch just an article's headers —
+  still far cheaper than a real download, and on most servers reads from
+  the same storage `BODY` does. Turned out *not* to be the case for the
+  reporting provider (`head` still said 100% present; only a real `body`
+  check, matching the actual download failure, caught it) — a useful,
+  if humbling, finding, and the reason `CheckMethod::Body` exists as its
+  own tier rather than assuming `Head` always suffices. `--sample <N>`
+  (first `N` segment(s) of each file, `--stat` only) keeps a `body` check's
+  real bandwidth cost bounded on a large release — deliberately implemented
+  as reading every sampled request to completion and closing cleanly,
+  never an abandoned mid-transfer read (cheaper still, but a pattern real
+  providers' anti-abuse systems watch for). `penne::check::CheckMethod`
+  (`Stat` still the default, `Head`, `Body`) lets `--stat` pick which to
+  trust; `check_availability`'s report is honest about each method's real
+  wire cost instead of always saying "STAT only".
 - **Named servers + `--server` selector.** A `[[servers]]` entry can carry a
   `name`; `penne download --server <NAME>` (repeatable) restricts a single
   run to just the named entries instead of drawing on every configured

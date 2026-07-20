@@ -40,6 +40,13 @@ impl DownloadClient {
         self.conn.body(message_id).await
     }
 
+    /// Fetch just the headers of a single article, via `HEAD` (RFC 3977
+    /// §6.2.2) — see [`pesto::nntp::Connection::head`] for why this catches
+    /// what a bare `STAT` existence check can miss.
+    pub async fn head(&mut self, message_id: &str) -> Result<Option<Vec<u8>>> {
+        self.conn.head(message_id).await
+    }
+
     /// Check whether an article is present on this server via `STAT` (RFC
     /// 3977 §6.2.4) — a small existence check, not an article transfer. Used
     /// by [`crate::check::check_queue`] to verify a release is still fully

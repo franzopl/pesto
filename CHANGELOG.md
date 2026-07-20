@@ -8,6 +8,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added (penne)
+- **`HEAD`/`BODY`-based availability checks** (`--stat=head`/`--stat=body`,
+  alongside the existing `STAT`-only `--stat`) **plus `--sample <N>`** to
+  bound a `body` check's real bandwidth cost to the first `N` segment(s)
+  per file: `pesto::nntp::Connection::head` usually (not always — see the
+  `penne` changelog) reads from the same article storage `BODY` does,
+  catching a provider whose `STAT` index says an article is present when
+  it actually isn't — a real report during development (99.99% "present"
+  via `STAT`, 0% actually downloadable, and in that specific case `HEAD`
+  agreed with `STAT` — only a real `BODY` check caught it).
 - **Named/selectable `[[servers]]` entries**: an entry can carry a `name`
   for `--server <NAME>` (repeatable) to run `penne download`/`--stat`
   against one or more specific configured providers instead of always

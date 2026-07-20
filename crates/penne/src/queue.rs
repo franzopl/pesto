@@ -59,6 +59,33 @@ pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
     DownloadQueue { files }
 }
 
+/// A reduced copy of `queue` keeping only the first `per_file` segment(s)
+/// (in existing part order) of each file — a representative but cheap spot
+/// check instead of verifying every segment. Most useful paired with
+/// `penne::check::CheckMethod::Body`: `BODY` reads a real article, the same
+/// cost a genuine download pays, so checking the *whole* release that way
+/// is often not worth it, but a small, honest, protocol-normal sample still
+/// catches a provider whose article storage doesn't back up what it claims
+/// (a real report: an account whose `STAT`/`HEAD` both looked fine, but
+/// every `BODY` failed).
+///
+/// `per_file` is clamped to at least `1` — sampling zero segments from a
+/// file would silently exclude it from the check entirely, which is never
+/// what "check a sample of the release" should mean.
+pub fn sample(queue: &DownloadQueue, per_file: usize) -> DownloadQueue {
+    let per_file = per_file.max(1);
+    DownloadQueue {
+        files: queue
+            .files
+            .iter()
+            .map(|f| QueuedFile {
+                name: f.name.clone(),
+                segments: f.segments.iter().take(per_file).cloned().collect(),
+            })
+            .collect(),
+    }
+}
+
 /// Neutralize a `.nzb`-provided file name so it can never split into a
 /// bogus nested directory or escape the destination directory once
 /// [`assemble::StreamingAssembly::new`](crate::assemble::StreamingAssembly::new)
@@ -145,6 +172,45 @@ mod tests {
         assert_eq!(queue.files.len(), 1);
         assert!(!queue.files[0].name.contains('/'));
         assert_eq!(queue.files[0].name, "[01_14] - \"real.mkv\"");
+    }
+
+    #[test]
+    fn sample_keeps_only_the_first_n_segments_per_file() {
+        let groups = vec!["alt.test".to_string()];
+        let segments = vec![
+            seg("a.bin", 1, 3, "<a1@x>"),
+            seg("a.bin", 2, 3, "<a2@x>"),
+            seg("a.bin", 3, 3, "<a3@x>"),
+            seg("b.bin", 1, 1, "<b1@x>"),
+        ];
+        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let parsed = pesto::nzb::parse(&xml).unwrap();
+        let queue = build(&parsed);
+
+        let sampled = sample(&queue, 2);
+        assert_eq!(sampled.files.len(), 2, "every file is still represented");
+        assert_eq!(sampled.files[0].name, "a.bin");
+        assert_eq!(sampled.files[0].segments.len(), 2);
+        assert_eq!(sampled.files[0].segments[0].message_id, "<a1@x>");
+        assert_eq!(sampled.files[0].segments[1].message_id, "<a2@x>");
+        // b.bin only has one segment to begin with; sampling 2 must not panic.
+        assert_eq!(sampled.files[1].segments.len(), 1);
+    }
+
+    #[test]
+    fn sample_of_zero_is_clamped_to_one_segment_per_file() {
+        let groups = vec!["alt.test".to_string()];
+        let segments = vec![seg("a.bin", 1, 2, "<a1@x>"), seg("a.bin", 2, 2, "<a2@x>")];
+        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let parsed = pesto::nzb::parse(&xml).unwrap();
+        let queue = build(&parsed);
+
+        let sampled = sample(&queue, 0);
+        assert_eq!(
+            sampled.files[0].segments.len(),
+            1,
+            "sampling 0 must not silently drop the file entirely"
+        );
     }
 
     #[test]

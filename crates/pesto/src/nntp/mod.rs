@@ -481,6 +481,30 @@ impl Connection {
         }
     }
 
+    /// Fetch just the headers of an article by Message-ID, using the `HEAD`
+    /// command (RFC 3977 §6.2.2) — much cheaper than [`Self::body`] since
+    /// only the header block is transferred, not the (often much larger)
+    /// article body. Unlike [`Self::stat`] (a bare existence check against
+    /// the server's index), `HEAD` reads from the same underlying article
+    /// storage `BODY` does, so it can catch a server whose `STAT` index has
+    /// drifted out of sync with what it can actually deliver — observed in
+    /// the wild: a provider reporting `223` (present) via `STAT` for an
+    /// article its `BODY`/`HEAD` then reports `430` (no such article) for.
+    ///
+    /// The message-id may be passed with or without angle brackets.
+    ///
+    /// Returns `Ok(None)` on `430`; any other non-`221` code is returned as
+    /// an error.
+    pub async fn head(&mut self, message_id: &str) -> Result<Option<Vec<u8>>> {
+        let id = message_id.trim_start_matches('<').trim_end_matches('>');
+        let resp = self.command(&format!("HEAD <{id}>")).await?;
+        match resp.code {
+            221 => Ok(Some(self.read_dot_terminated_block().await?)),
+            430 => Ok(None),
+            _ => bail!("unexpected HEAD response: {} {}", resp.code, resp.text),
+        }
+    }
+
     /// Read a multi-line, dot-terminated block (as returned by `BODY`/`ARTICLE`)
     /// and undo NNTP dot-stuffing (RFC 3977 §3.1.1).
     ///
@@ -1210,6 +1234,54 @@ mod tests {
     async fn body_returns_none_on_430() {
         let (mut conn, _server) = mock_conn(b"430 No such article\r\n").await;
         assert!(conn.body("missing@host").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn head_returns_header_block_on_221() {
+        let (mut conn, _server) = mock_conn(
+            b"221 0 <mid@host> headers follow\r\n\
+              From: poster@example.com\r\n\
+              Subject: test\r\n\
+              .\r\n",
+        )
+        .await;
+        let headers = conn.head("mid@host").await.unwrap().unwrap();
+        assert_eq!(
+            headers,
+            b"From: poster@example.com\r\nSubject: test\r\n".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn head_returns_none_on_430() {
+        let (mut conn, _server) = mock_conn(b"430 No such article\r\n").await;
+        assert!(conn.head("missing@host").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn head_unexpected_code_returns_error() {
+        let (mut conn, _server) = mock_conn(b"503 Program fault\r\n").await;
+        let err = conn.head("mid@host").await.unwrap_err();
+        assert!(err.to_string().contains("unexpected HEAD response"));
+    }
+
+    #[tokio::test]
+    async fn head_accepts_message_id_with_angle_brackets() {
+        let (mut conn, mut server) =
+            mock_conn(b"221 0 <mid@host> headers follow\r\nSubject: x\r\n.\r\n").await;
+        let headers = conn.head("<mid@host>").await.unwrap().unwrap();
+        assert_eq!(headers, b"Subject: x\r\n".to_vec());
+
+        let mut buf = vec![0u8; 64];
+        let n = tokio::io::AsyncReadExt::read(&mut server, &mut buf)
+            .await
+            .unwrap();
+        let sent = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(
+            sent.contains("HEAD <mid@host>"),
+            "unexpected command: {sent}"
+        );
+        assert!(!sent.contains("<<"), "double brackets in: {sent}");
     }
 
     #[tokio::test]

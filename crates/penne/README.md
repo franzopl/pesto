@@ -289,26 +289,66 @@ other tools) without typing `--mode` on every run.
 
 ### `--stat`: check availability without downloading
 
-`penne download <nzb> --stat` runs only a completeness check: it `STAT`s
-(RFC 3977 §6.2.4) every segment against the configured server(s) — a small
-existence check, not an article transfer — and reports which files are
-complete and which are missing segments, without fetching, decoding,
-writing, or extracting anything. Exits non-zero if anything is missing, so
-it's useful to script ahead of a real download (e.g. skip a release that's
-already expired off the indexer's server). `STAT` commands are pipelined
-(several queued and sent per round trip, not one-request-one-response) on
-top of `connections`' usual concurrency, so a check's wall time scales with
-round-trip latency far less than a naive implementation would. A live
-progress bar (segments checked, not bytes/speed — nothing is ever fetched)
-tracks the check on an interactive terminal, same as `download`'s own
-panel. A concise summary
-closes the run, leading with the percentage of articles actually present —
-the number that matters most at a glance — plus how many bytes the check
-itself used (KiB/MiB, not the release's size, proof of just how cheap
-`STAT` is next to a real download):
+`penne download <nzb> --stat[=<stat|head|body>]` runs only a completeness
+check against the configured server(s), without fetching, decoding,
+writing, or extracting anything, and exits non-zero if anything is
+missing — useful to script ahead of a real download (e.g. skip a release
+that's already expired off the indexer's server). Three methods, from
+cheapest-but-least-trustworthy to most expensive-but-certain:
+
+- **`stat`** (the default — `--stat` alone means this): `STAT` (RFC 3977
+  §6.2.4), a bare existence check against the server's *index*. By far the
+  cheapest, but the index can drift out of sync with what the server can
+  actually deliver — seen in the wild: a provider reporting 99.99% present
+  via `STAT`, then failing to download a single byte of the same release.
+- **`head`**: `HEAD` (RFC 3977 §6.2.2) — still cheap (a few hundred bytes
+  per article, not the full body), and on most servers reads from the same
+  underlying article storage `BODY` does, so it usually catches the drift
+  described above. Not guaranteed, though: some providers apparently serve
+  `HEAD` from a more complete path than `BODY` (observed in the wild — a
+  provider where `head` still reported 100% present for a release whose
+  `body` check, and real downloads, failed completely). Still a reasonable
+  default upgrade over plain `stat`, just not a substitute for `body` when
+  you need certainty.
+- **`body`**: a full, real `BODY` fetch, discarded immediately (never
+  decoded, written, or cached) — maximum certainty, the same real bandwidth
+  cost as an actual download of the same segments. Pair with `--sample`
+  (below) to keep that cost bounded on a large release. Only `stat`
+  pipelines several requests per round trip; `head`/`body` don't (pipelining
+  buys the most when a round trip carries almost no payload, which stops
+  being true once real bytes are involved).
+
+#### `--sample <N>`: check a subset instead of every segment
+
+Only meaningful alongside `--stat` (errors otherwise — a real download
+always fetches every segment). Limits the check to the first `N` segment(s)
+of *each file* instead of the whole release — most valuable with
+`--stat=body`, whose per-segment cost is a real article fetch, so checking
+a large release that way in full often isn't worth it. `--sample 1` (one
+segment per file) is usually enough to catch a systemic problem — a
+provider that can't actually deliver bodies tends to fail *every* segment,
+not a scattered few — while keeping the check's bandwidth down to roughly
+`file count` articles instead of `segment count`.
+
+Deliberately **not** implemented as a partial/truncated `BODY` read
+(requesting an article and disconnecting before reading its response) —
+that would be cheaper still, but abandoning a connection mid-transfer is
+the kind of pattern real providers' anti-abuse systems watch for, and it
+forces a reconnect (fresh TCP+TLS+auth) for every single present segment.
+`--sample` stays entirely inside normal protocol behavior — every request
+gets read to completion and every connection closes cleanly — while still
+cutting the checked segment count by orders of magnitude on a typical
+multi-hundred-segment-per-file release.
+
+A live progress bar (segments checked, not bytes/speed — `stat`/`head`
+never fetch a body) tracks the check on an interactive terminal, same as
+`download`'s own panel. A concise summary closes the run, leading with the
+percentage of articles actually present — the number that matters most at
+a glance — plus how many bytes the check itself used, honestly reflecting
+each method's real cost:
 
 ```
-checking 6968 segment(s) across 24 file(s)...
+checking 6968 segment(s) across 24 file(s) via STAT...
   complete: movie.mkv (200/200 segments)
   ...
 

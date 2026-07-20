@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use penne::check::CheckMethod;
 use penne::config::ProcessingMode;
 
 #[derive(Parser)]
@@ -63,12 +64,32 @@ enum Command {
         #[arg(long)]
         password: Option<String>,
         /// Only check that every segment is still present on the
-        /// configured server(s), via `STAT` (RFC 3977 §6.2.4) — no
-        /// download, decode, PAR2, or extraction. Much cheaper over the
-        /// wire than a real download, since STAT never transfers the
-        /// article body.
+        /// configured server(s) — no download, decode, PAR2, or
+        /// extraction. Three methods, from cheapest-but-least-trustworthy
+        /// to most expensive-but-certain: `stat` (the default when the
+        /// flag is given with no value — RFC 3977 §6.2.4, a bare
+        /// existence check against the server's index), `head` (RFC 3977
+        /// §6.2.2 — still cheap, but reads from the same article storage
+        /// `BODY` does, catching a provider whose `STAT` index has
+        /// drifted out of sync with what it can actually deliver), or
+        /// `body` (a full real fetch, discarded — maximum certainty, real
+        /// bandwidth cost, no different from an actual download of the
+        /// same segment).
+        #[arg(long, value_enum, value_name = "METHOD")]
+        stat: Option<Option<CheckMethod>>,
+        /// Only meaningful with `--stat`: check just the first `N`
+        /// segment(s) of each file instead of every segment in the
+        /// release. Most useful with `--stat=body`, whose per-segment cost
+        /// is a real article fetch — checking a whole large release that
+        /// way often isn't worth it, but a small, protocol-normal sample
+        /// (read to completion, connection closed cleanly — never an
+        /// abandoned mid-transfer read, which real NNTP servers'
+        /// anti-abuse systems tend to flag) still catches a provider whose
+        /// article storage doesn't back up what it claims. `0` is treated
+        /// as `1` (sampling nothing would silently skip the file
+        /// entirely, never useful).
         #[arg(long)]
-        stat: bool,
+        sample: Option<usize>,
         /// Use only the named [[servers]] entry for this run (matched by
         /// its `name` field in the config file), instead of every
         /// configured server. Repeat to pick more than one; they keep
@@ -110,6 +131,7 @@ async fn main() -> Result<()> {
             out_dir,
             password,
             stat,
+            sample,
             server,
             mode,
         }) => {
@@ -118,7 +140,8 @@ async fn main() -> Result<()> {
                 out_dir,
                 cli.config.flatten(),
                 password,
-                stat,
+                stat.map(|inner| inner.unwrap_or_default()),
+                sample,
                 &server,
                 mode,
             )
@@ -146,15 +169,21 @@ fn info(nzb: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download(
     nzb: &Path,
     out_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
     password: Option<String>,
-    stat: bool,
+    stat: Option<CheckMethod>,
+    sample: Option<usize>,
     server_names: &[String],
     cli_mode: Option<ProcessingMode>,
 ) -> Result<()> {
+    anyhow::ensure!(
+        stat.is_some() || sample.is_none(),
+        "--sample only makes sense with --stat; a real download always fetches every segment"
+    );
     let parsed = penne::nzb::load(nzb)?;
     let queue = penne::queue::build(&parsed);
 
@@ -184,8 +213,19 @@ async fn download(
     );
     let mode = cli_mode.unwrap_or(config.mode);
 
-    if stat {
-        return check_availability(&queue, &config.server_tiers, config.retries).await;
+    if let Some(method) = stat {
+        let Some(per_file) = sample else {
+            return check_availability(&queue, &config.server_tiers, method, config.retries).await;
+        };
+        let sampled = penne::queue::sample(&queue, per_file);
+        let full_total: usize = queue.files.iter().map(|f| f.segments.len()).sum();
+        let sampled_total: usize = sampled.files.iter().map(|f| f.segments.len()).sum();
+        println!(
+            "sampling {sampled_total} of {full_total} segment(s) ({} per file, {} file(s))...",
+            per_file.max(1),
+            sampled.files.len()
+        );
+        return check_availability(&sampled, &config.server_tiers, method, config.retries).await;
     }
 
     let dest_dir = out_dir.unwrap_or(config.download_dir);
@@ -411,11 +451,12 @@ async fn download(
 async fn check_availability(
     queue: &penne::queue::DownloadQueue,
     tiers: &[penne::config::ServerTier],
+    method: CheckMethod,
     retries: u32,
 ) -> Result<()> {
     let total_segments: usize = queue.files.iter().map(|f| f.segments.len()).sum();
     println!(
-        "checking {} segment(s) across {} file(s)...",
+        "checking {} segment(s) across {} file(s) via {method}...",
         total_segments,
         queue.files.len()
     );
@@ -423,7 +464,7 @@ async fn check_availability(
     let (tx, rx) = penne::check::channel();
     let progress_task = penne::ui::check::spawn_renderer(rx, total_segments as u32);
 
-    let outcome = penne::check::check_queue(queue, tiers, retries, Some(tx)).await?;
+    let outcome = penne::check::check_queue(queue, tiers, method, retries, Some(tx)).await?;
     // `check_queue` owns the only sender clone, so it's already dropped by
     // the time it returns — the renderer's channel closes on its own and
     // this simply waits for its final redraw to flush.
@@ -463,8 +504,15 @@ async fn check_availability(
         "  files complete:   {complete_files}/{}",
         outcome.files.len()
     );
+    let data_used_note = match method {
+        CheckMethod::Stat => "STAT only — no article data downloaded",
+        CheckMethod::Head => "HEAD only — headers only, no article body downloaded",
+        CheckMethod::Body => {
+            "full BODY fetch — real article data downloaded, nothing written to disk"
+        }
+    };
     println!(
-        "  data used:        {} (STAT only — no article data downloaded)",
+        "  data used:        {} ({data_used_note})",
         pesto::progress::format_size(outcome.bytes_used)
     );
 

@@ -56,6 +56,7 @@ testable state.
 | 15 | `nzbget`-inspired hardening — disk-space guard before download; PAR2-redundancy-aware early health warning ahead of the expensive verify pass (rescoped from a pre-download check, which turned out infeasible — see the phase itself); `level`+`group` server pools letting equal-priority servers share one worker pool instead of one strictly following another. |
 | 16 | `sabnzbd`-inspired hardening — categorized, actionable NNTP connect/auth error messages; PAR2 quick-check deriving a file's expected CRC-32 from IFSC data alone (new `pesto::yenc::crc32_combine`), skipping a full re-hash on the common all-intact path; per-segment streaming writes, closing the memory-scaling gap Phase 14 left for single-large-file releases. |
 | 17 | Processing modes — `--mode {download,repair,unpack,delete}` gates PAR2 verify/repair, extraction, and a new post-extraction cleanup step behind `sabnzbd`-style cumulative processing levels; new `penne::cleanup::purge_archives_and_par2` deletes archive volumes and PAR2 recovery data once extraction succeeds. |
+| 18 | `HEAD`/`BODY` availability checks + `--sample` — `pesto::nntp::Connection::head` (RFC 3977 §6.2.2) and `penne::check::CheckMethod` let `--stat` pick `stat`/`head`/`body` instead of only ever trusting `STAT`'s index; `--sample <N>` bounds a `body` check to the first `N` segment(s) per file. Prompted by, and verified against, a real provider whose `STAT` (and, it turned out, `HEAD` too) reported a release fully present while every real download attempt — and a `body` check — failed. |
 
 ---
 
@@ -1252,6 +1253,83 @@ scope, belongs to `upapasta` per `CLAUDE.md`, not the download engine).
 - [x] `README.md` rewritten with a "Processing modes" section (table +
       examples) and the per-step pipeline list updated to note which
       `--mode` each step needs.
+
+---
+
+## Phase 18 — `HEAD`/`BODY` availability checks + `--sample` ✅
+
+Prompted by a real report while debugging a specific release with `sugo`:
+a provider's `--stat` (`STAT`) reported 99.99% of the release present, but
+every actual download attempt against that same provider failed
+completely — zero bytes fetched. `STAT` (RFC 3977 §6.2.4) is a bare
+existence check against the server's *index*; a real download uses `BODY`
+(RFC 3977 §6.2.3), which reads from the article's actual storage. On this
+provider, the two had drifted apart.
+
+- [x] **`pesto::nntp::Connection::head`**, mirroring `body()` (RFC 3977
+      §6.2.2: `HEAD <id>` → `221` + multi-line header block via the
+      existing `read_dot_terminated_block()`, `430` → `Ok(None)`). Much
+      cheaper than `BODY` (a few hundred bytes per article, not the full
+      body) and, on most servers, reads from the same underlying storage
+      `BODY` does — a middle tier between `STAT`'s near-zero cost and
+      `BODY`'s full-fetch certainty. `penne::client::DownloadClient::head`
+      is a one-line wrapper, matching `stat`/`body`'s existing ones.
+- [x] **`penne::check::CheckMethod`** (`Stat` still the default, `Head`,
+      `Body`), a `clap::ValueEnum` living in the library (mirroring
+      `penne::config::ProcessingMode`'s existing precedent) so both the CLI
+      flag and a future library caller share one definition.
+      `check_queue` gains a `method` parameter; internally, `worker_loop`
+      dispatches to the existing, untouched pipelined-`STAT` path for
+      `Stat`, or a new `single_item_worker_loop`/`single_item_with_retry`
+      (mirroring `download.rs`'s own per-item retry shape) for `Head`/
+      `Body` — deliberately not pipelined, since pipelining's benefit
+      (hiding round-trip latency) matters far less once a round trip
+      carries real payload. `Body`'s "present" is a successful `BODY`
+      transfer, immediately discarded — never decoded, written, or
+      cached; decode-correctness is a real download's concern, not an
+      availability check's.
+- [x] **`penne download --stat[=<stat|head|body>]`**, replacing the old
+      boolean `--stat` flag with `Option<Option<CheckMethod>>` (the same
+      idiom `--config` already used in this file) — bare `--stat` still
+      means `Stat`, fully backward compatible. `check_availability`'s
+      report is honest about each method's real wire cost (`"STAT only"`
+      / `"HEAD only"` / `"full BODY fetch — real article data
+      downloaded"`) instead of always claiming `STAT`-level cheapness.
+- [x] **The real-world test produced a genuinely surprising result**:
+      against the reporting provider, `--stat=head` *also* reported the
+      release 100% present — `HEAD` agreed with `STAT`, not with `BODY`.
+      Only `--stat=body` (and a real download) revealed the true failure.
+      This means `HEAD` is a *usually*-reliable middle tier, not a
+      guaranteed substitute for a real `BODY` check on every provider —
+      documented as such in `README.md` rather than overclaiming what
+      Phase 18's original hypothesis assumed.
+- [x] **`penne::queue::sample(queue, per_file)`** + **`--sample <N>`**
+      (`--stat` only; errors otherwise). Keeps only the first `N`
+      segment(s) of each file, so a `body` check's real-bandwidth cost on
+      a large release can be bounded to roughly "one article per file"
+      instead of "every segment" — a provider that can't actually deliver
+      bodies tends to fail *every* segment it's asked for, so a small
+      sample catches a systemic problem just as fast as a full check.
+      Deliberately **not** implemented as a truncated/abandoned `BODY`
+      read (request an article, disconnect before reading the response) —
+      that would be cheaper still, but abandoning a connection
+      mid-transfer is a pattern real providers' anti-abuse systems watch
+      for, and it would force a fresh reconnect for every single present
+      segment. `--sample` stays entirely inside normal protocol behavior:
+      every sampled request is read to completion and every connection
+      closes cleanly.
+- [x] Verified against the real release/provider from the original
+      report: `--stat=body --sample 1` (113 segments, one per file,
+      instead of the release's 7565) reproduced the same 0%-present
+      verdict as the full `--stat=body` check and the failed real
+      download, using 16.7 KiB and finishing in seconds.
+- [x] New tests: `pesto::nntp` gains 5 `head()` unit tests mirroring
+      `body()`'s; `penne::check`'s fake test server gains independently
+      configurable `STAT`/`HEAD`/`BODY` availability so
+      `head_method_catches_an_article_stat_lies_about`/
+      `body_method_catches_an_article_stat_lies_about` can reproduce the
+      exact "index lies" bug this phase exists for; `penne::queue` gains
+      unit tests for `sample`.
 
 ---
 
