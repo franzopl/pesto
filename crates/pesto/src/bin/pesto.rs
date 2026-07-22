@@ -234,6 +234,31 @@ struct Cli {
     #[arg(long, value_name = "TAG", action = clap::ArgAction::Append)]
     nzb_tag: Vec<String>,
 
+    /// TMDb reference written to `<meta type="tmdbid">` in the `.nzb`, as
+    /// `movie/<id>` or `tv/<id>` (`movie:<id>` / `tv:<id>` also accepted).
+    /// When `--nzb-category` is not set, the category defaults to `movies`
+    /// or `tv` accordingly. Also added as a line in the `.nfo` when `--nfo`
+    /// is set.
+    #[arg(long, value_name = "TYPE/ID")]
+    tmdb: Option<String>,
+
+    /// IMDb ID written to `<meta type="imdbid">` in the `.nzb`, e.g.
+    /// `tt1234567`. The `tt` prefix is optional and added automatically
+    /// (`133093` normalizes to `tt0133093`). Also added as a line in the
+    /// `.nfo` when `--nfo` is set.
+    #[arg(long, value_name = "ID")]
+    imdb_id: Option<String>,
+
+    /// TheTVDB ID written to `<meta type="tvdbid">` in the `.nzb`, e.g.
+    /// `81189`. Also added as a line in the `.nfo` when `--nfo` is set.
+    #[arg(long, value_name = "ID")]
+    tvdb_id: Option<String>,
+
+    /// MyAnimeList ID written to `<meta type="malid">` in the `.nzb`, e.g.
+    /// `1535`. Also added as a line in the `.nfo` when `--nfo` is set.
+    #[arg(long, value_name = "ID")]
+    mal_id: Option<String>,
+
     /// `Date:` header for each article: `now` (current time), `random`
     /// (random time within the last 2 hours), or a fixed RFC 2822 timestamp.
     /// Omit to let the server supply the date. When obfuscation is active
@@ -503,6 +528,10 @@ impl Cli {
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
             nzb_tags: self.nzb_tag.clone(),
+            tmdb: self.tmdb.clone(),
+            imdb_id: self.imdb_id.clone(),
+            tvdb_id: self.tvdb_id.clone(),
+            mal_id: self.mal_id.clone(),
             nzb_dir: self
                 .nzb_dir
                 .as_ref()
@@ -1065,6 +1094,10 @@ async fn run_single_upload(
                         .clone()
                         .or_else(|| effective_password.clone()),
                     category: config.nzb_category.clone(),
+                    tmdb_id: config.tmdb_id.clone(),
+                    imdb_id: config.imdb_id.clone(),
+                    tvdb_id: config.tvdb_id.clone(),
+                    mal_id: config.mal_id.clone(),
                     tags: config.nzb_tags.clone(),
                 };
                 let xml = pesto::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
@@ -1186,7 +1219,10 @@ async fn run_single_upload(
             });
         if let Some(ref nfo_out) = base {
             match pesto::nfo::generate(entry_paths) {
-                Some(content) => match pesto::nfo::write(nfo_out, &content) {
+                Some(content) => match pesto::nfo::write(
+                    nfo_out,
+                    &format!("{}{content}", nfo_metadata_header(config)),
+                ) {
                     Ok(()) => {
                         println!("wrote nfo:  {}", nfo_out.display());
                         Some(nfo_out.clone())
@@ -1290,6 +1326,33 @@ async fn run_single_upload(
         total_bytes,
         nzb_path: nzb_reported_path,
     })
+}
+
+/// Build the `IMDb:`/`TMDb:`/`TVDB:`/`MAL:` header block prepended to a
+/// generated `.nfo` when any of `--tmdb`, `--imdb-id`, `--tvdb-id` or
+/// `--mal-id` were set. Returns an empty string when none is set.
+fn nfo_metadata_header(config: &Config) -> String {
+    let mut header = String::new();
+    if let Some(imdb_id) = &config.imdb_id {
+        header.push_str(&format!("IMDb : https://www.imdb.com/title/{imdb_id}/\n"));
+    }
+    if let Some(tmdb_id) = &config.tmdb_id {
+        header.push_str(&format!("TMDb : https://www.themoviedb.org/{tmdb_id}\n"));
+    }
+    if let Some(tvdb_id) = &config.tvdb_id {
+        // The dereferrer link resolves by ID alone, without needing the
+        // show's slug.
+        header.push_str(&format!(
+            "TVDB : https://thetvdb.com/dereferrer/series/{tvdb_id}\n"
+        ));
+    }
+    if let Some(mal_id) = &config.mal_id {
+        header.push_str(&format!("MAL  : https://myanimelist.net/anime/{mal_id}\n"));
+    }
+    if !header.is_empty() {
+        header.push('\n');
+    }
+    header
 }
 
 /// Whether a top-level entry is a pesto-generated artifact that must never be
@@ -1440,6 +1503,10 @@ async fn run_batch(
                     .clone()
                     .or_else(|| config.compress_password.clone()),
                 category: config.nzb_category.clone(),
+                tmdb_id: config.tmdb_id.clone(),
+                imdb_id: config.imdb_id.clone(),
+                tvdb_id: config.tvdb_id.clone(),
+                mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
             };
             let xml = pesto::nzb::generate(&all_groups, &all_segments, &nzb_meta);
@@ -1461,7 +1528,10 @@ async fn run_batch(
             let nfo_path: Option<PathBuf> = if config.nfo {
                 let nfo_out = season_path.with_extension("nfo");
                 match pesto::nfo::generate_season(dirs) {
-                    Some(content) => match pesto::nfo::write(&nfo_out, &content) {
+                    Some(content) => match pesto::nfo::write(
+                        &nfo_out,
+                        &format!("{}{content}", nfo_metadata_header(config)),
+                    ) {
                         Ok(()) => {
                             println!("wrote nfo:  {}", nfo_out.display());
                             Some(nfo_out)
@@ -1862,6 +1932,10 @@ fn run_merge_season(dir: &Path, display_name: Option<&str>, nzb_tags: Vec<String
                 .or_else(|| Some(key.clone())),
             password: None,
             category: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            mal_id: None,
             tags: nzb_tags.clone(),
         };
         let xml = pesto::nzb::generate(&all_groups, &combined_segments, &meta);

@@ -311,6 +311,18 @@ pub struct Overrides {
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_tags: Vec<String>,
+    /// Raw `--tmdb` value, e.g. `movie/12345` or `tv:12345`; parsed and
+    /// validated in [`Config::resolve`].
+    pub tmdb: Option<String>,
+    /// Raw `--imdb-id` value, e.g. `tt1234567`; parsed and validated in
+    /// [`Config::resolve`].
+    pub imdb_id: Option<String>,
+    /// Raw `--tvdb-id` value, e.g. `81189`; parsed and validated in
+    /// [`Config::resolve`].
+    pub tvdb_id: Option<String>,
+    /// Raw `--mal-id` value, e.g. `1535`; parsed and validated in
+    /// [`Config::resolve`].
+    pub mal_id: Option<String>,
     pub nzb_dir: Option<String>,
     pub history: Option<bool>,
     pub notify: Option<bool>,
@@ -370,6 +382,18 @@ pub struct Config {
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_tags: Vec<String>,
+    /// TMDb reference emitted as `<meta type="tmdbid">`, formatted as
+    /// `movie/<id>` or `tv/<id>`. See [`crate::nzb::parse_tmdb_ref`].
+    pub tmdb_id: Option<String>,
+    /// Media kind of `tmdb_id`, kept alongside it to derive a default
+    /// `nzb_category` when the user hasn't set one explicitly.
+    pub tmdb_kind: Option<crate::nzb::TmdbKind>,
+    /// IMDb ID emitted as `<meta type="imdbid">`, e.g. `tt1234567`.
+    pub imdb_id: Option<String>,
+    /// TheTVDB ID emitted as `<meta type="tvdbid">`.
+    pub tvdb_id: Option<String>,
+    /// MyAnimeList ID emitted as `<meta type="malid">`.
+    pub mal_id: Option<String>,
     pub indexer_url: Option<String>,
     pub indexer_api_key: Option<String>,
     pub nzb_dir: Option<String>,
