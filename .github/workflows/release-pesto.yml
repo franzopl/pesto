@@ -1,9 +1,19 @@
-name: Release
+name: Release pesto
+
+# Separate from release-parmesan.yml and release-penne.yml: pesto is
+# versioned and published independently — see crates/pesto/CHANGELOG.md and
+# crates/pesto/RELEASING.md — so it gets its own tag prefix and its own
+# GitHub Release, on its own cadence, entirely decoupled from parmesan's and
+# penne's.
+#
+# To ship a new pesto binary release:
+#   git tag pesto-v<version>   # matching crates/pesto/Cargo.toml
+#   git push origin pesto-v<version>
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'pesto-v*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,10 +53,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-pesto-cargo-${{ hashFiles('**/Cargo.toml') }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release -p pesto-poster --bin pesto --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -77,4 +87,12 @@ jobs:
             pesto-linux-x86_64
             pesto-linux-x86_64-musl
             pesto-windows-x86_64.exe
-          generate_release_notes: true
+          # Not `generate_release_notes: true` — GitHub's auto-generated notes
+          # pick the previous *tag by creation time* across the whole repo,
+          # which would pull in unrelated `parmesan-v*`/`penne-v*` tags
+          # interleaved with `pesto-v*` ones. Point at the crate's own
+          # changelog instead.
+          body: |
+            See [`crates/pesto/CHANGELOG.md`](https://github.com/franzopl/pesto/blob/main/crates/pesto/CHANGELOG.md) for what changed in this release.
+
+            Also published to [crates.io](https://crates.io/crates/pesto-poster) and documented on [docs.rs](https://docs.rs/pesto-poster).

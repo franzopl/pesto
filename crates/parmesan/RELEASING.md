@@ -7,8 +7,8 @@ which exercised every step here.
 `parmesan` is versioned, published, and released **independently of
 `pesto`** — different cadence, different tags, different crates.io package.
 Don't confuse this with `pesto`'s own release process
-(`.github/workflows/release.yml`, tags `v*`): that one builds and releases
-the `pesto` binary and has nothing to do with `parmesan`.
+(`.github/workflows/release-pesto.yml`, tags `pesto-v*`): that one builds
+and releases the `pesto` binary and has nothing to do with `parmesan`.
 
 ## Prerequisites
 
