@@ -277,6 +277,10 @@ pub async fn run_upload(
                 .clone()
                 .or_else(|| effective_password.clone()),
             category: config.nzb_category.clone(),
+            tmdb_id: config.tmdb_id.clone(),
+            imdb_id: config.imdb_id.clone(),
+            tvdb_id: config.tvdb_id.clone(),
+            mal_id: config.mal_id.clone(),
             tags: config.nzb_tags.clone(),
         };
         let xml = crate::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);

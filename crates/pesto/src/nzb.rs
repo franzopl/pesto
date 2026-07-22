@@ -24,8 +24,113 @@ pub struct NzbMeta {
     pub password: Option<String>,
     /// Indexer / downloader category (`<meta type="category">`).
     pub category: Option<String>,
+    /// TMDb reference (`<meta type="tmdbid">`), formatted as `movie/<id>` or
+    /// `tv/<id>` — see [`parse_tmdb_ref`].
+    pub tmdb_id: Option<String>,
+    /// IMDb ID (`<meta type="imdbid">`), e.g. `tt1234567` — see [`parse_imdb_ref`].
+    pub imdb_id: Option<String>,
+    /// TheTVDB ID (`<meta type="tvdbid">`) — see [`parse_tvdb_ref`].
+    pub tvdb_id: Option<String>,
+    /// MyAnimeList ID (`<meta type="malid">`) — see [`parse_mal_ref`].
+    pub mal_id: Option<String>,
     /// Arbitrary tags emitted as multiple `<meta type="tag">` elements.
     pub tags: Vec<String>,
+}
+
+/// Media type of a [`parse_tmdb_ref`] result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmdbKind {
+    Movie,
+    Tv,
+}
+
+impl TmdbKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            TmdbKind::Movie => "movie",
+            TmdbKind::Tv => "tv",
+        }
+    }
+
+    /// `.nzb` category to fall back to when the user hasn't set one explicitly.
+    pub fn default_category(self) -> &'static str {
+        match self {
+            TmdbKind::Movie => "movies",
+            TmdbKind::Tv => "tv",
+        }
+    }
+}
+
+/// Parse a `--tmdb` value into its media kind and numeric ID.
+///
+/// Accepts `movie/<id>` or `tv/<id>`, matching TMDb's own `/movie/<id>` and
+/// `/tv/<id>` URL scheme. `:` is also accepted as the separator
+/// (`movie:<id>`), since some indexer tools use that convention instead.
+pub fn parse_tmdb_ref(s: &str) -> Result<(TmdbKind, String), String> {
+    let (kind_str, id) = s
+        .split_once(['/', ':'])
+        .ok_or_else(|| format!("expected `movie/<id>` or `tv/<id>`, got `{s}`"))?;
+    let kind = match kind_str.to_ascii_lowercase().as_str() {
+        "movie" => TmdbKind::Movie,
+        "tv" => TmdbKind::Tv,
+        other => {
+            return Err(format!(
+                "unknown TMDb media type `{other}` (expected `movie` or `tv`)"
+            ))
+        }
+    };
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("expected a numeric TMDb ID, got `{id}`"));
+    }
+    Ok((kind, id.to_owned()))
+}
+
+/// Normalize a parsed [`parse_tmdb_ref`] result into the value stored in
+/// [`NzbMeta::tmdb_id`], e.g. `("movie", "12345")` -> `"movie/12345"`.
+pub fn format_tmdb_ref(kind: TmdbKind, id: &str) -> String {
+    format!("{}/{id}", kind.as_str())
+}
+
+/// Parse a `--imdb-id` value into its normalized form.
+///
+/// Accepts an optional `tt` prefix (case-insensitive) followed by digits;
+/// the `tt` prefix is added when missing. IMDb IDs are zero-padded to at
+/// least 7 digits (e.g. `133093` and `tt0133093` both normalize to
+/// `tt0133093`); longer IDs are kept as-is.
+pub fn parse_imdb_ref(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    let digits = trimmed
+        .strip_prefix("tt")
+        .or_else(|| trimmed.strip_prefix("TT"))
+        .or_else(|| trimmed.strip_prefix("Tt"))
+        .or_else(|| trimmed.strip_prefix("tT"))
+        .unwrap_or(trimmed);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("expected an IMDb ID like `tt1234567`, got `{s}`"));
+    }
+    Ok(format!("tt{digits:0>7}"))
+}
+
+/// Parse a `--tvdb-id` value into its normalized form: a plain numeric string.
+///
+/// Unlike TMDb, TheTVDB IDs aren't split into separate movie/series
+/// namespaces from the caller's point of view — the plain ID resolves
+/// correctly through TheTVDB's own dereferrer link (see [`NzbMeta::tvdb_id`]).
+pub fn parse_tvdb_ref(s: &str) -> Result<String, String> {
+    parse_numeric_ref(s, "TVDB")
+}
+
+/// Parse a `--mal-id` value into its normalized form: a plain numeric string.
+pub fn parse_mal_ref(s: &str) -> Result<String, String> {
+    parse_numeric_ref(s, "MAL")
+}
+
+fn parse_numeric_ref(s: &str, label: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("expected a numeric {label} ID, got `{s}`"));
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Generate the contents of an `.nzb` file describing the posted segments.
@@ -52,6 +157,10 @@ pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -
         ("name", meta.name.as_deref()),
         ("password", meta.password.as_deref()),
         ("category", meta.category.as_deref()),
+        ("tmdbid", meta.tmdb_id.as_deref()),
+        ("imdbid", meta.imdb_id.as_deref()),
+        ("tvdbid", meta.tvdb_id.as_deref()),
+        ("malid", meta.mal_id.as_deref()),
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|s| (k, s)))
@@ -397,6 +506,93 @@ mod tests {
     }
 
     #[test]
+    fn parse_tmdb_ref_accepts_slash_and_colon_separators() {
+        assert_eq!(
+            parse_tmdb_ref("movie/12345"),
+            Ok((TmdbKind::Movie, "12345".to_string()))
+        );
+        assert_eq!(
+            parse_tmdb_ref("tv:9999"),
+            Ok((TmdbKind::Tv, "9999".to_string()))
+        );
+        assert_eq!(
+            parse_tmdb_ref("MOVIE/1"),
+            Ok((TmdbKind::Movie, "1".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_tmdb_ref_rejects_bad_input() {
+        assert!(parse_tmdb_ref("12345").is_err());
+        assert!(parse_tmdb_ref("book/12345").is_err());
+        assert!(parse_tmdb_ref("movie/abc").is_err());
+        assert!(parse_tmdb_ref("movie/").is_err());
+    }
+
+    #[test]
+    fn tmdb_kind_default_category() {
+        assert_eq!(TmdbKind::Movie.default_category(), "movies");
+        assert_eq!(TmdbKind::Tv.default_category(), "tv");
+    }
+
+    #[test]
+    fn format_tmdb_ref_normalizes_to_slash() {
+        assert_eq!(format_tmdb_ref(TmdbKind::Movie, "12345"), "movie/12345");
+        assert_eq!(format_tmdb_ref(TmdbKind::Tv, "9999"), "tv/9999");
+    }
+
+    #[test]
+    fn parse_imdb_ref_normalizes_case() {
+        assert_eq!(parse_imdb_ref("tt1234567"), Ok("tt1234567".to_string()));
+        assert_eq!(parse_imdb_ref("TT1234567"), Ok("tt1234567".to_string()));
+    }
+
+    #[test]
+    fn parse_imdb_ref_accepts_bare_digits_and_pads() {
+        assert_eq!(parse_imdb_ref("1234567"), Ok("tt1234567".to_string()));
+        assert_eq!(parse_imdb_ref("133093"), Ok("tt0133093".to_string()));
+        assert_eq!(parse_imdb_ref("tt133093"), Ok("tt0133093".to_string()));
+        assert_eq!(parse_imdb_ref("21"), Ok("tt0000021".to_string()));
+    }
+
+    #[test]
+    fn parse_imdb_ref_keeps_long_ids_unpadded() {
+        assert_eq!(parse_imdb_ref("tt12345678"), Ok("tt12345678".to_string()));
+    }
+
+    #[test]
+    fn parse_imdb_ref_rejects_bad_input() {
+        assert!(parse_imdb_ref("tt").is_err());
+        assert!(parse_imdb_ref("ttabc").is_err());
+        assert!(parse_imdb_ref("abc123").is_err());
+        assert!(parse_imdb_ref("").is_err());
+    }
+
+    #[test]
+    fn parse_tvdb_ref_accepts_plain_digits() {
+        assert_eq!(parse_tvdb_ref("81189"), Ok("81189".to_string()));
+        assert_eq!(parse_tvdb_ref("  81189  "), Ok("81189".to_string()));
+    }
+
+    #[test]
+    fn parse_tvdb_ref_rejects_bad_input() {
+        assert!(parse_tvdb_ref("tt81189").is_err());
+        assert!(parse_tvdb_ref("").is_err());
+        assert!(parse_tvdb_ref("abc").is_err());
+    }
+
+    #[test]
+    fn parse_mal_ref_accepts_plain_digits() {
+        assert_eq!(parse_mal_ref("1535"), Ok("1535".to_string()));
+    }
+
+    #[test]
+    fn parse_mal_ref_rejects_bad_input() {
+        assert!(parse_mal_ref("").is_err());
+        assert!(parse_mal_ref("abc").is_err());
+    }
+
+    #[test]
     fn empty_input_yields_a_well_formed_skeleton() {
         let xml = generate(&["alt.test".into()], &[], &no_meta());
         assert!(xml.starts_with("<?xml version=\"1.0\""));
@@ -485,12 +681,20 @@ mod tests {
             name: Some("My Upload".into()),
             password: Some("s3cr3t".into()),
             category: Some("TV > HD".into()),
+            tmdb_id: Some("tv/12345".into()),
+            imdb_id: Some("tt1234567".into()),
+            tvdb_id: Some("321".into()),
+            mal_id: Some("654".into()),
             tags: Vec::new(),
         };
         let xml = generate(&["alt.test".into()], &[], &meta);
         assert!(xml.contains("<meta type=\"name\">My Upload</meta>"));
         assert!(xml.contains("<meta type=\"password\">s3cr3t</meta>"));
         assert!(xml.contains("<meta type=\"category\">TV &gt; HD</meta>"));
+        assert!(xml.contains("<meta type=\"tmdbid\">tv/12345</meta>"));
+        assert!(xml.contains("<meta type=\"imdbid\">tt1234567</meta>"));
+        assert!(xml.contains("<meta type=\"tvdbid\">321</meta>"));
+        assert!(xml.contains("<meta type=\"malid\">654</meta>"));
     }
 
     #[test]
@@ -642,6 +846,10 @@ mod tests {
             name: None,
             password: Some("hunter2".into()),
             category: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            mal_id: None,
             tags: Vec::new(),
         };
         let xml = generate(&["alt.test".into()], &[], &meta);
@@ -664,6 +872,10 @@ mod tests {
             name: Some("Test Show S01".into()),
             password: None,
             category: Some("TV".into()),
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            mal_id: None,
             tags: vec!["hd".into(), "2024".into()],
         };
         let xml = generate(&groups, &segs, &meta);

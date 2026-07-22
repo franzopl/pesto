@@ -1616,6 +1616,10 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                             .clone()
                             .or_else(|| config.compress_password.clone()),
                         category: config.nzb_category.clone(),
+                        tmdb_id: config.tmdb_id.clone(),
+                        imdb_id: config.imdb_id.clone(),
+                        tvdb_id: config.tvdb_id.clone(),
+                        mal_id: config.mal_id.clone(),
                         tags: config.nzb_tags.clone(),
                     };
                     let xml = pesto::nzb::generate(&config.groups, &all_segments, &meta);
@@ -1713,6 +1717,11 @@ fn build_dry_run_config() -> Config {
         nzb_password: None,
         nzb_category: None,
         nzb_tags: Vec::new(),
+        tmdb_id: None,
+        tmdb_kind: None,
+        imdb_id: None,
+        tvdb_id: None,
+        mal_id: None,
         nzb_dir: None,
         indexer_url: None,
         indexer_api_key: None,

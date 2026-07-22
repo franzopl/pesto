@@ -45,6 +45,35 @@ impl Config {
         let dry_run = cli.dry_run.unwrap_or(false);
         let par2_only = cli.par2_only.unwrap_or(false);
 
+        let tmdb = cli
+            .tmdb
+            .as_deref()
+            .map(crate::nzb::parse_tmdb_ref)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| "parsing --tmdb")?;
+        let imdb_id = cli
+            .imdb_id
+            .as_deref()
+            .map(crate::nzb::parse_imdb_ref)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| "parsing --imdb-id")?;
+        let tvdb_id = cli
+            .tvdb_id
+            .as_deref()
+            .map(crate::nzb::parse_tvdb_ref)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| "parsing --tvdb-id")?;
+        let mal_id = cli
+            .mal_id
+            .as_deref()
+            .map(crate::nzb::parse_mal_ref)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!(e))
+            .with_context(|| "parsing --mal-id")?;
+
         let (host, port, ssl, connections, username, password, retry_delay, timeout, extra_servers) =
             if !file.extra_servers.is_empty() {
                 let mut iter = file.extra_servers.into_iter();
@@ -192,12 +221,25 @@ impl Config {
             compress_password: cli.compress_password,
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
-            nzb_category: cli.nzb_category.or(file.output.nzb_category),
+            nzb_category: {
+                let explicit = cli.nzb_category.or(file.output.nzb_category);
+                explicit.or_else(|| {
+                    tmdb.as_ref()
+                        .map(|(kind, _)| kind.default_category().to_string())
+                })
+            },
             nzb_tags: if cli.nzb_tags.is_empty() {
                 file.output.nzb_tags
             } else {
                 cli.nzb_tags
             },
+            tmdb_id: tmdb
+                .as_ref()
+                .map(|(kind, id)| crate::nzb::format_tmdb_ref(*kind, id)),
+            tmdb_kind: tmdb.as_ref().map(|(kind, _)| *kind),
+            imdb_id,
+            tvdb_id,
+            mal_id,
             nzb_dir: cli.nzb_dir.or(file.output.nzb_dir),
             indexer_url: file.output.indexer.url,
             indexer_api_key: file.output.indexer.api_key,
