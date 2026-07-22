@@ -1,9 +1,10 @@
 name: Release parmesan
 
-# Separate from release.yml (which builds/releases the `pesto` binary on
-# `v*` tags): parmesan is versioned and published independently — see
-# crates/parmesan/CHANGELOG.md — so it gets its own tag prefix and its own
-# GitHub Release, on its own cadence, entirely decoupled from pesto's.
+# Separate from release-pesto.yml (which builds/releases the `pesto` binary
+# on `pesto-v*` tags) and release-penne.yml: parmesan is versioned and
+# published independently — see crates/parmesan/CHANGELOG.md — so it gets
+# its own tag prefix and its own GitHub Release, on its own cadence,
+# entirely decoupled from pesto's and penne's.
 #
 # To ship a new parmesan binary release:
 #   git tag parmesan-v<version>   # matching crates/parmesan/Cargo.toml

@@ -427,8 +427,8 @@ back.
       that file; omitted entirely → the default path, with a clear error
       (not a silent no-servers run) if nothing exists there yet.
 - [ ] Add `penne` to the release workflow once it has a stable CLI surface
-      (see `.github/workflows/release.yml` / `release-parmesan.yml` for the
-      pattern to follow).
+      (see `.github/workflows/release-pesto.yml` / `release-parmesan.yml`
+      for the pattern to follow).
 
 ## Phase 11 — De-obfuscation ✅ (core done; multi-recovery-set clustering and multi-volume ZIP guessing explicitly out of scope)
 

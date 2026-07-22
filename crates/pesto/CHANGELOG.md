@@ -1,34 +1,33 @@
-# Changelog
+# Changelog — pesto
 
 All notable changes to `pesto` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+`pesto` is versioned, published, and released independently of the rest of
+the workspace — see [`RELEASING.md`](RELEASING.md). Entries here cover the
+`pesto` binary/library only; `penne` and `parmesan` keep their own
+changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ---
 
 ## [Unreleased]
 
-### Added (penne)
-- **`HEAD`/`BODY`-based availability checks** (`--stat=head`/`--stat=body`,
-  alongside the existing `STAT`-only `--stat`) **plus `--sample <N>`** to
-  bound a `body` check's real bandwidth cost to the first `N` segment(s)
-  per file: `pesto::nntp::Connection::head` usually (not always — see the
-  `penne` changelog) reads from the same article storage `BODY` does,
-  catching a provider whose `STAT` index says an article is present when
-  it actually isn't — a real report during development (99.99% "present"
-  via `STAT`, 0% actually downloadable, and in that specific case `HEAD`
-  agreed with `STAT` — only a real `BODY` check caught it).
-- **Named/selectable `[[servers]]` entries**: an entry can carry a `name`
-  for `--server <NAME>` (repeatable) to run `penne download`/`--stat`
-  against one or more specific configured providers instead of always
-  drawing on every configured server, and `explicit_only = true` to
-  exclude a quota/block account from that default set unless named
-  directly — for a provider that must never be a silent automatic
-  fallback.
-- **Config-driven default `--mode`**: the config file can now set `mode`
-  (`download`/`repair`/`unpack`/`delete`) as the default processing level
-  for `penne download`, still overridable per run with `--mode`; the
-  interactive `penne --config` wizard now prompts for it, explaining what
-  each level does.
+## [0.3.62] — 2026-07-22
+
+### Added
+- **External-ID reference flags**: `--tmdb <movie|tv>/<id>` (`:` also
+  accepted as the separator, e.g. `movie:12345`), `--imdb-id <id>`,
+  `--tvdb-id <id>` and `--mal-id <id>`. Each is written as a structured
+  `<meta type="tmdbid"/"imdbid"/"tvdbid"/"malid">` element in the `.nzb`
+  and, when `--nfo` is set, as an `IMDb:`/`TMDb:`/`TVDB:`/`MAL:` header
+  line in the generated `.nfo`. `--tmdb`'s `movie`/`tv` prefix also derives
+  a default `--nzb-category` (`movies`/`tv`) when the user hasn't set one
+  explicitly — resolved entirely from the flag's own value, no TMDb/IMDb
+  API calls are made (metadata *lookup*/enrichment stays `upapasta`'s job
+  per the workspace's architecture principles). `--imdb-id` accepts the ID
+  with or without its `tt` prefix and zero-pads it to 7 digits (`133093`
+  normalizes to `tt0133093`); `--tvdb-id`/`--mal-id` take a plain numeric
+  ID.
 
 ---
 
