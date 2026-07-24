@@ -7,7 +7,7 @@
 //! # Embedding
 //!
 //! The minimal surface for embedding callers is [`post`]: pass a resolved
-//! [`config::Config`] and the list of [`poster::InputFile`]s; get back a
+//! [`config::Config`] and the list of [`walk::InputFile`]s; get back a
 //! [`poster::PostOutcome`]. Progress events are delivered on the
 //! [`progress::ProgressReceiver`] returned alongside the outcome; drop it to
 //! silence reporting.

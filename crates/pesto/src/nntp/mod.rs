@@ -154,7 +154,7 @@ impl Connection {
     /// Open a connection to `host:port`, performing the TLS handshake when
     /// `tls` is set, and read the server greeting.
     ///
-    /// `timeout_secs` bounds how long any later [`read_response`] waits for a
+    /// `timeout_secs` bounds how long any later `read_response` call waits for a
     /// server reply before failing, so a silently dead socket cannot hang a
     /// worker indefinitely.
     pub async fn connect(
@@ -245,17 +245,17 @@ impl Connection {
     /// any `'.'` that would appear at a line start (yEnc spec §4).
     ///
     /// A `441` duplicate rejection (`already_exists`) is treated as success —
-    /// see [`already_exists`] for why that's the right call when we don't yet
+    /// see `already_exists` for why that's the right call when we don't yet
     /// know whether the article actually reached the server.
     ///
     /// Returns `Some(message_id)` when the server echoed a (possibly
     /// different) Message-ID in its `240` response — see
-    /// [`extract_returned_message_id`] — or `None` when it didn't say.
+    /// `extract_returned_message_id` — or `None` when it didn't say.
     pub async fn post_parts(&mut self, headers: &[u8], body: &[u8]) -> Result<Option<String>> {
         self.post_parts_inner(headers, body, true).await
     }
 
-    /// Like [`post_parts`], but for re-posting an article a STAT pass already
+    /// Like [`Self::post_parts`], but for re-posting an article a STAT pass already
     /// *confirmed* missing.
     ///
     /// In that situation a `441` duplicate rejection must **not** be trusted
@@ -316,11 +316,11 @@ impl Connection {
 
     /// Queue one article on the wire for NNTP pipelining without flushing or
     /// reading any response. After enqueueing all articles in a batch, call
-    /// [`flush_pipeline`] once and then [`read_post_response`] once per article.
+    /// [`Self::flush_pipeline`] once and then [`Self::read_post_response`] once per article.
     ///
     /// The optimistic assumption is that the server will always respond 340 to
     /// POST, which holds for every server that allows posting. If the server
-    /// rejects POST with a non-340 code, [`read_post_response`] returns an
+    /// rejects POST with a non-340 code, [`Self::read_post_response`] returns an
     /// error and the caller must invalidate the connection.
     pub async fn enqueue_post(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
         self.write_all_timeout(b"POST\r\n").await?;
@@ -336,7 +336,7 @@ impl Connection {
     }
 
     /// Flush all enqueued articles to the server. Call once after all
-    /// [`enqueue_post`] calls for a batch, before reading responses.
+    /// [`Self::enqueue_post`] calls for a batch, before reading responses.
     pub async fn flush_pipeline(&mut self) -> Result<()> {
         self.flush_timeout().await
     }
@@ -344,7 +344,7 @@ impl Connection {
     /// Read one `(340, 240)` response pair for a pipelined POST.
     ///
     /// Returns `Ok(Some(message_id))` on a `240` that echoes a (possibly
-    /// different) Message-ID — see [`extract_returned_message_id`] — `Ok(None)`
+    /// different) Message-ID — see `extract_returned_message_id` — `Ok(None)`
     /// on a `240` that doesn't say, or an error describing the rejection. On
     /// any error the caller should invalidate the connection.
     pub async fn read_post_response(&mut self) -> Result<Option<String>> {
@@ -375,7 +375,7 @@ impl Connection {
     /// Post a complete article (headers, a blank line, then the yEnc body).
     ///
     /// The payload is dot-stuffed and terminated per RFC 3977.
-    /// Production code uses [`post_parts`] to avoid copying the body buffer.
+    /// Production code uses [`Self::post_parts`] to avoid copying the body buffer.
     pub async fn post(&mut self, article: &[u8]) -> Result<Option<String>> {
         let resp = self.command("POST").await?;
         if resp.code != 340 {
@@ -424,14 +424,14 @@ impl Connection {
 
     /// Queue one `STAT` command on the wire for NNTP pipelining, without
     /// flushing or reading a response. After enqueueing a batch, call
-    /// [`flush_pipeline`] once, then [`read_stat_response`] once per
+    /// [`Self::flush_pipeline`] once, then [`Self::read_stat_response`] once per
     /// command — in the same order they were enqueued, since NNTP is a
     /// strict request/response protocol over one connection: the server's
     /// answers arrive in the order the requests did.
     ///
-    /// Unlike [`enqueue_post`], `STAT` needs no analogous "optimistic
+    /// Unlike [`Self::enqueue_post`], `STAT` needs no analogous "optimistic
     /// assumption" about the first response code — it's already a single
-    /// request/single response command (see [`read_stat_response`]).
+    /// request/single response command (see [`Self::read_stat_response`]).
     /// Pipelining pays off enormously here specifically because a `STAT`
     /// carries no payload at all (a POST's pipeline depth is capped low by
     /// how much article data is worth buffering ahead of encode/read
@@ -445,7 +445,7 @@ impl Connection {
     }
 
     /// Read one `STAT` response for a pipelined batch queued via
-    /// [`enqueue_stat`]. Same semantics as [`stat`]: `Ok(true)` on `223`,
+    /// [`Self::enqueue_stat`]. Same semantics as [`Self::stat`]: `Ok(true)` on `223`,
     /// `Ok(false)` on `430`.
     pub async fn read_stat_response(&mut self) -> Result<bool> {
         let resp = self.read_response().await?;

@@ -421,7 +421,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// All servers in priority order: primary first, then [`extra_servers`].
+    /// All servers in priority order: primary first, then [`Self::extra_servers`].
     pub fn all_servers(&self) -> impl Iterator<Item = ServerEntry> + '_ {
         std::iter::once(ServerEntry {
             host: self.host.clone(),

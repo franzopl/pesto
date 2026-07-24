@@ -135,7 +135,7 @@ impl Article {
 
     /// Serialize the article for posting: header lines, a blank line, then the
     /// already-encoded `body`. Kept for tests; production code calls
-    /// [`build_headers`] and posts headers + body separately to avoid copying
+    /// [`Self::build_headers`] and posts headers + body separately to avoid copying
     /// the body.
     pub fn serialize(&self, body: &[u8]) -> Vec<u8> {
         let mut out = self.build_headers();

@@ -2,7 +2,7 @@
 //!
 //! Encodes raw file bytes into yEnc article bodies, including the `=ybegin`,
 //! `=ypart` and `=yend` control lines, and splits files into multi-part
-//! segments. This is the hot path — the inner [`encode_into`] loop allocates
+//! segments. This is the hot path — the inner [`encode`] loop allocates
 //! nothing beyond the output buffer.
 //!
 //! Reference: the yEnc draft specification, <http://www.yenc.org/yenc-draft.1.3.txt>.
