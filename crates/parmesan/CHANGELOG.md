@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-24
+
 ### Fixed
 - **`Par2Worker`'s internal producer→hasher→encoder pipeline channels
   defaulted to a depth of 256 slices.** Each in-flight slot holds a full

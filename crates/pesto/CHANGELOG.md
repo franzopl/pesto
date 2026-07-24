@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-24
+
 ### Fixed
 - **PAR2 memory auto-detection now respects this process's own address-space
   ceiling (`RLIMIT_AS` / `ulimit -v`), not just host RAM and cgroup
