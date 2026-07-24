@@ -169,6 +169,12 @@ pub struct RendererOptions {
     pub quiet: bool,
     /// Ring the terminal bell (`\a`) when the run finishes.
     pub bell: bool,
+    /// Force the append-only plain renderer even on a TTY. Set when verbose
+    /// (`-v`) logs share stderr with the panel: the panel's cursor-movement
+    /// redraws and the interleaved log lines would otherwise corrupt each
+    /// other, so we fall back to throttled, append-only progress lines that
+    /// coexist cleanly with scrolling log output.
+    pub plain: bool,
 }
 
 /// Spawn a newline-delimited JSON emitter for machine-readable consumers

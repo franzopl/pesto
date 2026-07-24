@@ -126,11 +126,17 @@ pub fn ansi(s: &str, code: &str) -> String {
     }
 }
 
-/// Count of *visible* characters in `s`, skipping ANSI SGR escape sequences
-/// (`\x1b[...m`) so width math reflects what's actually drawn on screen —
-/// see [`ansi`], whose invisible colour codes would otherwise inflate a plain
-/// `.chars().count()` and desync box borders from coloured content.
+/// Display width of `s` in terminal columns, skipping ANSI SGR escape
+/// sequences (`\x1b[...m`) so width math reflects what's actually drawn on
+/// screen — see [`ansi`], whose invisible colour codes would otherwise
+/// inflate the count and desync box borders from coloured content.
+///
+/// Width is measured with [`unicode_width`], not `.chars().count()`: a CJK
+/// ideograph or a wide emoji occupies two columns, so a filename containing
+/// one used to push the `│` border and the connection-grid cells one column
+/// right of where the count predicted.
 pub fn visible_len(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
     let mut len = 0;
     let mut in_escape = false;
     for c in s.chars() {
@@ -141,7 +147,7 @@ pub fn visible_len(s: &str) -> usize {
         } else if c == '\x1b' {
             in_escape = true;
         } else {
-            len += 1;
+            len += c.width().unwrap_or(0);
         }
     }
     len
@@ -166,9 +172,14 @@ pub fn pad(s: &str, width: usize) -> String {
 /// through; if truncation cuts off before a colour's closing `\x1b[0m`, a
 /// reset is appended so colour never bleeds past the truncated line.
 pub fn truncate(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
     if visible_len(s) <= width {
         return s.to_string();
     }
+    // Reserve one column for the `…`. A wide (2-column) glyph must not be
+    // placed when only one column of budget is left, or the result would be
+    // one column too wide — hence the `+ w > budget` check rather than a
+    // plain `>=`.
     let budget = width.saturating_sub(1);
     let mut out = String::new();
     let mut visible = 0;
@@ -191,11 +202,12 @@ pub fn truncate(s: &str, width: usize) -> String {
             escape_buf.push(c);
             continue;
         }
-        if visible >= budget {
+        let w = c.width().unwrap_or(0);
+        if visible + w > budget {
             break;
         }
         out.push(c);
-        visible += 1;
+        visible += w;
     }
     out.push('…');
     if color_active {
@@ -256,6 +268,33 @@ mod tests {
             assert!(
                 visible_len(&out) <= width,
                 "width={width} produced {} visible chars: {out:?}",
+                visible_len(&out)
+            );
+        }
+    }
+
+    #[test]
+    fn width_math_counts_wide_glyphs_as_two_columns() {
+        // Each CJK ideograph occupies two terminal columns; a naive
+        // `.chars().count()` would report 4 here instead of 8 and shove any
+        // box border drawn around this text two columns out of true.
+        assert_eq!(visible_len("映画作品"), 8);
+        assert_eq!(visible_len("ab映"), 4);
+        // Emoji presentation is also double-width.
+        assert_eq!(visible_len("🎬"), 2);
+    }
+
+    #[test]
+    fn truncate_never_overshoots_on_wide_glyphs() {
+        // Truncation must not place a 2-column glyph when only 1 column of
+        // budget is left — the result would be one column too wide and skew
+        // the border that follows it.
+        let s = "映画作品２０２６の動画ファイル";
+        for width in [3, 4, 5, 6, 10, 15, 20] {
+            let out = truncate(s, width);
+            assert!(
+                visible_len(&out) <= width,
+                "width={width} produced {} display cols: {out:?}",
                 visible_len(&out)
             );
         }
