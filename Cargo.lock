@@ -1628,6 +1628,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "lexical-sort",
+ "libc",
  "md-5",
  "parmesan-par2",
  "rayon",
@@ -1642,6 +1643,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
  "webpki-roots 0.26.11",
  "windows-sys 0.59.0",
 ]

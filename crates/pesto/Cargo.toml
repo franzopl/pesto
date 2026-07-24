@@ -42,10 +42,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 lexical-sort = "0.3"
+unicode-width = "0.2"
 bdinfo-rs-core = { version = "=1.0.1", git = "https://github.com/agentjp/bdinfo-rs", tag = "v1.0.1" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 bench-internals = ["parmesan/bench-internals"]

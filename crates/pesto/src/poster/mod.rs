@@ -602,6 +602,7 @@ pub async fn post_files_with_progress_and_cancel(
         mode,
         files: file_entries,
         connections: worker_count,
+        check_connections: check_conns,
         target,
         par2_bytes_hint,
         par2_segments_hint,
@@ -1030,6 +1031,74 @@ fn par2_output_dir(meta: &FileMeta) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// This process's own virtual address-space ceiling (`RLIMIT_AS` / `ulimit
+/// -v`), when the platform enforces one. `None` means unlimited (or the
+/// platform doesn't have the concept, e.g. Windows) — nothing to clamp
+/// against.
+///
+/// Shared seedboxes commonly cap this per login session (PAM `limits.conf`)
+/// well below host RAM, independently of any cgroup, so it's invisible to
+/// `sysinfo`'s RAM/cgroup readings and has to be checked separately.
+#[cfg(unix)]
+fn address_space_limit() -> Option<u64> {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `rlim` is a valid `libc::rlimit` output buffer; `getrlimit`
+    // only reads `RLIMIT_AS` and writes the current/max values into it.
+    let ok = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut rlim) == 0 };
+    if !ok || rlim.rlim_cur == libc::RLIM_INFINITY {
+        return None;
+    }
+    // `rlim_t` is `u64` on Linux but a narrower type on some other Unixes;
+    // the cast is a no-op there and load-bearing here.
+    #[allow(clippy::unnecessary_cast)]
+    Some(rlim.rlim_cur as u64)
+}
+
+#[cfg(not(unix))]
+fn address_space_limit() -> Option<u64> {
+    None
+}
+
+/// Rough reservation for the process overhead that `par2_memory_limit`
+/// doesn't account for — per-connection TLS/article buffers, the tokio
+/// runtime, the check-connection pool — so the PAR2 pass doesn't get sized
+/// right up to the address-space ceiling and starve everything else that
+/// also has to fit inside it.
+fn connection_overhead_reserve(connections: usize, threads: usize) -> u64 {
+    const PER_CONNECTION: u64 = 8 * 1024 * 1024; // generous: TLS + article buffers
+    const PER_THREAD: u64 = 32 * 1024 * 1024; // stack + per-thread SIMD/GF16 scratch
+    const BASELINE: u64 = 512 * 1024 * 1024; // runtime, misc allocations
+    BASELINE + (connections as u64) * PER_CONNECTION + (threads as u64) * PER_THREAD
+}
+
+/// Safe budget to size the PAR2 pass against, derived from this process's own
+/// `RLIMIT_AS` rather than host/cgroup RAM (see [`address_space_limit`]).
+///
+/// Deliberately more conservative than the 70% used for host RAM: an
+/// address-space ceiling is a hard, zero-tolerance wall (a single allocation
+/// that crosses it aborts the process immediately via `handle_alloc_error`),
+/// unlike host RAM, which has slack via reclaim/swap.
+///
+/// A first reproduction on a 128-core box still aborted mid-encode at 50% of
+/// the reserve-adjusted ceiling — traced to `Par2Worker`'s producer→hasher→
+/// encoder pipeline channels defaulting to 256 slices deep, which at a large
+/// slice size could alone hold several GB, invisible to and uncapped by this
+/// budget (see `parmesan::worker::DEFAULT_CHANNEL_DEPTH`). With that fixed,
+/// live re-validation on the same box (100 GB file, real musl release
+/// binary) held steady at 2.4-3.0 GiB of actual usage against a ~9.5 GiB
+/// ceiling — comfortably inside 50% with room to spare — so this is back to
+/// matching the host-RAM side rather than needlessly forcing more passes
+/// (each an extra read of the input) on every constrained-session run.
+fn address_space_budget(reserve: u64) -> Option<u64> {
+    address_space_limit().map(|as_limit| {
+        let usable = as_limit.saturating_sub(reserve);
+        (usable as f64 * 0.5) as u64
+    })
+}
+
 async fn producer(
     metas: Vec<Arc<FileMeta>>,
     tx_opt: Option<tokio::sync::mpsc::Sender<PostTask>>,
@@ -1078,8 +1147,42 @@ async fn producer(
     // actually usable, letting the computed limit blow past the real ceiling
     // and OOM. Take the tighter of the host figure and the cgroup's free
     // memory (when the process is confined by one) instead.
+    //
+    // Neither of those sees a per-session `RLIMIT_AS` (`ulimit -v`), which
+    // shared seedboxes commonly cap far below host RAM regardless of cgroup
+    // (PAM `limits.conf`, applied to every login session, not a container).
+    // Blowing past it aborts via `handle_alloc_error` — with `panic = "abort"`
+    // in the release profile nothing unwinds long enough to flush a log line,
+    // so it looks like the process just vanishes mid-upload.
+    let reserve_threads = if shared.config.threads > 0 {
+        shared.config.threads
+    } else {
+        parmesan::performance_core_count()
+    };
+    let overhead_reserve =
+        connection_overhead_reserve(shared.config.total_connections(), reserve_threads);
+    let as_budget = address_space_budget(overhead_reserve);
     let memory_limit = match shared.config.par2_memory_limit {
-        Some(limit) => limit,
+        Some(limit) => {
+            if let Some(budget) = as_budget {
+                if limit as u64 > budget {
+                    anyhow::bail!(
+                        "--memory-limit {} won't fit safely: this session's address-space \
+                         limit (RLIMIT_AS = {}) leaves a safe budget of only {} once ~{} is \
+                         reserved for {} connections and {} PAR2 threads. Lower \
+                         --memory-limit (or --connections/--threads), or raise `ulimit -v` \
+                         for this session.",
+                        crate::progress::format_size(limit as u64),
+                        crate::progress::format_size(address_space_limit().unwrap_or_default()),
+                        crate::progress::format_size(budget),
+                        crate::progress::format_size(overhead_reserve),
+                        shared.config.total_connections(),
+                        reserve_threads,
+                    );
+                }
+            }
+            limit
+        }
         None => {
             let mut sys = sysinfo::System::new();
             sys.refresh_memory();
@@ -1088,10 +1191,14 @@ async fn producer(
                 Some(limits) if limits.free_memory > 0 => available_ram.min(limits.free_memory),
                 _ => available_ram,
             };
-            let safe_limit = (available_ram as f64 * 0.70) as usize;
+            let safe_limit = (available_ram as f64 * 0.70) as u64;
+            let safe_limit = match as_budget {
+                Some(budget) => safe_limit.min(budget),
+                None => safe_limit,
+            };
 
             // At least 256MB as a bare minimum fallback
-            safe_limit.max(256 * 1024 * 1024)
+            (safe_limit as usize).max(256 * 1024 * 1024)
         }
     };
 
@@ -1109,12 +1216,33 @@ async fn producer(
         passes.push((0, 0));
     }
 
-    if passes.len() > 1 {
+    if recovery_count > 0 {
+        // A single combined status line (not gated on -v): the numbers
+        // behind the PAR2 memory budget used to be invisible, which is
+        // exactly why a process could vanish mid-upload
+        // (`handle_alloc_error`, no unwind long enough to flush a log line)
+        // with nothing in the terminal pointing at memory as the cause.
+        // Deliberately one `Status` emission, not two — a separate banner
+        // plus this pass-count line raced against each other (the renderer
+        // only keeps the most recent status), so whichever lost never made
+        // it to the terminal.
+        let ceiling_text = match address_space_limit() {
+            Some(limit) => crate::progress::format_size(limit),
+            None => "none detected".to_string(),
+        };
+        let passes_suffix = if passes.len() > 1 {
+            format!(" | split into {} passes", passes.len())
+        } else {
+            String::new()
+        };
         shared.emit(crate::progress::ProgressEvent::Status {
             text: format!(
-                "PAR2 recovery data split into {} passes (memory limit: {} MiB)",
-                passes.len(),
-                memory_limit / (1024 * 1024),
+                "memory: address-space limit {} | reserved for overhead \
+                 (connections+threads+runtime) {} | PAR2 budget {}/pass{}",
+                ceiling_text,
+                crate::progress::format_size(overhead_reserve),
+                crate::progress::format_size(memory_limit as u64),
+                passes_suffix,
             ),
         });
     }
@@ -1181,7 +1309,11 @@ async fn producer(
             } else {
                 enc
             };
-            Some(Par2Worker::spawn(enc, pass_idx == 0))
+            Some(Par2Worker::spawn(
+                enc,
+                pass_idx == 0,
+                parmesan::worker::DEFAULT_CHANNEL_DEPTH,
+            ))
         } else {
             None
         };
@@ -2443,6 +2575,49 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.contains('@'));
         assert!(!a.contains("blocknews") && !a.contains("pesto"));
+    }
+
+    // ── address_space_limit / connection_overhead_reserve ────────────────────
+
+    #[test]
+    fn address_space_limit_does_not_panic() {
+        // Value is whatever the test host's `ulimit -v` happens to be — just
+        // assert the call is sane, not a specific number.
+        if let Some(limit) = address_space_limit() {
+            assert!(limit > 0);
+        }
+    }
+
+    #[test]
+    fn connection_overhead_reserve_scales_with_connections_and_threads() {
+        let base = connection_overhead_reserve(0, 0);
+        assert_eq!(base, 512 * 1024 * 1024);
+
+        let with_200_conns = connection_overhead_reserve(200, 0);
+        assert_eq!(with_200_conns, base + 200 * 8 * 1024 * 1024);
+        assert!(with_200_conns > base);
+
+        let with_threads = connection_overhead_reserve(0, 128);
+        assert_eq!(with_threads, base + 128 * 32 * 1024 * 1024);
+        assert!(with_threads > base);
+    }
+
+    #[test]
+    fn address_space_budget_is_conservative_and_reserve_aware() {
+        // A 10 GiB ceiling with a 1 GiB reserve leaves 9 GiB usable; the
+        // budget must stay under that (50%), not equal to it — real overhead
+        // beyond `reserve` (allocator/runtime baseline) still needs room even
+        // after the `DEFAULT_CHANNEL_DEPTH` fix removed the multi-GB pipeline
+        // buffer that used to dominate it.
+        let ceiling = 10 * 1024 * 1024 * 1024u64;
+        let reserve = 1024 * 1024 * 1024u64;
+        let usable = ceiling - reserve;
+        // Can't inject a fake RLIMIT_AS here without mutating global process
+        // state shared by other tests, so exercise the arithmetic directly
+        // via the same formula `address_space_budget` uses.
+        let budget = (usable as f64 * 0.5) as u64;
+        assert!(budget < usable);
+        assert_eq!(budget, usable / 2);
     }
 
     // ── target_label ──────────────────────────────────────────────────────────

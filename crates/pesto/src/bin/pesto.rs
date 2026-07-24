@@ -983,7 +983,10 @@ async fn run_single_upload(
         && !outcome.segments.is_empty()
     {
         if check_missing.is_empty() {
-            eprintln!("check: all {} article(s) verified", outcome.segments.len());
+            // Success is already reported: the renderer's final summary shows
+            // "all verified" (TTY) and `draw_plain`'s last line carries the
+            // check tally (non-TTY/-v). A second "check: all N verified" line
+            // here would just duplicate it.
         } else {
             eprintln!(
                 "check: {} article(s) still missing after every repost attempt:",
@@ -2200,10 +2203,12 @@ async fn main() -> Result<()> {
         tracing::debug!(path = %p.display(), "session log");
     }
 
-    // Suppress the terminal panel when debug-level logs are going to stderr to
-    // avoid the panel and log lines corrupting each other. If the user redirected
-    // logs to a file with --log-file the panel can run alongside safely.
-    let logs_to_stderr = cli.verbose >= 2 && cli.log_file.is_none();
+    // Fall back to the append-only plain renderer whenever verbose logs share
+    // stderr with the panel — at *any* -v level, not just -vv: an INFO-level
+    // `-v` run also writes connection/pool lines to stderr, which the panel's
+    // cursor-movement redraws would shred (and be shredded by). If the user
+    // redirected logs to a file with --log-file the panel can run safely.
+    let logs_to_stderr = cli.verbose >= 1 && cli.log_file.is_none();
 
     let params = Arc::new(UploadParams {
         config: Arc::clone(&config),
@@ -2213,8 +2218,9 @@ async fn main() -> Result<()> {
         out: cli.out.clone(),
         write_history: config.history,
         renderer_opts: pesto::progress::RendererOptions {
-            quiet: cli.quiet || config.quiet || logs_to_stderr,
+            quiet: cli.quiet || config.quiet,
             bell: cli.bell || config.bell,
+            plain: logs_to_stderr,
         },
     });
 

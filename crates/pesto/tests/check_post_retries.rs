@@ -298,8 +298,12 @@ fn a_second_repost_attempt_recovers_an_article_the_first_missed() {
         output.status.success(),
         "expected pesto to succeed with 2 check-post-retries attempts\nstderr:\n{stderr}"
     );
+    // Non-TTY runs report verification through the plain renderer's final
+    // line (`… · check 1 verified/0 missing/0 pending`); the standalone
+    // "check: all N article(s) verified" line was dropped as a duplicate of
+    // the renderer's own summary.
     assert!(
-        stderr.contains("all 1 article(s) verified"),
+        stderr.contains("check 1 verified") && !stderr.contains("missing after every repost"),
         "stderr did not report a successful recovery:\n{stderr}"
     );
     assert!(
