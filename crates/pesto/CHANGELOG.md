@@ -12,6 +12,55 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **PAR2 memory auto-detection now respects this process's own address-space
+  ceiling (`RLIMIT_AS` / `ulimit -v`), not just host RAM and cgroup
+  limits.** Shared hosting/seedbox accounts commonly cap `RLIMIT_AS` well
+  below host RAM via PAM `limits.conf`, invisible to the RAM/cgroup checks
+  already in place — a process that blew past it aborted immediately via
+  `handle_alloc_error`, and with the release profile's `panic = "abort"`
+  nothing unwound long enough to flush a log line, so it looked like the
+  upload just vanished mid-run with no explanation anywhere. `pesto` now
+  reads `RLIMIT_AS` at startup, folds it into the auto-detected memory
+  budget, and rejects a manually-set `--memory-limit` up front with an
+  actionable error if it doesn't fit safely, instead of aborting partway
+  through. See the new "Memory budget" section in the README.
+- **A separate, related crash** in the PAR2 encoder's internal
+  producer→hasher→encoder pipeline (`parmesan`, see that crate's own
+  changelog) is fixed alongside this. Both fixes were needed together: the
+  `RLIMIT_AS` fix alone still left far less real headroom than expected on
+  many-core hosts, traced to that pipeline's channels defaulting to a
+  depth that could itself hold several GB, invisible to any memory budget.
+- **ETA now stays readable when PAR2 is data-starved by a slow upload.**
+  PAR2 encoding is fed by the same read loop as posting, so on a slow or
+  bandwidth-throttled connection its progress is bursty. The remaining-time
+  estimate used to average slices/sec since the encode phase started; a
+  slow start (or a mid-run stall) skewed that average for a long time
+  afterward, swinging the displayed ETA by many minutes tick to tick. It
+  now uses a smoothed recent-rate estimate (like the upload's own ETA
+  already did) that reacts in seconds instead of minutes, and the overall
+  ETA line folds in PAR2 encode/write's own remaining time (taking the
+  most pessimistic of the two) instead of showing them as separate,
+  easily-conflicting numbers.
+- **A low–high ETA range read as two conflicting estimates rather than one
+  with uncertainty.** Now shows only the pessimistic (worst-case) bound.
+- **`Status` progress events (e.g. the memory-budget banner, "PAR2
+  recovery data split into N passes") never appeared in redirected/logged
+  (non-TTY) output** — the plain-mode renderer's per-phase branches each
+  returned before reaching a generic status print. It now prints each new
+  status line exactly once, immediately.
+
+### Added
+- **A one-time startup line reporting the PAR2 memory budget's inputs**:
+  the detected address-space ceiling (or "none detected"), how much is
+  reserved for connection/thread overhead, and the resulting per-pass
+  budget — visible in both the terminal panel and redirected/logged
+  output, not gated on `-v`.
+- **Connection counts now show the configured total alongside the
+  upload/check split** (e.g. `50 connections · 46 upload · 4 check`)
+  instead of just the split on its own, which read as unrelated to
+  whatever total the user had actually configured.
+
 ## [0.3.62] — 2026-07-22
 
 ### Added

@@ -330,6 +330,23 @@ pesto --par2-only movie.mkv
 pesto --par2-only ./MyShow.S01/
 ```
 
+### Memory budget
+
+`--memory-limit` bounds the PAR2 recovery-encoding pass specifically, not
+the whole process. When it's left unset, pesto auto-detects a safe value
+from available host RAM, any cgroup memory limit, and this process's own
+address-space ceiling (`RLIMIT_AS` / `ulimit -v`) — shared hosting and
+seedbox accounts commonly cap the latter well below host RAM, invisible to
+the first two. A manually-set `--memory-limit` that doesn't fit safely
+inside that ceiling is rejected up front with an actionable error, instead
+of the process aborting partway through the upload with no explanation.
+
+The startup banner reports the numbers behind the decision:
+
+```
+memory: address-space limit 9.5 GiB | reserved for overhead (connections+threads+runtime) 4.0 GiB | PAR2 budget 2.8 GiB/pass
+```
+
 ### SIMD acceleration
 
 pesto selects the fastest available Reed-Solomon path at startup via runtime

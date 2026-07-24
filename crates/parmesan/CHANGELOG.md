@@ -7,6 +7,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`Par2Worker`'s internal producer→hasher→encoder pipeline channels
+  defaulted to a depth of 256 slices.** Each in-flight slot holds a full
+  `par2_slice_size` buffer, so at the slice sizes common on large files
+  (tens of MB) that alone could hold several GB across the three pipeline
+  stages — entirely invisible to and uncapped by whatever memory budget
+  the caller sized the encoder's own buffers against. Depth is now a
+  caller-supplied parameter (`Par2Worker::spawn` takes a `channel_depth`
+  argument) with a small default (`DEFAULT_CHANNEL_DEPTH = 4`) — enough to
+  let the async reader race a little ahead of the RS/hash threads without
+  becoming its own unbounded memory sink.
+- **The hasher thread ran fire-and-forget**: if it panicked before sending
+  its final result, the channel closed silently and the caller saw only
+  an empty hash list — surfacing downstream as a confusing "worker
+  returned fewer hashes than non-empty files" with no hint that a panic
+  (the real cause) had happened. Its `JoinHandle` is now kept and joined,
+  so a real panic propagates with its original message instead of being
+  swallowed.
+
 ## [0.3.0] — 2026-07-20
 
 ### Added

@@ -326,7 +326,7 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
             (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
         );
 
-        let worker = Par2Worker::spawn(enc, pass_idx == 0);
+        let worker = Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
 
         ingest_files(&input_files, &worker, slice_size).await?;
 

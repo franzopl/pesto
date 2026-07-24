@@ -48,8 +48,13 @@ pub enum ProgressEvent {
     Started {
         mode: RunMode,
         files: Vec<FileEntry>,
-        /// Number of NNTP connections / worker threads (0 for `--par2-only`).
+        /// Number of NNTP connections / worker threads dedicated to posting
+        /// (0 for `--par2-only`) — does not include `check_connections`.
         connections: usize,
+        /// Number of NNTP connections dedicated to the streaming STAT check
+        /// (`poster::check`), carved out of (or additive to) `connections` —
+        /// see `split_connections`. 0 when checking is disabled.
+        check_connections: usize,
         /// `host:port` of the NNTP server, or `None` when not posting.
         target: Option<String>,
         /// Exact PAR2 recovery-data size that will be added to the queue
@@ -216,6 +221,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::Started {
                         files,
                         connections,
+                        check_connections,
                         target,
                         par2_bytes_hint,
                         ..
@@ -234,7 +240,7 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         par2_hint_remaining = par2_bytes_hint;
                         let _ = writeln!(
                             out,
-                            r#"{{"type":"started","total_files":{nf},"total_bytes":{total_bytes},"total_segments":{total_segments},"connections":{connections},"target":{target_json}}}"#,
+                            r#"{{"type":"started","total_files":{nf},"total_bytes":{total_bytes},"total_segments":{total_segments},"connections":{connections},"check_connections":{check_connections},"target":{target_json}}}"#,
                             nf = files.len(),
                         );
                     }

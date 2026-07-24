@@ -47,6 +47,9 @@ bdinfo-rs-core = { version = "=1.0.1", git = "https://github.com/agentjp/bdinfo-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 bench-internals = ["parmesan/bench-internals"]
 par2-avx2-gfni-unsafe = ["parmesan/par2-avx2-gfni-unsafe"]

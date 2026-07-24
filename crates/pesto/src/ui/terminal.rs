@@ -144,6 +144,17 @@ struct RenderState {
     status: String,
     /// When the current non-empty status text was first set.
     status_since: Option<Instant>,
+    /// Last `status` text printed by `draw_plain` — lets it print each new
+    /// status line exactly once instead of never (every phase branch
+    /// `return`s before reaching a generic status print) or every tick.
+    plain_status_printed: String,
+    /// Whether the one-time "connections: N upload · M check" line has
+    /// already been printed in plain (non-TTY) mode.
+    plain_connections_printed: bool,
+    /// Number of NNTP connections dedicated to the streaming STAT check,
+    /// separate from `conn_files`/`conn_state` (upload connections only).
+    /// 0 when checking is disabled.
+    check_connections: usize,
     /// File currently posted by each worker connection (`None` = idle).
     conn_files: Vec<Option<String>>,
     /// Per-file `(done, total)` segment counts, for the file tally.
@@ -188,6 +199,11 @@ struct RenderState {
     par2_write_total: u32,
     par2_write_done: u32,
     par2_write_start: Instant,
+    /// `par2_write_done` at the last tick and a smoothed (EMA) slices/sec
+    /// rate derived from it — see `par2_write_remaining_secs` for why a
+    /// recent rate is used instead of the cumulative since-start average.
+    prev_par2_write_done: u32,
+    par2_write_rate_ema: f64,
     // Streaming check queue — runs concurrently with the upload, so there is
     // no fixed total known upfront (unlike the old end-of-run STAT sweep).
     check_active: bool,
@@ -207,6 +223,10 @@ struct RenderState {
     par2_encode_done: usize,
     par2_encode_total: usize,
     par2_encode_start: Instant,
+    /// `par2_encode_done` at the last tick and a smoothed (EMA) slices/sec
+    /// rate derived from it — see `par2_encode_remaining_secs`.
+    prev_par2_encode_done: usize,
+    par2_encode_rate_ema: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +259,9 @@ impl RenderState {
             interrupted: false,
             status: String::new(),
             status_since: None,
+            plain_status_printed: String::new(),
+            plain_connections_printed: false,
+            check_connections: 0,
             conn_files: Vec::new(),
             files: HashMap::new(),
             lines_drawn: 0,
@@ -251,6 +274,8 @@ impl RenderState {
             par2_write_total: 0,
             par2_write_done: 0,
             par2_write_start: Instant::now(),
+            prev_par2_write_done: 0,
+            par2_write_rate_ema: 0.0,
             check_active: false,
             check_checked: 0,
             check_failed: 0,
@@ -261,6 +286,8 @@ impl RenderState {
             par2_encode_done: 0,
             par2_encode_total: 0,
             par2_encode_start: Instant::now(),
+            prev_par2_encode_done: 0,
+            par2_encode_rate_ema: 0.0,
             proc_rss_bytes: 0,
             proc_cpu_pct: 0.0,
             proc_prev_ticks: 0,
@@ -285,6 +312,7 @@ impl RenderState {
                 mode,
                 files,
                 connections,
+                check_connections,
                 target,
                 par2_bytes_hint,
                 par2_segments_hint,
@@ -293,6 +321,7 @@ impl RenderState {
                 self.mode = mode;
                 self.target = target;
                 self.start = Instant::now();
+                self.check_connections = check_connections;
                 self.conn_files = vec![None; connections];
                 self.conn_state = vec![ConnState::Idle; connections];
                 for f in files {
@@ -415,6 +444,8 @@ impl RenderState {
                 self.par2_encode_total = input_slices;
                 self.par2_encode_done = 0;
                 self.par2_encode_start = Instant::now();
+                self.prev_par2_encode_done = 0;
+                self.par2_encode_rate_ema = 0.0;
                 self.par2_info = Some(Par2Info {
                     input_bytes,
                     input_slices,
@@ -437,6 +468,8 @@ impl RenderState {
                 self.par2_write_total = total;
                 self.par2_write_done = 0;
                 self.par2_write_start = Instant::now();
+                self.prev_par2_write_done = 0;
+                self.par2_write_rate_ema = 0.0;
             }
             ProgressEvent::Par2SliceWritten => {
                 self.par2_write_done = self.par2_write_done.saturating_add(1);
@@ -562,6 +595,100 @@ impl RenderState {
         Some((low, high, cv >= 0.3))
     }
 
+    /// Update the smoothed (EMA) PAR2 encode/write rates from this tick's
+    /// delta. Called once per draw tick (~200ms), mirroring the byte-rate
+    /// sampling right above its call site.
+    ///
+    /// The remaining-time estimates below deliberately use this smoothed
+    /// recent rate rather than the cumulative since-start average: PAR2
+    /// encoding is fed by the same data-starved read loop as the upload
+    /// (see the module's architecture notes), so its progress is bursty —
+    /// a slow start (or a network stall mid-run) skews a cumulative average
+    /// for a long time afterward, swinging the displayed ETA wildly as the
+    /// average slowly catches up. An EMA of the recent per-tick rate reacts
+    /// in seconds instead of minutes.
+    fn update_par2_rate_emas(&mut self) {
+        const EMA_ALPHA: f64 = 0.15;
+        if self.par2_encode_total > 0 {
+            let delta = self
+                .par2_encode_done
+                .saturating_sub(self.prev_par2_encode_done) as f64;
+            let instant_rate = delta * (1000.0 / 200.0);
+            self.prev_par2_encode_done = self.par2_encode_done;
+            self.par2_encode_rate_ema = if self.par2_encode_rate_ema <= 0.0 {
+                instant_rate
+            } else {
+                EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.par2_encode_rate_ema
+            };
+        }
+        if self.par2_write_total > 0 {
+            let delta = self
+                .par2_write_done
+                .saturating_sub(self.prev_par2_write_done) as f64;
+            let instant_rate = delta * (1000.0 / 200.0);
+            self.prev_par2_write_done = self.par2_write_done;
+            self.par2_write_rate_ema = if self.par2_write_rate_ema <= 0.0 {
+                instant_rate
+            } else {
+                EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.par2_write_rate_ema
+            };
+        }
+    }
+
+    /// Projected remaining seconds for the PAR2 encode phase, if it's active
+    /// and has a usable rate estimate. PAR2 encoding runs concurrently with
+    /// posting and can outlast it (e.g. a slow encode on a fast link, or
+    /// extra passes forced by a tight memory budget) — folding this into the
+    /// overall ETA (see its call site) means a slow encode shows up there
+    /// instead of only in its own easy-to-miss indicator line.
+    fn par2_encode_remaining_secs(&self) -> Option<f64> {
+        if self.par2_encode_total == 0 || self.par2_encode_done >= self.par2_encode_total {
+            return None;
+        }
+        (self.par2_encode_rate_ema > 0.01).then(|| {
+            (self.par2_encode_total - self.par2_encode_done) as f64 / self.par2_encode_rate_ema
+        })
+    }
+
+    /// Same idea as [`Self::par2_encode_remaining_secs`], for the (usually
+    /// short) phase that writes already-computed recovery data to disk.
+    fn par2_write_remaining_secs(&self) -> Option<f64> {
+        if self.par2_write_total == 0 || self.par2_write_done >= self.par2_write_total {
+            return None;
+        }
+        (self.par2_write_rate_ema > 0.01).then(|| {
+            (self.par2_write_total - self.par2_write_done) as f64 / self.par2_write_rate_ema
+        })
+    }
+
+    /// Overall ETA in seconds, folding in PAR2 encode/write remaining time
+    /// alongside the upload-side estimate — one pessimistic number instead
+    /// of two or three separate, easily-conflicting ETAs on screen at once.
+    /// Returns `(seconds, unstable)`; `unstable` only ever reflects the
+    /// upload-side estimate (`eta_range`), the only one with enough samples
+    /// to judge confidence.
+    fn overall_eta_secs(&self) -> Option<(f64, bool)> {
+        let (mut best, unstable) = match self.eta_range() {
+            Some((_lo, hi, u)) => (Some(hi), u),
+            None => {
+                let rate = self.rate();
+                let fallback = (rate > 1.0 && self.total_bytes > self.done_bytes)
+                    .then(|| (self.total_bytes - self.done_bytes) as f64 / rate);
+                (fallback, false)
+            }
+        };
+        for x in [
+            self.par2_encode_remaining_secs(),
+            self.par2_write_remaining_secs(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            best = Some(best.map_or(x, |b: f64| b.max(x)));
+        }
+        best.map(|secs| (secs, unstable))
+    }
+
     /// Draw quiet single-line mode (phase 21f).
     fn draw_quiet(&mut self, final_draw: bool) {
         if !self.started {
@@ -584,13 +711,9 @@ impl RenderState {
 
         let eta_str = if final_draw {
             format!("done {}", format_duration(self.elapsed_secs()))
-        } else if let Some((lo, hi, unstable)) = self.eta_range() {
+        } else if let Some((secs, unstable)) = self.overall_eta_secs() {
             let mark = if unstable { "~" } else { "" };
-            if (hi - lo).abs() < 1.0 {
-                format!("ETA {mark}{}", format_duration(lo))
-            } else {
-                format!("ETA {mark}{}–{}", format_duration(lo), format_duration(hi))
-            }
+            format!("ETA {mark}{}", format_duration(secs))
         } else {
             "ETA —".to_string()
         };
@@ -684,6 +807,9 @@ impl RenderState {
         self.prev_done_bytes = self.done_bytes;
         if !final_draw && self.done_bytes > 0 {
             self.push_speed_sample(current_bps);
+        }
+        if !final_draw {
+            self.update_par2_rate_emas();
         }
         if !final_draw {
             self.poll_proc_stats();
@@ -864,18 +990,12 @@ impl RenderState {
                     format_size(rate as u64),
                     spark,
                 );
-                let l3 = if let Some((lo, hi, unstable)) = self.eta_range() {
-                    let mark = if unstable { "~" } else { "" };
-                    if (hi - lo).abs() < 1.0 {
-                        format!("ETA {mark}{}", format_duration(lo))
-                    } else {
-                        format!("ETA {mark}{}–{}", format_duration(lo), format_duration(hi))
+                let l3 = match self.overall_eta_secs() {
+                    Some((secs, unstable)) => {
+                        let mark = if unstable { "~" } else { "" };
+                        format!("ETA {mark}{}", format_duration(secs))
                     }
-                } else if rate > 1.0 && self.total_bytes > self.done_bytes {
-                    let remaining = (self.total_bytes - self.done_bytes) as f64 / rate;
-                    format!("ETA {}", format_duration(remaining))
-                } else {
-                    "ETA —".to_string()
+                    None => "ETA —".to_string(),
                 };
                 (l2, Some(l3))
             };
@@ -936,6 +1056,17 @@ impl RenderState {
 
             // --- per-connection activity with colour codes (phase 21b) ----
             let conns = self.conn_files.len();
+            // The check pool runs on its own dedicated connections, carved
+            // out of (or additive to) the total the user actually asked for
+            // — show that total explicitly instead of leaving "N upload · M
+            // check" for the reader to add up against their own `-n`/config
+            // value themselves.
+            let total_conns = conns + self.check_connections;
+            let check_str = if self.check_connections > 0 {
+                format!(" · {} check", self.check_connections)
+            } else {
+                String::new()
+            };
             if conns > 0 && conns <= GRID_LIMIT {
                 let mut idx = 0;
                 while idx < conns {
@@ -953,6 +1084,9 @@ impl RenderState {
                     lines.push(line);
                     idx += 2;
                 }
+                lines.push(format!(
+                    "{total_conns} connections · {conns} upload{check_str}"
+                ));
             } else if conns > GRID_LIMIT {
                 let active = self.conn_files.iter().filter(|c| c.is_some()).count();
                 let retrying = self
@@ -965,7 +1099,9 @@ impl RenderState {
                 } else {
                     String::new()
                 };
-                lines.push(format!("{conns} connections · {active} active{retry_str}"));
+                lines.push(format!(
+                    "{total_conns} connections · {conns} upload · {active} active{retry_str}{check_str}"
+                ));
             }
 
             // --- file tally + failures -----------------------------------
@@ -1007,21 +1143,16 @@ impl RenderState {
             && self.par2_encode_total > 0
             && self.par2_encode_done < self.par2_encode_total
         {
-            let elapsed = self.par2_encode_start.elapsed().as_secs_f64().max(0.001);
             let frac =
                 (self.par2_encode_done as f64 / self.par2_encode_total as f64).clamp(0.0, 1.0);
             let pct = (frac * 100.0).round() as u64;
             let bar = render_bar(frac, 22);
-            let rate = self.par2_encode_done as f64 / elapsed;
-            let eta_str = if rate > 0.01 && self.par2_encode_done < self.par2_encode_total {
-                let remaining = (self.par2_encode_total - self.par2_encode_done) as f64 / rate;
-                format!(" · ETA {}", format_duration(remaining))
-            } else {
-                String::new()
-            };
+            // No ETA here on purpose — its remaining time already feeds into
+            // the single overall ETA above (`overall_eta_secs`) instead of
+            // competing with it as a second, easily-conflicting estimate.
             lines.push(ansi(
                 &format!(
-                    "  par2 encode  [{bar}] {pct:>3}%  {}/{} slices{eta_str}",
+                    "  par2 encode  [{bar}] {pct:>3}%  {}/{} slices",
                     self.par2_encode_done, self.par2_encode_total,
                 ),
                 "2",
@@ -1029,23 +1160,16 @@ impl RenderState {
         }
 
         if !final_draw && self.par2_write_active {
-            let elapsed = self.par2_write_start.elapsed().as_secs_f64().max(0.001);
             let frac = if self.par2_write_total > 0 {
                 (self.par2_write_done as f64 / self.par2_write_total as f64).clamp(0.0, 1.0)
             } else {
                 0.0
             };
             let bar = render_bar(frac, 10);
-            let rate = self.par2_write_done as f64 / elapsed;
-            let eta_str = if rate > 0.1 && self.par2_write_total > self.par2_write_done {
-                let remaining = (self.par2_write_total - self.par2_write_done) as f64 / rate;
-                format!(" · ETA {}", format_duration(remaining))
-            } else {
-                String::new()
-            };
+            // Same reasoning as the encode line above: no separate ETA.
             lines.push(ansi(
                 &format!(
-                    "  par2 write   [{bar}] {}/{} slices{eta_str}",
+                    "  par2 write   [{bar}] {}/{} slices",
                     self.par2_write_done, self.par2_write_total
                 ),
                 "2",
@@ -1126,6 +1250,27 @@ impl RenderState {
         if !self.started {
             return;
         }
+        // Print once, right when the run starts — upload and check pools are
+        // separate connection sets (see `split_connections`), so a single
+        // combined number would hide how many of each are actually in use.
+        if !self.plain_connections_printed {
+            self.plain_connections_printed = true;
+            let conns = self.conn_files.len();
+            if conns > 0 || self.check_connections > 0 {
+                let check_str = if self.check_connections > 0 {
+                    format!(" · {} check", self.check_connections)
+                } else {
+                    String::new()
+                };
+                let total_conns = conns + self.check_connections;
+                let mut err = std::io::stderr().lock();
+                let _ = writeln!(
+                    err,
+                    "connections: {total_conns} total ({conns} upload{check_str})"
+                );
+                let _ = err.flush();
+            }
+        }
         // Throttle to roughly one line every ~2s so logs stay readable.
         self.plain_ticks += 1;
         if !final_draw && !self.plain_ticks.is_multiple_of(10) {
@@ -1133,6 +1278,17 @@ impl RenderState {
         }
         self.expire_check_retry();
         let mut err = std::io::stderr().lock();
+
+        // Print each new `status` line exactly once, ahead of the
+        // phase-specific branches below — several of those `return` early,
+        // which used to mean a `Status` event (e.g. the memory-budget
+        // banner, or "PAR2 recovery data split into N passes") never made it
+        // into redirected/logged output at all.
+        if !self.status.is_empty() && self.status != self.plain_status_printed {
+            let _ = writeln!(err, "{}", self.status);
+            let _ = err.flush();
+            self.plain_status_printed = self.status.clone();
+        }
 
         if self.compress_active {
             let elapsed = self.compress_start.elapsed().as_secs_f64().max(0.001);

@@ -1628,6 +1628,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "lexical-sort",
+ "libc",
  "md-5",
  "parmesan-par2",
  "rayon",

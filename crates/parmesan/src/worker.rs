@@ -31,21 +31,47 @@ pub struct Par2Worker {
     handle: std::thread::JoinHandle<(Vec<RecoverySlice>, Vec<SliceChecksum>, Vec<FileHashes>)>,
 }
 
+/// Default depth (in slices) for the producer→hasher→encoder pipeline
+/// channels. Each in-flight slot holds a full `par2_slice_size` buffer, so
+/// this is a memory/throughput trade-off, not just a queue length: at a
+/// large slice size (tens of MB, common on big files) a deep channel can
+/// hold several GB across the three pipeline stages, uncapped by and
+/// invisible to whatever memory budget the caller sized the encoder's own
+/// buffers against. Small on purpose — enough to let the async reader race
+/// a little ahead of the RS/hash threads without becoming its own unbounded
+/// memory sink. Pass a caller-computed depth via [`Par2Worker::spawn`] when
+/// the slice size is large enough that this default would itself be
+/// significant.
+pub const DEFAULT_CHANNEL_DEPTH: usize = 64;
+
 impl Par2Worker {
-    pub fn spawn(enc: RecoveryEncoder, compute_hashes: bool) -> Self {
-        // Channel depth: 256 slices — enough to hold ~2 flush batches.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Par2Work>(256);
+    /// `channel_depth` bounds how many in-flight slices (each a full
+    /// `par2_slice_size` buffer) the producer→hasher→encoder pipeline may
+    /// buffer at once — see [`DEFAULT_CHANNEL_DEPTH`]. Callers that already
+    /// size the encoder's buffers against a memory budget should keep this
+    /// small (it's pipelining slack, not part of that budget).
+    pub fn spawn(enc: RecoveryEncoder, compute_hashes: bool, channel_depth: usize) -> Self {
+        let channel_depth = channel_depth.max(2); // at least double-buffered
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Par2Work>(channel_depth);
         // Return channel for recycled buffers.
-        let (free_tx, free_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(128);
+        let (free_tx, free_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(channel_depth);
 
         let handle = std::thread::spawn(move || {
-            let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(256);
+            let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(channel_depth);
             let (hash_tx, hash_rx) = std::sync::mpsc::sync_channel::<Vec<FileHashes>>(1);
 
             // Step 1: Spawn the MD5 hasher thread. It consumes Par2Work and
             // feeds raw Vec<u8> buffers to the RS encoder thread.
-            if compute_hashes {
-                std::thread::spawn(move || {
+            //
+            // Its `JoinHandle` is kept (not fire-and-forget) so a panic in
+            // here propagates instead of silently dropping `hash_tx`: without
+            // this, `hash_rx.recv()` below would just see a disconnected
+            // channel and `unwrap_or_default()` would return an empty
+            // `Vec<FileHashes>` — surfacing, at the call site, as "worker
+            // returned fewer hashes than non-empty files" with no hint that a
+            // panic (the real cause) ever happened.
+            let hasher_handle = if compute_hashes {
+                Some(std::thread::spawn(move || {
                     let mut hashes = Vec::new();
                     let mut current_hasher = crate::encoder::FileHasher::new();
                     while let Ok(work) = rx.recv() {
@@ -65,7 +91,7 @@ impl Par2Worker {
                         }
                     }
                     let _ = hash_tx.send(hashes);
-                });
+                }))
             } else {
                 std::thread::spawn(move || {
                     while let Ok(work) = rx.recv() {
@@ -76,7 +102,8 @@ impl Par2Worker {
                         }
                     }
                 });
-            }
+                None
+            };
 
             // Step 2: This thread acts as the RS encoder. It consumes slices
             // from the hasher thread and performs Reed-Solomon flushes.
@@ -91,7 +118,24 @@ impl Par2Worker {
             }
             let (slices, checksums) = enc.finish();
             let hashes = if compute_hashes {
-                hash_rx.recv().unwrap_or_default()
+                match hash_rx.recv() {
+                    Ok(hashes) => hashes,
+                    Err(_) => {
+                        // `hash_tx` was dropped without sending — the hasher
+                        // thread panicked before reaching its final send.
+                        // Join it to propagate the real panic instead of
+                        // silently returning an empty `Vec<FileHashes>`.
+                        if let Some(h) = hasher_handle {
+                            match h.join() {
+                                Err(payload) => std::panic::resume_unwind(payload),
+                                Ok(()) => unreachable!(
+                                    "hasher thread returned normally but never sent hashes"
+                                ),
+                            }
+                        }
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
