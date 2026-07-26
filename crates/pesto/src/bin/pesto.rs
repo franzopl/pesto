@@ -355,12 +355,15 @@ struct Cli {
 
     /// Treat each top-level entry in a directory argument as an independent
     /// upload with its own NZB. PAR2 and NZB naming follow the entry name.
-    /// Combine with --jobs for parallel uploads.
+    /// Combine with --jobs for parallel uploads. Also applies to directories
+    /// detected by --watch: each one is split per top-level entry instead of
+    /// posted as a single combined NZB.
     #[arg(long)]
     each: bool,
 
     /// Like --each, but also produces one consolidated NZB for the whole
-    /// directory. The consolidated NZB is named after the directory.
+    /// directory. The consolidated NZB is named after the directory. Also
+    /// applies to directories detected by --watch.
     #[arg(long)]
     season: bool,
 
@@ -369,8 +372,10 @@ struct Cli {
     #[arg(long, value_name = "N", default_value = "1")]
     jobs: usize,
 
-    /// Watch DIR for new entries and post each one automatically, implying
-    /// --each. On completion each entry is moved to --watch-done (if set);
+    /// Watch DIR for new entries and post each one automatically. A directory
+    /// entry is posted as a single combined NZB by default, or split per
+    /// top-level entry (one NZB per file) when --each or --season is also
+    /// passed. On completion each entry is moved to --watch-done (if set);
     /// otherwise it is left in place.
     /// Exits cleanly on SIGTERM / Ctrl-C after finishing any in-progress upload.
     #[arg(long, value_name = "DIR")]
@@ -1384,6 +1389,29 @@ fn top_level_entries(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
+/// Derive the path for a `--season` consolidated NZB for `entry`. Prefers
+/// `explicit_out` (from `--out`) if given; otherwise names the file after
+/// `entry` and places it under `nzb_dir` (from config), or the current
+/// directory if unset.
+fn derive_season_nzb_path(
+    explicit_out: Option<&Path>,
+    entry: &Path,
+    nzb_dir: Option<&str>,
+) -> PathBuf {
+    if let Some(out) = explicit_out {
+        return out.to_path_buf();
+    }
+    let name = entry
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "season".to_string());
+    let stem = format!("{name}.nzb");
+    match nzb_dir {
+        Some(dir) => expand_tilde(dir).join(&stem),
+        None => PathBuf::from(&stem),
+    }
+}
+
 /// Run `--each` / `--season` batch over all top-level entries of the given directories.
 ///
 /// Returns all collected segments (for season NZB consolidation) and whether
@@ -1629,6 +1657,14 @@ fn entry_size(path: &Path) -> u64 {
         .sum()
 }
 
+/// `--each`/`--season` options that also apply to directories detected by
+/// `--watch` (see `run_watch`).
+struct WatchBatchOpts {
+    each: bool,
+    season: bool,
+    explicit_out: Option<PathBuf>,
+}
+
 /// Run `--watch DIR`: poll for new entries and post each one automatically.
 ///
 /// New entries are held in a "pending" state until their total byte size is
@@ -1643,8 +1679,14 @@ async fn run_watch(
     watch_done: Option<&Path>,
     poll_interval: u64,
     jobs: usize,
+    batch_opts: WatchBatchOpts,
     cancel: Arc<AtomicBool>,
 ) -> Result<bool> {
+    let WatchBatchOpts {
+        each,
+        season,
+        explicit_out,
+    } = batch_opts;
     use tokio::sync::mpsc;
 
     eprintln!(
@@ -1775,40 +1817,77 @@ async fn run_watch(
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "entry".to_string());
                     let task_cancel = cancel.clone();
+                    let explicit_out = explicit_out.clone();
 
                     tokio::spawn(async move {
                         let _permit = permit;
                         if !params.json_mode {
                             println!("\n── watch: {} ──", label);
                         }
-                        let (success, task_cancelled) = match run_single_upload(
-                            &params,
-                            std::slice::from_ref(&entry),
-                            &label,
-                            Some(&task_cancel),
-                        )
-                        .await
-                        {
-                            Ok(result) if result.cancelled => (false, true),
-                            Ok(_) => {
-                                // Move to --watch-done if specified; otherwise leave in place.
-                                if let Some(done_dir) = &watch_done {
-                                    let dest = done_dir.join(entry.file_name().unwrap_or_default());
-                                    if let Err(e) = std::fs::rename(&entry, &dest) {
-                                        eprintln!(
-                                            "watch: could not move `{}` to `{}`: {e}",
-                                            entry.display(),
-                                            dest.display()
-                                        );
-                                    }
+                        // Directories are posted as one combined NZB by default. With
+                        // --each/--season, split per top-level entry instead, reusing
+                        // the same batch machinery --each/--season use outside --watch.
+                        let (success, task_cancelled) = if (each || season) && entry.is_dir() {
+                            let season_nzb = season.then(|| {
+                                derive_season_nzb_path(
+                                    explicit_out.as_deref(),
+                                    &entry,
+                                    params.config.nzb_dir.as_deref(),
+                                )
+                            });
+                            match run_batch(
+                                Arc::clone(&params),
+                                std::slice::from_ref(&entry),
+                                jobs,
+                                season_nzb,
+                                task_cancel.clone(),
+                            )
+                            .await
+                            {
+                                Ok((_segments, any_cancelled, any_failures)) => {
+                                    (!any_cancelled && !any_failures, any_cancelled)
                                 }
-                                (true, false)
+                                Err(e) => {
+                                    eprintln!(
+                                        "watch: upload failed for `{}`: {e:#}",
+                                        entry.display()
+                                    );
+                                    (false, false)
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("watch: upload failed for `{}`: {e:#}", entry.display());
-                                (false, false)
+                        } else {
+                            match run_single_upload(
+                                &params,
+                                std::slice::from_ref(&entry),
+                                &label,
+                                Some(&task_cancel),
+                            )
+                            .await
+                            {
+                                Ok(result) if result.cancelled => (false, true),
+                                Ok(_) => (true, false),
+                                Err(e) => {
+                                    eprintln!(
+                                        "watch: upload failed for `{}`: {e:#}",
+                                        entry.display()
+                                    );
+                                    (false, false)
+                                }
                             }
                         };
+                        if success {
+                            // Move to --watch-done if specified; otherwise leave in place.
+                            if let Some(done_dir) = &watch_done {
+                                let dest = done_dir.join(entry.file_name().unwrap_or_default());
+                                if let Err(e) = std::fs::rename(&entry, &dest) {
+                                    eprintln!(
+                                        "watch: could not move `{}` to `{}`: {e}",
+                                        entry.display(),
+                                        dest.display()
+                                    );
+                                }
+                            }
+                        }
                         // Report outcome; if the channel is closed we're shutting down.
                         let _ = tx.send((entry, success, task_cancelled));
                     });
@@ -2114,6 +2193,16 @@ async fn main() -> Result<()> {
         _stdin_tempfile = None;
     }
 
+    // --out names a single fixed file; combined with --watch --season, every
+    // distinct folder detected over time would silently clobber the same
+    // path. Point the user at --nzb-dir instead, which names each season NZB
+    // after its folder.
+    anyhow::ensure!(
+        !(cli.watch.is_some() && cli.season && cli.out.is_some()),
+        "--out cannot be combined with --watch --season (each detected folder needs its own \
+         season NZB name); use --nzb-dir instead"
+    );
+
     // --merge-season: offline NZB merge, no server connection needed.
     if let Some(ref dir) = cli.merge_season {
         // No upload here, so no session log — just honour -v/--log-file.
@@ -2236,6 +2325,11 @@ async fn main() -> Result<()> {
             cli.watch_done.as_deref(),
             cli.watch_interval,
             cli.jobs,
+            WatchBatchOpts {
+                each: cli.each,
+                season: cli.season,
+                explicit_out: cli.out.clone(),
+            },
             cancel,
         )
         .await?;
@@ -2251,21 +2345,12 @@ async fn main() -> Result<()> {
         // For --season, derive the consolidated NZB path from the first directory arg.
         let season_nzb: Option<PathBuf> = if cli.season {
             cli.out.clone().or_else(|| {
-                cli.files.iter().find_map(|p| {
-                    let md = std::fs::metadata(p).ok()?;
-                    if md.is_dir() {
-                        let name = p.file_name()?.to_string_lossy();
-                        let stem = format!("{name}.nzb");
-                        let path = if let Some(dir) = &params.config.nzb_dir {
-                            expand_tilde(dir).join(&stem)
-                        } else {
-                            PathBuf::from(&stem)
-                        };
-                        Some(path)
-                    } else {
-                        None
-                    }
-                })
+                cli.files
+                    .iter()
+                    .find(|p| std::fs::metadata(p).map(|md| md.is_dir()).unwrap_or(false))
+                    .map(|entry| {
+                        derive_season_nzb_path(None, entry, params.config.nzb_dir.as_deref())
+                    })
             })
         } else {
             None
@@ -2877,5 +2962,27 @@ mod tests {
         assert_eq!(names, ["ep01.mkv"]);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn derive_season_nzb_path_prefers_explicit_out() {
+        let path = derive_season_nzb_path(
+            Some(Path::new("/custom/out.nzb")),
+            Path::new("/downloads/Show.S01"),
+            Some("/nzbs"),
+        );
+        assert_eq!(path, PathBuf::from("/custom/out.nzb"));
+    }
+
+    #[test]
+    fn derive_season_nzb_path_names_after_entry_under_nzb_dir() {
+        let path = derive_season_nzb_path(None, Path::new("/downloads/Show.S01"), Some("/nzbs"));
+        assert_eq!(path, PathBuf::from("/nzbs/Show.S01.nzb"));
+    }
+
+    #[test]
+    fn derive_season_nzb_path_falls_back_to_cwd_relative_name() {
+        let path = derive_season_nzb_path(None, Path::new("/downloads/Show.S01"), None);
+        assert_eq!(path, PathBuf::from("Show.S01.nzb"));
     }
 }
