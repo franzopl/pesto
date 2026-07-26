@@ -29,6 +29,10 @@
 #   PESTO_OBFUSCATE   — obfuscation mode in use
 #   PESTO_PAR2        — PAR2 redundancy percentage (e.g. 10)
 #   PESTO_TAGS        — space-separated list of NZB tags (empty when none)
+#   PESTO_TMDB_ID     — value of --tmdb, e.g. movie/12345 or tv/12345 (empty when not set)
+#   PESTO_IMDB_ID     — value of --imdb-id, e.g. tt1234567 (empty when not set)
+#   PESTO_TVDB_ID     — value of --tvdb-id (empty when not set)
+#   PESTO_MAL_ID      — value of --mal-id (empty when not set)
 #
 # Post-upload hooks additionally receive:
 #   PESTO_NZB         — absolute path to the generated .nzb file (empty when not written)
@@ -47,6 +51,10 @@ echo "  PESTO_NZB_NAME    = $PESTO_NZB_NAME"
 echo "  PESTO_OBFUSCATE   = $PESTO_OBFUSCATE"
 echo "  PESTO_PAR2        = $PESTO_PAR2"
 echo "  PESTO_TAGS        = $PESTO_TAGS"
+echo "  PESTO_TMDB_ID     = $PESTO_TMDB_ID"
+echo "  PESTO_IMDB_ID     = $PESTO_IMDB_ID"
+echo "  PESTO_TVDB_ID     = $PESTO_TVDB_ID"
+echo "  PESTO_MAL_ID      = $PESTO_MAL_ID"
 echo "  PESTO_NZB         = $PESTO_NZB"
 echo "  PESTO_NFO         = $PESTO_NFO"
 echo "=============================="

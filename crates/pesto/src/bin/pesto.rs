@@ -673,6 +673,10 @@ async fn run_single_upload(
             obfuscate: pre_obfuscate,
             par2: config.par2,
             tags: &pre_tags_str,
+            tmdb_id: config.tmdb_id.as_deref(),
+            imdb_id: config.imdb_id.as_deref(),
+            tvdb_id: config.tvdb_id.as_deref(),
+            mal_id: config.mal_id.as_deref(),
         };
 
         // Explicit --pre-hook always runs (not suppressed by --no-hooks).
@@ -1290,6 +1294,10 @@ async fn run_single_upload(
             obfuscate: post_obfuscate,
             par2: config.par2,
             tags: &post_tags_str,
+            tmdb_id: config.tmdb_id.as_deref(),
+            imdb_id: config.imdb_id.as_deref(),
+            tvdb_id: config.tvdb_id.as_deref(),
+            mal_id: config.mal_id.as_deref(),
         };
 
         run_all_hooks(config, &hook_env);
@@ -1628,6 +1636,10 @@ async fn run_batch(
                 obfuscate: season_obfuscate,
                 par2: config.par2,
                 tags: &season_tags_str,
+                tmdb_id: config.tmdb_id.as_deref(),
+                imdb_id: config.imdb_id.as_deref(),
+                tvdb_id: config.tvdb_id.as_deref(),
+                mal_id: config.mal_id.as_deref(),
             };
             // Skip hooks for --dry-run / --par2-only: no real upload happened.
             if !config.dry_run && !config.par2_only {
@@ -2556,6 +2568,14 @@ struct HookEnv<'a> {
     par2: u8,
     /// Space-separated list of NZB tags (empty string when none).
     tags: &'a str,
+    /// TMDb reference, e.g. `movie/12345` or `tv/12345` (`--tmdb`).
+    tmdb_id: Option<&'a str>,
+    /// IMDb ID, e.g. `tt1234567` (`--imdb-id`).
+    imdb_id: Option<&'a str>,
+    /// TheTVDB ID (`--tvdb-id`).
+    tvdb_id: Option<&'a str>,
+    /// MyAnimeList ID (`--mal-id`).
+    mal_id: Option<&'a str>,
 }
 
 fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
@@ -2572,6 +2592,10 @@ fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
     child.env("PESTO_OBFUSCATE", env.obfuscate);
     child.env("PESTO_PAR2", env.par2.to_string());
     child.env("PESTO_TAGS", env.tags);
+    child.env("PESTO_TMDB_ID", env.tmdb_id.unwrap_or(""));
+    child.env("PESTO_IMDB_ID", env.imdb_id.unwrap_or(""));
+    child.env("PESTO_TVDB_ID", env.tvdb_id.unwrap_or(""));
+    child.env("PESTO_MAL_ID", env.mal_id.unwrap_or(""));
     child.env(
         "PESTO_NZB",
         env.nzb_path

@@ -12,6 +12,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- Pre- and post-upload hooks now receive `PESTO_TMDB_ID`, `PESTO_IMDB_ID`,
+  `PESTO_TVDB_ID`, and `PESTO_MAL_ID` (from `--tmdb`, `--imdb-id`,
+  `--tvdb-id`, `--mal-id`), empty when not set.
+- `--each`/`--season` now also apply to directories detected by `--watch`,
+  splitting each one per top-level entry instead of always posting it as a
+  single combined NZB.
+
 ## [0.4.0] — 2026-07-24
 
 ### Fixed
