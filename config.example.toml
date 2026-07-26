@@ -226,6 +226,10 @@ groups = ["alt.binaries.test"]
 #   PESTO_OBFUSCATE    — obfuscation mode in use: none, full, or paranoid
 #   PESTO_PAR2         — PAR2 redundancy percentage (e.g. 10)
 #   PESTO_TAGS         — space-separated list of NZB tags (empty when none)
+#   PESTO_TMDB_ID      — value of --tmdb (empty when not set)
+#   PESTO_IMDB_ID      — value of --imdb-id (empty when not set)
+#   PESTO_TVDB_ID      — value of --tvdb-id (empty when not set)
+#   PESTO_MAL_ID       — value of --mal-id (empty when not set)
 #
 # Use case: query NZBHydra2 or Prowlarr before uploading to avoid duplicates.
 # Example (abort if the release is already indexed):
@@ -236,7 +240,8 @@ groups = ["alt.binaries.test"]
 # Runs via `sh -c` on Unix or `cmd /c` on Windows. The following environment
 # variables are available: PESTO_NZB, PESTO_NFO, PESTO_NAME, PESTO_BYTES,
 # PESTO_INPUT_PATHS, PESTO_SERVER, PESTO_GROUP, PESTO_GROUPS, PESTO_PASSWORD,
-# PESTO_CATEGORY, PESTO_NZB_NAME, PESTO_OBFUSCATE, PESTO_PAR2, PESTO_TAGS.
+# PESTO_CATEGORY, PESTO_NZB_NAME, PESTO_OBFUSCATE, PESTO_PAR2, PESTO_TAGS,
+# PESTO_TMDB_ID, PESTO_IMDB_ID, PESTO_TVDB_ID, PESTO_MAL_ID.
 # post_hook = "notify-send 'pesto' 'Upload done: $PESTO_NAME'"
 #
 # See examples/hooks/ for ready-made hook scripts (curupira.sh, generic-indexer.sh, etc.).
