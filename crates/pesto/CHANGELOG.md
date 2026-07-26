@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-26
+
 ### Added
 - Pre- and post-upload hooks now receive `PESTO_TMDB_ID`, `PESTO_IMDB_ID`,
   `PESTO_TVDB_ID`, and `PESTO_MAL_ID` (from `--tmdb`, `--imdb-id`,
