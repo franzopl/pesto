@@ -168,6 +168,11 @@ struct RenderState {
     done_bytes: u64,
     failures: u64,
     interrupted: bool,
+    /// Set by `ProgressEvent::Failed` (e.g. a producer error such as the
+    /// `--memory-limit` address-space check bailing). Printed alongside the
+    /// "interrupted" note so a run that dies before posting anything doesn't
+    /// leave the user with no clue why.
+    failed_description: Option<String>,
     status: String,
     /// When the current non-empty status text was first set.
     status_since: Option<Instant>,
@@ -175,6 +180,9 @@ struct RenderState {
     /// status line exactly once instead of never (every phase branch
     /// `return`s before reaching a generic status print) or every tick.
     plain_status_printed: String,
+    /// Whether `failed_description` has already been printed in plain mode —
+    /// mirrors `plain_status_printed`'s one-shot pattern.
+    plain_failed_printed: bool,
     /// Whether the one-time "connections: N upload · M check" line has
     /// already been printed in plain (non-TTY) mode.
     plain_connections_printed: bool,
@@ -294,9 +302,11 @@ impl RenderState {
             done_bytes: 0,
             failures: 0,
             interrupted: false,
+            failed_description: None,
             status: String::new(),
             status_since: None,
             plain_status_printed: String::new(),
+            plain_failed_printed: false,
             plain_connections_printed: false,
             check_connections: 0,
             conn_files: Vec::new(),
@@ -452,7 +462,7 @@ impl RenderState {
                 }
                 self.status = text;
             }
-            ProgressEvent::Failed { .. } => {}
+            ProgressEvent::Failed { description } => self.failed_description = Some(description),
             ProgressEvent::Interrupted => self.interrupted = true,
             ProgressEvent::Finished => self.finished = true,
             ProgressEvent::CompressStarted { total_bytes } => {
@@ -1357,8 +1367,10 @@ impl RenderState {
             lines.push(ansi(&res_line, "2")); // dim — informational, not critical
         }
 
-        // --- optional status / interrupt note ----------------------------
-        if self.interrupted {
+        // --- optional status / interrupt / failure note -------------------
+        if let Some(desc) = &self.failed_description {
+            lines.push(format!("⚠ {desc}"));
+        } else if self.interrupted {
             lines.push("⚠ interrupt received — finishing in-flight segments".to_string());
         } else if !self.status.is_empty() {
             let elapsed_str = if let Some(since) = self.status_since {
@@ -1416,6 +1428,14 @@ impl RenderState {
             let _ = writeln!(err, "{}", self.status);
             let _ = err.flush();
             self.plain_status_printed = self.status.clone();
+        }
+
+        if !self.plain_failed_printed {
+            if let Some(desc) = &self.failed_description {
+                self.plain_failed_printed = true;
+                let _ = writeln!(err, "⚠ {desc}");
+                let _ = err.flush();
+            }
         }
 
         if self.compress_active {

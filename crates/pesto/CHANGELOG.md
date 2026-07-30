@@ -12,6 +12,19 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-07-30
+
+### Fixed
+- A producer-side failure (e.g. the `--memory-limit` address-space check
+  introduced in 0.4.0 rejecting a limit that doesn't fit) was silently
+  swallowed by the human-readable renderer — both the TTY panel and the
+  non-TTY plain output dropped `ProgressEvent::Failed` entirely, and no
+  `tracing` log line was emitted either, so the run just printed
+  "interrupted — upload incomplete" with no indication of why. The failure
+  description is now logged and shown as a `⚠` line in both renderers;
+  `--output-format json` already surfaced it via `{"type":"failed",...}`
+  and is unaffected.
+
 ## [0.4.1] — 2026-07-26
 
 ### Added

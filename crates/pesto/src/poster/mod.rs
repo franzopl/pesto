@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::article::{
     default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, random_from,
@@ -686,10 +686,14 @@ pub async fn post_files_with_progress_and_cancel(
 
     // Producer runs in this thread
     if let Err(e) = producer(metas, tx_opt, shared.clone()).await {
+        let description = format!("producer error: {e:#}");
+        // `Failed` alone only reaches `--output-format json` consumers; log
+        // it too so the reason survives in the session log file even when
+        // the human-readable renderer (which only shows it via `Failed`,
+        // see `ui::terminal`) is what's on screen.
+        error!(error = %e, "producer error");
         shared.cancelled.store(true, Ordering::Relaxed);
-        shared.emit(ProgressEvent::Failed {
-            description: format!("producer error: {e:#}"),
-        });
+        shared.emit(ProgressEvent::Failed { description });
     }
 
     for handle in handles {
