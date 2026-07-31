@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-07-31
+
 ### Added
 - **`--obfuscate=full-shared` mode**: like `full`, but every file posted in the
   same run (archive/loose files and every PAR2 index/volume) shares one
