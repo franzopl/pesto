@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-07-31
+
 ### Fixed
 - A `producer` error (bad PAR2 geometry, a memory-budget check, file I/O, …)
   set the same `cancelled` flag as a real Ctrl-C, so both the CLI and the
