@@ -54,12 +54,29 @@ Download the latest binary for your platform from the
 
 | Platform | File |
 |----------|------|
-| Linux x86-64 (glibc) | `pesto-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux x86-64 (musl / Alpine) | `pesto-x86_64-unknown-linux-musl.tar.gz` |
-| Windows x86-64 | `pesto-x86_64-pc-windows-msvc.zip` |
+| Linux x86-64 (glibc) | `pesto-linux-x86_64` |
+| Linux x86-64 (musl / Alpine) | `pesto-linux-x86_64-musl` |
+| Windows x86-64 | `pesto-windows-x86_64.exe` |
 
-Extract the archive and copy the binary to a directory on your `PATH`
-(e.g. `/usr/local/bin` on Linux/macOS, `C:\Windows\System32` on Windows).
+Copy the binary to a directory on your `PATH` (e.g. `/usr/local/bin` on
+Linux/macOS), marking it executable on Linux/macOS (`chmod +x`). On Windows,
+rename it to `pesto.exe` and place it anywhere on your `PATH`.
+
+### Windows install script
+
+For a one-command setup that also creates the hooks folder, run this in
+PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/franzopl/pesto/main/scripts/install.ps1 | iex
+```
+
+This downloads the latest `pesto.exe`, installs it under
+`%LOCALAPPDATA%\pesto\bin`, adds that folder to your user `PATH`, creates
+`%APPDATA%\pesto\hooks\`, and runs the `--config` wizard if you don't have a
+config yet. See [`scripts/install.ps1`](scripts/install.ps1) for the
+`-HookUrl` / `-ConfigUrl` parameters distributors (e.g. an indexer pointing
+its users at a pre-filled hook) can use to skip manual file editing entirely.
 
 ### Via cargo
 
