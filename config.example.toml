@@ -84,9 +84,11 @@ groups = ["alt.binaries.test"]
 # retries = 3
 
 # obfuscate — how much of each post to hide. Default: "none".
-#   "none"    real file name in the subject and the yEnc header
-#   "subject" random subject; yEnc header keeps the real name
-#   "full"    random subject and random yEnc name (recover via the .nzb)
+#   "none"        real file name in the subject and the yEnc header
+#   "full"        random subject and random yEnc name (recover via the .nzb)
+#   "full-shared" like "full", but every file in the release (archive + PAR2
+#                 volumes) shares one random name, so indexers can still
+#                 group them as one release
 # obfuscate = "none"
 
 # par2 — percentage of PAR2 recovery data to generate. 0 disables it.

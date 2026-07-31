@@ -423,6 +423,7 @@ pub async fn run_upload(
             obfuscate: match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             }
             .to_string(),

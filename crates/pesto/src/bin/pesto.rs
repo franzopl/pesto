@@ -141,8 +141,10 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     nzb_dir: Option<PathBuf>,
 
-    /// Obfuscation mode: `none`, `full`. A bare `--obfuscate` means `full`
-    /// [config: posting.obfuscate, default none].
+    /// Obfuscation mode: `none`, `full`, `full-shared`. A bare `--obfuscate`
+    /// means `full`. `full-shared` is like `full` but reuses one random name
+    /// across every file in the release (archive + PAR2 volumes) so indexers
+    /// can still group them [config: posting.obfuscate, default none].
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1,
           default_missing_value = "full", require_equals = true)]
     obfuscate: Option<ObfuscateMode>,
@@ -643,6 +645,7 @@ async fn run_single_upload(
         let pre_obfuscate = match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",
+            ObfuscateMode::FullShared => "full-shared",
             ObfuscateMode::Paranoid => "paranoid",
         };
         let pre_groups_str = config.groups.join(":");
@@ -705,6 +708,7 @@ async fn run_single_upload(
             obfuscate: match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             },
             compress: compress_fmt,
@@ -1266,6 +1270,7 @@ async fn run_single_upload(
         let post_obfuscate = match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",
+            ObfuscateMode::FullShared => "full-shared",
             ObfuscateMode::Paranoid => "paranoid",
         };
         // PESTO_GROUP/PESTO_GROUPS report the group(s) actually posted to
@@ -1599,6 +1604,7 @@ async fn run_batch(
             let season_obfuscate = match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             };
             // The union of groups actually used across every episode in the

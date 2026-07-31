@@ -222,7 +222,8 @@ from cataloguing plain posts; obfuscation hides the content from them.
 | Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
-| `full` | random, 10–30 chars | random, 10–30 chars | random per file | yes |
+| `full` | random, 10–30 chars, unique per file | random, unique per file | random per file | yes |
+| `full-shared` | random, shared across the release | random, shared across the release | random, shared across the release | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
@@ -240,6 +241,31 @@ pesto --obfuscate=full movie.mkv
 # Combine with compression for maximum privacy
 pesto --obfuscate --password movie.mkv
 ```
+
+### Shared-prefix mode
+
+Under plain `full`, every file gets its own independently-random name — which
+also means the archive and its PAR2 volumes have nothing in common on the
+wire. Some public indexers rely on a shared base name to recognise that a
+PAR2 set belongs to a given release, so under `full` those posts often show
+up unindexed or split apart (see [issue #58]).
+
+`--obfuscate=full-shared` fixes that by generating one random name per run and
+reusing it — with the real extension kept — for every file: the archive (or
+loose input files) and every PAR2 index/volume. The real names still never
+touch the wire; only the *grouping* changes.
+
+```bash
+pesto --obfuscate=full-shared movie.mkv
+```
+
+This is a distinct, explicit choice rather than the default for `full`: reusing
+one name across the whole release is exactly the kind of correlation that
+`paranoid` mode (below) is designed to prevent, so pick `full-shared` only when
+indexer compatibility matters more than resistance to wire-metadata
+correlation.
+
+[issue #58]: https://github.com/franzopl/pesto/issues/58
 
 ### Paranoid mode (experimental)
 
@@ -767,7 +793,7 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none` or `full`; bare flag = `full` |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `full` or `full-shared`; bare flag = `full` |
 | `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random`, or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |

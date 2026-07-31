@@ -80,6 +80,16 @@ pub enum ObfuscateMode {
     /// Randomise subject and yEnc `name=` on the wire; the NZB always carries
     /// the real filename so download clients work without PAR2 recovery.
     Full,
+    /// Like `full`, but every file posted in the same run (archive parts and
+    /// PAR2 volumes alike) shares one random prefix instead of each getting
+    /// an independently-random name. The real names still stay off the wire;
+    /// what changes is that Usenet indexers can once again recognise the
+    /// PAR2 set and the content as one release, which plain `full` prevents
+    /// (see GitHub issue #58). This trades away resistance to correlation by
+    /// wire metadata for indexer compatibility — the opposite trade `paranoid`
+    /// makes — so it is a distinct mode rather than a `full` variant.
+    #[serde(rename = "full-shared")]
+    FullShared,
     /// Like `full` but each individual article gets a unique subject and From
     /// header, making segment grouping by wire metadata impossible.
     /// Experimental — requires the NZB to download.

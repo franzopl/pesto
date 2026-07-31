@@ -342,6 +342,17 @@ struct Shared {
     /// [`pick_post_group`]), so a whole upload stays together in a single group
     /// while the footprint spreads across groups over many runs.
     post_group: Vec<String>,
+    /// Shared subject/yEnc prefix for [`ObfuscateMode::FullShared`], generated
+    /// once per run so the archive files and every PAR2 volume land on the
+    /// wire under the same random name — see [`ObfuscateMode::FullShared`] for
+    /// why this trades away `full`'s per-file randomisation. `None` in every
+    /// other mode.
+    release_prefix: Option<String>,
+    /// Shared `From` header for [`ObfuscateMode::FullShared`], generated once
+    /// alongside `release_prefix` so the whole release also posts under one
+    /// identity instead of a fresh random sender per file. `None` in every
+    /// other mode.
+    release_from: Option<String>,
 }
 
 impl Shared {
@@ -417,8 +428,17 @@ pub async fn post_files_with_progress_and_cancel(
 ) -> Result<PostOutcome> {
     configure_rayon(config.threads);
 
+    // Generated once per run (not per file) so every file posted under
+    // `FullShared` — archive parts and PAR2 volumes alike — shares the same
+    // wire name prefix and sender identity. See `ObfuscateMode::FullShared`.
+    let (release_prefix, release_from) = if config.obfuscate == ObfuscateMode::FullShared {
+        (Some(obfuscated_name()), Some(random_from()))
+    } else {
+        (None, None)
+    };
+
     let mut metas = Vec::with_capacity(files.len());
-    for input in files {
+    for (idx, input) in files.iter().enumerate() {
         let path = &input.path;
         let md = tokio::fs::metadata(path)
             .await
@@ -445,6 +465,29 @@ pub async fn post_files_with_progress_and_cancel(
                 } else {
                     let obfuscated = obfuscated_name();
                     (obfuscated.clone(), obfuscated, random_from())
+                }
+            }
+            ObfuscateMode::FullShared => {
+                let from = release_from.clone().unwrap_or_default();
+                if size == 0 {
+                    let wn = wire_name(&real_name).to_string();
+                    (wn.clone(), wn, from)
+                } else {
+                    let prefix = release_prefix.as_deref().unwrap_or_default();
+                    let ext = Path::new(&real_name)
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    // A single-file release (the common case: one archive, or
+                    // one loose file) keeps a bare `prefix.ext`; multiple
+                    // files get a sequential suffix so they stay distinct
+                    // while still grouping under the same prefix.
+                    let name = if files.len() == 1 {
+                        format!("{prefix}{ext}")
+                    } else {
+                        format!("{prefix}-{:02}{ext}", idx + 1)
+                    };
+                    (name.clone(), name, from)
                 }
             }
         };
@@ -549,6 +592,8 @@ pub async fn post_files_with_progress_and_cancel(
         pool: Arc::new(Mutex::new(initial_pool)),
         total_retries: std::sync::atomic::AtomicUsize::new(0),
         post_group: pick_post_group(&config.groups),
+        release_prefix,
+        release_from,
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -1584,7 +1629,11 @@ async fn producer(
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
                 if let Some(tx) = &tx_opt {
-                    push_par2_file(&index_path, index_name, &shared, tx).await?;
+                    // In `FullShared` mode, root the wire name at the release
+                    // prefix instead of the (possibly real) on-disk base name,
+                    // so this index file groups with the rest of the release.
+                    let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
+                    push_par2_file(&index_path, index_name, wire_override, &shared, tx).await?;
                 }
             }
 
@@ -1618,7 +1667,11 @@ async fn producer(
 
                 if slice.exponent == vol.first + vol.count - 1 {
                     if let Some(tx) = &tx_opt {
-                        push_par2_file(&vol_path, vol_name, &shared, tx).await?;
+                        let wire_override = shared
+                            .release_prefix
+                            .as_deref()
+                            .map(|prefix| layout::volume_name(prefix, *vol));
+                        push_par2_file(&vol_path, vol_name, wire_override, &shared, tx).await?;
                     }
                 }
             }
@@ -1636,6 +1689,7 @@ async fn producer(
 async fn push_par2_file(
     path: &PathBuf,
     real_name: String,
+    wire_override: Option<String>,
     shared: &Arc<Shared>,
     tx: &tokio::sync::mpsc::Sender<PostTask>,
 ) -> Result<()> {
@@ -1649,14 +1703,22 @@ async fn push_par2_file(
         bytes: size,
     });
 
-    let (subject_name, yenc_name, from) = match shared.config.obfuscate {
-        ObfuscateMode::None => {
-            let wn = wire_name(&real_name).to_string();
-            (wn.clone(), wn, shared.config.from.clone())
-        }
-        ObfuscateMode::Full | ObfuscateMode::Paranoid => {
-            let obfuscated = obfuscated_name();
-            (obfuscated.clone(), obfuscated, random_from())
+    let (subject_name, yenc_name, from) = if let Some(name) = wire_override {
+        (
+            name.clone(),
+            name,
+            shared.release_from.clone().unwrap_or_default(),
+        )
+    } else {
+        match shared.config.obfuscate {
+            ObfuscateMode::None => {
+                let wn = wire_name(&real_name).to_string();
+                (wn.clone(), wn, shared.config.from.clone())
+            }
+            ObfuscateMode::Full | ObfuscateMode::Paranoid | ObfuscateMode::FullShared => {
+                let obfuscated = obfuscated_name();
+                (obfuscated.clone(), obfuscated, random_from())
+            }
         }
     };
     let date = resolve_date(shared.config.date.as_deref());
@@ -3092,6 +3154,8 @@ mod tests {
             pool: Arc::new(Mutex::new(Vec::new())),
             total_retries: std::sync::atomic::AtomicUsize::new(0),
             post_group,
+            release_prefix: None,
+            release_from: None,
         })
     }
 

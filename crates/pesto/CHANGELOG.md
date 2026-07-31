@@ -12,6 +12,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **`--obfuscate=full-shared` mode**: like `full`, but every file posted in the
+  same run (archive/loose files and every PAR2 index/volume) shares one
+  random name instead of each getting an independently-random one. Under
+  `full`, the archive and its PAR2 set share nothing on the wire, so several
+  public indexers fail to group them into one release; `full-shared` fixes
+  that at the cost of the correlation resistance `paranoid` mode provides
+  (fixes #58).
+
 ## [0.4.2] — 2026-07-30
 
 ### Fixed
