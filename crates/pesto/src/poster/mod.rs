@@ -273,6 +273,14 @@ pub struct PostOutcome {
     /// when `config.check` is disabled. A non-empty list means the run
     /// produced content that is not fully confirmed on the server.
     pub still_missing: Vec<String>,
+    /// Set when the run stopped because `producer` returned an error (bad
+    /// PAR2 geometry, a memory-budget check, file I/O, …) rather than because
+    /// the user cancelled it. `cancelled` is `true` in both cases — callers
+    /// that want to tell "the user pressed Ctrl-C" apart from "the run failed
+    /// and here's why" should check this field first. See issue #57: without
+    /// it, callers had no way to surface the actual failure and could only
+    /// print a generic "interrupted" message.
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -730,6 +738,7 @@ pub async fn post_files_with_progress_and_cancel(
     };
 
     // Producer runs in this thread
+    let mut failure_reason: Option<String> = None;
     if let Err(e) = producer(metas, tx_opt, shared.clone()).await {
         let description = format!("producer error: {e:#}");
         // `Failed` alone only reaches `--output-format json` consumers; log
@@ -738,7 +747,10 @@ pub async fn post_files_with_progress_and_cancel(
         // see `ui::terminal`) is what's on screen.
         error!(error = %e, "producer error");
         shared.cancelled.store(true, Ordering::Relaxed);
-        shared.emit(ProgressEvent::Failed { description });
+        shared.emit(ProgressEvent::Failed {
+            description: description.clone(),
+        });
+        failure_reason = Some(description);
     }
 
     for handle in handles {
@@ -845,6 +857,7 @@ pub async fn post_files_with_progress_and_cancel(
         groups: shared.post_group.clone(),
         still_missing,
         servers: servers_used,
+        failure_reason,
     })
 }
 

@@ -12,6 +12,18 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- A `producer` error (bad PAR2 geometry, a memory-budget check, file I/O, …)
+  set the same `cancelled` flag as a real Ctrl-C, so both the CLI and the
+  human-readable renderer printed a generic "interrupted" message — the TTY
+  summary even showed a green `✓`, as if the run had succeeded — with no way
+  to tell a genuine failure apart from a user cancellation or see *why* it
+  failed. Since the failure is a deterministic function of the file and the
+  config, retrying the same file failed identically every time with no
+  indication that retrying wouldn't help. `PostOutcome`/`UploadOutcome` now
+  carry `failure_reason`, and the CLI and both renderers (TTY summary and
+  `--quiet`) surface it instead of a bare "interrupted" (fixes #57).
+
 ## [0.4.3] — 2026-07-31
 
 ### Added

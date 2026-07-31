@@ -973,7 +973,15 @@ async fn run_single_upload(
     }
 
     if cancelled {
-        if config.par2_only {
+        // `outcome.cancelled` is set both by a real user cancellation and by a
+        // producer error (bad PAR2 geometry, a memory-budget check, file I/O,
+        // …) — see `PostOutcome::failure_reason`. Printing the same generic
+        // "interrupted" text for both left a run that actually failed with no
+        // indication of why, and the same file would then fail identically on
+        // every retry with no clue that retrying wouldn't help (issue #57).
+        if let Some(reason) = &outcome.failure_reason {
+            eprintln!("upload failed: {reason}");
+        } else if config.par2_only {
             eprintln!("interrupted — stopped before finishing PAR2 generation");
         } else {
             eprintln!("interrupted — upload incomplete");
@@ -1077,7 +1085,11 @@ async fn run_single_upload(
         if !cancelled || config.resume {
             Some(nzb_archive_path(&stem).await)
         } else {
-            eprintln!("interrupted — skipping nzb output");
+            if outcome.failure_reason.is_some() {
+                eprintln!("upload failed — skipping nzb output");
+            } else {
+                eprintln!("interrupted — skipping nzb output");
+            }
             None
         }
     } else {
