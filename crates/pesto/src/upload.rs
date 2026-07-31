@@ -24,6 +24,11 @@ pub struct UploadOutcome {
     pub had_failures: bool,
     pub nzb_path: Option<PathBuf>,
     pub total_bytes: u64,
+    /// See [`crate::poster::PostOutcome::failure_reason`]: set when
+    /// `cancelled` is true because the run failed (not because the user
+    /// cancelled it), so callers can tell the two apart instead of showing a
+    /// generic "cancelled" state for an actual failure (issue #57).
+    pub failure_reason: Option<String>,
 }
 
 /// Run the complete upload pipeline.
@@ -471,6 +476,7 @@ pub async fn run_upload(
         had_failures: has_post_failures || has_confirmed_missing,
         nzb_path,
         total_bytes,
+        failure_reason: outcome.failure_reason,
     })
 }
 

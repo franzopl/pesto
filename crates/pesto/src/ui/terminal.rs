@@ -790,7 +790,14 @@ impl RenderState {
         }
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let spinner = if final_draw {
-            '✓'
+            // A run that failed before posting anything (producer error) or
+            // was cancelled still set `final_draw`, so a bare '✓' here would
+            // claim success even when it isn't — see issue #57.
+            if self.interrupted || self.failed_description.is_some() || self.failures > 0 {
+                '⚠'
+            } else {
+                '✓'
+            }
         } else {
             let ch = SPINNER[self.spinner_frame % SPINNER.len()];
             self.spinner_frame += 1;
@@ -956,8 +963,11 @@ impl RenderState {
     /// nzb`/`wrote nfo` paths, so this covers only what the renderer itself
     /// knows — outcome, throughput and verification.
     fn summary_lines(&self, width: usize) -> Vec<String> {
-        let ok = self.failures == 0 && self.check_failed == 0 && !self.interrupted;
-        let glyph = if self.interrupted {
+        let ok = self.failures == 0
+            && self.check_failed == 0
+            && !self.interrupted
+            && self.failed_description.is_none();
+        let glyph = if self.interrupted || self.failed_description.is_some() {
             ansi("⚠", "33")
         } else if ok {
             ansi("✓", "32")
@@ -996,10 +1006,18 @@ impl RenderState {
         }
         let line2 = format!("  {}", parts.join(" · "));
 
-        vec![line1, line2]
-            .into_iter()
-            .map(|l| truncate(&l, width))
-            .collect()
+        let mut lines = vec![line1, line2];
+        // Surface *why* a run stopped early — without this, a run that fails
+        // before posting anything (e.g. a PAR2 geometry or memory-budget
+        // error in `producer`) printed a bare green checkmark here, because
+        // `ok`/`glyph` above were the only signal and `failed_description`
+        // was otherwise only ever shown in the live panel, which this summary
+        // replaces once the run ends (issue #57).
+        if let Some(desc) = &self.failed_description {
+            lines.push(format!("  {}", ansi(&format!("⚠ {desc}"), "33")));
+        }
+
+        lines.into_iter().map(|l| truncate(&l, width)).collect()
     }
 
     /// Erase the live panel and print the compact final summary in its place.
@@ -2068,6 +2086,32 @@ mod tests {
         let summary = state.summary_lines(100);
         assert!(summary[0].contains('✗'), "a failed run gets a cross glyph");
         assert!(summary[1].contains("failed"));
+    }
+
+    // Issue #57: a run that dies to a `producer` error (bad PAR2 geometry, a
+    // memory-budget check, …) before posting anything used to print a bare
+    // green `✓` here, because `summary_lines` only looked at `interrupted`
+    // (set solely by a real Ctrl-C) and never at `failed_description` (set by
+    // `ProgressEvent::Failed`) — indistinguishable from a clean run.
+    #[test]
+    fn final_summary_flags_producer_failure_instead_of_a_bare_checkmark() {
+        let mut state = started_state(false);
+        state.apply(ProgressEvent::Failed {
+            description: "producer error: too many input slices: 46875 (max 32768)".to_string(),
+        });
+        let summary = state.summary_lines(100);
+        assert!(
+            !summary.iter().any(|l| l.contains('✓')),
+            "a run that failed in producer must not show a green checkmark: {summary:?}"
+        );
+        assert!(
+            summary.iter().any(|l| l.contains('⚠')),
+            "a producer failure should get the same warning glyph as a cancellation: {summary:?}"
+        );
+        assert!(
+            summary.iter().any(|l| l.contains("too many input slices")),
+            "the actual failure reason should be visible in the final summary: {summary:?}"
+        );
     }
 
     #[test]
