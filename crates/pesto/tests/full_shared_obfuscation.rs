@@ -415,7 +415,6 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
         );
     }
 
-    let par2_dir = pesto::poster::par2_temp_dir();
-    let _ = std::fs::remove_dir_all(&par2_dir);
+    let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
