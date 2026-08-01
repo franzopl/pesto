@@ -105,14 +105,17 @@ if (-not $NoPathUpdate) {
     if ($userPath) { $pathEntries = $userPath -split ";" }
 
     if ($pathEntries -notcontains $InstallDir) {
-        $newPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+        # Prepend, not append: an older pesto.exe elsewhere on PATH (a prior
+        # manual install, common per pesto's own README before this script
+        # existed) would otherwise keep shadowing the one just installed here
+        # in every new terminal, silently running stale code.
+        $newPath = if ($userPath) { "$InstallDir;$userPath" } else { $InstallDir }
         [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-        Log "Added $InstallDir to your user PATH (open a new terminal to pick it up)."
+        Log "Added $InstallDir to the front of your user PATH (open a new terminal to pick it up)."
     }
 
-    if (($env:Path -split ";") -notcontains $InstallDir) {
-        $env:Path = "$env:Path;$InstallDir"
-    }
+    $sessionEntries = $env:Path -split ";" | Where-Object { $_ -and ($_ -ne $InstallDir) }
+    $env:Path = (@($InstallDir) + $sessionEntries) -join ";"
 }
 
 # ── hooks folder ─────────────────────────────────────────────────────────────
@@ -124,6 +127,20 @@ if ($HookUrl) {
     $hookName = [IO.Path]::GetFileName(([Uri]$HookUrl).LocalPath)
     if (-not $hookName) { $hookName = "hook.ps1" }
     $hookPath = Join-Path $hooksDir $hookName
+
+    # pesto runs every executable file in this folder on every upload -
+    # a pre-existing hook here (from a manual install before this script
+    # existed, or from a previous run with a different -HookUrl filename)
+    # would now ALSO run alongside the new one, e.g. double-posting the
+    # same release to an indexer twice. Can't tell if they're duplicates
+    # (that requires reading what each one does), so just surface it.
+    $existingHooks = Get-ChildItem -Path $hooksDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne $hookName }
+    if ($existingHooks) {
+        Warn "The hooks folder already has other file(s): $(($existingHooks.Name) -join ', ')"
+        Warn "pesto runs every file in $hooksDir on every upload - check none of them duplicate what the new hook does (e.g. posting to the same indexer twice)."
+    }
+
     Invoke-WebRequest -Uri $HookUrl -OutFile $hookPath
     Log "Hook script installed to $hookPath"
 
@@ -178,6 +195,34 @@ try {
 }
 
 Log "pesto is installed."
+
+# A prior manual install (System PATH, e.g. C:\Windows\System32 - pesto's
+# own README used to suggest that location) can still shadow this one: on
+# Windows, new sessions build PATH as Machine entries followed by User
+# entries, and prepending only within the User half can't override that.
+# Reconstruct what a brand-new terminal's PATH would resolve `pesto` to and
+# warn loudly if it would find a *different* pesto.exe than the one just
+# installed - better than a leigo user quietly running stale code forever.
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$freshUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$freshPath = @($machinePath, $freshUserPath) -join ";"
+$shadowingPesto = $null
+foreach ($dir in ($freshPath -split ";" | Where-Object { $_ })) {
+    $candidate = Join-Path $dir "pesto.exe"
+    if (Test-Path $candidate) {
+        $shadowingPesto = $candidate
+        break
+    }
+}
+if ($shadowingPesto -and ((Resolve-Path $shadowingPesto).Path -ne (Resolve-Path $exePath).Path)) {
+    Warn "A different pesto.exe was found earlier on PATH: $shadowingPesto"
+    Warn "New terminals will run THAT one instead of the one just installed at $exePath."
+    try {
+        $oldVersion = (& $shadowingPesto --version 2>$null)
+        if ($oldVersion) { Warn "That one reports: $oldVersion" }
+    } catch {}
+    Warn "Remove or update it (or move $InstallDir earlier in PATH) so 'pesto' resolves to the version just installed."
+}
 
 if (-not $haveConfig -and -not $NoConfigWizard) {
     Log "Running the setup wizard to configure your Usenet server..."
