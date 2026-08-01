@@ -12,6 +12,30 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-08-01
+
+### Added
+- **`scripts/install.ps1` / `scripts/install.sh`**: one-line installers
+  (`irm ... | iex` on Windows, `curl ... | bash` on Linux) that download the
+  latest release binary, add it to `PATH`, and create the hooks folder.
+  Indexer-agnostic — no indexer name, URL, or key is hardcoded in this repo.
+  `-HookUrl`/`--hook-url` and `-ConfigUrl`/`--config-url` let a distributor
+  point users at a hook/config they host themselves, so installs need no
+  manual file editing: if the downloaded hook contains the `YOUR_API_KEY` or
+  `YOUR_IMGBB_API_KEY` placeholders (used by `examples/hooks/generic-indexer.*`),
+  the installer prompts for them interactively and substitutes them in.
+  `install.ps1` also detects and warns when an older `pesto.exe` elsewhere on
+  `PATH` would shadow the one just installed, and both installers warn about
+  pre-existing files in the hooks folder that could double-run alongside a
+  newly installed hook.
+
+### Changed
+- **`--config` wizard**: "Generate .nfo file alongside the .nzb?" now
+  defaults to yes. Most people running the wizard have no strong reason to
+  say no, and an NFO improves automatic categorization on indexers that read
+  it. Only the wizard's default changed — pesto's own behavior when the
+  `--nfo` flag or `nfo` config key is simply absent is unaffected.
+
 ## [0.4.4] — 2026-07-31
 
 ### Fixed
