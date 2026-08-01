@@ -35,8 +35,9 @@
     Skip running `pesto --config` at the end when no config.toml exists yet.
 
 .PARAMETER NoApiKeyPrompt
-    Skip the interactive prompt for an indexer API key, even if the
-    downloaded hook (-HookUrl) contains the YOUR_API_KEY placeholder.
+    Skip the interactive prompts for an indexer/ImgBB API key, even if the
+    downloaded hook (-HookUrl) contains the YOUR_API_KEY / YOUR_IMGBB_API_KEY
+    placeholders.
 
 .EXAMPLE
     Plain install, run interactively:
@@ -63,6 +64,36 @@ $Repo = "franzopl/pesto"
 
 function Log  { param($msg) Write-Host "[pesto-install] $msg" }
 function Warn { param($msg) Write-Host "[pesto-install] WARNING: $msg" -ForegroundColor Yellow }
+
+# Hooks that need a per-user credential use a literal placeholder - e.g.
+# YOUR_API_KEY / YOUR_IMGBB_API_KEY in examples/hooks/generic-indexer.* -
+# since a distributor can bake in their own indexer URL but not a key that
+# belongs to each individual user. Prompt for it and substitute it in place,
+# so installs need no manual editing.
+function Set-HookPlaceholder {
+    param([string]$HookPath, [string]$Placeholder, [string]$PromptText)
+
+    $hookContent = Get-Content -Raw -Path $HookPath
+    if ($hookContent -notmatch [regex]::Escape($Placeholder)) { return }
+
+    $value = Read-Host $PromptText
+    if ($value) {
+        # Replace only the FIRST occurrence (via IndexOf/Substring, not
+        # .Replace(), which rewrites every occurrence). The placeholder can
+        # appear a second time in the hook's own "is this still unset" check
+        # (e.g. generic-indexer.ps1's
+        # `elseif ($ImgbbApiKey -eq "YOUR_IMGBB_API_KEY")`) - replacing every
+        # occurrence would rewrite that check into comparing the key against
+        # itself, always true, permanently "detecting" a freshly-filled key
+        # as still unset.
+        $idx = $hookContent.IndexOf($Placeholder)
+        $hookContent = $hookContent.Substring(0, $idx) + $value + $hookContent.Substring($idx + $Placeholder.Length)
+        Set-Content -Path $HookPath -Value $hookContent
+        Log "Value written to $HookPath (replaced $Placeholder)"
+    } else {
+        Warn "No value entered - edit $HookPath manually before your first upload (replace $Placeholder)."
+    }
+}
 
 # Windows PowerShell 5.1 (the default on Windows 10/11) only speaks TLS 1.0
 # by default on some configurations; force 1.2 or GitHub's API/CDN will
@@ -149,22 +180,9 @@ if ($HookUrl) {
         Warn "$hookName does not have a recognized extension (.exe/.cmd/.bat/.ps1/.py) - pesto will not run it automatically."
     }
 
-    # Hooks that need a per-user credential use the literal placeholder
-    # YOUR_API_KEY (see examples/hooks/generic-indexer.*) since a distributor
-    # can bake in their own indexer URL but not a key that belongs to each
-    # individual user. Prompt for it here so installs need no manual editing.
     if (-not $NoApiKeyPrompt) {
-        $hookContent = Get-Content -Raw -Path $hookPath
-        if ($hookContent -match "YOUR_API_KEY") {
-            $apiKey = Read-Host "Enter your indexer API key (leave blank to fill in later)"
-            if ($apiKey) {
-                $hookContent = $hookContent.Replace("YOUR_API_KEY", $apiKey)
-                Set-Content -Path $hookPath -Value $hookContent
-                Log "API key written to $hookPath"
-            } else {
-                Warn "No API key entered - edit $hookPath manually before your first upload (replace YOUR_API_KEY)."
-            }
-        }
+        Set-HookPlaceholder -HookPath $hookPath -Placeholder "YOUR_API_KEY" -PromptText "Enter your indexer API key (leave blank to fill in later)"
+        Set-HookPlaceholder -HookPath $hookPath -Placeholder "YOUR_IMGBB_API_KEY" -PromptText "Enter your ImgBB API key for hook screenshots (leave blank to skip screenshots, see https://api.imgbb.com/)"
     }
 }
 
