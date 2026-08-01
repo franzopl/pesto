@@ -198,14 +198,14 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
     // must still exist immediately after post_files returns, so a caller
     // running --check afterward can still re-read them to repost a segment
     // STAT couldn't find.
-    let par2_dir = pesto::poster::par2_temp_dir();
+    let par2_dir = &outcome.par2_temp_dir;
     assert!(
         par2_dir.exists(),
-        "par2_temp_dir() ({}) must still exist right after post_files() \
+        "outcome.par2_temp_dir ({}) must still exist right after post_files() \
          returns — --check's repost pass runs after this and needs it",
         par2_dir.display()
     );
 
-    let _ = std::fs::remove_dir_all(&par2_dir);
+    let _ = std::fs::remove_dir_all(par2_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,19 +1,15 @@
-//! Regression guard for a real crash: when a file's size is an exact
-//! multiple of the PAR2 slice size, `producer`'s per-article accumulation
-//! loop in `crates/pesto/src/poster/mod.rs` used to drain `par2_accum` to
-//! exactly zero and flush the file's true last slice with
-//! `is_last_of_file: false` (the trailing, correctly-labelled flush is
-//! skipped whenever there's nothing left over). The PAR2 worker
-//! (`crates/parmesan/src/worker.rs`) relies on that flag to finalize and
-//! push the file's MD5/CRC hash — without it, the hash silently bled into
-//! the next file, or (for the last file in the set) the worker returned
-//! fewer hashes than non-empty files and `producer` panicked with
-//! `"worker returned fewer hashes than non-empty files"`.
+//! Regression guard for GitHub issue #67: `--each`/`--season` with
+//! `--jobs > 1` runs several `post_files_with_progress_and_cancel` calls
+//! concurrently *in the same process*. `poster::par2_temp_dir()` used to be
+//! keyed only by the process ID, so every concurrent entry wrote its PAR2
+//! index/volume files into the exact same directory — and each entry's
+//! caller deletes that directory (`remove_dir_all`) as soon as its own run
+//! finishes, which could wipe out a sibling entry's still-in-flight PAR2
+//! source files (needed later for `--check`'s repost pass).
 //!
-//! This reproduces the exact condition (`article_size == par2_slice_size`,
-//! file size an exact multiple of both) against the standard posting path
-//! (not `--par2-only`, which was never affected — see the module comment on
-//! `par2_only_ingest`).
+//! This runs two `post_files` calls concurrently and checks each gets its
+//! own PAR2 temp directory (`PostOutcome::par2_temp_dir`), so finishing one
+//! and cleaning it up can never touch the other's files.
 
 use pesto::config::{Config, ObfuscateMode};
 use pesto::poster::post_files;
@@ -98,28 +94,11 @@ fn content(seed: u8, len: usize) -> Vec<u8> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
-    let addr = spawn_accept_all_server();
-    let dir =
-        std::env::temp_dir().join(format!("pesto_par2_exact_multiple_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let input = dir.join("movie.bin");
-
-    // article_size == par2_slice_size, and the file is exactly 10 articles —
-    // every article boundary is also an exact PAR2 slice boundary, the
-    // precise condition that used to drain `par2_accum` to zero. 10 slices
-    // at 10% recovery rounds down to exactly 1 recovery block, so the PAR2
-    // worker (and the buggy code path) is actually exercised — too few
-    // slices makes `recovery_count` round down to 0 and skips PAR2 entirely.
+fn par2_config(port: u16) -> Config {
     const ARTICLE_SIZE: usize = 65536;
-    const ARTICLES: usize = 10;
-    std::fs::write(&input, content(0, ARTICLE_SIZE * ARTICLES)).unwrap();
-
-    let config = Config {
+    Config {
         host: "127.0.0.1".to_string(),
-        port: addr.port(),
+        port,
         ssl: false,
         connections: 1,
         username: None,
@@ -181,28 +160,95 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         allow_incomplete_nzb: false,
         pipeline_depth: 1,
         keepalive_interval: 0,
-    };
+    }
+}
 
-    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
-    // The bug manifested as a panic (`.expect("worker returned fewer hashes
-    // than non-empty files")`) inside `producer`, unwinding straight through
-    // this `.await.unwrap()` — so simply completing without panicking is the
-    // regression check.
-    let outcome = post_files(&config, &inputs).await.unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_each_entries_get_distinct_par2_temp_dirs() {
+    let addr = spawn_accept_all_server();
+    let dir =
+        std::env::temp_dir().join(format!("pesto_each_concurrent_par2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    const ARTICLE_SIZE: usize = 65536;
+    const ARTICLES: usize = 10;
+
+    let input_a = dir.join("entry_a").join("movie.bin");
+    let input_b = dir.join("entry_b").join("movie.bin");
+    std::fs::create_dir_all(input_a.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(input_b.parent().unwrap()).unwrap();
+    std::fs::write(&input_a, content(1, ARTICLE_SIZE * ARTICLES)).unwrap();
+    std::fs::write(&input_b, content(2, ARTICLE_SIZE * ARTICLES)).unwrap();
+
+    let config_a = par2_config(addr.port());
+    let config_b = par2_config(addr.port());
+    let inputs_a = expand_inputs(std::slice::from_ref(&input_a)).unwrap();
+    let inputs_b = expand_inputs(std::slice::from_ref(&input_b)).unwrap();
+
+    // Simulate `--each --jobs 2`: two entries posted concurrently from the
+    // same process, exactly like `run_batch` in `bin/pesto.rs` does.
+    let (outcome_a, outcome_b) = tokio::join!(
+        post_files(&config_a, &inputs_a),
+        post_files(&config_b, &inputs_b),
+    );
+    let outcome_a = outcome_a.unwrap();
+    let outcome_b = outcome_b.unwrap();
 
     assert!(
-        outcome
-            .segments
-            .iter()
-            .any(|s| s.file_name.ends_with(".par2")),
-        "expected at least one PAR2 segment among: {:?}",
-        outcome
-            .segments
-            .iter()
-            .map(|s| &s.file_name)
-            .collect::<Vec<_>>()
+        outcome_a.failures.is_empty(),
+        "entry A: {:?}",
+        outcome_a.failures
+    );
+    assert!(
+        outcome_b.failures.is_empty(),
+        "entry B: {:?}",
+        outcome_b.failures
     );
 
-    let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
+    // The actual fix: each concurrent run must get its own PAR2 temp dir.
+    assert_ne!(
+        outcome_a.par2_temp_dir, outcome_b.par2_temp_dir,
+        "concurrent entries shared one PAR2 temp dir — deleting either \
+         after it finishes would destroy the other's still-needed PAR2 files"
+    );
+
+    // Both directories must independently hold their own PAR2 output —
+    // deleting one (as a finished entry's caller would) must not have
+    // touched the other's files.
+    for outcome in [&outcome_a, &outcome_b] {
+        assert!(
+            outcome.par2_temp_dir.exists(),
+            "{} should still exist — no cleanup has run yet",
+            outcome.par2_temp_dir.display()
+        );
+        let has_par2_file = std::fs::read_dir(&outcome.par2_temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "par2"));
+        assert!(
+            has_par2_file,
+            "{} should contain this entry's own PAR2 file(s)",
+            outcome.par2_temp_dir.display()
+        );
+    }
+
+    // Deleting entry A's directory (as its caller would once fully done)
+    // must leave entry B's directory and files completely intact.
+    std::fs::remove_dir_all(&outcome_a.par2_temp_dir).unwrap();
+    assert!(
+        outcome_b.par2_temp_dir.exists(),
+        "cleaning up entry A's temp dir destroyed entry B's"
+    );
+    let b_still_has_par2 = std::fs::read_dir(&outcome_b.par2_temp_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.path().extension().is_some_and(|ext| ext == "par2"));
+    assert!(
+        b_still_has_par2,
+        "entry B's PAR2 file(s) disappeared after cleaning up entry A"
+    );
+
+    let _ = std::fs::remove_dir_all(&outcome_b.par2_temp_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -281,6 +281,13 @@ pub struct PostOutcome {
     /// it, callers had no way to surface the actual failure and could only
     /// print a generic "interrupted" message.
     pub failure_reason: Option<String>,
+    /// This run's PAR2 temp directory (see [`par2_temp_dir`]). Always set,
+    /// even when PAR2 was never generated — removing a directory that was
+    /// never created is a harmless no-op. Callers use this instead of
+    /// calling `par2_temp_dir` themselves, so each concurrent `--each`/
+    /// `--season` entry (`--jobs > 1`) cleans up only its own directory
+    /// instead of a path shared by every run in the process (issue #67).
+    pub par2_temp_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +368,11 @@ struct Shared {
     /// identity instead of a fresh random sender per file. `None` in every
     /// other mode.
     release_from: Option<String>,
+    /// Unique ID for this run, used to key [`par2_temp_dir`] so concurrent
+    /// runs in the same process (`--each`/`--season` with `--jobs > 1`) each
+    /// get their own PAR2 temp directory instead of colliding on one shared
+    /// by process ID alone.
+    run_id: u64,
 }
 
 impl Shared {
@@ -586,6 +598,13 @@ pub async fn post_files_with_progress_and_cancel(
         .map(|_| vec![0u8; config.article_size])
         .collect();
 
+    // Unique per call to this function, i.e. per posting run — not per
+    // process. `--each`/`--season` with `--jobs > 1` spawn several runs
+    // concurrently in the same process; each needs its own PAR2 temp
+    // directory (see `par2_temp_dir`'s doc comment / GitHub issue #67).
+    static RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
+
     let shared = Arc::new(Shared {
         config: config.clone(),
         servers,
@@ -602,6 +621,7 @@ pub async fn post_files_with_progress_and_cancel(
         post_group: pick_post_group(&config.groups),
         release_prefix,
         release_from,
+        run_id,
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -858,17 +878,23 @@ pub async fn post_files_with_progress_and_cancel(
         still_missing,
         servers: servers_used,
         failure_reason,
+        par2_temp_dir: par2_temp_dir(shared.run_id),
     })
 }
 
-/// Per-process temp directory holding the intermediate PAR2 files written
-/// during a normal posting run. Callers should remove it (when
-/// `!config.par2_only`) once the *entire* run is done — including any
-/// `--check` repost pass or end-of-run failed-task retry — not right after
-/// the main post loop finishes, since both of those may still need to
-/// re-read a PAR2 file's bytes from disk.
-pub fn par2_temp_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("parmesan_{}", std::process::id()))
+/// Per-run temp directory holding the intermediate PAR2 files written during
+/// a normal posting run. Keyed by `run_id` (unique per [`PostOutcome`]), not
+/// just the process ID: `--each`/`--season` with `--jobs > 1` run several
+/// posting tasks concurrently *in the same process*, and a PID-only path
+/// used to collide them all into one directory — one entry finishing would
+/// delete PAR2 source files a sibling entry was still reading to repost
+/// (see GitHub issue #67). Callers should remove
+/// `par2_temp_dir(outcome.run_id)` (when `!config.par2_only`) once the
+/// *entire* run is done — including any `--check` repost pass or end-of-run
+/// failed-task retry — not right after the main post loop finishes, since
+/// both of those may still need to re-read a PAR2 file's bytes from disk.
+pub fn par2_temp_dir(run_id: u64) -> PathBuf {
+    std::env::temp_dir().join(format!("parmesan_{}_{run_id}", std::process::id()))
 }
 
 /// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure
@@ -1634,7 +1660,7 @@ async fn producer(
                 if shared.config.par2_only {
                     par2_dir = Some(par2_output_dir(&metas[0]));
                 } else {
-                    par2_dir = Some(par2_temp_dir());
+                    par2_dir = Some(par2_temp_dir(shared.run_id));
                     tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
                 }
 
@@ -3169,6 +3195,7 @@ mod tests {
             post_group,
             release_prefix: None,
             release_from: None,
+            run_id: 0,
         })
     }
 
