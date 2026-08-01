@@ -60,6 +60,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# `curl URL | bash` means bash reads this very script's source from stdin
+# (fd 0) as it executes it. Any later command that reads stdin without an
+# explicit redirect - `pesto --config`'s prompts included - inherits that
+# same fd and can read leftover, not-yet-consumed bytes of this script's own
+# source instead of the terminal (confirmed in practice: the config wizard's
+# first prompt came back containing a line of this file's own code). Reattach
+# stdin to the real terminal once, up front, so every interactive read below
+# just works. Guarded: without a tty (e.g. a non-interactive CI run), this is
+# a no-op and those reads degrade the same way they already did before.
+if [ -r /dev/tty ]; then
+    exec < /dev/tty
+fi
+
 command -v curl >/dev/null 2>&1 || die "curl is required but not found."
 
 case "$(uname -s)" in
@@ -191,7 +204,7 @@ fi
 
 log "pesto is installed."
 
-if [ -z "$HAVE_CONFIG" ] && [ -z "$NO_CONFIG_WIZARD" ]; then
+if [ -z "$HAVE_CONFIG" ] && [ -z "$NO_CONFIG_WIZARD" ] && [ -r /dev/tty ]; then
     log "Running the setup wizard to configure your Usenet server..."
     "$EXE_PATH" --config
 elif [ -z "$HAVE_CONFIG" ]; then
