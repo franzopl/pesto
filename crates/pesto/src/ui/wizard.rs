@@ -38,7 +38,7 @@ pub fn run() -> Result<()> {
     println!("Leave blank to keep that default, or enter a directory path to always");
     println!("save .nzb files there (e.g. ~/nzbs).");
     let nzb_dir = ask("NZB output directory (blank = next to uploaded file)", "")?;
-    let nfo = ask("Generate .nfo file alongside the .nzb? (y/N)", "n")?;
+    let nfo = ask("Generate .nfo file alongside the .nzb? (Y/n)", "y")?;
     let nfo = nfo.eq_ignore_ascii_case("y");
 
     let mut toml = String::new();
