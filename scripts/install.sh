@@ -29,6 +29,7 @@
 #   --musl                Force the musl build (default: auto-detected).
 #   --no-path-update      Don't touch your shell rc file.
 #   --no-config-wizard    Don't run `pesto --config` even if no config.toml exists yet.
+#   --no-api-key-prompt   Don't prompt for an indexer API key, even if the downloaded hook needs one.
 
 set -euo pipefail
 
@@ -39,6 +40,7 @@ CONFIG_URL=""
 FORCE_MUSL=""
 NO_PATH_UPDATE=""
 NO_CONFIG_WIZARD=""
+NO_API_KEY_PROMPT=""
 
 log()  { printf '[pesto-install] %s\n' "$1"; }
 warn() { printf '[pesto-install] WARNING: %s\n' "$1" >&2; }
@@ -52,6 +54,7 @@ while [ $# -gt 0 ]; do
         --musl) FORCE_MUSL=1; shift ;;
         --no-path-update) NO_PATH_UPDATE=1; shift ;;
         --no-config-wizard) NO_CONFIG_WIZARD=1; shift ;;
+        --no-api-key-prompt) NO_API_KEY_PROMPT=1; shift ;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
@@ -136,6 +139,31 @@ if [ -n "$HOOK_URL" ]; then
     curl -fsSL "$HOOK_URL" -o "$HOOK_PATH"
     chmod +x "$HOOK_PATH"
     log "Hook script installed to ${HOOK_PATH}"
+
+    # Hooks that need a per-user credential use the literal placeholder
+    # YOUR_API_KEY (see examples/hooks/generic-indexer.*) since a distributor
+    # can bake in their own indexer URL but not a key that belongs to each
+    # individual user. Prompt for it here so installs need no manual editing.
+    # Read from /dev/tty, not stdin: this script is normally invoked as
+    # `curl ... | bash`, so stdin is the script source, not the terminal.
+    if [ -z "$NO_API_KEY_PROMPT" ] && grep -q "YOUR_API_KEY" "$HOOK_PATH" 2>/dev/null; then
+        api_key=""
+        if [ -r /dev/tty ]; then
+            read -rp "[pesto-install] Enter your indexer API key (leave blank to fill in later): " api_key < /dev/tty || true
+        fi
+        if [ -n "$api_key" ]; then
+            # Bash's ${var//pattern/replacement} treats & and \ in the
+            # replacement specially (like sed) - escape them so an API key
+            # containing either lands in the file byte-for-byte.
+            api_key_escaped="${api_key//\\/\\\\}"
+            api_key_escaped="${api_key_escaped//&/\\&}"
+            hook_content="$(cat "$HOOK_PATH")"
+            printf '%s\n' "${hook_content//YOUR_API_KEY/$api_key_escaped}" > "$HOOK_PATH"
+            log "API key written to ${HOOK_PATH}"
+        else
+            warn "No API key entered - edit ${HOOK_PATH} manually before your first upload (replace YOUR_API_KEY)."
+        fi
+    fi
 fi
 
 # ── config.toml ──────────────────────────────────────────────────────────────

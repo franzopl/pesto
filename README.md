@@ -84,7 +84,10 @@ config yet. See [`scripts/install.ps1`](scripts/install.ps1) /
 [`scripts/install.sh`](scripts/install.sh) for the `-HookUrl`/`--hook-url`
 and `-ConfigUrl`/`--config-url` parameters distributors (e.g. an indexer
 pointing its users at a pre-filled hook) can use to skip manual file editing
-entirely.
+entirely. If the downloaded hook still contains the `YOUR_API_KEY`
+placeholder (see [`examples/hooks/`](examples/hooks/)), the installer prompts
+for it interactively and writes it into the hook file — pass
+`-NoApiKeyPrompt`/`--no-api-key-prompt` to skip that.
 
 ### Via cargo
 

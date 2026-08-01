@@ -34,6 +34,10 @@
 .PARAMETER NoConfigWizard
     Skip running `pesto --config` at the end when no config.toml exists yet.
 
+.PARAMETER NoApiKeyPrompt
+    Skip the interactive prompt for an indexer API key, even if the
+    downloaded hook (-HookUrl) contains the YOUR_API_KEY placeholder.
+
 .EXAMPLE
     Plain install, run interactively:
         irm https://raw.githubusercontent.com/franzopl/pesto/main/scripts/install.ps1 | iex
@@ -50,7 +54,8 @@ param(
     [string]$ConfigUrl,
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "pesto\bin"),
     [switch]$NoPathUpdate,
-    [switch]$NoConfigWizard
+    [switch]$NoConfigWizard,
+    [switch]$NoApiKeyPrompt
 )
 
 $ErrorActionPreference = "Stop"
@@ -125,6 +130,24 @@ if ($HookUrl) {
     $recognized = @(".exe", ".cmd", ".bat", ".ps1", ".py")
     if ($recognized -notcontains [IO.Path]::GetExtension($hookName).ToLower()) {
         Warn "$hookName does not have a recognized extension (.exe/.cmd/.bat/.ps1/.py) - pesto will not run it automatically."
+    }
+
+    # Hooks that need a per-user credential use the literal placeholder
+    # YOUR_API_KEY (see examples/hooks/generic-indexer.*) since a distributor
+    # can bake in their own indexer URL but not a key that belongs to each
+    # individual user. Prompt for it here so installs need no manual editing.
+    if (-not $NoApiKeyPrompt) {
+        $hookContent = Get-Content -Raw -Path $hookPath
+        if ($hookContent -match "YOUR_API_KEY") {
+            $apiKey = Read-Host "Enter your indexer API key (leave blank to fill in later)"
+            if ($apiKey) {
+                $hookContent = $hookContent.Replace("YOUR_API_KEY", $apiKey)
+                Set-Content -Path $hookPath -Value $hookContent
+                Log "API key written to $hookPath"
+            } else {
+                Warn "No API key entered - edit $hookPath manually before your first upload (replace YOUR_API_KEY)."
+            }
+        }
     }
 }
 
