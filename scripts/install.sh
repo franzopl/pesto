@@ -60,19 +60,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# `curl URL | bash` means bash reads this very script's source from stdin
-# (fd 0) as it executes it. Any later command that reads stdin without an
-# explicit redirect - `pesto --config`'s prompts included - inherits that
-# same fd and can read leftover, not-yet-consumed bytes of this script's own
-# source instead of the terminal (confirmed in practice: the config wizard's
-# first prompt came back containing a line of this file's own code). Reattach
-# stdin to the real terminal once, up front, so every interactive read below
-# just works. Guarded: without a tty (e.g. a non-interactive CI run), this is
-# a no-op and those reads degrade the same way they already did before.
-if [ -r /dev/tty ]; then
-    exec < /dev/tty
-fi
-
 command -v curl >/dev/null 2>&1 || die "curl is required but not found."
 
 case "$(uname -s)" in
@@ -206,7 +193,15 @@ log "pesto is installed."
 
 if [ -z "$HAVE_CONFIG" ] && [ -z "$NO_CONFIG_WIZARD" ] && [ -r /dev/tty ]; then
     log "Running the setup wizard to configure your Usenet server..."
-    "$EXE_PATH" --config
+    # Explicit redirect, not a script-wide `exec <`: this script is normally
+    # invoked as `curl ... | bash`, so bash itself is still reading the rest
+    # of *this file* from fd 0 at this point. A bare `exec < /dev/tty` here
+    # was tried and reassigns fd 0 for bash's own script-reading too, not
+    # just this command - bash then reads its next commands from the
+    # terminal instead of the remaining script, and anything typed at the
+    # prompts below gets executed as shell commands. A per-command redirect
+    # only changes stdin for this one child process.
+    "$EXE_PATH" --config < /dev/tty
 elif [ -z "$HAVE_CONFIG" ]; then
     log "No config.toml yet - run 'pesto --config' to set up your Usenet server."
 fi
