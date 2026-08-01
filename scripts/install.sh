@@ -136,6 +136,20 @@ if [ -n "$HOOK_URL" ]; then
     HOOK_NAME="$(basename "${HOOK_URL%%\?*}")"
     [ -n "$HOOK_NAME" ] || HOOK_NAME="hook.sh"
     HOOK_PATH="${HOOKS_DIR}/${HOOK_NAME}"
+
+    # pesto runs every executable file in this folder on every upload - a
+    # pre-existing hook here (from a manual install before this script
+    # existed, or a previous run with a different --hook-url filename) would
+    # now ALSO run alongside the new one, e.g. double-posting the same
+    # release to an indexer twice. Can't tell if they're duplicates (that
+    # requires reading what each one does), so just surface it.
+    existing_hooks="$(find "$HOOKS_DIR" -maxdepth 1 -type f ! -name "$HOOK_NAME" 2>/dev/null)"
+    if [ -n "$existing_hooks" ]; then
+        warn "The hooks folder already has other file(s):"
+        printf '%s\n' "$existing_hooks" | while IFS= read -r f; do warn "  - $f"; done
+        warn "pesto runs every file in ${HOOKS_DIR} on every upload - check none of them duplicate what the new hook does (e.g. posting to the same indexer twice)."
+    fi
+
     curl -fsSL "$HOOK_URL" -o "$HOOK_PATH"
     chmod +x "$HOOK_PATH"
     log "Hook script installed to ${HOOK_PATH}"
