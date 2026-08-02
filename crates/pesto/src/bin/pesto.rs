@@ -72,6 +72,12 @@ struct Cli {
     #[arg(short, long, value_name = "PATH", num_args = 0..=1)]
     config: Option<Option<PathBuf>>,
 
+    /// Download the latest pesto-v* release from GitHub for this platform,
+    /// verify its checksum, and replace the running binary with it. Exits
+    /// without touching anything else (no upload, no config load).
+    #[arg(long)]
+    update: bool,
+
     /// NNTP server hostname [config: server.host].
     #[arg(short = 's', long, value_name = "HOST")]
     host: Option<String>,
@@ -2161,6 +2167,10 @@ async fn main() -> Result<()> {
     // `pesto --config` with no value: launch the interactive setup wizard.
     if matches!(cli.config, Some(None)) {
         return pesto::ui::wizard::run();
+    }
+
+    if cli.update {
+        return pesto::update::run().await;
     }
 
     // Handle `-` (stdin) in the file list.

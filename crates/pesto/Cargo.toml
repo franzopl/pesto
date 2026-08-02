@@ -34,7 +34,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 webpki-roots = "0.26"
 rayon = "1.12.0"
 crc32fast = "1.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "json"] }
 sha2 = "0.10"
 tempfile = "3"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
@@ -44,6 +44,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 lexical-sort = "0.3"
 unicode-width = "0.2"
 bdinfo-rs-core = { version = "=1.0.1", git = "https://github.com/agentjp/bdinfo-rs", tag = "v1.0.1" }
+self-replace = "1.5.0"
+semver = "1.0.28"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }

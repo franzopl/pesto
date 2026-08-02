@@ -49,12 +49,16 @@ Download the latest binary for your platform from the
 
 | Platform | File |
 |----------|------|
-| Linux x86-64 (glibc) | `pesto-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux x86-64 (musl / Alpine) | `pesto-x86_64-unknown-linux-musl.tar.gz` |
-| Windows x86-64 | `pesto-x86_64-pc-windows-msvc.zip` |
+| Linux x86-64 (glibc) | `pesto-linux-x86_64` |
+| Linux x86-64 (musl / Alpine) | `pesto-linux-x86_64-musl` |
+| Windows x86-64 | `pesto-windows-x86_64.exe` |
 
-Extract the archive and copy the binary to a directory on your `PATH`
-(e.g. `/usr/local/bin` on Linux/macOS, `C:\Windows\System32` on Windows).
+These are plain binaries, not archives — download and copy the file to a
+directory on your `PATH` (e.g. `/usr/local/bin` on Linux, `C:\Windows\System32`
+on Windows), renaming it to `pesto`/`pesto.exe` if you want the short name.
+[`scripts/install.sh`](../../scripts/install.sh)/[`install.ps1`](../../scripts/install.ps1)
+do this for you (`curl ... | bash` / `irm ... | iex` — see each script's header
+for the one-liner).
 
 ### Via cargo
 
@@ -63,6 +67,20 @@ cargo install pesto-poster
 ```
 
 The installed binary is named `pesto`.
+
+### Updating
+
+If you installed a prebuilt binary (not via `cargo install`), run:
+
+```bash
+pesto --update
+```
+
+This downloads the latest `pesto-v*` release for your platform, verifies its
+SHA256 against the `SHA256SUMS` file published alongside it, and replaces the
+running binary in place. It touches nothing else — no config, no NZBs.
+`cargo install pesto-poster` installs are unaffected; update those the same
+way you installed them (`cargo install pesto-poster` again).
 
 ### Build from source
 
@@ -779,6 +797,7 @@ picked up automatically — no config change needed.
 | Flag | Config key | Default | Description |
 |------|-----------|---------|-------------|
 | `-c`, `--config [PATH]` | — | auto | Load a TOML config; with no value, run the setup wizard |
+| `--update` | — | — | Download and install the latest release binary for this platform, then exit |
 | **Connection** | | | |
 | `--host <HOST>` | `server.host` | — | NNTP server hostname |
 | `--port <PORT>` | `server.port` | `563` | NNTP server port |
