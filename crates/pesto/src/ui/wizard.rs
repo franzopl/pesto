@@ -30,6 +30,17 @@ pub fn run() -> Result<()> {
         ask("Password", "")?
     };
     let groups = ask("Newsgroups (comma-separated)", "alt.binaries.test")?;
+    let group_count = groups.split(',').filter(|g| !g.trim().is_empty()).count();
+    let cross_post = if group_count > 1 {
+        let ans = ask(
+            "Cross-post to all of them together on every run, instead of rotating \
+             through them at random? (y/N)",
+            "n",
+        )?;
+        ans.eq_ignore_ascii_case("y")
+    } else {
+        false
+    };
     let from = ask("From header (blank = random identity per run)", "")?;
     let par2 = ask("PAR2 recovery percentage (0 disables)", "10")?;
 
@@ -57,11 +68,21 @@ pub fn run() -> Result<()> {
     }
 
     toml.push_str("[posting]\n");
-    let group_list = groups
-        .split(',')
-        .map(|g| format!("\"{}\"", esc(g.trim())))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let group_list = if cross_post {
+        let target = groups
+            .split(',')
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+            .collect::<Vec<_>>()
+            .join("+");
+        format!("\"{}\"", esc(&target))
+    } else {
+        groups
+            .split(',')
+            .map(|g| format!("\"{}\"", esc(g.trim())))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     toml.push_str(&format!("groups = [{group_list}]\n"));
     if from.is_empty() {
         toml.push_str("# from omitted: each run posts under a random identity.\n");

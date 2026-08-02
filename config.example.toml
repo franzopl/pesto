@@ -8,6 +8,13 @@
 #
 # Every field is optional and can be overridden by the matching CLI flag.
 # Commented-out fields show their built-in default.
+#
+# Windows paths: a single backslash inside a "..." string is a TOML escape
+# sequence, not a literal character (e.g. "C:\nzb" is "C:" + a newline, and
+# some paths simply fail to parse). Either double every backslash
+# ("C:\\nzb\\arquivo"), use forward slashes instead ("C:/nzb/arquivo" — both
+# Windows and pesto accept these fine), or use single-quoted 'literal'
+# strings, which TOML never escapes.
 
 # ── Single-server configuration ─────────────────────────────────────────────
 #
@@ -72,6 +79,12 @@ password = "your_password"
 # from = "poster <poster@example.com>"
 
 # Newsgroups to post to. At least one is required (unless --par2-only).
+# With more than one entry, one is picked at random per run to spread posts
+# across the pool — it does not cross-post. To post to several groups at
+# once instead, join their names with '+' in a single entry:
+#   groups = ["alt.binaries.a+alt.binaries.b"]
+# The two can be mixed: ["alt.binaries.a+alt.binaries.b", "alt.binaries.c"]
+# picks between cross-posting a+b, or posting to c alone, each run.
 groups = ["alt.binaries.test"]
 
 # article_size — target size of each posted segment, in bytes. Default: 768000.
@@ -170,6 +183,9 @@ groups = ["alt.binaries.test"]
 # nzb_dir — directory where .nzb hardlinks/copies are placed after each upload.
 # Every upload is also archived to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb so
 # the canonical copy is never lost. Overridden by --out or output.nzb.
+# On Windows, write this as "C:/nzb" or "C:\\nzb" — a single backslash is a
+# TOML escape sequence, not a literal one (see the note at the top of this
+# file).
 # nzb_dir = "/home/user/nzbs"
 
 # nzb — fixed path for the generated .nzb hardlink/copy. Overrides nzb_dir.

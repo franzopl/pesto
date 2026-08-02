@@ -12,6 +12,21 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **Cross-posting via `+`**: a `groups`/`--groups` entry can now join several
+  newsgroup names with `+` (e.g. `"alt.a+alt.b"`) to post to all of them in
+  the same run, instead of only picking one at random from the pool. Entries
+  can be mixed, e.g. `["alt.a+alt.b", "alt.c"]` picks between cross-posting
+  a+b or posting to c alone, each run. The config wizard (`pesto --config`)
+  now asks whether to cross-post when more than one group is entered.
+  A `groups` entry with an embedded `,` (only reachable via a hand-edited
+  TOML config — `--groups` on the CLI already splits on `,`) was previously
+  treated as a single literal group name that happened to cross-post once
+  it reached the `Newsgroups:` header, purely as a parsing accident; `,` is
+  now an explicit, documented (deprecated) alias for `+` with the same
+  effect, so existing configs relying on it keep working and print a
+  one-line warning nudging towards `+`. See #66.
+
 ## [0.4.7] — 2026-08-02
 
 ### Added

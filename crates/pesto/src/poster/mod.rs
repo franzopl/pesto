@@ -2331,16 +2331,26 @@ fn make_task(
     }
 }
 
-/// across the configured groups over many runs. With zero or one configured
-/// group the slice is returned as-is.
+/// across the configured groups over many runs. Each entry in `groups` is a
+/// "target" that may itself be several newsgroup names joined with `+` (or
+/// the deprecated `,` alias) for a simultaneous cross-post (see
+/// [`crate::config::validation::validate_groups`] for the syntax this
+/// assumes has already been validated); the chosen target is split into the
+/// flat list every caller expects. With zero or one configured entry
+/// there's nothing to pick between, but the split still applies.
 fn pick_post_group(groups: &[String]) -> Vec<String> {
-    match groups {
-        [] | [_] => groups.to_vec(),
-        _ => {
-            let idx = (rand_u64() % groups.len() as u64) as usize;
-            vec![groups[idx].clone()]
+    let target = match groups {
+        [] => return Vec::new(),
+        [one] => one.as_str(),
+        many => {
+            let idx = (rand_u64() % many.len() as u64) as usize;
+            many[idx].as_str()
         }
-    }
+    };
+    target
+        .split(['+', ','])
+        .map(|s| s.trim().to_string())
+        .collect()
 }
 
 /// Compute the `Date:` header value and its Unix timestamp from the config
@@ -3164,6 +3174,41 @@ mod tests {
             let picked = pick_post_group(&groups);
             assert_eq!(picked.len(), 1);
             assert!(groups.contains(&picked[0]));
+        }
+    }
+
+    #[test]
+    fn pick_post_group_splits_single_entry_cross_post_target() {
+        let groups = vec!["alt.binaries.a+alt.binaries.b".to_string()];
+        assert_eq!(
+            pick_post_group(&groups),
+            vec!["alt.binaries.a".to_string(), "alt.binaries.b".to_string()]
+        );
+    }
+
+    #[test]
+    fn pick_post_group_trims_whitespace_around_plus() {
+        let groups = vec!["alt.binaries.a  +  alt.binaries.b".to_string()];
+        assert_eq!(
+            pick_post_group(&groups),
+            vec!["alt.binaries.a".to_string(), "alt.binaries.b".to_string()]
+        );
+    }
+
+    #[test]
+    fn pick_post_group_splits_the_chosen_target_from_a_pool() {
+        let groups = vec![
+            "alt.binaries.a+alt.binaries.b".to_string(),
+            "alt.binaries.c".to_string(),
+        ];
+        for _ in 0..100 {
+            let picked = pick_post_group(&groups);
+            let picked_set: Vec<&str> = picked.iter().map(String::as_str).collect();
+            assert!(
+                picked_set == ["alt.binaries.a", "alt.binaries.b"]
+                    || picked_set == ["alt.binaries.c"],
+                "unexpected pick: {picked:?}"
+            );
         }
     }
 
