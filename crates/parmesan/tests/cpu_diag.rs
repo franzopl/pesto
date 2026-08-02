@@ -12,6 +12,8 @@ fn print_cpu_features() {
         std::is_x86_feature_detected!("avx512bw"),
         std::is_x86_feature_detected!("gfni"),
         std::is_x86_feature_detected!("avx512vbmi"),
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
     );
 }
