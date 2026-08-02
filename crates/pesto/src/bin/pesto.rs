@@ -631,6 +631,11 @@ async fn run_single_upload(
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
     let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
+    // Snapshot the pre-compression file list: `inputs` gets overwritten below
+    // with the single archive file when --compress is active, but hooks still
+    // need the original filenames (e.g. to detect a video file by extension
+    // for thumbnail generation) regardless of what was actually posted.
+    let original_inputs = inputs.clone();
 
     // Run pre-hook(s) before anything else (before compression, PAR2, or NNTP).
     // Non-zero exit from any hook aborts the upload immediately.
@@ -1274,7 +1279,11 @@ async fn run_single_upload(
 
     // Run post-upload hooks only when the upload actually succeeded.
     if upload_ok && !config.par2_only && !config.dry_run {
-        let post_input_paths = inputs
+        // Use `original_inputs`, not `inputs`: when --compress is active
+        // `inputs` was replaced with the single compressed archive, which
+        // would otherwise hide every original filename (and its extension)
+        // from post-upload hooks — see the `original_inputs` snapshot above.
+        let post_input_paths = original_inputs
             .iter()
             .map(|f| f.path.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
