@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-08-02
+
 ### Added
 - **`pesto --update`**: downloads the latest `pesto-v*` GitHub release for
   the current platform, verifies its SHA256 against the `SHA256SUMS` file
