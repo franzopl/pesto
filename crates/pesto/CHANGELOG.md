@@ -12,6 +12,18 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.4.7] — 2026-08-02
+
+### Added
+- **`--par2-temp-dir` / `[posting] par2_temp_dir`**: overrides where
+  intermediate PAR2 files are written during a normal posting run, before
+  they're read back and posted. Previously this always used the OS temp
+  directory (`std::env::temp_dir()`, usually `/tmp`), which can sit on a
+  different filesystem — with less free space or a stricter disk quota —
+  than the destination disk, causing spurious `Disk quota exceeded`
+  failures even when the destination has plenty of room. Ignored with
+  `--par2-only`, which writes PAR2 files next to the sources instead.
+
 ## [0.4.6] — 2026-08-02
 
 ### Added

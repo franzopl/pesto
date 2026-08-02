@@ -95,6 +95,13 @@ groups = ["alt.binaries.test"]
 # Default: 10.
 # par2 = 10
 
+# par2_temp_dir — directory where intermediate PAR2 files are written during
+# posting, before they're read back and posted. Default: the OS temp
+# directory (e.g. /tmp), which may sit on a different filesystem — with less
+# free space or a stricter disk quota — than the destination disk. Ignored
+# with --par2-only, which writes PAR2 files next to the sources instead.
+# par2_temp_dir = "/path/on/destination/disk/tmp"
+
 # check — confirm every posted article via a streaming STAT check that runs
 # concurrently with the upload: each article is checked check_delay seconds
 # after it posts, and misses are reposted automatically. Default: true.

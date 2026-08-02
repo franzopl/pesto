@@ -878,7 +878,7 @@ pub async fn post_files_with_progress_and_cancel(
         still_missing,
         servers: servers_used,
         failure_reason,
-        par2_temp_dir: par2_temp_dir(shared.run_id),
+        par2_temp_dir: par2_temp_dir(config.par2_temp_dir.as_deref(), shared.run_id),
     })
 }
 
@@ -893,8 +893,16 @@ pub async fn post_files_with_progress_and_cancel(
 /// *entire* run is done — including any `--check` repost pass or end-of-run
 /// failed-task retry — not right after the main post loop finishes, since
 /// both of those may still need to re-read a PAR2 file's bytes from disk.
-pub fn par2_temp_dir(run_id: u64) -> PathBuf {
-    std::env::temp_dir().join(format!("parmesan_{}_{run_id}", std::process::id()))
+///
+/// `base` overrides the parent directory the per-run subdirectory is created
+/// under (see `Config::par2_temp_dir`). `None` falls back to
+/// `std::env::temp_dir()`, which may sit on a different filesystem — with
+/// less free space or a stricter quota — than the destination disk.
+pub fn par2_temp_dir(base: Option<&Path>, run_id: u64) -> PathBuf {
+    let base = base
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(format!("parmesan_{}_{run_id}", std::process::id()))
 }
 
 /// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure
@@ -1660,7 +1668,10 @@ async fn producer(
                 if shared.config.par2_only {
                     par2_dir = Some(par2_output_dir(&metas[0]));
                 } else {
-                    par2_dir = Some(par2_temp_dir(shared.run_id));
+                    par2_dir = Some(par2_temp_dir(
+                        shared.config.par2_temp_dir.as_deref(),
+                        shared.run_id,
+                    ));
                     tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
                 }
 
