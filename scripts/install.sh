@@ -30,6 +30,7 @@
 #   --no-path-update      Don't touch your shell rc file.
 #   --no-config-wizard    Don't run `pesto --config` even if no config.toml exists yet.
 #   --no-api-key-prompt   Don't prompt for an indexer/ImgBB API key, even if the downloaded hook needs one.
+#   --no-mediainfo-check  Don't check for / warn about a missing mediainfo binary.
 
 set -euo pipefail
 
@@ -41,6 +42,7 @@ FORCE_MUSL=""
 NO_PATH_UPDATE=""
 NO_CONFIG_WIZARD=""
 NO_API_KEY_PROMPT=""
+NO_MEDIAINFO_CHECK=""
 
 log()  { printf '[pesto-install] %s\n' "$1"; }
 warn() { printf '[pesto-install] WARNING: %s\n' "$1" >&2; }
@@ -92,6 +94,7 @@ while [ $# -gt 0 ]; do
         --no-path-update) NO_PATH_UPDATE=1; shift ;;
         --no-config-wizard) NO_CONFIG_WIZARD=1; shift ;;
         --no-api-key-prompt) NO_API_KEY_PROMPT=1; shift ;;
+        --no-mediainfo-check) NO_MEDIAINFO_CHECK=1; shift ;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
@@ -221,6 +224,32 @@ fi
 "$EXE_PATH" --version >/dev/null || die "pesto did not run correctly after install."
 
 log "pesto is installed."
+
+# ── mediainfo (optional, used by pesto to generate .nfo files) ──────────────
+# Distro-specific here since there's no universal package manager on Linux
+# (unlike winget on Windows) - just point at the right command, don't run it
+# with sudo on the user's behalf.
+
+if [ -z "$NO_MEDIAINFO_CHECK" ]; then
+    if command -v mediainfo >/dev/null 2>&1; then
+        log "mediainfo already available on PATH ($(command -v mediainfo)) - .nfo generation is ready."
+    else
+        warn "mediainfo not found - pesto will fall back to a plain file listing instead of a full .nfo."
+        if [ -f /etc/debian_version ]; then
+            warn "Install it with: sudo apt install mediainfo"
+        elif command -v dnf >/dev/null 2>&1; then
+            warn "Install it with: sudo dnf install mediainfo"
+        elif command -v pacman >/dev/null 2>&1; then
+            warn "Install it with: sudo pacman -S mediainfo"
+        elif command -v zypper >/dev/null 2>&1; then
+            warn "Install it with: sudo zypper install mediainfo"
+        elif command -v apk >/dev/null 2>&1; then
+            warn "Install it with: sudo apk add mediainfo"
+        else
+            warn "Install it via your distro's package manager, or see https://mediaarea.net/en/MediaInfo/Download"
+        fi
+    fi
+fi
 
 if [ -z "$HAVE_CONFIG" ] && [ -z "$NO_CONFIG_WIZARD" ] && [ -r /dev/tty ]; then
     log "Running the setup wizard to configure your Usenet server..."

@@ -39,6 +39,10 @@
     downloaded hook (-HookUrl) contains the YOUR_API_KEY / YOUR_IMGBB_API_KEY
     placeholders.
 
+.PARAMETER NoMediaInfoInstall
+    Skip checking for and auto-installing the MediaInfo CLI (via winget),
+    which pesto shells out to for .nfo generation.
+
 .EXAMPLE
     Plain install, run interactively:
         irm https://raw.githubusercontent.com/franzopl/pesto/main/scripts/install.ps1 | iex
@@ -56,7 +60,8 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "pesto\bin"),
     [switch]$NoPathUpdate,
     [switch]$NoConfigWizard,
-    [switch]$NoApiKeyPrompt
+    [switch]$NoApiKeyPrompt,
+    [switch]$NoMediaInfoInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -240,6 +245,30 @@ if ($shadowingPesto -and ((Resolve-Path $shadowingPesto).Path -ne (Resolve-Path 
         if ($oldVersion) { Warn "That one reports: $oldVersion" }
     } catch {}
     Warn "Remove or update it (or move $InstallDir earlier in PATH) so 'pesto' resolves to the version just installed."
+}
+
+# ── mediainfo (optional, used by pesto to generate .nfo files) ─────────────
+
+if (-not $NoMediaInfoInstall) {
+    $mediainfoCmd = Get-Command mediainfo.exe -ErrorAction SilentlyContinue
+    if ($mediainfoCmd) {
+        Log "mediainfo already available on PATH ($($mediainfoCmd.Source)) - .nfo generation is ready."
+    } else {
+        $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($winget) {
+            Log "mediainfo not found - installing MediaInfo CLI via winget (used by pesto to generate .nfo files)..."
+            try {
+                winget install -e --id MediaArea.MediaInfo --accept-package-agreements --accept-source-agreements --silent
+                Log "MediaInfo CLI installed. Open a new terminal for 'mediainfo' to be picked up on PATH."
+            } catch {
+                Warn "Could not install MediaInfo CLI via winget: $_"
+                Warn "Install it manually (CLI build) from https://mediaarea.net/en/MediaInfo/Download/Windows to enable .nfo generation."
+            }
+        } else {
+            Warn "mediainfo not found and winget is not available - pesto will fall back to a plain file listing instead of a full .nfo."
+            Warn "Install MediaInfo CLI manually (CLI build) from https://mediaarea.net/en/MediaInfo/Download/Windows to enable it."
+        }
+    }
 }
 
 if (-not $haveConfig -and -not $NoConfigWizard) {
