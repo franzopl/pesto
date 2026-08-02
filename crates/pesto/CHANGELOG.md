@@ -12,6 +12,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **`PESTO_INPUT_PATHS` sent to post-upload hooks now lists the original
+  input filenames even when `--compress` is active.** The `pesto` CLI was
+  overwriting its internal file list with the single compressed archive
+  before building the hook environment, so any hook that detects a video
+  file by extension (e.g. to capture thumbnails) never saw a `.mkv`/`.mp4`
+  path and silently skipped that step whenever compression was used. The
+  `pesto` library (used by `upapasta`/`sugo`) was unaffected — it already
+  reported the pre-compression paths.
+
 ## [0.4.5] — 2026-08-01
 
 ### Added
