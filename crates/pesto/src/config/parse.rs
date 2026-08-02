@@ -201,6 +201,15 @@ impl Config {
                     None
                 }
             },
+            par2_temp_dir: cli.par2_temp_dir.or(file.posting.par2_temp_dir).map(|s| {
+                if let Some(rest) = s.strip_prefix("~/") {
+                    std::env::var_os("HOME")
+                        .map(|h| PathBuf::from(h).join(rest))
+                        .unwrap_or_else(|| PathBuf::from(&s))
+                } else {
+                    PathBuf::from(&s)
+                }
+            }),
             par2_slice_size: cli.par2_slice_size.map(|s| s as usize),
             par2_slice_count: cli.par2_slice_count,
             par2_recovery_count: cli.par2_recovery_count,

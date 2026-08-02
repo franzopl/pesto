@@ -188,6 +188,14 @@ pub struct PostingSection {
     /// the encoder splits recovery blocks into multiple passes, re-reading
     /// the input files once per pass. Default: `"1 GiB"`.
     pub par2_memory_limit: Option<String>,
+    /// Base directory for the intermediate PAR2 files written during a
+    /// normal posting run, before they're read back and posted. Default:
+    /// the OS temp directory (`std::env::temp_dir()`, usually `/tmp` or
+    /// `$TMPDIR`), which may sit on a different filesystem — with less free
+    /// space or a stricter quota — than the destination disk. Ignored when
+    /// `--par2-only` is set, since PAR2 files are then written next to the
+    /// sources instead of a scratch directory.
+    pub par2_temp_dir: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -308,6 +316,7 @@ pub struct Overrides {
     pub par2: Option<u8>,
     pub par2_only: Option<bool>,
     pub par2_memory_limit: Option<u64>,
+    pub par2_temp_dir: Option<String>,
     pub par2_slice_size: Option<u64>,
     pub par2_slice_count: Option<usize>,
     pub par2_recovery_count: Option<usize>,
@@ -378,6 +387,10 @@ pub struct Config {
     pub dry_run: bool,
     pub par2: u8,
     pub par2_memory_limit: Option<usize>,
+    /// Base directory for the per-run PAR2 scratch directory. See
+    /// [`PostingSection::par2_temp_dir`]. `None` falls back to
+    /// `std::env::temp_dir()`.
+    pub par2_temp_dir: Option<PathBuf>,
     pub par2_slice_size: Option<usize>,
     pub par2_slice_count: Option<usize>,
     pub par2_recovery_count: Option<usize>,

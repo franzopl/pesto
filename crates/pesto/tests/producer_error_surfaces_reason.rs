@@ -47,6 +47,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
+        par2_temp_dir: None,
         par2_only: false,
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,

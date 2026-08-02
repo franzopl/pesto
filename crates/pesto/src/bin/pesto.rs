@@ -177,6 +177,15 @@ struct Cli {
     #[arg(long, value_name = "SIZE")]
     memory_limit: Option<String>,
 
+    /// Directory where intermediate PAR2 files are written during posting,
+    /// before they're read back and posted. Defaults to the OS temp
+    /// directory (e.g. /tmp), which may sit on a different filesystem —
+    /// with less free space or a stricter disk quota — than the destination
+    /// disk. Ignored with --par2-only, which writes PAR2 files next to the
+    /// sources instead [config: posting.par2_temp_dir].
+    #[arg(long, value_name = "DIR")]
+    par2_temp_dir: Option<String>,
+
     /// Number of threads for parallel PAR2 compute
     /// [default: physical cores].
     #[arg(long, value_name = "N")]
@@ -512,6 +521,7 @@ impl Cli {
                 .memory_limit
                 .as_ref()
                 .and_then(|s| parse_upload_rate(s).ok()),
+            par2_temp_dir: self.par2_temp_dir.clone(),
             par2_slice_size: self
                 .slice_size
                 .as_ref()

@@ -165,6 +165,7 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
+        par2_temp_dir: None,
         par2_only: false,
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
