@@ -12,6 +12,17 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **`pesto --update`**: downloads the latest `pesto-v*` GitHub release for
+  the current platform, verifies its SHA256 against the `SHA256SUMS` file
+  now published alongside every release, and replaces the running binary in
+  place. Intended for prebuilt-binary installs (`scripts/install.sh`/
+  `install.ps1`); `cargo install` users should keep using `cargo install
+  pesto-poster`. Note: this only works against releases cut *after* this
+  change ships, since `SHA256SUMS` is a new release asset — running
+  `--update` against an older release without one fails with a clear error
+  instead of installing an unverified binary.
+
 ### Fixed
 - **`PESTO_INPUT_PATHS` sent to post-upload hooks now lists the original
   input filenames even when `--compress` is active.** The `pesto` CLI was

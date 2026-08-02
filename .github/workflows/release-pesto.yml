@@ -80,6 +80,11 @@ jobs:
           mv x86_64-unknown-linux-musl/pesto pesto-linux-x86_64-musl
           mv x86_64-pc-windows-msvc/pesto.exe pesto-windows-x86_64.exe
 
+      # `pesto --update` refuses to install a binary whose SHA256 doesn't
+      # match this file, so it must exist for every release from now on.
+      - name: Generate checksums
+        run: sha256sum pesto-linux-x86_64 pesto-linux-x86_64-musl pesto-windows-x86_64.exe > SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -87,6 +92,7 @@ jobs:
             pesto-linux-x86_64
             pesto-linux-x86_64-musl
             pesto-windows-x86_64.exe
+            SHA256SUMS
           # Not `generate_release_notes: true` — GitHub's auto-generated notes
           # pick the previous *tag by creation time* across the whole repo,
           # which would pull in unrelated `parmesan-v*`/`penne-v*` tags

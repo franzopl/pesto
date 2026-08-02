@@ -40,6 +40,7 @@ pub mod poster;
 pub mod progress;
 pub mod resume;
 pub mod ui;
+pub mod update;
 pub mod upload;
 pub mod walk;
 pub mod yenc;
