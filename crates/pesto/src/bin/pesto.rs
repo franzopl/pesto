@@ -108,6 +108,9 @@ struct Cli {
     from: Option<String>,
 
     /// Newsgroups to post to (repeat or comma-separate) [config: posting.groups].
+    /// With more than one, one is chosen at random per run to spread posts
+    /// across the pool; join names with '+' in a single value to cross-post
+    /// to all of them at once instead, e.g. `-g alt.a+alt.b`.
     #[arg(short = 'g', long, value_name = "GROUP", value_delimiter = ',')]
     groups: Vec<String>,
 

@@ -160,6 +160,7 @@ impl Config {
                 .filter(|g| !g.is_empty())
                 .context("no `groups` set: provide [posting].groups or --groups")?
         };
+        super::validation::validate_groups(&groups)?;
 
         Ok(Config {
             host,

@@ -157,6 +157,15 @@ nzb_dir = "/home/user/nzbs"   # where .nzb files are saved
 
 Any config field can be overridden by a CLI flag for a single run.
 
+With more than one entry, `groups` is a pool of alternatives: one is picked
+at random each run to spread posts across the pool over time — it does not
+cross-post. To post the same article to several groups at once instead, join
+their names with `+` in a single entry, e.g. `groups = ["alt.a+alt.b"]`. The
+two can be mixed, e.g. `groups = ["alt.a+alt.b", "alt.c"]` picks between
+"cross-post to a and b" or "post to c alone" each run. (`,` is accepted as a
+deprecated alias for `+` within a `groups` array entry, with a warning —
+prefer `+` in new configs.)
+
 ### Multiple servers with automatic failover
 
 ```toml
@@ -808,7 +817,7 @@ picked up automatically — no config change needed.
 | `--auth-password <PASS>` | `auth.password` | — | NNTP password |
 | **Posting** | | | |
 | `--from <ADDRESS>` | `posting.from` | random | `From` header (omit = random per run) |
-| `--groups <G,...>` | `posting.groups` | — | Newsgroups, comma-separated |
+| `--groups <G,...>` | `posting.groups` | — | Newsgroups; a pool to pick one from at random per run, or join with `+` in one entry to cross-post to all of them |
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
