@@ -320,6 +320,46 @@ mod tests {
                 .collect()
         }
 
+        // Pinned regression check for the 3 known CI-failing minimal inputs
+        // from issue #51 (seed always 0; n/recovery_count vary but all
+        // satisfy recovery_count == n + 1, and recovery_count % 4 == 3).
+        // Never reproduced locally so far — this exists to make each new
+        // investigation attempt (different core count, RAYON_NUM_THREADS,
+        // toolchain) trivially re-checkable without waiting on proptest to
+        // land on the same inputs by chance.
+        #[test]
+        fn known_ci_failing_inputs_from_issue_51() {
+            for (n, recovery_count) in [(2usize, 3usize), (5, 7), (9, 11)] {
+                let seed = 0u64;
+                let slice_size = 16;
+                let m = recovery_count.min(n);
+                let missing = distinct_below(seed, m, n);
+
+                let slices: Vec<Vec<u8>> = (0..n)
+                    .map(|i| pseudo_random_bytes(seed ^ 0x9E3779B9 ^ (i as u64), slice_size))
+                    .collect();
+                let recovery_blocks = encode(&slices, slice_size, recovery_count);
+
+                let dec = RecoveryDecoder::new(slice_size, n, missing.clone());
+                let result = dec
+                    .reconstruct(|j| Ok(slices[j].clone()), &recovery_blocks)
+                    .unwrap();
+
+                assert_eq!(
+                    result.len(),
+                    missing.len(),
+                    "n={n} recovery_count={recovery_count}"
+                );
+                for (idx, data) in result {
+                    assert_eq!(
+                        data,
+                        slices[idx].clone(),
+                        "slice {idx} mismatch (n={n}, recovery_count={recovery_count}, missing={missing:?})"
+                    );
+                }
+            }
+        }
+
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(96))]
 

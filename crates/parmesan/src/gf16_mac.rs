@@ -438,6 +438,52 @@ mod tests {
             }
         }
 
+        /// Same exhaustive-coefficient agreement check as above, but at
+        /// words=8 (16 bytes) — small enough that `blocks_32 == 0` in both
+        /// `mac_avx2` and `mac_ssse3`, so the *entire* buffer goes through
+        /// `scalar_tail` with zero preceding SIMD main-loop iterations. The
+        /// 200-word test above only exercises `scalar_tail` after 12 (AVX2)
+        /// or 25 (SSSE3) full main-loop iterations already ran, so it never
+        /// covers this all-tail case. This exact length (16 bytes) is what
+        /// `RecoveryDecoder::reconstruct` uses in the proptest
+        /// `decoder::tests::props::round_trip_reconstructs_arbitrary_missing_sets`,
+        /// which has failed intermittently in CI (never locally) —
+        /// this test isolates whether `mac`'s all-tail path is the cause.
+        #[test]
+        fn scalar_ssse3_and_avx2_agree_for_every_coefficient_all_tail_no_main_loop() {
+            if !std::is_x86_feature_detected!("ssse3") || !std::is_x86_feature_detected!("avx2") {
+                eprintln!("skipping: SSSE3/AVX2 not available on this CPU");
+                return;
+            }
+            let gf = Gf16::new();
+            let words = 8usize;
+            let src: Vec<u8> = (0..words as u32 * 2)
+                .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+                .collect();
+
+            for coeff in 0u32..=65535 {
+                let coeff = coeff as u16;
+
+                let mut d_scalar = vec![0xFFu8; src.len()];
+                mac_scalar(&gf, &mut d_scalar, &src, coeff);
+
+                let mut d_ssse3 = vec![0xFFu8; src.len()];
+                unsafe { mac_ssse3(&gf, &mut d_ssse3, &src, coeff) };
+
+                let mut d_avx2 = vec![0xFFu8; src.len()];
+                unsafe { mac_avx2(&gf, &mut d_avx2, &src, coeff) };
+
+                assert_eq!(
+                    d_ssse3, d_scalar,
+                    "SSSE3 vs scalar mismatch at coeff={coeff:#06x}"
+                );
+                assert_eq!(
+                    d_avx2, d_scalar,
+                    "AVX2 vs scalar mismatch at coeff={coeff:#06x}"
+                );
+            }
+        }
+
         /// Same agreement check but accumulating (non-zero starting `dst`,
         /// like real decode usage where multiple `mac` calls XOR into the
         /// same buffer) rather than starting from a fixed fill value.

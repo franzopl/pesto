@@ -3904,6 +3904,68 @@ mod tests {
         }
     }
 
+    // `simd_recovery_matches_scalar_for_larger_slices` above only exercises
+    // recovery_count=4, a clean multiple of the 4-wide unrolled group size in
+    // `flush_avx2_work`'s `buffers.par_chunks_mut(4)` — so it never touches the
+    // `[buf_a, buf_b]` (remainder 2) or `rest` (remainder 1 or 3) fallback arms.
+    // Investigating a flaky proptest failure (round_trip_reconstructs_arbitrary_missing_sets)
+    // whose 3 known failing inputs (recovery_count 3, 7, 11) all hit exactly
+    // those under-tested fallback arms — this sweeps every remainder case
+    // directly against the scalar reference to isolate whether the bug lives
+    // in AVX2 encoding itself (as opposed to the decoder or a timing issue).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_recovery_matches_scalar_across_all_group_remainders() {
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!(
+                "avx2_recovery_matches_scalar_across_all_group_remainders: skipped (no AVX2)"
+            );
+            return;
+        }
+        let slice_size = 16;
+        for total_slices in [1usize, 2, 3, 5] {
+            for recovery_count in 1usize..=12 {
+                let slices: Vec<Vec<u8>> = (0..total_slices)
+                    .map(|s| {
+                        (0..slice_size)
+                            .map(|i| ((s * 37 + i * 13 + 7) & 0xFF) as u8)
+                            .collect()
+                    })
+                    .collect();
+
+                let mut enc = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count);
+                for s in &slices {
+                    enc.add_slice(s.clone());
+                }
+                let (simd_recovery, _) = enc.finish();
+
+                let gf = Gf16::new();
+                let logbases = input_logbases(total_slices);
+                let mut scalar_buffers = vec![vec![0u16; slice_size / 2]; recovery_count];
+                RecoveryEncoder::flush_scalar_work(
+                    &mut scalar_buffers,
+                    &slices,
+                    0,
+                    &logbases,
+                    0,
+                    &gf,
+                );
+                let scalar_recovery: Vec<Vec<u8>> = scalar_buffers
+                    .into_iter()
+                    .map(|buf| buf.into_iter().flat_map(|w| w.to_le_bytes()).collect())
+                    .collect();
+
+                for (i, (simd, scalar)) in simd_recovery.iter().zip(&scalar_recovery).enumerate() {
+                    assert_eq!(
+                        simd.data, *scalar,
+                        "SIMD and scalar disagree on recovery block {i} \
+                         (total_slices={total_slices}, recovery_count={recovery_count})"
+                    );
+                }
+            }
+        }
+    }
+
     // Validates that flush_avx512_gfni produces bit-identical output to the
     // scalar reference.  Requires the `bench-internals` feature to force the
     // path; skips cleanly on CPUs without AVX-512/GFNI.
