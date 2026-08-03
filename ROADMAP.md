@@ -541,6 +541,14 @@ GitHub issue #68, which was closed as indexer-side (NZBIndex/Binsearch key their
 test against NZBIndex showed no change in that specific grouping gap. The flag stays available (and now on by
 default for `none`/`full-shared`) for compatibility with any other indexer/tool that does read it.
 
+**Update — the actual grouping gap was found, and it's unrelated to `--file-counter`:** the bare PAR2 index file
+(and any other single-segment file posted alongside multi-segment siblings) had a subject shaped differently
+from the rest of the release — `"name" yEnc`, no `(part/total)` trailer, per the yEnc spec's own allowance for
+omitting it on a single-article file. `default_subject()` now always emits `(part/total)`, including `(1/1)`.
+Confirmed live against Binsearch: a `--compress`/`--par2` release went from 8 of 9 files grouped (bare `.par2`
+excluded) to 9 of 9 once every file's subject had the same shape. See the CHANGELOG `[Unreleased]` entry for
+issue #68.
+
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
