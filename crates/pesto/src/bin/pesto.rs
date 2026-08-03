@@ -303,11 +303,20 @@ struct Cli {
     /// counter, e.g. `[3/15] "movie.mkv" yEnc (1/1875)`, counting every file
     /// in the release (data files plus the PAR2 index and volumes). Some
     /// posting tools (e.g. nyuu) emit this by default and some indexers may
-    /// key their grouping heuristics off it; pesto omits it unless this flag
-    /// is set. See `ROADMAP.md` "Subject file counter"
-    /// [config: posting.file_counter].
+    /// key their grouping heuristics off it. On by default for `--obfuscate
+    /// none` and `full-shared`, which already accept cross-file correlation
+    /// by wire metadata as part of their own design (bare filename, or a
+    /// shared prefix/From); off by default for `full`/`paranoid`, whose
+    /// whole point is preventing exactly that. Pass --no-file-counter to
+    /// force it off regardless of mode. See `ROADMAP.md` "Subject file
+    /// counter" [config: posting.file_counter].
     #[arg(long)]
     file_counter: bool,
+
+    /// Force the `[filenum/total]` subject counter off, overriding the
+    /// per-`--obfuscate`-mode default [config: posting.file_counter].
+    #[arg(long)]
+    no_file_counter: bool,
 
     /// Fixed domain component for generated `Message-ID` headers
     /// (e.g. `example.com`). When omitted a random domain is generated per
@@ -609,7 +618,13 @@ impl Cli {
             },
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
-            file_counter: if self.file_counter { Some(true) } else { None },
+            file_counter: if self.no_file_counter {
+                Some(false)
+            } else if self.file_counter {
+                Some(true)
+            } else {
+                None
+            },
             message_id_domain: self.message_id_domain.clone(),
             pre_hooks: self.pre_hook.clone(),
             post_hooks: self.post_hook.clone(),
@@ -3121,7 +3136,9 @@ mod tests {
         let compressed = test_config(768_000, ObfuscateMode::FullShared, Some("7z"), 5);
         assert_eq!(
             resume_flags_string(&compressed),
-            "--article-size 768000 --obfuscate=full-shared --par2 5 --compress=7z"
+            // `file_counter` defaults to true for `full-shared` — see
+            // `Config::resolve`'s obfuscate-mode-dependent default.
+            "--article-size 768000 --obfuscate=full-shared --par2 5 --compress=7z --file-counter"
         );
     }
 

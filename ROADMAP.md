@@ -498,7 +498,9 @@ teardown/rebuild, which remains.
 
 ### Subject file counter `[N/M]`
 
-**Status:** Implemented behind an opt-in flag, `--file-counter` / `[posting] file_counter` (default: off).
+**Status:** Implemented as `--file-counter` / `[posting] file_counter`, on by default for `--obfuscate none` and
+`full-shared`, off by default for `full`/`paranoid`. `--no-file-counter` (or `file_counter = false`/`true`
+explicitly in the config file) overrides the mode-based default either way.
 
 **Background:** Tools like `nyuu` prefix subjects with `[filenum/total]` (e.g. `[1/5] "movie.mkv" yEnc (1/3)`) — a
 release-wide file counter, distinct from the per-file segment counter `(part/total)` that `pesto` always emits.
@@ -520,16 +522,24 @@ once, before any worker spawns (`post_files_with_progress_and_cancel`), and assi
 `file_index` (1-based release position: data files in final posting order, then the PAR2 index, then the
 volumes in `plan_volumes` order). Both values are denormalized onto `FileMeta`, `PostedSegment` and `FailedTask`
 so every place that rebuilds a subject — the main post path, `--check` reposts, the end-of-run retry pass, and
-`.nzb` generation — produces the identical `[filenum/total]` prefix. Off by default: toggling it between runs of
-the same `--resume` state invalidates the state (`resume::RunFingerprint`), the same way `--obfuscate`/`--par2`
-changes already do, since it changes every subject in the release.
+`.nzb` generation — produces the identical `[filenum/total]` prefix. Toggling it (explicitly or via a changed
+`--obfuscate` mode) between runs of the same `--resume` state invalidates the state (`resume::RunFingerprint`),
+the same way `--obfuscate`/`--par2` changes already do, since it changes every subject in the release.
 
-**Why still opt-in rather than default-on:** this remains a cosmetic nicety, not a spec requirement, and whether
-any indexer's grouping heuristic actually keys off it is unconfirmed — see GitHub issue #68, which was closed as
-indexer-side (NZBIndex/Binsearch key their "complete set" grouping off the `.volNNN+MMM.par2` filename pattern,
-not the subject's file counter). Enabling `--file-counter` does not change that filename pattern, so it is not
-expected to fix #68's original report on its own; it exists for compatibility with any indexer/tool that does
-read the counter, and to let that be tested empirically rather than assumed.
+**Why the default is split by obfuscation mode:** `full` and `paranoid` exist specifically to prevent an
+observer from correlating files/segments by wire metadata (independently-random names/`From` per file, or per
+article for `paranoid`) — a stable, sequential `[filenum/total]` shared across the whole release is exactly the
+kind of correlation vector those modes are designed to deny, so the counter stays off there by default. `none`
+and `full-shared` already accept that correlation as part of their own design (a bare real filename, or a shared
+prefix/`From` across the release) — see `full-shared`'s doc comment, which trades away `full`'s per-file
+isolation for indexer compatibility in the first place — so adding the counter introduces no new correlation
+vector for them, and it's on by default there.
+
+Whether any indexer's grouping heuristic actually keys off the counter is otherwise unconfirmed either way — see
+GitHub issue #68, which was closed as indexer-side (NZBIndex/Binsearch key their "complete set" grouping off the
+`.volNNN+MMM.par2` filename pattern, not the subject's file counter) and re-closed after a live `--file-counter`
+test against NZBIndex showed no change in that specific grouping gap. The flag stays available (and now on by
+default for `none`/`full-shared`) for compatibility with any other indexer/tool that does read it.
 
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>

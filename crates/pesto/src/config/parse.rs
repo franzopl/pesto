@@ -276,10 +276,24 @@ impl Config {
                 }
             },
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
-            file_counter: cli
-                .file_counter
-                .or(file.posting.file_counter)
-                .unwrap_or(false),
+            file_counter: {
+                let explicit = cli.file_counter.or(file.posting.file_counter);
+                match explicit {
+                    Some(v) => v,
+                    None => {
+                        let obfuscate =
+                            cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default();
+                        // `None` and `FullShared` already accept cross-file
+                        // correlation by wire metadata (bare filename, or a
+                        // shared prefix/From) as part of their own design, so
+                        // the counter adds no new correlation vector there —
+                        // unlike `Full`/`Paranoid`, whose whole point is
+                        // preventing exactly that. See ROADMAP.md "Subject
+                        // file counter".
+                        matches!(obfuscate, ObfuscateMode::None | ObfuscateMode::FullShared)
+                    }
+                }
+            },
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
             pre_hooks: {
                 // CLI flags take precedence over config file; single `pre_hook`

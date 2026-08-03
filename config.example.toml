@@ -175,8 +175,11 @@ groups = ["alt.binaries.test"]
 # file counter, e.g. `[3/15] "movie.mkv" yEnc (1/1875)`, counting every file
 # in the release (data files plus the PAR2 index and volumes). Some posting
 # tools (e.g. nyuu) emit this by default and some indexers may key their
-# grouping heuristics off it; pesto omits it unless enabled. See ROADMAP.md
-# "Subject file counter". Default: false.
+# grouping heuristics off it. Default depends on `obfuscate`: on for `none`
+# and `full-shared` (which already accept cross-file correlation by wire
+# metadata as part of their own design), off for `full`/`paranoid` (whose
+# whole point is preventing exactly that). Set explicitly here to override
+# the mode-based default either way. See ROADMAP.md "Subject file counter".
 # file_counter = false
 
 # message_id_domain — fixed domain used in the Message-ID of every article.

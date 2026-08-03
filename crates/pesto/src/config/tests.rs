@@ -642,6 +642,54 @@ fn cli_overrides_check_resume_no_archive() {
 }
 
 #[test]
+fn file_counter_defaults_on_for_none_and_full_shared_off_for_full_and_paranoid() {
+    for (mode, expected) in [
+        (ObfuscateMode::None, true),
+        (ObfuscateMode::FullShared, true),
+        (ObfuscateMode::Full, false),
+        (ObfuscateMode::Paranoid, false),
+    ] {
+        let cfg = Config::resolve(
+            minimal_file(),
+            Overrides {
+                obfuscate: Some(mode),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.file_counter, expected,
+            "obfuscate={mode:?} should default file_counter to {expected}"
+        );
+    }
+}
+
+#[test]
+fn file_counter_explicit_override_wins_over_obfuscate_mode_default() {
+    let forced_off = Config::resolve(
+        minimal_file(),
+        Overrides {
+            obfuscate: Some(ObfuscateMode::FullShared),
+            file_counter: Some(false),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!forced_off.file_counter);
+
+    let forced_on = Config::resolve(
+        minimal_file(),
+        Overrides {
+            obfuscate: Some(ObfuscateMode::Full),
+            file_counter: Some(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(forced_on.file_counter);
+}
+
+#[test]
 fn cli_overrides_date_and_message_id_domain() {
     let cfg = Config::resolve(
         minimal_file(),
