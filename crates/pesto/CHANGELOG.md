@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-08-03
+
 ### Added
 - **Startup notice for new releases**: a normal run (not `--update` itself)
   now prints a one-line notice when a newer `pesto-v*` release exists on
