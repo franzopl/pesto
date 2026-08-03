@@ -221,6 +221,8 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
         check_connections: 1,
         check_post_retries: 1,
         allow_incomplete_nzb: true,
+        check_recover_percent: 15,
+        check_recover_max: 0,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };

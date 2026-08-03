@@ -258,14 +258,18 @@ fn one_repost_attempt_is_not_enough_when_the_server_keeps_losing_the_article() {
     // The first 2 distinct Message-IDs the server ever sees are cursed: the
     // original post (1st) and the one allowed repost's fresh ID (2nd) both
     // fail STAT. `check-post-retries 1` allows only one repost attempt per
-    // article, so it's not enough.
+    // article, so it's not enough on its own — `--check-recover-max 0`
+    // disables the separate automatic final-recovery pass (on by default,
+    // see issue #18's resume follow-up), which would otherwise make a 3rd
+    // attempt and land past `cursed_count`, masking exactly the behavior
+    // this test exists to verify.
     let addr = spawn_flaky_dedup_server(2);
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("movie.bin");
     std::fs::write(&input, vec![0xABu8; 64]).unwrap();
     let out = dir.path().join("out.nzb");
 
-    let output = run_pesto(addr.port(), 1, &input, &out);
+    let output = run_pesto_with_args(addr.port(), 1, &input, &out, &["--check-recover-max", "0"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(

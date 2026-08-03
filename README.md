@@ -487,12 +487,17 @@ deleted if `--watch-done` is not set.
 
 ### Upload resume
 
-If a posting run is interrupted (Ctrl-C, network failure, etc.), `pesto` can save
-state to a `.pesto-state` sidecar file next to the `.nzb`. On the next run with
-the same output path, already-posted articles are skipped and their `Message-ID`s
-are reused, so the final `.nzb` is complete and correct.
+If a posting run is interrupted (Ctrl-C, network failure, articles still
+missing after every automatic retry, etc.), `pesto` can pick up where it left
+off instead of re-posting everything from scratch.
 
-Resume is **off by default**. Enable it for a single run:
+Progress is tracked automatically for every run. If a run ends incomplete, that
+progress is saved to a `.pesto-state` sidecar file next to the `.nzb`; if it
+completes successfully, any state file is deleted — there is nothing left to
+resume from a finished upload. `--resume` controls the other half: whether a
+*prior* run's saved state is actually loaded and its already-posted segments
+skipped. Without it, `pesto` always starts fresh, even if a `.pesto-state` file
+is sitting right there.
 
 ```bash
 pesto --resume movie.mkv
@@ -504,8 +509,41 @@ Or enable it permanently in config.toml:
 resume = true
 ```
 
-State files are created beside the `.nzb` and are not automatically cleaned up.
-You can delete them manually when you no longer need them.
+When posting finishes but only a handful of articles fail the post-check,
+`pesto` already retries them automatically in the same run before giving up
+(see `--check-post-retries` and `--check-recover-max` below) — `--resume` is
+for what that can't cover: a run interrupted outright, or one where too many
+articles failed to justify an automatic retry. When a run does end that way,
+the printed error includes a ready-to-run retry command with the original
+`--article-size`/`--obfuscate`/`--par2`/`--compress` values already filled in.
+
+**Safety.** A saved state is only trusted if it was recorded under the same
+posting parameters (`--article-size`, `--obfuscate`, `--compress`, `--par2`)
+and, per file, the same size and modification time as what `--resume` sees
+now. Any mismatch — different parameters, or a file that changed since the
+state was recorded — is discarded rather than partially trusted, so a
+mismatched retry never corrupts the `.nzb`; it just re-posts as if `--resume`
+had not found anything.
+
+**Compressed uploads (`--compress`).** The archive is rebuilt from scratch on
+every run, so it always looks "changed" to the per-file check above and its
+segments can't be skipped on `--resume` — the archive's *content* is not
+resumable today. What does carry over: the obfuscated name/identity used to
+build it (reused instead of regenerated, so at least the file doesn't change
+identity every retry), and any article that was sent but never got a
+confirmed response (see below). The same applies to PAR2 recovery volumes for
+segments an interrupted run never reached — they're regenerated, not resumed.
+A plain, uncompressed upload gets full data-level resume; a compressed one
+mainly gets a safe, fast "no" instead of a slow re-post pretending to be a
+skip.
+
+**Sent but unconfirmed.** A segment whose article was sent but whose server
+acknowledgement never arrived (e.g. the connection dropped between `POST` and
+reading `240`) is cached in a `.pesto-spool` sidecar directory as soon as it's
+encoded, before it goes over the wire. On `--resume`, that exact article is
+replayed under its original `Message-ID` instead of being re-encoded and
+posted under a new one — avoiding a duplicate article if the original `POST`
+had, in fact, gone through.
 
 ### Per-upload logs
 
@@ -588,6 +626,10 @@ automatically if still missing.
 | `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass (implies `--check`) |
 | `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article; 20 s between each |
 | `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for the STAT pass |
+| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost-then-verify rounds for articles still missing after `--check` |
+| `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` anyway if articles are still confirmed missing after `--check-post-retries` |
+| `--check-recover-percent <N>` | `posting.check_recover_percent` | `15` | Skip the automatic final recovery pass below if still-missing articles exceed this percent of the release |
+| `--check-recover-max <N>` | `posting.check_recover_max` | `50` | After `--check-post-retries` is exhausted, automatically retry once more if at most this many articles (and within `--check-recover-percent`) are still missing; `0` disables |
 
 ### Rate limiting
 
@@ -854,7 +896,7 @@ picked up automatically — no config change needed.
 | `--par2 <PERCENT>` | `posting.par2` | `10` | PAR2 recovery percentage (0 = off) |
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
 | `--dry-run` | — | off | Encode only; never touch the network |
-| `--resume` | `output.resume` | off | Resume interrupted upload from `.pesto-state` file |
+| `--resume` | `output.resume` | off | Load a prior run's `.pesto-state` file and skip already-posted segments |
 | `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |
 | `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |

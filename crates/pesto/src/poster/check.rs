@@ -22,7 +22,7 @@
 //! answered by flooding an already-struggling server with reposts.
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -646,6 +646,73 @@ async fn repost_one(
         }
     }
     Err(last_err)
+}
+
+/// One extra, bounded recovery attempt for articles that are still missing
+/// after every `check_post_retries` round already ran out — the caller (see
+/// `poster::maybe_recover_missing`) has already decided this batch is small
+/// enough to be worth it. Unlike the streaming coordinator's normal flow,
+/// every item here is already *known* to be missing (that's how it ended up
+/// here), so this skips straight to [`repost_one`] instead of re-running the
+/// patient STAT-retry sequence first, then verifies once via a single STAT
+/// after `check_delay_secs` — one round trip per article, not the full
+/// `check_retries`-attempt cycle.
+///
+/// Returns the subset of `segments` that got reposted *and* confirmed
+/// present; anything not in the returned list is still genuinely missing.
+pub(crate) async fn recover_missing(
+    config: &Config,
+    groups: &[String],
+    segments: Vec<PostedSegment>,
+    events: Option<&ProgressSender>,
+) -> Vec<PostedSegment> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
+    // One connection per distinct server actually referenced, reused across
+    // the whole batch instead of reconnecting per article.
+    let mut slots: HashMap<usize, ConnectionSlot> = HashMap::new();
+    let mut recovered = Vec::with_capacity(segments.len());
+
+    for seg in segments {
+        let idx = seg.server_idx.min(servers.len().saturating_sub(1));
+        let slot = slots
+            .entry(idx)
+            .or_insert_with(|| ConnectionSlot::new(Arc::clone(&servers), idx));
+
+        let new_seg = match repost_one(config, slot, &seg, groups).await {
+            Ok(new_seg) => new_seg,
+            Err(e) => {
+                warn!(id = %seg.message_id, error = %e, "check: final recovery repost failed");
+                continue;
+            }
+        };
+
+        tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
+
+        let confirmed = match slot.ensure_connected().await {
+            Ok(conn) => conn.stat(&new_seg.message_id).await.unwrap_or(false),
+            Err(_) => false,
+        };
+
+        if confirmed {
+            if let Some(tx) = events {
+                let _ = tx.send(ProgressEvent::Status {
+                    text: format!(
+                        "check: recovered {} on final pass ({}/{})",
+                        new_seg.message_id, new_seg.part, new_seg.total
+                    ),
+                });
+            }
+            recovered.push(new_seg);
+        } else {
+            warn!(id = %new_seg.message_id, "check: recovery repost accepted but not confirmed on final STAT");
+        }
+    }
+
+    recovered
 }
 
 #[cfg(test)]

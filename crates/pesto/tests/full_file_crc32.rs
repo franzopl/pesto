@@ -177,6 +177,8 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
         check_connections: 1,
         check_post_retries: 1,
         allow_incomplete_nzb: false,
+        check_recover_percent: 15,
+        check_recover_max: 0,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };

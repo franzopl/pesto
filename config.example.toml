@@ -144,6 +144,17 @@ groups = ["alt.binaries.test"]
 # check_post_retries round. Default: false.
 # allow_incomplete_nzb = false
 
+# check_recover_percent / check_recover_max — after every check_post_retries
+# round is exhausted, pesto makes one more automatic repost-and-verify
+# attempt for whatever is still missing, but only when that's cheap: at or
+# below check_recover_max articles, AND at or below check_recover_percent of
+# the release's total segments (whichever cap is smaller wins). This is what
+# turns "posting finished but the check failed for a handful of articles"
+# into a self-healing run instead of a failed one requiring a manual
+# --resume. Set check_recover_max = 0 to disable. Defaults: 15 and 50.
+# check_recover_percent = 15
+# check_recover_max = 50
+
 # upload_rate — maximum total upload speed across all connections.
 # Accepts human-readable values: "50 MiB/s", "10 MB/s", "1024 KiB/s".
 # 0 or omitted means unlimited. Also settable with --rate.
@@ -217,12 +228,16 @@ groups = ["alt.binaries.test"]
 # Use this only to set a static password independently of --compress.
 # nzb_password = "archive_pass"
 
-# resume — save upload progress to a .pesto-state sidecar file after every
-# article. If the upload is interrupted, re-running the same command resumes
-# from where it stopped instead of starting over. The state file is placed
-# beside the .nzb output (same name, .pesto-state extension). Note: state
-# files are NOT automatically deleted on success — remove them manually.
-# Default: false.
+# resume — load a prior run's saved progress (from a .pesto-state sidecar
+# file beside the .nzb output) and skip already-posted segments. Progress is
+# always tracked and saved when a run ends incomplete, regardless of this
+# setting; `resume` only controls whether that saved state is actually
+# loaded back on the next run. The state file is deleted automatically once
+# a run completes successfully — nothing to clean up by hand. A saved state
+# is only trusted if it was recorded under matching posting parameters
+# (article_size, obfuscate, compress, par2) and, per file, the same size and
+# modification time; any mismatch is discarded rather than reused, so a
+# stale or unrelated state file can't corrupt the .nzb. Default: false.
 # resume = false
 
 # nfo — generate a .nfo text file alongside the .nzb. Default: false.
