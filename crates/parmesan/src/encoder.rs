@@ -2701,66 +2701,86 @@ impl RecoveryEncoder {
                                 }
                             });
                     }
-                    [buf_a] => {
-                        let base = i * n_queued;
-                        buf_a.par_chunks_mut(chunk_size).enumerate().for_each(
-                            |(chunk_idx, chunk_a)| unsafe {
-                                let byte_offset = chunk_idx * chunk_size * 2;
-                                let byte_len = chunk_a.len() * 2;
-                                let blocks_64 = byte_len / 64;
-                                let remainder = byte_len % 64;
+                    // Fallback for 1 or 3 remaining buffers (2 is handled
+                    // above). Previously only `[buf_a]` (exactly 1) was
+                    // matched here, with everything else — crucially, a
+                    // remainder of *3*, which is exactly what
+                    // `par_chunks_mut(4)` leaves whenever `recovery_count %
+                    // 4 == 3` — silently falling through to an empty `_ =>
+                    // {}` arm. Those recovery blocks were never written to
+                    // at all, left as zero-initialized `buffers` entries
+                    // instead of real recovery data: this was the root
+                    // cause of issue #51's "silent data corruption" (the
+                    // decoder faithfully reconstructing from all-zero
+                    // recovery blocks). See the issue for the investigation
+                    // history — this is what every local repro attempt
+                    // couldn't catch, since it only reproduces on hardware
+                    // with AVX-512+GFNI, which none of those attempts had.
+                    rest => {
+                        for (j, buf_a) in rest.iter_mut().enumerate() {
+                            let base = (i + j) * n_queued;
+                            buf_a.par_chunks_mut(chunk_size).enumerate().for_each(
+                                |(chunk_idx, chunk_a)| unsafe {
+                                    let byte_offset = chunk_idx * chunk_size * 2;
+                                    let byte_len = chunk_a.len() * 2;
+                                    let blocks_64 = byte_len / 64;
+                                    let remainder = byte_len % 64;
 
-                                for q_idx in 0..n_queued {
-                                    let (mat_lo, mat_hi, ref table_low, ref table_high) =
-                                        all_tables[base + q_idx];
-                                    let slice_chunk =
-                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
+                                    for q_idx in 0..n_queued {
+                                        let (mat_lo, mat_hi, ref table_low, ref table_high) =
+                                            all_tables[base + q_idx];
+                                        let slice_chunk =
+                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
 
-                                    let mut ptr_buf = chunk_a.as_mut_ptr() as *mut __m512i;
-                                    let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
-                                    let end = ptr_in.add(blocks_64);
+                                        let mut ptr_buf = chunk_a.as_mut_ptr() as *mut __m512i;
+                                        let mut ptr_in = slice_chunk.as_ptr() as *const __m512i;
+                                        let end = ptr_in.add(blocks_64);
 
-                                    while ptr_in < end {
-                                        let input = _mm512_loadu_si512(ptr_in.cast());
-                                        let separated = _mm512_shuffle_epi8(input, deint_mask);
+                                        while ptr_in < end {
+                                            let input = _mm512_loadu_si512(ptr_in.cast());
+                                            let separated = _mm512_shuffle_epi8(input, deint_mask);
 
-                                        let v_lo =
-                                            _mm512_gf2p8affine_epi64_epi8(separated, mat_lo, 0);
-                                        let new_lo =
-                                            _mm512_xor_si512(v_lo, _mm512_bsrli_epi128::<8>(v_lo));
-                                        let v_hi =
-                                            _mm512_gf2p8affine_epi64_epi8(separated, mat_hi, 0);
-                                        let new_hi =
-                                            _mm512_xor_si512(v_hi, _mm512_bsrli_epi128::<8>(v_hi));
-                                        let out = _mm512_unpacklo_epi8(new_lo, new_hi);
-                                        let prev = _mm512_loadu_si512(ptr_buf.cast());
-                                        _mm512_storeu_si512(
-                                            ptr_buf.cast(),
-                                            _mm512_xor_si512(prev, out),
-                                        );
+                                            let v_lo =
+                                                _mm512_gf2p8affine_epi64_epi8(separated, mat_lo, 0);
+                                            let new_lo = _mm512_xor_si512(
+                                                v_lo,
+                                                _mm512_bsrli_epi128::<8>(v_lo),
+                                            );
+                                            let v_hi =
+                                                _mm512_gf2p8affine_epi64_epi8(separated, mat_hi, 0);
+                                            let new_hi = _mm512_xor_si512(
+                                                v_hi,
+                                                _mm512_bsrli_epi128::<8>(v_hi),
+                                            );
+                                            let out = _mm512_unpacklo_epi8(new_lo, new_hi);
+                                            let prev = _mm512_loadu_si512(ptr_buf.cast());
+                                            _mm512_storeu_si512(
+                                                ptr_buf.cast(),
+                                                _mm512_xor_si512(prev, out),
+                                            );
 
-                                        ptr_in = ptr_in.add(1);
-                                        ptr_buf = ptr_buf.add(1);
-                                    }
+                                            ptr_in = ptr_in.add(1);
+                                            ptr_buf = ptr_buf.add(1);
+                                        }
 
-                                    if remainder > 0 {
-                                        let ow = blocks_64 * 32;
-                                        let mut pw = chunk_a[ow..].as_mut_ptr();
-                                        let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
-                                        let tail_end = p_in.add(remainder);
-                                        while p_in < tail_end {
-                                            let lo = *p_in as usize;
-                                            let hi = *p_in.add(1) as usize;
-                                            *pw ^= table_low[lo] ^ table_high[hi];
-                                            pw = pw.add(1);
-                                            p_in = p_in.add(2);
+                                        if remainder > 0 {
+                                            let ow = blocks_64 * 32;
+                                            let mut pw = chunk_a[ow..].as_mut_ptr();
+                                            let mut p_in = slice_chunk[blocks_64 * 64..].as_ptr();
+                                            let tail_end = p_in.add(remainder);
+                                            while p_in < tail_end {
+                                                let lo = *p_in as usize;
+                                                let hi = *p_in.add(1) as usize;
+                                                *pw ^= table_low[lo] ^ table_high[hi];
+                                                pw = pw.add(1);
+                                                p_in = p_in.add(2);
+                                            }
                                         }
                                     }
-                                }
-                            },
-                        );
+                                },
+                            );
+                        }
                     }
-                    _ => {}
                 }
             });
     }
