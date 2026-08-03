@@ -173,6 +173,8 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         check_connections: 1,
         check_post_retries: 1,
         allow_incomplete_nzb: false,
+        check_recover_percent: 15,
+        check_recover_max: 0,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };

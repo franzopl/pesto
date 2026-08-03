@@ -26,6 +26,62 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   now an explicit, documented (deprecated) alias for `+` with the same
   effect, so existing configs relying on it keep working and print a
   one-line warning nudging towards `+`. See #66.
+- **`--check-recover-percent` / `--check-recover-max`**: after every
+  `--check-post-retries` round is exhausted, `pesto` now makes one more
+  automatic repost-and-verify attempt for whatever is still missing, as long
+  as that's cheap — at most `--check-recover-max` articles (default 50) and
+  within `--check-recover-percent` of the release's total segments (default
+  15%, whichever cap is smaller). This resolves the common case of "posting
+  finished, the check failed for a handful of articles" without requiring a
+  second `--resume` invocation. Set `--check-recover-max 0` to disable.
+- **Resume state now protects itself against corruption instead of trusting
+  blindly** (issue #18): before skipping any recorded segment, `--resume`
+  checks that this run's posting parameters (`--article-size`, `--obfuscate`,
+  `--compress`, `--par2`) and, per file, its size and modification time,
+  match what the state was recorded under. Any mismatch is discarded
+  (safely) instead of reused — a run-level mismatch clears the whole state,
+  a single changed file clears only that file's segments (and, when `--par2`
+  is active, the whole state — PAR2 recovery blocks are computed over every
+  file together, so one file changing invalidates all of them, not just its
+  own). On mismatch or failure, `pesto` now prints a ready-to-copy retry
+  command with the original parameters filled in.
+- **Resume state is now tracked for every run, not just ones started with
+  `--resume`**: if a run ends incomplete, its progress is always saved so a
+  later `--resume` has something to load — previously, deciding you needed
+  `--resume` only happened *after* a failure, which was too late if nothing
+  had been recorded. `--resume` itself still only controls whether a *prior*
+  run's saved state is loaded and reused, so nothing changes for a run that
+  already used it from the start.
+- **A segment that was sent but never confirmed (e.g. the connection dropped
+  between `POST` and reading the `240`) can now be resumed safely**: its
+  fully-encoded article is cached in a `.pesto-spool` sidecar directory as
+  soon as it's encoded, and replayed byte-for-byte under its original
+  Message-ID on `--resume`, instead of being silently re-encoded and posted
+  under a fresh one — which risked a duplicate article if the original
+  `POST` had, in fact, succeeded. Only active when `--resume` is passed.
+- The obfuscated archive name produced by `--compress`+`--obfuscate`, and the
+  shared identity used by `--obfuscate=full-shared`, now persist across
+  `--resume` runs with matching parameters instead of being regenerated
+  every time — needed for either to be resumable at all, since the resume
+  key is the name itself.
+
+### Fixed
+- **`--resume` no longer trusts stale or mismatched state, closing several
+  silent-corruption paths reported in issue #18**: a `.pesto-state` file
+  left over from an unrelated run, an edited file reusing the same output
+  name, or a retry using a different `--article-size`/`--obfuscate`/
+  `--compress`/`--par2` no longer gets blindly reused — see "Added" above.
+- **Resume state is deleted once a run completes successfully** —
+  previously left on disk indefinitely, so a later unrelated run at the same
+  output path could silently skip every segment and post nothing at all.
+- **Resumed segments now report their real wire size in the `.nzb`** instead
+  of a hardcoded `0`.
+
+### Changed
+- Resume-state persistence moved off the posting hot path: every confirmed
+  segment used to trigger a full rewrite of the state file while holding a
+  shared lock across all workers (O(n²) disk I/O on large uploads); it is
+  now written once, at the end of the run, based on the final outcome.
 
 ## [0.4.7] — 2026-08-02
 

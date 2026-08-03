@@ -39,6 +39,7 @@ pub use parmesan as par2;
 pub mod poster;
 pub mod progress;
 pub mod resume;
+pub mod spool;
 pub mod ui;
 pub mod update;
 pub mod upload;

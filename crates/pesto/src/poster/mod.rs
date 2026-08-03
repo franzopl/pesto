@@ -342,10 +342,20 @@ struct Shared {
     /// Progress channel; `None` keeps the poster silent (library default).
     events: Option<ProgressSender>,
     cancelled: Arc<AtomicBool>,
-    /// Resume state shared among workers. `None` when resume is disabled.
+    /// Resume state shared among workers. `Some` whenever a resume-state
+    /// path was given and this isn't a dry run/`--par2-only` — tracked
+    /// unconditionally, regardless of `--resume` (see `validate_run`'s call
+    /// site), so an incomplete run always has something to persist.
     resume: Option<Arc<Mutex<ResumeState>>>,
-    /// Path of the resume state file; `None` when resume is disabled.
+    /// Path of the resume state file; `None` when resume tracking is disabled
+    /// (dry run / `--par2-only`).
     resume_path: Option<PathBuf>,
+    /// Directory for the type-1 spool (cached encoded articles) — `Some`
+    /// only when `config.resume` is explicitly set, unlike `resume` itself:
+    /// spooling writes real article bytes to disk on the posting hot path,
+    /// a cost a plain run must never pay just because a resume-state path
+    /// happened to be available. See `crate::spool`.
+    spool_dir: Option<PathBuf>,
     /// Reusable article byte buffers (Phase 12b). Workers return their buffer
     /// here after encoding so the producer and reader tasks can reuse it
     /// instead of allocating a fresh `Vec<u8>` for every article.
@@ -418,8 +428,12 @@ pub async fn post_files(config: &Config, files: &[InputFile]) -> Result<PostOutc
 /// Post every file in `files`, emitting [`ProgressEvent`]s on `events`.
 ///
 /// `resume_state_path` is the path of the `.pesto-state` sidecar file.
-/// When `config.resume` is `true` and the path is `Some`, already-posted
-/// segments are skipped and the state is updated after each successful post.
+/// Progress is tracked in memory whenever this path is given, regardless of
+/// `config.resume` — that flag only controls whether a *prior* run's
+/// on-disk state at this path is loaded and used to skip already-posted
+/// segments. At the end of the run, the state is written to disk once if
+/// the run ended incomplete (so a later `--resume` has something to load),
+/// or deleted if it ended complete (nothing left to resume).
 ///
 /// Passing `None` for `events` keeps the poster silent (library default).
 pub async fn post_files_with_progress(
@@ -448,11 +462,93 @@ pub async fn post_files_with_progress_and_cancel(
 ) -> Result<PostOutcome> {
     configure_rayon(config.threads);
 
+    // Resume state is tracked in memory for *every* run that could plausibly
+    // need it (not gated behind --resume), so a run that ends incomplete
+    // always has something to persist for a later retry — without
+    // `--resume`, deciding you need it only happens *after* a failure, which
+    // is too late if nothing was ever recorded (see issue #18). Only
+    // *loading* a prior run's on-disk state (to skip already-posted
+    // segments) stays gated behind --resume: silently trusting whatever
+    // `.pesto-state` file happens to already sit next to the target, without
+    // being asked to, is exactly the "stale state reused blindly" hazard
+    // issue #18 warns about.
+    let (resume_arc, resume_path_owned) = if !config.dry_run && !config.par2_only {
+        if let Some(rp) = resume_state_path {
+            let state = if config.resume {
+                ResumeState::load(rp)?
+            } else {
+                ResumeState::default()
+            };
+            (Some(Arc::new(Mutex::new(state))), Some(rp.to_path_buf()))
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    // Type-1 spool: only when --resume was actually passed (see the field
+    // doc on `Shared::spool_dir` for why this is a stricter condition than
+    // `resume_arc` itself).
+    let spool_dir_owned = if config.resume {
+        resume_path_owned.as_deref().map(crate::spool::spool_dir)
+    } else {
+        None
+    };
+
+    // Posting parameters that change how the whole input is chunked or
+    // named — compared against whatever fingerprint a loaded state was
+    // recorded under. A mismatch (e.g. this run's --article-size differs
+    // from the run that originally populated the state) means every
+    // recorded Message-ID could reference the wrong byte range, so the
+    // *entire* state is discarded rather than trusted partially — see
+    // `resume::RunFingerprint` and GitHub issue #18.
+    let run_fingerprint = crate::resume::RunFingerprint {
+        article_size: config.article_size as u64,
+        obfuscate: config.obfuscate,
+        compress_format: config.compress_format.clone(),
+        par2_percent: config.par2,
+    };
+    if let Some(resume) = &resume_arc {
+        let mut state = resume.lock().unwrap();
+        let had_segments = !state.is_empty();
+        if !state.validate_run(&run_fingerprint) {
+            eprintln!(
+                "resume: posting parameters changed since the saved state was recorded \
+                 (--article-size/--obfuscate/--compress/--par2) — ignoring it and starting fresh"
+            );
+        } else if had_segments {
+            eprintln!(
+                "resuming: {} segment(s) already posted, skipping",
+                state.len()
+            );
+        }
+    }
+
     // Generated once per run (not per file) so every file posted under
     // `FullShared` — archive parts and PAR2 volumes alike — shares the same
     // wire name prefix and sender identity. See `ObfuscateMode::FullShared`.
+    // Randomly generated fresh by default, which would otherwise make a
+    // `--resume` run's segments unmatchable against a prior run's (its
+    // wire identity, though not the resume key itself, would differ) — a
+    // compatible prior state (see `validate_run` above) reuses the same
+    // identity instead of generating a new one; see issue #18's resume
+    // follow-up discussion.
     let (release_prefix, release_from) = if config.obfuscate == ObfuscateMode::FullShared {
-        (Some(obfuscated_name()), Some(random_from()))
+        let reused = resume_arc.as_ref().and_then(|r| {
+            r.lock()
+                .unwrap()
+                .release_identity()
+                .map(|(p, f)| (p.to_string(), f.to_string()))
+        });
+        let (prefix, from) = reused.unwrap_or_else(|| (obfuscated_name(), random_from()));
+        if let Some(resume) = &resume_arc {
+            resume
+                .lock()
+                .unwrap()
+                .set_release_identity(prefix.clone(), from.clone());
+        }
+        (Some(prefix), Some(from))
     } else {
         (None, None)
     };
@@ -470,6 +566,43 @@ pub async fn post_files_with_progress_and_cancel(
         // `season01/ep01.mkv` for files found inside a directory argument.
         let real_name = input.name.clone();
         let size = md.len();
+
+        if let Some(resume) = &resume_arc {
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+            let file_fp = crate::resume::FileFingerprint { size, mtime };
+            let mut state = resume.lock().unwrap();
+            if !state.file_matches(&real_name, &file_fp) {
+                if config.par2 > 0 {
+                    // PAR2 recovery blocks are computed over the whole
+                    // recovery set together, not per file — one file's
+                    // content changing invalidates every volume's segments
+                    // too, not just this file's own (see
+                    // `forget_all_segments`'s doc comment). PAR2 volumes
+                    // never go through this per-file check themselves
+                    // (they're generated later, straight into the posting
+                    // queue — see `push_par2_file`), so this is the only
+                    // place that can catch it.
+                    eprintln!(
+                        "resume: `{real_name}` changed size or modification time since the \
+                         saved state was recorded — ignoring all saved segments, including \
+                         PAR2 volumes, since recovery data no longer matches this file"
+                    );
+                    state.forget_all_segments();
+                } else {
+                    eprintln!(
+                        "resume: `{real_name}` changed size or modification time since the \
+                         saved state was recorded — ignoring its saved segments and \
+                         re-posting it"
+                    );
+                    state.forget_file(&real_name);
+                }
+            }
+            state.record_file(&real_name, file_fp);
+        }
         let (subject_name, yenc_name, from) = match config.obfuscate {
             ObfuscateMode::None => {
                 let wn = wire_name(&real_name).to_string();
@@ -573,24 +706,6 @@ pub async fn post_files_with_progress_and_cancel(
         "connection pool"
     );
 
-    // Load resume state when enabled and a state path is provided.
-    let (resume_arc, resume_path_owned) = if config.resume && !config.dry_run && !config.par2_only {
-        if let Some(rp) = resume_state_path {
-            let state = ResumeState::load(rp)?;
-            if !state.is_empty() {
-                eprintln!(
-                    "resuming: {} segment(s) already posted, skipping",
-                    state.len()
-                );
-            }
-            (Some(Arc::new(Mutex::new(state))), Some(rp.to_path_buf()))
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
-    };
-
     // Pre-seed the buffer pool with enough buffers to keep all workers and the
     // double-buffer reader supplied without allocating during the hot path.
     let pool_size = worker_count + 4;
@@ -616,6 +731,7 @@ pub async fn post_files_with_progress_and_cancel(
         cancelled: Arc::new(AtomicBool::new(false)),
         resume: resume_arc,
         resume_path: resume_path_owned,
+        spool_dir: spool_dir_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
         total_retries: std::sync::atomic::AtomicUsize::new(0),
         post_group: pick_post_group(&config.groups),
@@ -836,11 +952,132 @@ pub async fn post_files_with_progress_and_cancel(
     // removing `par2_temp_dir()` once it's truly done with the run (see
     // `run_single_upload` / `run_upload`).
     drop(check_tx);
-    let still_missing = if let Some(coordinator) = check_coordinator {
+    let mut still_missing = if let Some(coordinator) = check_coordinator {
         coordinator.finish_and_drain().await
     } else {
         Vec::new()
     };
+
+    // One more, bounded automatic recovery attempt for a small stubborn
+    // tail. The common real-world case this targets: posting finished, the
+    // streaming check failed to confirm a handful of articles even after
+    // every `check_post_retries` round, and the NZB is about to be refused.
+    // Reposting those few articles right here — still in this same process,
+    // with the source files still on disk — is strictly cheaper and simpler
+    // than requiring the user to notice the failure and rerun with
+    // `--resume` by hand. Only kicks in when the leftover count is small
+    // enough (`check_recover_percent`/`check_recover_max`) to still count as
+    // "cheap": a release with a large fraction missing looks like a
+    // systemic server problem, not a handful of unlucky articles, and
+    // retrying that automatically would just hammer an already-struggling
+    // server.
+    if !still_missing.is_empty() && !cancelled {
+        let total = shared.results.lock().unwrap().len();
+        if is_cheap_to_recover(still_missing.len(), total, config) {
+            let candidates: Vec<PostedSegment> = {
+                let results = shared.results.lock().unwrap();
+                results
+                    .iter()
+                    .filter(|s| still_missing.contains(&s.message_id))
+                    .cloned()
+                    .collect()
+            };
+            shared.emit(ProgressEvent::Status {
+                text: format!(
+                    "check: {} article(s) still missing after every round; \
+                     attempting one more automatic recovery pass",
+                    candidates.len()
+                ),
+            });
+            // `recover_missing` returns *fresh* Message-IDs (every repost
+            // gets a new one — see `repost_one`), so its output can never be
+            // matched directly against `still_missing`'s old ids. Snapshot
+            // old-id -> (file_name, part) identity before the candidates are
+            // moved into the call, so the retain below can match by that
+            // identity instead.
+            let old_identity: std::collections::HashMap<String, (String, u32)> = candidates
+                .iter()
+                .map(|c| (c.message_id.clone(), (c.file_name.clone(), c.part)))
+                .collect();
+            let recovered = check::recover_missing(
+                config,
+                &shared.post_group,
+                candidates,
+                shared.events.as_ref(),
+            )
+            .await;
+            for seg in &recovered {
+                let mut results = shared.results.lock().unwrap();
+                if let Some(existing) = results
+                    .iter_mut()
+                    .find(|s| s.file_name == seg.file_name && s.part == seg.part)
+                {
+                    *existing = seg.clone();
+                }
+            }
+            let recovered_keys: std::collections::HashSet<(String, u32)> = recovered
+                .iter()
+                .map(|s| (s.file_name.clone(), s.part))
+                .collect();
+            still_missing.retain(|id| {
+                !old_identity
+                    .get(id)
+                    .is_some_and(|key| recovered_keys.contains(key))
+            });
+        }
+    }
+
+    // Whatever is left in `still_missing` at this point is confirmed bad:
+    // the original POST got a `240`, but every STAT check and every repost
+    // attempt (both the normal `check_post_retries` rounds and the recovery
+    // pass above) failed to make the article retrievable. Its recorded
+    // Message-ID must be forgotten now — otherwise a later `--resume` would
+    // trust that known-bad ID and silently skip re-posting the segment,
+    // producing an NZB that looks complete but references an article that
+    // was never actually confirmed present.
+    if let Some(resume) = &shared.resume {
+        if !still_missing.is_empty() {
+            let results = shared.results.lock().unwrap();
+            let mut state = resume.lock().unwrap();
+            for id in &still_missing {
+                if let Some(seg) = results.iter().find(|s| &s.message_id == id) {
+                    state.remove(&seg.file_name, seg.part);
+                    // No spool cleanup needed here: a segment can only reach
+                    // `still_missing` after already being confirmed posted
+                    // once (`commit_result`'s `posted: true` branch), and
+                    // that branch already removes its spool entry — before
+                    // the check coordinator that could ever mark it missing
+                    // even sees it. See `crate::spool`.
+                }
+            }
+        }
+    }
+
+    // Single, final resume-state persistence decision, replacing the old
+    // per-segment write in `commit_result`. Mirrors the completeness check
+    // `run_single_upload` uses to decide whether the NZB itself gets
+    // written: a run cancellation makes `still_missing` meaningless (the
+    // check simply didn't get to finish verifying everything, not a
+    // confirmed gap), and `allow_incomplete_nzb` means the user has already
+    // accepted the remaining gap and is relying on PAR2, not `--resume`, to
+    // fill it. Whenever the run is *not* complete by those terms, persist
+    // once so a later `--resume` has something to load; otherwise delete
+    // any state file (freshly written or left over from an earlier failed
+    // attempt at the same output path) — there is nothing left to resume.
+    if let (Some(resume), Some(rp)) = (&shared.resume, &shared.resume_path) {
+        let has_post_failures = !failed_tasks.is_empty();
+        let has_confirmed_missing = !cancelled && !still_missing.is_empty();
+        let incomplete =
+            has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+        if incomplete {
+            let _ = resume.lock().unwrap().save(rp);
+        } else {
+            let _ = std::fs::remove_file(rp);
+            if let Some(dir) = &shared.spool_dir {
+                crate::spool::remove_all(dir);
+            }
+        }
+    }
 
     shared.emit(ProgressEvent::Finished);
 
@@ -1967,12 +2204,12 @@ async fn worker(
             });
 
             if let Some(resume) = &shared.resume {
-                if let Some(existing_id) = resume
+                let existing = resume
                     .lock()
                     .unwrap()
                     .get(&task.meta.real_name, task.part)
-                    .map(str::to_string)
-                {
+                    .cloned();
+                if let Some(existing) = existing {
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
                         file_path: task.meta.path.clone(),
@@ -1980,8 +2217,8 @@ async fn worker(
                         file_size: task.meta.size,
                         part: task.part,
                         total: task.total,
-                        message_id: existing_id,
-                        bytes: 0,
+                        message_id: existing.message_id,
+                        bytes: existing.bytes,
                         from: task.from.clone(),
                         date: task.date.clone(),
                         full_crc32: task.file_crc32.unwrap_or(0),
@@ -1989,46 +2226,94 @@ async fn worker(
                         // into the check queue this run — see the field doc.
                         server_idx: 0,
                     });
-                    let bytes = task.data.len() as u64;
+                    let raw_bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
                     shared.emit(ProgressEvent::SegmentDone {
                         file: task.meta.real_name.clone(),
-                        bytes,
+                        bytes: raw_bytes,
                         ok: true,
                     });
                     continue;
                 }
             }
 
-            let t_enc = Instant::now();
-            let file_crc32 = task.file_crc32;
-            let encoded = yenc::encode_part(
-                &task.meta.yenc_name,
-                task.meta.size,
-                yenc::PartSpec {
+            // Type-1 spool: this exact segment may already have reached the
+            // server on a prior interrupted attempt whose `240`
+            // acknowledgement was lost (e.g. the connection dropped between
+            // sending the article and reading the response) — an ambiguity
+            // the resume state above can't resolve, since it only records a
+            // segment once the response actually came back. Replaying the
+            // identical bytes under the identical Message-ID lets the
+            // server's own dedup (`435 Already exists`) settle it, instead
+            // of silently re-encoding and posting under a fresh ID, which
+            // risks a duplicate article if the original POST had in fact
+            // succeeded. See `crate::spool`.
+            let spooled = shared
+                .spool_dir
+                .as_ref()
+                .and_then(|dir| crate::spool::read(dir, &task.meta.real_name, task.part));
+
+            let (message_id, headers, encoded, encode_time) = if let Some(spooled) = spooled {
+                let encoded = yenc::EncodedPart {
                     number: task.part,
                     total: task.total,
-                    offset: task.offset,
-                },
-                &task.data,
-                shared.config.line_length,
-                file_crc32,
-            );
-            let encode_time = t_enc.elapsed();
-            let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
-            let (rfc_date, _ts) = &task.date;
-            if let Some(d) = &rfc_date {
-                debug!(segment = %message_id, date = %d, "article date");
-            }
-            let article = Article {
-                message_id: message_id.clone(),
-                from: task.from.clone(),
-                newsgroups: shared.post_group.clone(),
-                subject: default_subject(&task.meta.subject_name, task.part, task.total),
-                date: rfc_date.clone(),
-                no_archive: shared.config.no_archive,
+                    begin: 0,
+                    end: 0,
+                    crc32: 0,
+                    body: spooled.body,
+                };
+                (spooled.message_id, spooled.headers, encoded, Duration::ZERO)
+            } else {
+                let t_enc = Instant::now();
+                let file_crc32 = task.file_crc32;
+                let encoded = yenc::encode_part(
+                    &task.meta.yenc_name,
+                    task.meta.size,
+                    yenc::PartSpec {
+                        number: task.part,
+                        total: task.total,
+                        offset: task.offset,
+                    },
+                    &task.data,
+                    shared.config.line_length,
+                    file_crc32,
+                );
+                let encode_time = t_enc.elapsed();
+                let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
+                let (rfc_date, _ts) = &task.date;
+                if let Some(d) = &rfc_date {
+                    debug!(segment = %message_id, date = %d, "article date");
+                }
+                let article = Article {
+                    message_id: message_id.clone(),
+                    from: task.from.clone(),
+                    newsgroups: shared.post_group.clone(),
+                    subject: default_subject(&task.meta.subject_name, task.part, task.total),
+                    date: rfc_date.clone(),
+                    no_archive: shared.config.no_archive,
+                };
+                let headers = article.build_headers();
+
+                // Cache the encoded article before it goes over the wire.
+                // Best-effort: a spool write failing must never abort an
+                // otherwise successful post.
+                if let Some(dir) = &shared.spool_dir {
+                    if let Err(e) = crate::spool::write(
+                        dir,
+                        &task.meta.real_name,
+                        task.part,
+                        &message_id,
+                        &headers,
+                        &encoded.body,
+                    )
+                    .await
+                    {
+                        warn!(error = %e, "resume: failed to write spool entry; continuing without it");
+                    }
+                }
+
+                (message_id, headers, encoded, encode_time)
             };
-            let headers = article.build_headers();
             let task_date = task.date.clone();
             pending.push(Pending {
                 task,
@@ -2418,11 +2703,27 @@ fn commit_result(
 ) {
     if posted {
         if let Some(resume) = &shared.resume {
-            let mut state = resume.lock().unwrap();
-            state.record(&task.meta.real_name, task.part, &message_id);
-            if let Some(rp) = &shared.resume_path {
-                let _ = state.save(rp);
-            }
+            // In-memory only — no disk write here. Every commit used to
+            // rewrite the entire state file while holding this lock, which
+            // serialized all workers through one lock and turned state
+            // tracking into an O(n^2) hot-path cost on large uploads. Now
+            // that resume state is tracked unconditionally (not just when
+            // --resume is passed), persisting had to move off this path
+            // regardless — the whole point of resume is to survive the *end*
+            // of a run being incomplete, not every individual segment, so a
+            // single persist decided by the final outcome (see the
+            // still_missing handling and `run_single_upload`'s cleanup)
+            // covers the same guarantee at a fraction of the cost.
+            resume.lock().unwrap().record(
+                &task.meta.real_name,
+                task.part,
+                &message_id,
+                wire_bytes as u64,
+            );
+        }
+        // Confirmed posted — any spooled copy has served its purpose.
+        if let Some(dir) = &shared.spool_dir {
+            crate::spool::remove(dir, &task.meta.real_name, task.part);
         }
         let seg = PostedSegment {
             file_name: task.meta.real_name.clone(),
@@ -2467,6 +2768,25 @@ fn jittered(base: Duration, slot_id: usize) -> Duration {
     let noise = (ns.wrapping_add(slot_id as u64 * 2_654_435_761) % 1000) as u32;
     let extra_ms = (base.as_millis() as u64 * noise as u64 / 2000) as u32;
     base + Duration::from_millis(extra_ms as u64)
+}
+
+/// Whether an automatic final recovery pass (see `check::recover_missing`)
+/// is worth attempting for `missing` still-unconfirmed articles out of
+/// `total` posted this run. Gated by *both* an absolute cap
+/// (`check_recover_max`) and a percentage of the release
+/// (`check_recover_percent`) — whichever is smaller wins, so behaviour
+/// scales sanely from a small release (where even a large fraction missing
+/// is only a handful of articles) to a huge one (where 15% could still be
+/// thousands of articles, no longer "cheap" to retry automatically).
+fn is_cheap_to_recover(missing: usize, total: usize, config: &Config) -> bool {
+    if missing == 0 || config.check_recover_max == 0 {
+        return false;
+    }
+    if missing > config.check_recover_max {
+        return false;
+    }
+    let percent_cap = (total as f64 * config.check_recover_percent as f64 / 100.0).ceil() as usize;
+    missing <= percent_cap.max(1)
 }
 
 /// Build the "→ ..." label shown in the live panel header and the `Started`
@@ -2987,6 +3307,50 @@ mod tests {
         .unwrap()
     }
 
+    // ── automatic recovery threshold (is_cheap_to_recover) ────────────────────
+
+    fn recover_config(check_recover_percent: u8, check_recover_max: usize) -> Config {
+        let mut config = dry_run_config();
+        config.check_recover_percent = check_recover_percent;
+        config.check_recover_max = check_recover_max;
+        config
+    }
+
+    #[test]
+    fn small_release_within_both_caps_is_cheap() {
+        let config = recover_config(15, 50);
+        // 3 missing out of 20 (15%) — right at the percent cap, under the max.
+        assert!(is_cheap_to_recover(3, 20, &config));
+    }
+
+    #[test]
+    fn huge_release_capped_by_absolute_max_even_under_percent() {
+        let config = recover_config(15, 50);
+        // 15% of 100,000 is 15,000 — nowhere near cheap, even though it's
+        // exactly the configured percentage.
+        assert!(!is_cheap_to_recover(15_000, 100_000, &config));
+    }
+
+    #[test]
+    fn small_absolute_count_rejected_when_it_is_most_of_the_release() {
+        let config = recover_config(15, 50);
+        // 5 missing out of 10 (50%) — small in absolute terms, but a large
+        // fraction of a tiny release looks systemic, not incidental.
+        assert!(!is_cheap_to_recover(5, 10, &config));
+    }
+
+    #[test]
+    fn zero_missing_is_never_worth_recovering() {
+        let config = recover_config(15, 50);
+        assert!(!is_cheap_to_recover(0, 1000, &config));
+    }
+
+    #[test]
+    fn max_zero_disables_recovery_entirely() {
+        let config = recover_config(100, 0);
+        assert!(!is_cheap_to_recover(1, 2, &config));
+    }
+
     // ── connection splitting (upload vs. streaming check) ─────────────────────
 
     #[test]
@@ -3246,6 +3610,7 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
             resume: None,
             resume_path: None,
+            spool_dir: None,
             pool: Arc::new(Mutex::new(Vec::new())),
             total_retries: std::sync::atomic::AtomicUsize::new(0),
             post_group,
@@ -3384,15 +3749,16 @@ mod tests {
     #[tokio::test]
     async fn dry_run_ignores_resume_state_by_design() {
         // Resume is explicitly disabled in dry_run mode (post_files_with_progress
-        // checks `config.resume && !config.dry_run`). Segments get fresh
-        // Message-IDs even when a state file with recorded entries is present.
+        // only creates resume state when `!config.dry_run && !config.par2_only`).
+        // Segments get fresh Message-IDs even when a state file with recorded
+        // entries is present.
         let dir = TempDir::new().unwrap();
         let f = dir.path().join("r.bin");
         std::fs::write(&f, vec![0u8; 100]).unwrap();
 
         let state_path = dir.path().join("r.bin.pesto-state");
         let mut state = crate::resume::ResumeState::default();
-        state.record("r.bin", 1, "<stored-id@pesto>");
+        state.record("r.bin", 1, "<stored-id@pesto>", 100);
         state.save(&state_path).unwrap();
 
         let files = vec![InputFile {

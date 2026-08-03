@@ -206,8 +206,15 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
-    /// Resume an interrupted upload from where it left off. Without this flag
-    /// pesto always starts fresh, even if a state file exists
+    /// Resume an interrupted upload from where it left off. Without this
+    /// flag pesto always starts fresh, even if a state file exists from a
+    /// previous incomplete run at the same output path — progress is always
+    /// saved on an incomplete run regardless of this flag, but only loaded
+    /// back (to skip already-posted segments) when --resume is passed. With
+    /// --compress, the archive is always rebuilt from scratch and its
+    /// segments can't be skipped — only its identity and any sent-but-
+    /// unconfirmed article carry over. See the README's "Upload resume"
+    /// section for the full picture
     /// [config: output.resume = true].
     #[arg(long)]
     resume: bool,
@@ -455,6 +462,26 @@ struct Cli {
     #[arg(long)]
     allow_incomplete_nzb: bool,
 
+    /// After every --check-post-retries round is exhausted, skip the
+    /// automatic final recovery pass (see --check-recover-max) if the
+    /// still-missing articles exceed this percentage of the release's total
+    /// segments — past this point it looks like a systemic problem, not a
+    /// handful of unlucky articles, and retrying automatically would just
+    /// hammer an already-struggling server
+    /// [config: posting.check_recover_percent, default 15].
+    #[arg(long, value_name = "PERCENT")]
+    check_recover_percent: Option<u8>,
+
+    /// After every --check-post-retries round is exhausted, if the number of
+    /// still-missing articles is at or below this count (and within
+    /// --check-recover-percent of the release), automatically make one more
+    /// repost-and-verify attempt for just those articles before giving up —
+    /// cheap enough to be worth doing without a separate --resume run. Set
+    /// to 0 to disable
+    /// [config: posting.check_recover_max, default 50].
+    #[arg(long, value_name = "N")]
+    check_recover_max: Option<usize>,
+
     /// Name to use when reading from stdin (`-`). Required when a `-` path is
     /// given; determines the filename in the NZB and PAR2 metadata.
     #[arg(long, value_name = "NAME")]
@@ -598,6 +625,8 @@ impl Cli {
             } else {
                 None
             },
+            check_recover_percent: self.check_recover_percent,
+            check_recover_max: self.check_recover_max,
             pipeline_depth: self.pipeline_depth,
         }
     }
@@ -749,123 +778,10 @@ async fn run_single_upload(
         pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
     };
 
-    // ── Compression ──────────────────────────────────────────────────────────
-    let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
-        if config.compress_password.is_some() {
-            Some("7z".to_string())
-        } else {
-            None
-        }
-    });
-    let effective_password: Option<String> = config.compress_password.clone();
-
-    let compress_temp_dir: Option<PathBuf>;
-    if let Some(fmt_str) = &compress_format_str {
-        let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
-            anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
-        })?;
-
-        if format == ArchiveFormat::Rar && pesto::compress::find_binary("rar").is_none() {
-            eprintln!("note: rar password protection requires the `rar` binary in PATH");
-        }
-
-        let archive_stem = upload_root(&inputs)
-            .or_else(|| {
-                inputs.first().map(|f| {
-                    PathBuf::from(&f.name)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            })
-            .unwrap_or_else(|| "archive".to_string());
-
-        let archive_stem = if config.obfuscate != ObfuscateMode::None {
-            pesto::article::obfuscated_name()
-        } else {
-            archive_stem
-        };
-
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "pesto_compress_{}_{}",
-            std::process::id(),
-            entry_label
-        ));
-        compress_temp_dir = Some(tmp_dir.clone());
-
-        let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
-        let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
-
-        let t_compress = std::time::Instant::now();
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
-            total_bytes: compress_input_bytes,
-        });
-
-        let archive_path_for_poll =
-            tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
-        let poll_tx = progress_tx.clone();
-        let poll_path = archive_path_for_poll.clone();
-        let poll_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                if let Ok(meta) = tokio::fs::metadata(&poll_path).await {
-                    let _ = poll_tx.send(pesto::progress::ProgressEvent::CompressProgress {
-                        bytes_written: meta.len(),
-                    });
-                }
-            }
-        });
-
-        let compress_inputs = fs_paths.clone();
-        let compress_stem = archive_stem.clone();
-        let compress_dest = tmp_dir.clone();
-        let compress_pass = effective_password.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            compress(
-                &compress_inputs,
-                &compress_stem,
-                &compress_dest,
-                format,
-                compress_pass.as_deref(),
-            )
-        })
-        .await
-        .context("compressor task panicked")??;
-
-        poll_handle.abort();
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
-        let compress_ms = t_compress.elapsed().as_millis();
-        info!(elapsed_ms = compress_ms, phase = "compress", "phase done");
-        timings.compress_ms = Some(compress_ms);
-
-        let archive_name = result
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        inputs = vec![pesto::walk::InputFile {
-            path: result.path,
-            name: archive_name,
-        }];
-
-        if let Some(pw) = &effective_password {
-            let was_auto = params.archive_password_raw.as_deref() == Some("");
-            if was_auto {
-                println!("archive password: {pw}");
-            }
-        }
-    } else {
-        compress_temp_dir = None;
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
     // Derive NZB stem from: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
-    // Always use the original entry_paths for the stem so obfuscation/compression
-    // does not leak the randomised archive name into the output filenames.
+    // Computed from the original entry_paths, before compression, so it never
+    // depends on the (possibly obfuscated/randomised) archive name compression
+    // produces below.
     //
     // nzb_stem: bare filename without extension, used to name the NZB.
     // nzb_user_dest: optional user-requested destination (--out or nzb_dir).
@@ -962,6 +878,131 @@ async fn run_single_upload(
     // nzb_out_path is resolved at write time (after post) — placeholder kept for
     // symmetry with the rest of the function.
     let nzb_out_path: Option<String> = nzb_stem.clone();
+
+    // ── Compression ──────────────────────────────────────────────────────────
+    let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
+        if config.compress_password.is_some() {
+            Some("7z".to_string())
+        } else {
+            None
+        }
+    });
+    let effective_password: Option<String> = config.compress_password.clone();
+
+    let compress_temp_dir: Option<PathBuf>;
+    if let Some(fmt_str) = &compress_format_str {
+        let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
+            anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
+        })?;
+
+        if format == ArchiveFormat::Rar && pesto::compress::find_binary("rar").is_none() {
+            eprintln!("note: rar password protection requires the `rar` binary in PATH");
+        }
+
+        let archive_stem = upload_root(&inputs)
+            .or_else(|| {
+                inputs.first().map(|f| {
+                    PathBuf::from(&f.name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+            .unwrap_or_else(|| "archive".to_string());
+
+        // The obfuscated archive name is normally regenerated fresh on every
+        // run — but that means a --resume run can never match this file's
+        // segments back up, since the resume key is this very name. When a
+        // compatible prior state exists (same posting parameters — see
+        // `resume::RunFingerprint`) and already recorded one, reuse it
+        // instead of generating a new one; otherwise generate fresh and
+        // record it (tracked unconditionally, same as segment state — see
+        // issue #18's follow-up discussion) so a *future* --resume can reuse
+        // it. `poster::post_files_with_progress_and_cancel` still validates
+        // the fingerprint itself, so a genuinely incompatible resume run
+        // simply gets a fresh stem here and a wiped segment state there.
+        let archive_stem = if config.obfuscate != ObfuscateMode::None {
+            reuse_or_generate_archive_stem(resume_path.as_deref(), config)
+        } else {
+            archive_stem
+        };
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "pesto_compress_{}_{}",
+            std::process::id(),
+            entry_label
+        ));
+        compress_temp_dir = Some(tmp_dir.clone());
+
+        let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
+        let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
+
+        let t_compress = std::time::Instant::now();
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
+            total_bytes: compress_input_bytes,
+        });
+
+        let archive_path_for_poll =
+            tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
+        let poll_tx = progress_tx.clone();
+        let poll_path = archive_path_for_poll.clone();
+        let poll_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Ok(meta) = tokio::fs::metadata(&poll_path).await {
+                    let _ = poll_tx.send(pesto::progress::ProgressEvent::CompressProgress {
+                        bytes_written: meta.len(),
+                    });
+                }
+            }
+        });
+
+        let compress_inputs = fs_paths.clone();
+        let compress_stem = archive_stem.clone();
+        let compress_dest = tmp_dir.clone();
+        let compress_pass = effective_password.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            compress(
+                &compress_inputs,
+                &compress_stem,
+                &compress_dest,
+                format,
+                compress_pass.as_deref(),
+            )
+        })
+        .await
+        .context("compressor task panicked")??;
+
+        poll_handle.abort();
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
+        let compress_ms = t_compress.elapsed().as_millis();
+        info!(elapsed_ms = compress_ms, phase = "compress", "phase done");
+        timings.compress_ms = Some(compress_ms);
+
+        let archive_name = result
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        inputs = vec![pesto::walk::InputFile {
+            path: result.path,
+            name: archive_name,
+        }];
+
+        if let Some(pw) = &effective_password {
+            let was_auto = params.archive_password_raw.as_deref() == Some("");
+            if was_auto {
+                println!("archive password: {pw}");
+            }
+        }
+    } else {
+        compress_temp_dir = None;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     let t_post = std::time::Instant::now();
     let outcome = pesto::poster::post_files_with_progress_and_cancel(
@@ -1061,23 +1102,32 @@ async fn run_single_upload(
     let has_confirmed_missing = !check_missing.is_empty() && !config.dry_run && !config.par2_only;
     let has_unrecoverable_failures =
         has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+    let files_str = || {
+        entry_paths
+            .iter()
+            .map(|p| format!("\"{}\"", p.display()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let resume_flags_str = || resume_flags_string(config);
     if has_post_failures {
         let n = outcome.failed_tasks.len();
         eprintln!();
         eprintln!("error: {n} segment(s) could not be posted after all retries.");
         eprintln!("The NZB will NOT be written — the upload is incomplete.");
+        // Resume state is tracked for every run (not just ones started with
+        // --resume) and persisted whenever a run ends incomplete like this
+        // one — see `post_files_with_progress_and_cancel`'s final
+        // persist-or-delete decision — so the segments that did succeed are
+        // always recoverable here, regardless of whether --resume was
+        // originally passed.
         if let Some(ref state_path) = resume_path {
             eprintln!();
             eprintln!("The successfully posted segments have been saved to:");
             eprintln!("  {}", state_path.display());
             eprintln!();
-            let files_str = entry_paths
-                .iter()
-                .map(|p| format!("\"{}\"", p.display()))
-                .collect::<Vec<_>>()
-                .join(" ");
             eprintln!("To retry the missing segments and finish the upload, run:");
-            eprintln!("  pesto {files_str} --resume");
+            eprintln!("  pesto {} --resume {}", files_str(), resume_flags_str());
         }
         eprintln!();
     }
@@ -1086,17 +1136,33 @@ async fn run_single_upload(
         eprintln!();
         if config.allow_incomplete_nzb {
             eprintln!(
-                "warning: {n} article(s) still missing on the server after every repost attempt."
+                "warning: {n} article(s) still missing on the server after every repost \
+                 attempt, including one final automatic recovery pass when the miss count \
+                 was small enough."
             );
             eprintln!("Publishing anyway — --allow-incomplete-nzb was set.");
         } else {
             eprintln!(
-                "error: {n} article(s) still missing on the server after every repost attempt."
+                "error: {n} article(s) still missing on the server after every repost \
+                 attempt, including one final automatic recovery pass when the miss count \
+                 was small enough."
             );
             eprintln!(
                 "The NZB will NOT be written — pass --allow-incomplete-nzb to publish anyway \
                  (e.g. relying on PAR2 recovery)."
             );
+            // Same reasoning as the has_post_failures branch above: resume
+            // state is always tracked and gets persisted here regardless of
+            // whether --resume was passed to this run.
+            if let Some(ref state_path) = resume_path {
+                eprintln!();
+                eprintln!(
+                    "Or retry just the missing article(s) — the segments already \
+                     confirmed present have been saved to:"
+                );
+                eprintln!("  {}", state_path.display());
+                eprintln!("  pesto {} --resume {}", files_str(), resume_flags_str());
+            }
         }
         eprintln!();
     }
@@ -2518,6 +2584,72 @@ fn upload_root(inputs: &[pesto::walk::InputFile]) -> Option<String> {
     root.map(str::to_string)
 }
 
+/// Decide the obfuscated archive stem for a `--compress`+`--obfuscate` run:
+/// reuse the value a compatible prior `--resume` run recorded, or generate a
+/// fresh one and record it for a *future* `--resume` to find.
+///
+/// Only touches the resume-state file when `--resume` is passed. Doing this
+/// unconditionally would conflict with
+/// `poster::post_files_with_progress_and_cancel`'s own handling of the same
+/// file: when `--resume` is *not* passed, that function deliberately starts
+/// from a fresh, empty state (see issue #18 — trusting whatever happens to
+/// be on disk without being asked is the exact hazard it guards against),
+/// which would silently erase whatever this function wrote moments earlier.
+/// The practical result is the same rule as everywhere else in resume
+/// handling: a stem only survives into a later run when every run in the
+/// chain, including the first, passes `--resume`.
+fn reuse_or_generate_archive_stem(resume_path: Option<&Path>, config: &Config) -> String {
+    if !config.resume {
+        return pesto::article::obfuscated_name();
+    }
+    let Some(rp) = resume_path else {
+        return pesto::article::obfuscated_name();
+    };
+    let fingerprint = pesto::resume::RunFingerprint {
+        article_size: config.article_size as u64,
+        obfuscate: config.obfuscate,
+        compress_format: config.compress_format.clone(),
+        par2_percent: config.par2,
+    };
+    let mut state = pesto::resume::ResumeState::load(rp).unwrap_or_default();
+    // Normalizes the loaded state first: a fingerprint mismatch clears any
+    // stale archive_stem (and segments/files) before we look at it, so an
+    // incompatible prior run's name is never reused.
+    state.validate_run(&fingerprint);
+    if let Some(stem) = state.archive_stem() {
+        return stem.to_string();
+    }
+    let stem = pesto::article::obfuscated_name();
+    state.set_archive_stem(stem.clone());
+    let _ = state.save(rp);
+    stem
+}
+
+/// The posting flags that `resume::RunFingerprint` actually checks,
+/// formatted for a copy-pasteable `--resume` retry command. A retry using
+/// different values for any of these gets its resume state silently (and
+/// safely) discarded by `validate_run` — printing them explicitly means a
+/// copy-pasted retry command actually resumes instead of quietly re-posting
+/// everything from scratch. Closes the gap issue #18 called out: "the
+/// printed resume hint only suggests `pesto <file> --resume` and drops the
+/// original flags".
+fn resume_flags_string(config: &Config) -> String {
+    let obfuscate = match config.obfuscate {
+        ObfuscateMode::None => "none",
+        ObfuscateMode::Full => "full",
+        ObfuscateMode::FullShared => "full-shared",
+        ObfuscateMode::Paranoid => "paranoid",
+    };
+    let mut flags = format!(
+        "--article-size {} --obfuscate={obfuscate} --par2 {}",
+        config.article_size, config.par2
+    );
+    if let Some(fmt) = &config.compress_format {
+        flags.push_str(&format!(" --compress={fmt}"));
+    }
+    flags
+}
+
 /// Recursively sum bytes for a path that may be a file or a directory.
 fn dir_or_file_size(path: &Path) -> u64 {
     match std::fs::metadata(path) {
@@ -2926,7 +3058,133 @@ fn expand_tilde(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pesto::config::{FileConfig, Overrides};
     use pesto::walk::InputFile;
+
+    fn test_config(
+        article_size: usize,
+        obfuscate: ObfuscateMode,
+        compress_format: Option<&str>,
+        par2: u8,
+    ) -> Config {
+        let mut file = FileConfig::default();
+        file.server.host = Some("news.example.com".into());
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        Config::resolve(
+            file,
+            Overrides {
+                article_size: Some(article_size),
+                obfuscate: Some(obfuscate),
+                compress_format: compress_format.map(str::to_string),
+                par2: Some(par2),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resume_flags_string_includes_every_fingerprinted_flag() {
+        let config = test_config(384_000, ObfuscateMode::Full, None, 10);
+        assert_eq!(
+            resume_flags_string(&config),
+            "--article-size 384000 --obfuscate=full --par2 10"
+        );
+    }
+
+    #[test]
+    fn resume_flags_string_includes_compress_only_when_set() {
+        let none_compressed = test_config(768_000, ObfuscateMode::None, None, 0);
+        assert!(!resume_flags_string(&none_compressed).contains("--compress"));
+
+        let compressed = test_config(768_000, ObfuscateMode::FullShared, Some("7z"), 5);
+        assert_eq!(
+            resume_flags_string(&compressed),
+            "--article-size 768000 --obfuscate=full-shared --par2 5 --compress=7z"
+        );
+    }
+
+    // ── reuse_or_generate_archive_stem ─────────────────────────────────────
+
+    #[test]
+    fn archive_stem_without_resume_is_always_fresh_and_untracked() {
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = false;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("release.pesto-state");
+
+        let a = reuse_or_generate_archive_stem(Some(&state_path), &config);
+        let b = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        assert_ne!(
+            a, b,
+            "without --resume, every call must generate a fresh name"
+        );
+        assert!(
+            !state_path.exists(),
+            "without --resume, nothing should be written to disk"
+        );
+    }
+
+    #[test]
+    fn archive_stem_without_a_resume_path_is_fresh() {
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = true;
+        let a = reuse_or_generate_archive_stem(None, &config);
+        let b = reuse_or_generate_archive_stem(None, &config);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn archive_stem_is_generated_and_recorded_on_first_resume_run() {
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = true;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("release.pesto-state");
+
+        let stem = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        let state = pesto::resume::ResumeState::load(&state_path).unwrap();
+        assert_eq!(state.archive_stem(), Some(stem.as_str()));
+    }
+
+    #[test]
+    fn archive_stem_is_reused_on_a_compatible_resume_run() {
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = true;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("release.pesto-state");
+
+        let first = reuse_or_generate_archive_stem(Some(&state_path), &config);
+        let second = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        assert_eq!(
+            first, second,
+            "a compatible resume run must reuse the same stem"
+        );
+    }
+
+    #[test]
+    fn archive_stem_is_regenerated_when_posting_parameters_changed() {
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = true;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("release.pesto-state");
+
+        let first = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        // A later run using a different --article-size: the old stem
+        // (recorded under a now-mismatched fingerprint) must not be reused.
+        config.article_size = 384_000;
+        let second = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        assert_ne!(
+            first, second,
+            "a fingerprint mismatch must not reuse the old stem"
+        );
+        let state = pesto::resume::ResumeState::load(&state_path).unwrap();
+        assert_eq!(state.archive_stem(), Some(second.as_str()));
+    }
 
     fn inputs(names: &[&str]) -> Vec<InputFile> {
         names

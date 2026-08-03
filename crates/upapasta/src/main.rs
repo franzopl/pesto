@@ -1745,6 +1745,8 @@ fn build_dry_run_config() -> Config {
         check_connections: 1,
         check_post_retries: 1,
         allow_incomplete_nzb: false,
+        check_recover_percent: 15,
+        check_recover_max: 0,
         pipeline_depth: 0,
         keepalive_interval: 60,
     }

@@ -179,6 +179,19 @@ pub struct PostingSection {
     /// `check_post_retries` round. Default: false — pesto refuses to write
     /// an NZB that references content it never confirmed is retrievable.
     pub allow_incomplete_nzb: Option<bool>,
+    /// Above this percentage of the release's total segments, a final
+    /// recovery pass (see `check_recover_max`) is skipped even if the
+    /// absolute count would otherwise qualify — a large fraction missing
+    /// looks like a systemic problem, not a handful of unlucky articles.
+    /// Default: 15.
+    pub check_recover_percent: Option<u8>,
+    /// After every `check_post_retries` round is exhausted, if the number of
+    /// still-missing articles is at or below this count (and within
+    /// `check_recover_percent` of the release), pesto makes one more
+    /// dedicated repost-and-verify attempt for just those articles before
+    /// giving up — cheap enough in practice to be worth doing automatically,
+    /// without requiring a separate `--resume` run. Default: 50.
+    pub check_recover_max: Option<usize>,
     /// Number of articles to send per connection before reading responses.
     /// Values > 1 enable NNTP pipelining, which cuts per-article RTT cost.
     /// Default: 1.
@@ -359,6 +372,8 @@ pub struct Overrides {
     pub check_connections: Option<usize>,
     pub check_post_retries: Option<u32>,
     pub allow_incomplete_nzb: Option<bool>,
+    pub check_recover_percent: Option<u8>,
+    pub check_recover_max: Option<usize>,
     pub pipeline_depth: Option<usize>,
 }
 
@@ -438,6 +453,8 @@ pub struct Config {
     pub check_connections: usize,
     pub check_post_retries: u32,
     pub allow_incomplete_nzb: bool,
+    pub check_recover_percent: u8,
+    pub check_recover_max: usize,
     pub pipeline_depth: usize,
     /// Keepalive interval in seconds; 0 = disabled. See [`DEFAULT_KEEPALIVE_SECS`].
     pub keepalive_interval: u64,

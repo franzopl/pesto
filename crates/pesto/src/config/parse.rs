@@ -330,6 +330,14 @@ impl Config {
                 .allow_incomplete_nzb
                 .or(file.posting.allow_incomplete_nzb)
                 .unwrap_or(false),
+            check_recover_percent: cli
+                .check_recover_percent
+                .or(file.posting.check_recover_percent)
+                .unwrap_or(15),
+            check_recover_max: cli
+                .check_recover_max
+                .or(file.posting.check_recover_max)
+                .unwrap_or(50),
             // 0 = adaptive; any positive value is the explicit fixed depth.
             pipeline_depth: cli
                 .pipeline_depth

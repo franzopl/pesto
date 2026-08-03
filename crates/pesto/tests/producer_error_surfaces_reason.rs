@@ -89,6 +89,8 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         check_connections: 1,
         check_post_retries: 1,
         allow_incomplete_nzb: false,
+        check_recover_percent: 15,
+        check_recover_max: 0,
         pipeline_depth: 1,
         keepalive_interval: 0,
     };
