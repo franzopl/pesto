@@ -23,6 +23,16 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+      - name: Environment diagnostics
+        # Baseline info for issue #51 (parmesan's decoder proptest fails
+        # intermittently on CI, never locally): capture what SIMD tier and
+        # core count this runner actually has on every run, not just failing
+        # ones, so a future failure can be cross-referenced against a run
+        # that passed under the same environment.
+        run: |
+          echo "nproc: $(nproc)"
+          echo "CPU flags of interest:"
+          grep -o -E '\b(avx2|avx512f|avx512bw|gfni|ssse3)\b' /proc/cpuinfo | sort -u || true
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

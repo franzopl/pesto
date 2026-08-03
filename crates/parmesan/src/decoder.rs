@@ -457,6 +457,54 @@ mod tests {
                     .reconstruct(|j| Ok(slices[j].clone()), &recovery_blocks)
                     .unwrap();
 
+                let mismatched = result.iter().any(|(idx, data)| data != &slices[*idx]);
+                if mismatched {
+                    // Diagnostic capture for issue #51: this failure has
+                    // reproduced on CI 9 times and never once locally across
+                    // three investigation rounds. Before failing, gather the
+                    // two things the plain "minimal failing input" report
+                    // never has: (1) whether it's a genuine data race (some
+                    // retries of the *identical* inputs pass) or a
+                    // deterministic environment-specific bug (every retry
+                    // fails the same way), and (2) which SIMD tier and
+                    // thread count this machine actually used, since that's
+                    // exactly what differs between CI and every local
+                    // attempt so far.
+                    eprintln!(
+                        "issue #51 diagnostic: mismatch at n={n} recovery_count={recovery_count} seed={seed}"
+                    );
+                    eprintln!(
+                        "  simd={} gfni={} nproc={}",
+                        crate::detect_simd(),
+                        {
+                            #[cfg(target_arch = "x86_64")]
+                            { std::is_x86_feature_detected!("gfni") }
+                            #[cfg(not(target_arch = "x86_64"))]
+                            { false }
+                        },
+                        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+                    );
+                    for attempt in 1..=5 {
+                        let retry = dec
+                            .reconstruct(|j| Ok(slices[j].clone()), &recovery_blocks)
+                            .unwrap();
+                        let retry_mismatched =
+                            retry.iter().any(|(idx, data)| data != &slices[*idx]);
+                        eprintln!(
+                            "  retry {attempt} (same recovery_blocks): {}",
+                            if retry_mismatched { "mismatch" } else { "MATCH (non-deterministic!)" }
+                        );
+                    }
+                    // Encode fresh from the same slices too, in case the bug
+                    // is in `encode` producing different bytes run-to-run
+                    // (e.g. rayon scheduling) rather than in `reconstruct`.
+                    let re_encoded = encode(&slices, slice_size, recovery_count);
+                    eprintln!(
+                        "  re-encode produced identical recovery blocks: {}",
+                        re_encoded == recovery_blocks
+                    );
+                }
+
                 prop_assert_eq!(result.len(), missing.len());
                 for (idx, data) in result {
                     prop_assert_eq!(data, slices[idx].clone(), "slice {} mismatch", idx);
