@@ -816,6 +816,8 @@ scripts:
 | [`generic-indexer.sh`](examples/hooks/generic-indexer.sh) | Unix | Sends the NZB (and optional NFO) to any Newznab-compatible indexer via its REST API |
 | [`generic-indexer.bat`](examples/hooks/generic-indexer.bat) | Windows | Same as above — `.bat` version for `cmd.exe` |
 | [`generic-indexer.ps1`](examples/hooks/generic-indexer.ps1) | Windows | Same as above — PowerShell version with native JSON parsing (recommended on Windows) |
+| [`different-indexer.sh`](examples/hooks/different-indexer.sh) | Unix | Sends the NZB (and optional NFO) to an indexer that takes the API key as a query parameter and replies with a JSON `guid` |
+| [`different-indexer.ps1`](examples/hooks/different-indexer.ps1) | Windows | Same as above — PowerShell version |
 
 To install a hook on Unix:
 
