@@ -587,15 +587,19 @@ impl Cli {
                 .transpose()
                 .unwrap_or(None),
             compress_format: self.compress.clone(),
-            // None → no password; Some("") → bare --password → random;
-            // Some(s) → explicit password.
-            compress_password: self.archive_password.as_deref().map(|pw| {
-                if pw.is_empty() {
-                    random_password()
-                } else {
-                    pw.to_string()
-                }
-            }),
+            // None → no password (flag absent, or bare `--password` for
+            // auto-random). Some(s) → an explicit password, reused verbatim
+            // by every entry under --each/--season/--watch. The bare-flag
+            // case is deliberately *not* resolved here: doing so used to
+            // bake one random password into `Config` for the whole process,
+            // so every entry under --each/--watch silently shared it
+            // instead of getting its own (issue #67). It's resolved lazily
+            // per upload instead — see `run_single_upload`'s
+            // `effective_password` and `run_batch`'s `season_password`.
+            compress_password: self
+                .archive_password
+                .as_deref()
+                .and_then(|pw| (!pw.is_empty()).then(|| pw.to_string())),
             nzb_name: self.nzb_name.clone(),
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
@@ -690,6 +694,33 @@ struct PhaseTimings {
     post_ms: Option<u128>,
 }
 
+/// Resolve the archive password for one upload.
+///
+/// Priority: `forced` (a season's shared password, passed down from
+/// `run_batch`) beats `explicit` (`Config::compress_password` — an
+/// explicit `--password VALUE`, meant to be reused verbatim by every entry
+/// in the run) beats a freshly-generated random password when `raw` shows a
+/// bare `--password` was given (`Some("")`) beats no password at all.
+///
+/// The bare-flag case is resolved here, per call, rather than once when the
+/// CLI is parsed — resolving it once used to bake a single random password
+/// into `Config` for the whole process, so every entry under
+/// `--each`/`--watch` silently shared it instead of getting its own
+/// (issue #67). `run_batch` passes `forced` for a `--season` batch (every
+/// episode needs the same password so the merged season NZB only needs
+/// one) and `None` otherwise, so a plain `--each` still gets a fresh
+/// password per entry through the `raw` fallback below.
+fn resolve_entry_password(
+    forced: Option<&str>,
+    explicit: Option<&str>,
+    raw: Option<&str>,
+) -> Option<String> {
+    forced
+        .or(explicit)
+        .map(str::to_string)
+        .or_else(|| (raw == Some("")).then(random_password))
+}
+
 /// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
 ///
 /// Returns the posted segments so the caller can build a consolidated season NZB.
@@ -698,8 +729,17 @@ async fn run_single_upload(
     entry_paths: &[PathBuf],
     entry_label: &str,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    forced_password: Option<&str>,
 ) -> Result<UploadResult> {
     let config = &params.config;
+    // Resolved once, used for the pre-upload summary, the archive itself,
+    // and the .nzb/history/hook metadata alike — so all of them agree on
+    // the exact password that ends up protecting this entry's archive.
+    let effective_password: Option<String> = resolve_entry_password(
+        forced_password,
+        config.compress_password.as_deref(),
+        params.archive_password_raw.as_deref(),
+    );
     let upload_start = std::time::Instant::now();
     let mut timings = PhaseTimings::default();
 
@@ -777,7 +817,7 @@ async fn run_single_upload(
     if !params.json_mode && !params.renderer_opts.quiet && std::io::stderr().is_terminal() {
         pesto::progress::print_tree(&inputs);
         let compress_fmt = config.compress_format.as_deref().or_else(|| {
-            if config.compress_password.is_some() {
+            if effective_password.is_some() {
                 Some("7z")
             } else {
                 None
@@ -791,7 +831,7 @@ async fn run_single_upload(
                 ObfuscateMode::Paranoid => "paranoid",
             },
             compress: compress_fmt,
-            password: config.compress_password.as_deref(),
+            password: effective_password.as_deref(),
             par2: config.par2,
             resume: config.resume,
             check: config.check,
@@ -907,13 +947,12 @@ async fn run_single_upload(
 
     // ── Compression ──────────────────────────────────────────────────────────
     let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
-        if config.compress_password.is_some() {
+        if effective_password.is_some() {
             Some("7z".to_string())
         } else {
             None
         }
     });
-    let effective_password: Option<String> = config.compress_password.clone();
 
     let compress_temp_dir: Option<PathBuf>;
     if let Some(fmt_str) = &compress_format_str {
@@ -1584,6 +1623,22 @@ async fn run_batch(
         anyhow::bail!("no entries found to post");
     }
 
+    // A season batch merges every entry's NZB into one at the end, so they
+    // all need the *same* archive password — resolved once, up front, and
+    // handed to every entry below. A plain --each batch has no such merge,
+    // so leaving this `None` lets each entry resolve (and randomise) its
+    // own password independently inside `run_single_upload` (issue #67).
+    let season_password: Option<String> = season_nzb
+        .is_some()
+        .then(|| {
+            resolve_entry_password(
+                None,
+                params.config.compress_password.as_deref(),
+                params.archive_password_raw.as_deref(),
+            )
+        })
+        .flatten();
+
     let effective_jobs = if jobs == 0 {
         parmesan::performance_core_count()
     } else {
@@ -1609,6 +1664,7 @@ async fn run_batch(
         let entry = entry.clone();
         let params = Arc::clone(&params);
         let task_cancel = cancel.clone();
+        let task_password = season_password.clone();
         let label = entry
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1626,7 +1682,14 @@ async fn run_batch(
             if !params.json_mode {
                 println!("\n── {} ──", label);
             }
-            run_single_upload(&params, &[entry], &label, Some(&task_cancel)).await
+            run_single_upload(
+                &params,
+                &[entry],
+                &label,
+                Some(&task_cancel),
+                task_password.as_deref(),
+            )
+            .await
         });
         handles.push(handle);
     }
@@ -1677,7 +1740,7 @@ async fn run_batch(
                 password: config
                     .nzb_password
                     .clone()
-                    .or_else(|| config.compress_password.clone()),
+                    .or_else(|| season_password.clone()),
                 category: config.nzb_category.clone(),
                 tmdb_id: config.tmdb_id.clone(),
                 imdb_id: config.imdb_id.clone(),
@@ -1732,7 +1795,7 @@ async fn run_batch(
             let effective_password = config
                 .nzb_password
                 .clone()
-                .or_else(|| config.compress_password.clone());
+                .or_else(|| season_password.clone());
             let season_obfuscate = match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
@@ -2011,6 +2074,7 @@ async fn run_watch(
                                 std::slice::from_ref(&entry),
                                 &label,
                                 Some(&task_cancel),
+                                None,
                             )
                             .await
                             {
@@ -2551,7 +2615,7 @@ async fn main() -> Result<()> {
             }
         })
         .unwrap_or_else(|| format!("{}", std::process::id()));
-    let result = run_single_upload(&params, &cli.files, &label, Some(&cancel)).await?;
+    let result = run_single_upload(&params, &cli.files, &label, Some(&cancel), None).await?;
 
     if let Some(ref p) = session_log {
         write_session_summary(
@@ -3334,6 +3398,63 @@ mod tests {
         let roots = collect_compress_roots(&files);
         assert_eq!(roots, vec![PathBuf::from("/home/user/upload/Test1")]);
         assert!(!roots.contains(&PathBuf::from("/home/user/upload")));
+    }
+
+    #[test]
+    fn resolve_entry_password_no_flag_is_no_password() {
+        assert_eq!(resolve_entry_password(None, None, None), None);
+    }
+
+    #[test]
+    fn resolve_entry_password_explicit_password_is_reused_verbatim() {
+        // `--password mypass`: same literal string every time it's resolved,
+        // matching every entry under --each/--season/--watch sharing it.
+        for raw in [None, Some(""), Some("mypass")] {
+            assert_eq!(
+                resolve_entry_password(None, Some("mypass"), raw),
+                Some("mypass".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_entry_password_bare_flag_generates_a_password() {
+        // Regression for issue #67: bare `--password` (raw == Some("")) with
+        // no forced/explicit password must still produce something to
+        // protect the archive with.
+        let pw = resolve_entry_password(None, None, Some(""));
+        assert!(pw.is_some());
+        assert_eq!(pw.as_deref().map(str::len), Some(24));
+    }
+
+    #[test]
+    fn resolve_entry_password_bare_flag_is_unique_per_call() {
+        // Regression for issue #67: under plain --each/--watch (no forced
+        // password), every call must mint its own password instead of the
+        // whole run sharing one — this is what let `Test1.nzb` and
+        // `Test2.nzb` end up with the identical password after the
+        // `Cli::overrides()`-time resolution used to bake one value in for
+        // the whole process.
+        let a = resolve_entry_password(None, None, Some(""));
+        let b = resolve_entry_password(None, None, Some(""));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn resolve_entry_password_forced_wins_over_explicit_and_bare() {
+        // Regression for issue #67: a --season batch resolves one shared
+        // password up front (`run_batch`'s `season_password`) and forces it
+        // on every entry — every episode must get that exact value even
+        // though each entry, left alone, would otherwise resolve its own
+        // (explicit or freshly-random) password.
+        assert_eq!(
+            resolve_entry_password(Some("season-pw"), Some("explicit-pw"), Some("")),
+            Some("season-pw".to_string())
+        );
+        assert_eq!(
+            resolve_entry_password(Some("season-pw"), None, Some("")),
+            Some("season-pw".to_string())
+        );
     }
 
     #[test]

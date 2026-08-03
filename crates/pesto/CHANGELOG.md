@@ -12,6 +12,23 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **A bare `--password` (auto-generated) is no longer shared by every entry
+  under `--each`/`--watch`, fixes #67**: `Cli::overrides()` used to call
+  `random_password()` once, at CLI-parse time, and bake the result into the
+  single `Config` shared by the whole process — so every top-level folder
+  posted in one `--each`/`--watch` run silently reused the exact same
+  archive password instead of getting its own. The password is now resolved
+  per entry, right before it's used (`run_single_upload`'s
+  `resolve_entry_password`), so plain `--each`/`--watch` mint a fresh random
+  password for every independent upload. `--season` batches are unaffected:
+  since every episode's NZB gets merged into one at the end, they still
+  deliberately share a single password (resolved once per season in
+  `run_batch`'s `season_password` and forced onto every entry) — otherwise
+  the merged release would need a different password per episode. An
+  explicit `--password VALUE` also keeps behaving as before: reused verbatim
+  by every entry in the run, `--each`/`--season`/`--watch` alike.
+
 ## [0.5.1] — 2026-08-03
 
 ### Added
