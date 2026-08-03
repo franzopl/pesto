@@ -2552,10 +2552,16 @@ fn collect_compress_roots(inputs: &[pesto::walk::InputFile]) -> Vec<PathBuf> {
         let root = if depth <= 1 {
             input.path.clone()
         } else {
+            // Strip `depth - 1` trailing components (everything in `name`
+            // after the top-level folder) to land on the top-level folder
+            // itself, not its parent. `ancestors().nth(k)` strips `k`
+            // trailing components, so `nth(depth)` was one level too high —
+            // it landed on the folder's *parent*, which under `--watch`
+            // silently pulled in sibling top-level entries (issue #67).
             input
                 .path
                 .ancestors()
-                .nth(depth)
+                .nth(depth - 1)
                 .filter(|p| !p.as_os_str().is_empty())
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| input.path.clone())
@@ -3237,8 +3243,44 @@ mod tests {
         ];
         assert_eq!(
             collect_compress_roots(&files),
-            vec![PathBuf::from("/media")]
+            vec![PathBuf::from("/media/Show")]
         );
+    }
+
+    #[test]
+    fn collect_compress_roots_nested_subfolder_strips_to_top_level() {
+        // Regression test for issue #67: a file nested two levels deep
+        // inside the top-level folder (e.g. `Test1/Subs/en.srt`) must still
+        // resolve to `Test1`, not to `Test1`'s parent.
+        let files = vec![InputFile {
+            path: PathBuf::from("/home/user/upload/Test1/Subs/en.srt"),
+            name: "Test1/Subs/en.srt".to_string(),
+        }];
+        assert_eq!(
+            collect_compress_roots(&files),
+            vec![PathBuf::from("/home/user/upload/Test1")]
+        );
+    }
+
+    #[test]
+    fn collect_compress_roots_does_not_leak_sibling_top_level_folders() {
+        // Regression test for issue #67: compressing `Test1` under
+        // `--watch` must never resolve to the watch directory itself, or
+        // sibling entries like `Test2` end up bundled into the same
+        // archive.
+        let files = vec![
+            InputFile {
+                path: PathBuf::from("/home/user/upload/Test1/movie.mkv"),
+                name: "Test1/movie.mkv".to_string(),
+            },
+            InputFile {
+                path: PathBuf::from("/home/user/upload/Test1/movie.nfo"),
+                name: "Test1/movie.nfo".to_string(),
+            },
+        ];
+        let roots = collect_compress_roots(&files);
+        assert_eq!(roots, vec![PathBuf::from("/home/user/upload/Test1")]);
+        assert!(!roots.contains(&PathBuf::from("/home/user/upload")));
     }
 
     #[test]
