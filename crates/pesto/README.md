@@ -533,7 +533,7 @@ resume = true
 
 When posting finishes but only a handful of articles fail the post-check,
 `pesto` already retries them automatically in the same run before giving up
-(see `--check-post-retries` and `--check-recover-max` above) — `--resume` is
+(see `--check-post-retries` and `--check-recover-max` below) — `--resume` is
 for what that can't cover: a run interrupted outright, or one where too many
 articles failed to justify an automatic retry. When a run does end that way,
 the printed error includes a ready-to-run retry command with the original
@@ -600,6 +600,15 @@ couldn't confirm is fully retrievable. Pass `--allow-incomplete-nzb` to
 publish anyway (e.g. when PAR2 recovery is expected to cover the gap); the
 process still exits non-zero so scripts and hooks can tell the upload wasn't
 fully clean.
+
+Once every `--check-post-retries` round is exhausted, `pesto` makes one more
+automatic repost-and-verify attempt for whatever is still missing, as long as
+that's cheap — at most `--check-recover-max` articles (default `50`) and
+within `--check-recover-percent` of the release's total segments (default
+`15`), whichever cap is smaller. This resolves the common case of "posting
+finished, the check failed for a handful of articles" without requiring a
+separate `--resume` invocation. Set `--check-recover-max 0` to disable it and
+fall back to `--allow-incomplete-nzb`/`--resume` only.
 
 ### Rate limiting
 
