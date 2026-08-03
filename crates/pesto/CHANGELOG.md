@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-08-03
+
 ### Fixed
 - **A bare `--password` (auto-generated) is no longer shared by every entry
   under `--each`/`--watch`, fixes #67**: `Cli::overrides()` used to call
