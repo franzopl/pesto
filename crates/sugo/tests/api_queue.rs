@@ -23,6 +23,8 @@ fn minimal_nzb_bytes() -> Vec<u8> {
         date: (None, None),
         full_crc32: 0,
         server_idx: 0,
+        file_index: 0,
+        total_files: 0,
     }];
     pesto::nzb::generate(&groups, &segments, &pesto::nzb::NzbMeta::default()).into_bytes()
 }

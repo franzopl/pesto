@@ -204,6 +204,7 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

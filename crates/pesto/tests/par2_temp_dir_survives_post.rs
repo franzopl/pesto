@@ -154,6 +154,7 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

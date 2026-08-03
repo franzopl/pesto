@@ -594,7 +594,12 @@ async fn repost_one(
         message_id: message_id.clone(),
         from: seg.from.clone(),
         newsgroups: groups.to_vec(),
-        subject: default_subject(&seg.subject_name, seg.part, seg.total),
+        subject: default_subject(
+            &seg.subject_name,
+            seg.part,
+            seg.total,
+            (seg.total_files > 0).then_some((seg.file_index, seg.total_files)),
+        ),
         date: rfc_date.clone(),
         no_archive: config.no_archive,
     };
@@ -630,6 +635,8 @@ async fn repost_one(
                         date: seg.date.clone(),
                         full_crc32: seg.full_crc32,
                         server_idx: slot.server_idx(),
+                        file_index: seg.file_index,
+                        total_files: seg.total_files,
                     });
                 }
                 Err(e) => {

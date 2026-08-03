@@ -299,6 +299,16 @@ struct Cli {
     #[arg(long)]
     no_archive: bool,
 
+    /// Prefix every subject with a `[filenum/total]` release-wide file
+    /// counter, e.g. `[3/15] "movie.mkv" yEnc (1/1875)`, counting every file
+    /// in the release (data files plus the PAR2 index and volumes). Some
+    /// posting tools (e.g. nyuu) emit this by default and some indexers may
+    /// key their grouping heuristics off it; pesto omits it unless this flag
+    /// is set. See `ROADMAP.md` "Subject file counter"
+    /// [config: posting.file_counter].
+    #[arg(long)]
+    file_counter: bool,
+
     /// Fixed domain component for generated `Message-ID` headers
     /// (e.g. `example.com`). When omitted a random domain is generated per
     /// article [config: posting.message_id_domain].
@@ -599,6 +609,7 @@ impl Cli {
             },
             date: self.date.clone(),
             no_archive: if self.no_archive { Some(true) } else { None },
+            file_counter: if self.file_counter { Some(true) } else { None },
             message_id_domain: self.message_id_domain.clone(),
             pre_hooks: self.pre_hook.clone(),
             post_hooks: self.post_hook.clone(),
@@ -2616,6 +2627,7 @@ fn reuse_or_generate_archive_stem(resume_path: Option<&Path>, config: &Config) -
         obfuscate: config.obfuscate,
         compress_format: config.compress_format.clone(),
         par2_percent: config.par2,
+        file_counter: config.file_counter,
     };
     let mut state = pesto::resume::ResumeState::load(rp).unwrap_or_default();
     // Normalizes the loaded state first: a fingerprint mismatch clears any
@@ -2652,6 +2664,9 @@ fn resume_flags_string(config: &Config) -> String {
     );
     if let Some(fmt) = &config.compress_format {
         flags.push_str(&format!(" --compress={fmt}"));
+    }
+    if config.file_counter {
+        flags.push_str(" --file-counter");
     }
     flags
 }

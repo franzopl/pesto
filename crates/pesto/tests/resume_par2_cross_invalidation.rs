@@ -124,6 +124,7 @@ fn test_config(port: u16) -> Config {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],
@@ -179,6 +180,7 @@ async fn changed_file_with_par2_invalidates_previously_resumed_par2_volumes_too(
         obfuscate: ObfuscateMode::None,
         compress_format: None,
         par2_percent: config.par2,
+        file_counter: config.file_counter,
     });
     prior.record_file(
         "movie.bin",

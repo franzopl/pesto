@@ -75,6 +75,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

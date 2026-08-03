@@ -198,7 +198,8 @@ fn write_file(out: &mut String, groups: &[String], segs: &[PostedSegment]) {
     // restore it correctly. Only what goes on the wire (subject + yEnc name=)
     // is obfuscated — see ObfuscateMode::Full in poster/mod.rs.
     let file_name = &first.file_name;
-    let subject = default_subject(&first.subject_name, 1, first.total);
+    let file_counter = (first.total_files > 0).then_some((first.file_index, first.total_files));
+    let subject = default_subject(&first.subject_name, 1, first.total, file_counter);
     let poster = &first.from;
     let (_rfc_date, unix_date) = &first.date;
     let date = unix_date.unwrap_or_else(|| {
@@ -350,6 +351,12 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 // A segment parsed back from an .nzb never re-enters the
                 // check queue (see `PostedSegment::server_idx`).
                 server_idx: 0,
+                // `current_subject_name` already had any `[filenum/total]`
+                // prefix stripped by `strip_filenum_prefix` — this run has no
+                // way to know the original numbering, so it's simply absent
+                // (see `default_subject`'s `None` case) rather than guessed.
+                file_index: 0,
+                total_files: 0,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
@@ -498,6 +505,8 @@ mod tests {
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
+            file_index: 0,
+            total_files: 0,
         }
     }
 
@@ -634,6 +643,8 @@ mod tests {
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
+            file_index: 0,
+            total_files: 0,
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // The wire subject is obfuscated; the NZB always carries the real filename.
@@ -657,6 +668,8 @@ mod tests {
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
+            file_index: 0,
+            total_files: 0,
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // Subject on the wire is obfuscated; NZB name= always uses the real filename.

@@ -215,6 +215,7 @@ async fn check_fast_reposts_an_isolated_miss_instead_of_waiting_out_patient_retr
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

@@ -1700,6 +1700,7 @@ fn build_dry_run_config() -> Config {
         obfuscate: ObfuscateMode::None,
         date: None,
         no_archive: true,
+        file_counter: false,
         message_id_domain: None,
         dry_run: true, // ← never touches the network
         par2: 5,

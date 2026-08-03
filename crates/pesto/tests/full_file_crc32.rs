@@ -163,6 +163,7 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

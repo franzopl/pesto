@@ -166,6 +166,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

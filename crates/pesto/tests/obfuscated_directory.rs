@@ -58,6 +58,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],

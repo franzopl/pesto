@@ -155,6 +155,12 @@ pub struct PostingSection {
     pub date: Option<String>,
     /// Add `X-No-Archive: yes` to every posted article.
     pub no_archive: Option<bool>,
+    /// Prefix every subject with a `[filenum/total]` release-wide file
+    /// counter (e.g. `[3/15] "movie.mkv" yEnc (1/1875)`), counting every
+    /// file in the release — data files plus the PAR2 index and volumes —
+    /// not just the segment counter pesto always emits. Default: false.
+    /// See `ROADMAP.md` "Subject file counter".
+    pub file_counter: Option<bool>,
     /// Fixed domain for `Message-ID` generation. When absent a random domain
     /// is generated per article.
     pub message_id_domain: Option<String>,
@@ -360,6 +366,7 @@ pub struct Overrides {
     pub notify: Option<bool>,
     pub date: Option<String>,
     pub no_archive: Option<bool>,
+    pub file_counter: Option<bool>,
     pub message_id_domain: Option<String>,
     pub pre_hooks: Vec<String>,
     pub post_hooks: Vec<String>,
@@ -398,6 +405,8 @@ pub struct Config {
     pub obfuscate: ObfuscateMode,
     pub date: Option<String>,
     pub no_archive: bool,
+    /// See [`PostingSection::file_counter`].
+    pub file_counter: bool,
     pub message_id_domain: Option<String>,
     pub dry_run: bool,
     pub par2: u8,

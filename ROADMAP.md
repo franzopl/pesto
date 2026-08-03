@@ -498,19 +498,39 @@ teardown/rebuild, which remains.
 
 ### Subject file counter `[N/M]`
 
-**Status:** Intentionally deferred.  
-**Rationale:** Tools like `nyuu` prefix subjects with `[filenum/total]` (e.g. `[1/5] "movie.mkv" yEnc (1/3)`).
-This requires knowing the total file count before posting the first article.
+**Status:** Implemented behind an opt-in flag, `--file-counter` / `[posting] file_counter` (default: off).
 
-In `pesto`, PAR2 files are generated asynchronously and appended to the queue after data files begin posting.
-Two-pass approaches (compute PAR2 first, then post) would add latency and complexity.
-One-pass with subject rewriting would require reposting already-sent articles.
+**Background:** Tools like `nyuu` prefix subjects with `[filenum/total]` (e.g. `[1/5] "movie.mkv" yEnc (1/3)`) — a
+release-wide file counter, distinct from the per-file segment counter `(part/total)` that `pesto` always emits.
+This entry used to say the total file count (data files + PAR2 index + volumes) couldn't be known before the
+first article posts, since PAR2 files are generated asynchronously and appended to the queue after data files
+begin posting — making a two-pass approach (compute PAR2 first, then post) seem necessary and too costly.
+
+That rationale conflated two different things: *computing the PAR2 recovery-set geometry* (how many volumes
+`plan_volumes` will produce) versus *actually running the Reed-Solomon encoder over file content*. Only the
+second is expensive and must stay asynchronous. The first is pure metadata — file sizes plus config
+(`--article-size`/`--par2`/`--slice-size`/`--recovery-count`), no I/O — and `pesto` already computed it up front
+for the progress bar (`par2_geometry`, kept deliberately in sync with the encoder's own geometry calculation in
+`producer`). Since `parmesan::layout::plan_volumes` is a pure function of the recovery-block count, the exact
+number of volume files (and hence the release's grand total file count) is knowable before the first byte of
+the first file is ever posted — no two-pass encode needed.
+
+**Implementation:** `--file-counter` computes `total_files = data_files + 1 (PAR2 index) + plan_volumes(recovery_count).len()`
+once, before any worker spawns (`post_files_with_progress_and_cancel`), and assigns each file a stable
+`file_index` (1-based release position: data files in final posting order, then the PAR2 index, then the
+volumes in `plan_volumes` order). Both values are denormalized onto `FileMeta`, `PostedSegment` and `FailedTask`
+so every place that rebuilds a subject — the main post path, `--check` reposts, the end-of-run retry pass, and
+`.nzb` generation — produces the identical `[filenum/total]` prefix. Off by default: toggling it between runs of
+the same `--resume` state invalidates the state (`resume::RunFingerprint`), the same way `--obfuscate`/`--par2`
+changes already do, since it changes every subject in the release.
+
+**Why still opt-in rather than default-on:** this remains a cosmetic nicety, not a spec requirement, and whether
+any indexer's grouping heuristic actually keys off it is unconfirmed — see GitHub issue #68, which was closed as
+indexer-side (NZBIndex/Binsearch key their "complete set" grouping off the `.volNNN+MMM.par2` filename pattern,
+not the subject's file counter). Enabling `--file-counter` does not change that filename pattern, so it is not
+expected to fix #68's original report on its own; it exists for compatibility with any indexer/tool that does
+read the counter, and to let that be tested empirically rather than assumed.
 
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
-
-This is a cosmetic nicety, _not a spec requirement_. If needed in the future, options include:
-- Count only source files (ignore PAR2 in total) — simple but inconsistent
-- Two-pass mode (compute PAR2 before posting) — adds latency
-- Post-PAR2-only subjects without counters — already works today

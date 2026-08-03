@@ -171,6 +171,14 @@ groups = ["alt.binaries.test"]
 # no_archive — add `X-No-Archive: yes` to every posted article. Default: false.
 # no_archive = false
 
+# file_counter — prefix every subject with a `[filenum/total]` release-wide
+# file counter, e.g. `[3/15] "movie.mkv" yEnc (1/1875)`, counting every file
+# in the release (data files plus the PAR2 index and volumes). Some posting
+# tools (e.g. nyuu) emit this by default and some indexers may key their
+# grouping heuristics off it; pesto omits it unless enabled. See ROADMAP.md
+# "Subject file counter". Default: false.
+# file_counter = false
+
 # message_id_domain — fixed domain used in the Message-ID of every article.
 # When omitted (default), a fresh random domain is generated per article, which
 # is better for privacy. Set this only if your provider requires a stable domain.

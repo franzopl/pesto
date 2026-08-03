@@ -139,6 +139,8 @@ mod tests {
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
+            file_index: 0,
+            total_files: 0,
         }
     }
 

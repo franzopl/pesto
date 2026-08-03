@@ -55,6 +55,8 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         date: (None, None),
         full_crc32: 0,
         server_idx: 0,
+        file_index: 0,
+        total_files: 0,
     }];
     let nzb_bytes = pesto::nzb::generate(&groups, &segments, &NzbMeta::default()).into_bytes();
 

@@ -223,12 +223,27 @@ pub fn random_from() -> String {
 /// - Single-part: `"name" yEnc`
 /// - Multi-part:  `"name" yEnc (part/total)`
 ///
-/// See ROADMAP.md "Subject file counter" for why `[N/M]` prefixes are omitted.
-pub fn default_subject(name: &str, part: u32, total: u32) -> String {
-    if total > 1 {
+/// `file_counter`, when `Some((filenum, total_files))`, prepends a
+/// `[filenum/total_files] ` release-wide file counter — `filenum` is this
+/// file's 1-based position among every file in the release (data files plus
+/// the PAR2 index and volumes), `total_files` the release's grand total. This
+/// is the `--file-counter` opt-in (see `Config::file_counter`); off by
+/// default. See ROADMAP.md "Subject file counter" for why pesto doesn't
+/// compute this by default and how the geometry is known ahead of encoding.
+pub fn default_subject(
+    name: &str,
+    part: u32,
+    total: u32,
+    file_counter: Option<(u32, u32)>,
+) -> String {
+    let base = if total > 1 {
         format!("\"{name}\" yEnc ({part}/{total})")
     } else {
         format!("\"{name}\" yEnc")
+    };
+    match file_counter {
+        Some((filenum, total_files)) => format!("[{filenum}/{total_files}] - {base}"),
+        None => base,
     }
 }
 
@@ -320,8 +335,23 @@ mod tests {
 
     #[test]
     fn default_subject_handles_single_and_multi_part() {
-        assert_eq!(default_subject("file.bin", 1, 1), "\"file.bin\" yEnc");
-        assert_eq!(default_subject("file.bin", 2, 5), "\"file.bin\" yEnc (2/5)");
+        assert_eq!(default_subject("file.bin", 1, 1, None), "\"file.bin\" yEnc");
+        assert_eq!(
+            default_subject("file.bin", 2, 5, None),
+            "\"file.bin\" yEnc (2/5)"
+        );
+    }
+
+    #[test]
+    fn default_subject_with_file_counter_prefixes_release_position() {
+        assert_eq!(
+            default_subject("file.bin", 2, 5, Some((3, 15))),
+            "[3/15] - \"file.bin\" yEnc (2/5)"
+        );
+        assert_eq!(
+            default_subject("file.bin", 1, 1, Some((1, 1))),
+            "[1/1] - \"file.bin\" yEnc"
+        );
     }
 
     #[test]
@@ -398,14 +428,17 @@ mod tests {
 
     #[test]
     fn default_subject_single_part_has_no_parens() {
-        let s = default_subject("movie.mkv", 1, 1);
+        let s = default_subject("movie.mkv", 1, 1, None);
         assert!(!s.contains("(1/1)"));
         assert_eq!(s, "\"movie.mkv\" yEnc");
     }
 
     #[test]
     fn default_subject_last_part() {
-        assert_eq!(default_subject("f.bin", 10, 10), "\"f.bin\" yEnc (10/10)");
+        assert_eq!(
+            default_subject("f.bin", 10, 10, None),
+            "\"f.bin\" yEnc (10/10)"
+        );
     }
 
     // ── format_rfc2822 additional edge cases ──────────────────────────────────

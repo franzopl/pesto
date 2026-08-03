@@ -132,6 +132,7 @@ async fn posts_every_segment_to_a_mock_server() {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],
@@ -298,6 +299,7 @@ fn make_config(port: u16) -> Config {
         nzb_dir: None,
         date: None,
         no_archive: false,
+        file_counter: false,
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],
@@ -581,6 +583,7 @@ async fn resume_with_different_article_size_discards_stale_state_instead_of_corr
         obfuscate: ObfuscateMode::None,
         compress_format: None,
         par2_percent: 0,
+        file_counter: false,
     });
     stale.record("resize.bin", 1, "stale-part1@x", 100);
     stale.record("resize.bin", 2, "stale-part2@x", 100);
@@ -664,6 +667,7 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
         obfuscate: ObfuscateMode::FullShared,
         compress_format: None,
         par2_percent: 0,
+        file_counter: false,
     });
     prior.record_file(
         "a.bin",

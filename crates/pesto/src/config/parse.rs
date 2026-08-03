@@ -276,6 +276,10 @@ impl Config {
                 }
             },
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
+            file_counter: cli
+                .file_counter
+                .or(file.posting.file_counter)
+                .unwrap_or(false),
             message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
             pre_hooks: {
                 // CLI flags take precedence over config file; single `pre_hook`

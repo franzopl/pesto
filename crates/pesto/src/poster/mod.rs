@@ -216,6 +216,14 @@ pub struct PostedSegment {
     /// resume-skipped segments (already confirmed in a prior run) and
     /// dry-run segments (nothing was actually posted).
     pub server_idx: usize,
+    /// This file's 1-based position among every file in the release, and the
+    /// release's total file count — the `--file-counter` subject prefix.
+    /// `(0, 0)` when the flag is off; see `Shared::total_files`. Denormalized
+    /// here (rather than looked up via `Shared`) because both the NZB writer
+    /// and a `--check` repost rebuild the subject from a `PostedSegment`
+    /// alone, long after `Shared` is gone.
+    pub file_index: u32,
+    pub total_files: u32,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -247,6 +255,11 @@ pub struct FailedTask {
     /// CRC-32 of the whole file this segment belongs to — see
     /// `PostedSegment::full_crc32`. Only meaningful when `part == total`.
     pub full_crc32: u32,
+    /// See `PostedSegment::file_index`/`total_files` — carried through so the
+    /// end-of-run retry (which only has `&[FailedTask]`, not `Shared`) can
+    /// rebuild the identical subject.
+    pub file_index: u32,
+    pub total_files: u32,
 }
 
 /// The result of a posting run.
@@ -304,6 +317,11 @@ struct FileMeta {
     /// Fixed dates have `Some` RFC but `None` timestamp.
     date: (Option<String>, Option<u64>),
     size: u64,
+    /// This file's 1-based position among every file in the release (data
+    /// files, then the PAR2 index, then the PAR2 volumes) — used for the
+    /// `--file-counter` `[filenum/total]` subject prefix. Meaningless
+    /// (left as `0`) when `Shared::total_files` is `0`, i.e. the flag is off.
+    file_index: u32,
 }
 
 struct PostTask {
@@ -383,6 +401,12 @@ struct Shared {
     /// get their own PAR2 temp directory instead of colliding on one shared
     /// by process ID alone.
     run_id: u64,
+    /// Total number of files in the release (data files + PAR2 index +
+    /// volumes), computed once up front from `par2_geometry` before any
+    /// worker spawns — see that function's doc comment for why this is known
+    /// before PAR2 encoding actually starts. `0` when `config.file_counter`
+    /// is off, which callers treat as "no counter" (see `FileMeta::file_index`).
+    total_files: u32,
 }
 
 impl Shared {
@@ -508,6 +532,7 @@ pub async fn post_files_with_progress_and_cancel(
         obfuscate: config.obfuscate,
         compress_format: config.compress_format.clone(),
         par2_percent: config.par2,
+        file_counter: config.file_counter,
     };
     if let Some(resume) = &resume_arc {
         let mut state = resume.lock().unwrap();
@@ -515,7 +540,8 @@ pub async fn post_files_with_progress_and_cancel(
         if !state.validate_run(&run_fingerprint) {
             eprintln!(
                 "resume: posting parameters changed since the saved state was recorded \
-                 (--article-size/--obfuscate/--compress/--par2) — ignoring it and starting fresh"
+                 (--article-size/--obfuscate/--compress/--par2/--file-counter) — ignoring it \
+                 and starting fresh"
             );
         } else if had_segments {
             eprintln!(
@@ -653,6 +679,9 @@ pub async fn post_files_with_progress_and_cancel(
             from,
             date,
             size: md.len(),
+            // Assigned below, once `metas`' final posting order is settled —
+            // see the `config.file_counter` pass after the File-ID sort.
+            file_index: 0,
         }));
     }
 
@@ -672,6 +701,22 @@ pub async fn post_files_with_progress_and_cancel(
         }
         keyed.sort_by_key(|(file_id, _)| *file_id);
         metas = keyed.into_iter().map(|(_, meta)| meta).collect();
+    }
+
+    // `--file-counter`'s `[filenum/total]` numbers every file by its position
+    // in the release, so it must be assigned only now that `metas`' final
+    // posting order (post File-ID sort) is settled — not at push time above.
+    if config.file_counter {
+        metas = metas
+            .into_iter()
+            .enumerate()
+            .map(|(i, m)| {
+                Arc::new(FileMeta {
+                    file_index: i as u32 + 1,
+                    ..(*m).clone()
+                })
+            })
+            .collect();
     }
 
     let mut initial_segments = 0;
@@ -720,6 +765,29 @@ pub async fn post_files_with_progress_and_cancel(
     static RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
 
+    // Total release file count for `--file-counter`: data files, plus (when
+    // there's any recovery data to write) the index file and every volume
+    // `plan_volumes` will produce. Gated on `recovery_count > 0`, exactly
+    // like `producer`'s own `worker_opt`/index-write gate — not on
+    // `config.par2 > 0` directly, since `par2_geometry` can still land on
+    // zero recovery blocks with PAR2 "on" (e.g. a tiny release where
+    // `total_slices * pct / 100` floors to 0), in which case `producer`
+    // never writes an index or volumes at all. `par2_geometry` is
+    // metadata-only (file sizes + config, no I/O — see its doc comment) so
+    // this is exact, not an estimate, and safe to compute before `producer`
+    // actually runs the encoder.
+    let total_files: u32 = if config.file_counter {
+        let (_, _, recovery_count) = par2_geometry(&metas, config);
+        let par2_file_count = if recovery_count > 0 {
+            1 + layout::plan_volumes(recovery_count as u32).len()
+        } else {
+            0
+        };
+        (metas.len() + par2_file_count) as u32
+    } else {
+        0
+    };
+
     let shared = Arc::new(Shared {
         config: config.clone(),
         servers,
@@ -738,6 +806,7 @@ pub async fn post_files_with_progress_and_cancel(
         release_prefix,
         release_from,
         run_id,
+        total_files,
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -1920,16 +1989,28 @@ async fn producer(
                     // prefix instead of the (possibly real) on-disk base name,
                     // so this index file groups with the rest of the release.
                     let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-                    push_par2_file(&index_path, index_name, wire_override, &shared, tx).await?;
+                    // The index file is the release's first file after the
+                    // data files — see `Shared::total_files`'s doc comment.
+                    let file_index = metas.len() as u32 + 1;
+                    push_par2_file(
+                        &index_path,
+                        index_name,
+                        wire_override,
+                        file_index,
+                        &shared,
+                        tx,
+                    )
+                    .await?;
                 }
             }
 
             let t_par2_write = std::time::Instant::now();
             let volumes = layout::plan_volumes(recovery_count as u32);
             for slice in recovery_slices {
-                let vol = volumes
+                let (vol_idx, vol) = volumes
                     .iter()
-                    .find(|v| slice.exponent >= v.first && slice.exponent < v.first + v.count)
+                    .enumerate()
+                    .find(|(_, v)| slice.exponent >= v.first && slice.exponent < v.first + v.count)
                     .unwrap();
                 let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
                 let vol_path = par2_dir.as_ref().unwrap().join(&vol_name);
@@ -1958,7 +2039,11 @@ async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        push_par2_file(&vol_path, vol_name, wire_override, &shared, tx).await?;
+                        // Volumes follow the data files and the index file
+                        // (+1), in `plan_volumes`' order (+vol_idx).
+                        let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+                        push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
+                            .await?;
                     }
                 }
             }
@@ -1977,6 +2062,7 @@ async fn push_par2_file(
     path: &PathBuf,
     real_name: String,
     wire_override: Option<String>,
+    file_index: u32,
     shared: &Arc<Shared>,
     tx: &tokio::sync::mpsc::Sender<PostTask>,
 ) -> Result<()> {
@@ -2018,6 +2104,11 @@ async fn push_par2_file(
         from,
         date,
         size,
+        file_index: if shared.config.file_counter {
+            file_index
+        } else {
+            0
+        },
     });
 
     // Whole-file CRC-32 accumulated as this same loop reads the file for
@@ -2225,6 +2316,8 @@ async fn worker(
                         // Resumed from a prior run's state, not re-entered
                         // into the check queue this run — see the field doc.
                         server_idx: 0,
+                        file_index: task.meta.file_index,
+                        total_files: shared.total_files,
                     });
                     let raw_bytes = task.data.len() as u64;
                     shared.release_buffer(task.data);
@@ -2288,7 +2381,13 @@ async fn worker(
                     message_id: message_id.clone(),
                     from: task.from.clone(),
                     newsgroups: shared.post_group.clone(),
-                    subject: default_subject(&task.meta.subject_name, task.part, task.total),
+                    subject: default_subject(
+                        &task.meta.subject_name,
+                        task.part,
+                        task.total,
+                        (shared.total_files > 0)
+                            .then_some((task.meta.file_index, shared.total_files)),
+                    ),
                     date: rfc_date.clone(),
                     no_archive: shared.config.no_archive,
                 };
@@ -2346,6 +2445,8 @@ async fn worker(
                     // Nothing was actually posted in dry-run mode, so there's
                     // no real server and no check queue — see the field doc.
                     server_idx: 0,
+                    file_index: p.task.meta.file_index,
+                    total_files: shared.total_files,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -2738,6 +2839,8 @@ fn commit_result(
             date,
             full_crc32: task.file_crc32.unwrap_or(0),
             server_idx,
+            file_index: task.meta.file_index,
+            total_files: shared.total_files,
         };
         if let Some(tx) = check_tx {
             let _ = tx.send(seg.clone());
@@ -2833,6 +2936,8 @@ fn record_failure(
         from: task.from.clone(),
         date: task.date.clone(),
         full_crc32: task.file_crc32.unwrap_or(0),
+        file_index: meta.file_index,
+        total_files: shared.total_files,
     });
 }
 
@@ -2916,7 +3021,12 @@ pub async fn repost_failed_tasks(
             message_id: message_id.clone(),
             from: task.from.clone(),
             newsgroups: groups.to_vec(),
-            subject: default_subject(&task.subject_name, task.part, task.total),
+            subject: default_subject(
+                &task.subject_name,
+                task.part,
+                task.total,
+                (task.total_files > 0).then_some((task.file_index, task.total_files)),
+            ),
             date: rfc_date.clone(),
             no_archive: config.no_archive,
         };
@@ -2983,6 +3093,8 @@ pub async fn repost_failed_tasks(
                 from: task.from.clone(),
                 date: task.date.clone(),
                 full_crc32: task.full_crc32,
+                file_index: task.file_index,
+                total_files: task.total_files,
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::Status {
@@ -3487,6 +3599,7 @@ mod tests {
             from: String::new(),
             date: (None, None),
             size: 0,
+            file_index: 0,
         }
     }
 
@@ -3617,6 +3730,7 @@ mod tests {
             release_prefix: None,
             release_from: None,
             run_id: 0,
+            total_files: 0,
         })
     }
 

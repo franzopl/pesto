@@ -11,7 +11,8 @@
 //! Trusting a state file blindly is unsafe (see GitHub issue #18): the same
 //! output name can be reused for an unrelated or edited file, or with
 //! different posting parameters (`--article-size`, `--obfuscate`,
-//! `--compress`, `--par2`) that change how the input is chunked and named.
+//! `--compress`, `--par2`, `--file-counter`) that change how the input is
+//! chunked and named.
 //! [`RunFingerprint`] and [`FileFingerprint`] guard against exactly that —
 //! a run-level mismatch discards the whole state, a per-file mismatch
 //! discards only that file's segments.
@@ -35,6 +36,12 @@ pub struct RunFingerprint {
     pub obfuscate: ObfuscateMode,
     pub compress_format: Option<String>,
     pub par2_percent: u8,
+    /// `--file-counter`: toggling it changes every subject in the release
+    /// (the `[filenum/total]` prefix), so a mismatch must discard the state
+    /// the same way an `--obfuscate`/`--par2` change does — otherwise a
+    /// resumed run's reused Message-IDs would be recorded against a subject
+    /// that no longer matches what the original run actually posted.
+    pub file_counter: bool,
 }
 
 /// A single file's identity at the time its segments were recorded. Compared
@@ -243,6 +250,7 @@ mod tests {
             obfuscate: ObfuscateMode::None,
             compress_format: None,
             par2_percent: 0,
+            file_counter: false,
         }
     }
 
