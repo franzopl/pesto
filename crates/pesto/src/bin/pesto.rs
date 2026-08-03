@@ -3263,6 +3263,24 @@ mod tests {
     }
 
     #[test]
+    fn collect_compress_roots_relative_folder_resolves_to_folder_itself() {
+        // A directory passed with a bare relative path (e.g. `pesto Test1
+        // --compress` run from Test1's parent) must still resolve to
+        // `Test1`, not fall back to per-file roots or an empty path.
+        let files = vec![
+            InputFile {
+                path: PathBuf::from("Test1/movie.mkv"),
+                name: "Test1/movie.mkv".to_string(),
+            },
+            InputFile {
+                path: PathBuf::from("Test1/movie.nfo"),
+                name: "Test1/movie.nfo".to_string(),
+            },
+        ];
+        assert_eq!(collect_compress_roots(&files), vec![PathBuf::from("Test1")]);
+    }
+
+    #[test]
     fn collect_compress_roots_does_not_leak_sibling_top_level_folders() {
         // Regression test for issue #67: compressing `Test1` under
         // `--watch` must never resolve to the watch directory itself, or
