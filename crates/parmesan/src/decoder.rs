@@ -320,9 +320,20 @@ mod tests {
                 .collect()
         }
 
-        // Pinned regression check for the 3 known CI-failing minimal inputs
-        // from issue #51 (seed always 0; n/recovery_count vary but all
-        // satisfy recovery_count == n + 1, and recovery_count % 4 == 3).
+        // Pinned regression check for the known CI-failing minimal inputs
+        // from issue #51. Across 9 observed CI failures (3 originally
+        // reported + 6 found later by scanning CI history), only these 3
+        // distinct (n, recovery_count) pairs have ever appeared, always with
+        // seed = 0 — despite the property covering n in 2..25 and
+        // recovery_count in 1..15 (360 combinations), and 9 independent
+        // proptest runs (each exploring 96 random cases) never landing on
+        // any *other* failing input. All 3 share a structural trait: `m =
+        // recovery_count.min(n) == n` (every input slice is missing — the
+        // "reconstruct everything" edge) *and* recovery_count > n (surplus
+        // recovery blocks are available, so `reconstruct` only uses the
+        // first n by exponent — see `exponents: ... .take(m)` above).
+        // recovery_count % 4 == 3 in all 3 known cases too, but that may be
+        // coincidental rather than essential — see the broader sweep below.
         // Never reproduced locally so far — this exists to make each new
         // investigation attempt (different core count, RAYON_NUM_THREADS,
         // toolchain) trivially re-checkable without waiting on proptest to
@@ -358,6 +369,63 @@ mod tests {
                     );
                 }
             }
+        }
+
+        // Exhaustively sweeps the structural condition every known CI
+        // failure shares — "reconstruct everything" (m == n) with surplus
+        // recovery blocks (recovery_count > n) — across n and surplus far
+        // beyond the 3 known points, and several seeds per point (not just
+        // 0), to check whether the trigger is that structural condition
+        // alone or something narrower (e.g. recovery_count % 4 == 3
+        // specifically, or seed == 0 specifically). Proptest's default 96
+        // cases per run, spread over the *entire* n/recovery_count/seed
+        // space, apparently doesn't sample this particular corner densely
+        // enough to hit it reliably even when it exists — this targets it
+        // directly instead of hoping general-purpose exploration finds it.
+        //
+        // Ran once (~200s, 960 real PAR2 encode/decode round trips) with
+        // zero mismatches found — the structural condition alone isn't
+        // sufficient to reproduce locally. `#[ignore]`d rather than run on
+        // every `cargo test`: too slow for routine/CI use, kept as an
+        // on-demand tool for the next investigation attempt
+        // (`cargo test -- --ignored everything_missing_with_surplus`).
+        #[test]
+        #[ignore]
+        fn everything_missing_with_surplus_recovery_blocks_sweep() {
+            let mut failures = Vec::new();
+            for n in 1usize..=20 {
+                for surplus in 1usize..=8 {
+                    let recovery_count = n + surplus;
+                    for seed in [0u64, 1, 2, 42, 12345, u64::MAX] {
+                        let slice_size = 16;
+                        let missing: Vec<usize> = (0..n).collect();
+
+                        let slices: Vec<Vec<u8>> = (0..n)
+                            .map(|i| {
+                                pseudo_random_bytes(seed ^ 0x9E3779B9 ^ (i as u64), slice_size)
+                            })
+                            .collect();
+                        let recovery_blocks = encode(&slices, slice_size, recovery_count);
+
+                        let dec = RecoveryDecoder::new(slice_size, n, missing.clone());
+                        let result = dec
+                            .reconstruct(|j| Ok(slices[j].clone()), &recovery_blocks)
+                            .unwrap();
+
+                        for (idx, data) in result {
+                            if data != slices[idx] {
+                                failures.push((n, recovery_count, seed, idx));
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                failures.is_empty(),
+                "{} mismatch(es) found: {:?}",
+                failures.len(),
+                &failures[..failures.len().min(20)]
+            );
         }
 
         proptest! {
