@@ -64,7 +64,8 @@ fi
 RESPONSE=$(curl "${ARGS[@]}" "${UPLOAD_URL}?user=${USER}&api=${API_KEY}")
 
 if echo "$RESPONSE" | grep -qi "successfully"; then
-    echo "[Indexer] OK"
+    PUB_ID=$(echo "$RESPONSE" | grep -oP '(?<=ID: )[a-zA-Z0-9]+' || echo "?")
+    echo "[Indexer] OK — release id: $PUB_ID"
 else
     echo "[Indexer] FAILED"
     exit 1
