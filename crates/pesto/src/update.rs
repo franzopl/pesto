@@ -9,11 +9,18 @@
 //! `cargo install` a new version with.
 
 use std::io::Write;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{ensure, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const REPO: &str = "franzopl/pesto";
+
+/// How long a cached "latest version" result is trusted before `check_notice`
+/// hits GitHub again. Keeps the startup notice off the hot path on every run
+/// but for one request per day.
+const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Deserialize)]
 struct GhRelease {
@@ -66,15 +73,9 @@ fn find_checksum(sums_text: &str, want: &str) -> Option<String> {
     None
 }
 
-/// Run `pesto --update`: check the latest release, download it if newer,
-/// verify its checksum, and replace the running binary.
-pub async fn run() -> Result<()> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("pesto-update/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("building HTTP client")?;
-
-    println!("Checking for updates...");
+/// Fetch the GitHub release list and return the latest `pesto-v*` release
+/// along with its parsed semver version.
+async fn fetch_latest_release(client: &reqwest::Client) -> Result<(GhRelease, semver::Version)> {
     let releases: Vec<GhRelease> = client
         .get(format!("https://api.github.com/repos/{REPO}/releases"))
         .send()
@@ -98,9 +99,27 @@ pub async fn run() -> Result<()> {
     let latest_version: semver::Version = latest_version_str
         .parse()
         .with_context(|| format!("release tag `{}` is not valid semver", latest.tag_name))?;
-    let current_version: semver::Version = env!("CARGO_PKG_VERSION")
+
+    Ok((latest, latest_version))
+}
+
+fn current_version() -> Result<semver::Version> {
+    env!("CARGO_PKG_VERSION")
         .parse()
-        .context("current CARGO_PKG_VERSION is not valid semver")?;
+        .context("current CARGO_PKG_VERSION is not valid semver")
+}
+
+/// Run `pesto --update`: check the latest release, download it if newer,
+/// verify its checksum, and replace the running binary.
+pub async fn run() -> Result<()> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("pesto-update/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("building HTTP client")?;
+
+    println!("Checking for updates...");
+    let (latest, latest_version) = fetch_latest_release(&client).await?;
+    let current_version = current_version()?;
 
     if latest_version <= current_version {
         println!(
@@ -178,6 +197,92 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateCache {
+    /// Unix timestamp (seconds) of the last GitHub check.
+    checked_at: u64,
+    /// Latest version known as of `checked_at`, as plain semver (no `v` prefix).
+    latest_version: String,
+}
+
+fn cache_path() -> Option<PathBuf> {
+    crate::config::config_dir().map(|d| d.join("update_check.json"))
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn is_fresh(checked_at: u64, now: u64) -> bool {
+    now.saturating_sub(checked_at) < CACHE_TTL.as_secs()
+}
+
+fn read_cache(path: &std::path::Path) -> Option<UpdateCache> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_cache(path: &std::path::Path, latest_version: &semver::Version) {
+    let cache = UpdateCache {
+        checked_at: now_unix(),
+        latest_version: latest_version.to_string(),
+    };
+    // Best-effort: a failed write just means the next run checks again.
+    if let Ok(text) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// Build the one-line notice to print when `latest` is newer than `current`.
+fn notice_text(current: &semver::Version, latest: &semver::Version) -> Option<String> {
+    (latest > current).then(|| {
+        format!(
+            "A new version of pesto is available: v{latest} (you have v{current}). \
+             Run `pesto --update` to update."
+        )
+    })
+}
+
+/// Courtesy check for a newer release, meant to be called once near startup
+/// of a normal (non-`--update`) run. Backed by a 24h cache
+/// (`~/.config/pesto/update_check.json`) so most runs never touch the
+/// network; on a cache miss/expiry it hits GitHub with a short timeout so a
+/// slow or unreachable API can never hold up an actual upload.
+///
+/// Returns `None` whenever there is nothing to report — up to date, no cache
+/// directory available, or the check failed for any reason. This is a
+/// courtesy notice, not a requirement, so errors are swallowed rather than
+/// surfaced to the caller.
+pub async fn check_notice() -> Option<String> {
+    let current = current_version().ok()?;
+    let path = cache_path();
+
+    if let Some(path) = path.as_deref() {
+        if let Some(cached) = read_cache(path) {
+            if is_fresh(cached.checked_at, now_unix()) {
+                let latest: semver::Version = cached.latest_version.parse().ok()?;
+                return notice_text(&current, &latest);
+            }
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("pesto-update-check/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let (_, latest) = fetch_latest_release(&client).await.ok()?;
+
+    if let Some(path) = path.as_deref() {
+        write_cache(path, &latest);
+    }
+
+    notice_text(&current, &latest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +333,44 @@ mod tests {
             find_checksum(sums, "pesto-linux-x86_64"),
             Some("abc123".to_string())
         );
+    }
+
+    #[test]
+    fn notice_text_is_none_when_up_to_date_or_older() {
+        let current: semver::Version = "1.2.0".parse().unwrap();
+        assert_eq!(notice_text(&current, &"1.2.0".parse().unwrap()), None);
+        assert_eq!(notice_text(&current, &"1.1.0".parse().unwrap()), None);
+    }
+
+    #[test]
+    fn notice_text_mentions_both_versions_and_the_update_flag() {
+        let current: semver::Version = "1.2.0".parse().unwrap();
+        let latest: semver::Version = "1.3.0".parse().unwrap();
+        let text = notice_text(&current, &latest).unwrap();
+        assert!(text.contains("1.3.0"));
+        assert!(text.contains("1.2.0"));
+        assert!(text.contains("--update"));
+    }
+
+    #[test]
+    fn cache_is_fresh_inside_ttl_and_stale_past_it() {
+        let checked_at = 1_000_000;
+        assert!(is_fresh(checked_at, checked_at));
+        assert!(is_fresh(checked_at, checked_at + CACHE_TTL.as_secs() - 1));
+        assert!(!is_fresh(checked_at, checked_at + CACHE_TTL.as_secs()));
+        assert!(!is_fresh(checked_at, checked_at + CACHE_TTL.as_secs() + 1));
+    }
+
+    #[test]
+    fn cache_round_trips_through_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update_check.json");
+        let version: semver::Version = "9.9.9".parse().unwrap();
+
+        assert!(read_cache(&path).is_none());
+        write_cache(&path, &version);
+        let cached = read_cache(&path).unwrap();
+        assert_eq!(cached.latest_version, "9.9.9");
+        assert!(is_fresh(cached.checked_at, now_unix()));
     }
 }

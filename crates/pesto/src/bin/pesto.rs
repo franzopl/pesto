@@ -2383,6 +2383,9 @@ async fn main() -> Result<()> {
     }
 
     print_header();
+    if let Some(notice) = pesto::update::check_notice().await {
+        eprintln!("{notice}");
+    }
 
     // Resolve config file.
     let (file_config, nzb_default) = match &cli.config {

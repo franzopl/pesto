@@ -12,6 +12,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **Startup notice for new releases**: a normal run (not `--update` itself)
+  now prints a one-line notice when a newer `pesto-v*` release exists on
+  GitHub, pointing at `pesto --update`. Backed by a 24h cache
+  (`~/.config/pesto/update_check.json`) so most runs never touch the network;
+  on a cache miss/expiry the check uses a 2s timeout and any failure is
+  swallowed silently, so a slow or unreachable GitHub can never hold up an
+  actual upload.
+
 ## [0.5.0] — 2026-08-03
 
 ### Added
