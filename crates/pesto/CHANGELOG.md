@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-03
+
 ### Added
 - **Cross-posting via `+`**: a `groups`/`--groups` entry can now join several
   newsgroup names with `+` (e.g. `"alt.a+alt.b"`) to post to all of them in
@@ -76,6 +78,13 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   output path could silently skip every segment and post nothing at all.
 - **Resumed segments now report their real wire size in the `.nzb`** instead
   of a hardcoded `0`.
+- **`--compress` on a directory input no longer bundles sibling folders into
+  the archive** (issue #67): the helper that resolves which filesystem path
+  to hand to the compressor stripped one path component too many, landing on
+  the folder's *parent* instead of the folder itself. Most visible under
+  `--watch`, where the parent is the watch directory — `--compress` would
+  silently archive every other top-level entry present there alongside the
+  one actually being posted.
 
 ### Changed
 - Resume-state persistence moved off the posting hot path: every confirmed
