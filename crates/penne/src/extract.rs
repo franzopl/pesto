@@ -146,22 +146,27 @@ fn extract_with_7z(archive: &Path, dest_dir: &Path, password: Option<&str>) -> R
         "7z not found in PATH; install p7zip (e.g. `apt install p7zip-full` or `brew install p7zip`)",
     )?;
 
+    let staging = staging_dir(dest_dir)?;
+
     let mut cmd = Command::new(&bin);
     cmd.arg("x") // extract with full paths
         .arg("-y") // assume yes
-        .arg(format!("-o{}", dest_dir.display())); // no space: 7z syntax
+        .arg(format!("-o{}", staging.path().display())); // no space: 7z syntax
     if let Some(pass) = password {
         cmd.arg(format!("-p{pass}"));
     }
     cmd.arg(archive);
 
-    run_command(cmd, "7z")
+    run_command(cmd, "7z")?;
+    move_dir_contents(staging.path(), dest_dir)
 }
 
 fn extract_with_unrar(archive: &Path, dest_dir: &Path, password: Option<&str>) -> Result<()> {
     let bin = find_binary("unrar").context(
         "unrar not found in PATH; install the unrar CLI (e.g. `apt install unrar` or `brew install unrar`)",
     )?;
+
+    let staging = staging_dir(dest_dir)?;
 
     let mut cmd = Command::new(&bin);
     cmd.arg("x") // extract with full paths
@@ -175,11 +180,49 @@ fn extract_with_unrar(archive: &Path, dest_dir: &Path, password: Option<&str>) -
     // filename.
     cmd.arg(format!(
         "{}{}",
-        dest_dir.display(),
+        staging.path().display(),
         std::path::MAIN_SEPARATOR
     ));
 
-    run_command(cmd, "unrar")
+    run_command(cmd, "unrar")?;
+    move_dir_contents(staging.path(), dest_dir)
+}
+
+/// A fresh, empty directory nested under `dest_dir` (same filesystem, so the
+/// later move back into `dest_dir` is a cheap rename) to extract into before
+/// anything lands in the real destination.
+///
+/// Some `7z` builds write a file's decoded bytes to disk before verifying
+/// its stored CRC, so a wrong password (or any other extraction failure)
+/// can leave corrupt output behind even though the command itself reports
+/// failure — observed directly: `7-Zip 23.01` extracting under CPU
+/// contention wrote garbage-decrypted bytes for a wrong-password archive,
+/// then reported `CRC Failed ... Wrong password?` and exited non-zero,
+/// without removing the file it had just written. Extracting into a
+/// throwaway staging dir first means that garbage never reaches `dest_dir`:
+/// on failure the whole staging dir (dropped via `TempDir`) is discarded
+/// along with it; only a *successful* run's output ever gets moved in.
+fn staging_dir(dest_dir: &Path) -> Result<tempfile::TempDir> {
+    tempfile::tempdir_in(dest_dir)
+        .with_context(|| format!("creating a staging directory under {}", dest_dir.display()))
+}
+
+/// Move every entry under `src` into `dest`, recreating `src`'s directory
+/// structure and overwriting any existing files already at the destination.
+fn move_dir_contents(src: &Path, dest: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&to).with_context(|| format!("creating {}", to.display()))?;
+            move_dir_contents(&from, &to)?;
+        } else {
+            std::fs::rename(&from, &to)
+                .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Classify one file name as part of an archive set, if it is one.

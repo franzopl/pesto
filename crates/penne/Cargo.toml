@@ -29,6 +29,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fs4 = "1.1.0"
-
-[dev-dependencies]
 tempfile = "3"
