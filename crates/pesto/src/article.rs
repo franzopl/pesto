@@ -215,13 +215,25 @@ pub fn random_from() -> String {
 
 /// Build a default subject line for one part of a file.
 ///
-/// Follows the yEnc draft v1.3 specification:
+/// Loosely follows the yEnc draft v1.3 specification:
 /// - Primary: <http://www.yenc.org/yenc-draft.1.3.txt>
 /// - Mirror:  <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
 ///
-/// Formats:
-/// - Single-part: `"name" yEnc`
-/// - Multi-part:  `"name" yEnc (part/total)`
+/// Format: `"name" yEnc (part/total)`, always — including `(1/1)` for a file
+/// that fits in a single segment. The spec itself allows omitting the
+/// `(part/total)` trailer in that case, and pesto used to; a small file (the
+/// bare PAR2 index in a `--compress`/`--par2` release is the common case, but
+/// any file — `.nfo`, `.sfv`, a loose small upload — posted single-segment
+/// alongside multi-segment siblings hits the same thing) then had a subject
+/// shaped differently from the rest of the release. Confirmed live against
+/// Binsearch (issue #68): several indexers' "collection cleaning" regexes
+/// key off that trailer to recover a release's shared base name, so the
+/// single-segment file's differently-shaped subject hashed it into a
+/// separate collection — it never joined the rest of the release, even
+/// though every file shared the same name/prefix otherwise. Always emitting
+/// `(1/1)` gives every file in a release the same subject shape and fixed
+/// that grouping gap in a real repro; no known downside, since `(1/1)` is
+/// still a spec-valid subject.
 ///
 /// `file_counter`, when `Some((filenum, total_files))`, prepends a
 /// `[filenum/total_files] ` release-wide file counter — `filenum` is this
@@ -236,11 +248,7 @@ pub fn default_subject(
     total: u32,
     file_counter: Option<(u32, u32)>,
 ) -> String {
-    let base = if total > 1 {
-        format!("\"{name}\" yEnc ({part}/{total})")
-    } else {
-        format!("\"{name}\" yEnc")
-    };
+    let base = format!("\"{name}\" yEnc ({part}/{total})");
     match file_counter {
         Some((filenum, total_files)) => format!("[{filenum}/{total_files}] - {base}"),
         None => base,
@@ -335,7 +343,10 @@ mod tests {
 
     #[test]
     fn default_subject_handles_single_and_multi_part() {
-        assert_eq!(default_subject("file.bin", 1, 1, None), "\"file.bin\" yEnc");
+        assert_eq!(
+            default_subject("file.bin", 1, 1, None),
+            "\"file.bin\" yEnc (1/1)"
+        );
         assert_eq!(
             default_subject("file.bin", 2, 5, None),
             "\"file.bin\" yEnc (2/5)"
@@ -350,7 +361,7 @@ mod tests {
         );
         assert_eq!(
             default_subject("file.bin", 1, 1, Some((1, 1))),
-            "[1/1] - \"file.bin\" yEnc"
+            "[1/1] - \"file.bin\" yEnc (1/1)"
         );
     }
 
@@ -427,10 +438,14 @@ mod tests {
     }
 
     #[test]
-    fn default_subject_single_part_has_no_parens() {
+    fn default_subject_single_part_still_carries_1_of_1() {
+        // Regression for issue #68: a single-segment file (e.g. the bare
+        // PAR2 index) must carry the same `(part/total)` shape as every
+        // multi-segment sibling in the release, or some indexers' subject
+        // parsing hashes it into a separate collection instead of grouping
+        // it with the rest — confirmed live against Binsearch.
         let s = default_subject("movie.mkv", 1, 1, None);
-        assert!(!s.contains("(1/1)"));
-        assert_eq!(s, "\"movie.mkv\" yEnc");
+        assert_eq!(s, "\"movie.mkv\" yEnc (1/1)");
     }
 
     #[test]

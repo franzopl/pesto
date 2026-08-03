@@ -648,7 +648,7 @@ mod tests {
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // The wire subject is obfuscated; the NZB always carries the real filename.
-        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc\""));
+        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc (1/1)\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
         assert!(!xml.contains("subject=\"secret-movie.mkv\""));
     }
@@ -673,7 +673,7 @@ mod tests {
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
         // Subject on the wire is obfuscated; NZB name= always uses the real filename.
-        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc\""));
+        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc (1/1)\""));
         assert!(xml.contains("name=\"secret-movie.mkv\""));
         assert!(!xml.contains("name=\"deadbeefcafe0000\""));
     }
@@ -753,14 +753,17 @@ mod tests {
     }
 
     #[test]
-    fn single_part_subject_has_no_part_indicator() {
+    fn single_part_subject_still_carries_1_of_1() {
+        // Regression for issue #68: a single-segment file's subject must
+        // have the same `(part/total)` shape as multi-segment siblings, or
+        // some indexers hash it into a separate collection instead of
+        // grouping it with the rest of the release.
         let xml = generate(
             &["alt.test".into()],
             &[seg("file.bin", 1, 1, "<id@x>")],
             &no_meta(),
         );
-        assert!(xml.contains("subject=\"&quot;file.bin&quot; yEnc\""));
-        assert!(!xml.contains("(1/1)"));
+        assert!(xml.contains("subject=\"&quot;file.bin&quot; yEnc (1/1)\""));
     }
 
     #[test]

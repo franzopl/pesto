@@ -28,6 +28,22 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   the merged release would need a different password per episode. An
   explicit `--password VALUE` also keeps behaving as before: reused verbatim
   by every entry in the run, `--each`/`--season`/`--watch` alike.
+- **A single-segment file's subject now always carries `(1/1)` instead of
+  omitting it, fixing an indexer grouping gap tracked in #68**: the yEnc
+  spec allows dropping the `(part/total)` trailer for a file that fits in
+  one article — the bare PAR2 index in a `--par2` release is the common
+  case — and `default_subject()` used to do exactly that. That left the
+  single-segment file's subject shaped differently from every multi-segment
+  sibling in the same release (`.rar`, each `.volNNN+MMM.par2`). Confirmed
+  live against Binsearch: some indexers' "collection cleaning" regexes key
+  off that trailer to recover a release's shared base name, so the
+  differently-shaped subject hashed the file into its own collection
+  instead of grouping it with the rest — a real release with `--compress`
+  went from "8 of 9 files grouped" (bare `.par2` excluded) to "9 of 9"
+  once every file emitted `(1/1)`/`(part/total)` uniformly. No downside:
+  `(1/1)` is still a spec-valid subject, and reading NZBs/subjects without
+  it (other tools, older pesto releases) is unaffected — `nzb::strip_part_suffix`
+  already handled both forms.
 
 ## [0.5.1] — 2026-08-03
 
