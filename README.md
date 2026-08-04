@@ -931,6 +931,7 @@ picked up automatically — no config change needed.
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
+| `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |

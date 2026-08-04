@@ -36,6 +36,7 @@ fn dry_run_config(file_counter: bool, par2_recovery_count: Option<usize>) -> Con
         par2_recovery_count,
         par2_memory_limit: Some(1_000_000_000),
         par2_temp_dir: None,
+        compress_temp_dir: None,
         par2_only: false,
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
