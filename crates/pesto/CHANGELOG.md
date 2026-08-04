@@ -12,6 +12,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **`--compress-volume-size` (`compression.volume_size`)**: splits the
+  archive built by `--compress` into multiple volumes (e.g. `500m`, `4g`)
+  instead of one monolithic file. Supported with `--compress=rar`
+  (`stem.partNN.rar`) and `--compress=7z` (`stem.7z.NNN`); rejected with
+  `--compress=zip` (7z's zip backend has no volume support). Added to test
+  whether smaller per-file article counts help indexer grouping on very
+  large releases — see issue #68.
+
 ## [0.5.7] — 2026-08-04
 
 ### Fixed

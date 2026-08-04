@@ -149,6 +149,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        compress_volume_size: None,
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,

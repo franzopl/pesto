@@ -58,6 +58,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        compress_volume_size: None,
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,

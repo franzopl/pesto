@@ -252,6 +252,14 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     compress_temp_dir: Option<String>,
 
+    /// Split the archive built by --compress into multiple volumes instead
+    /// of one monolithic file, e.g. `500m` or `4g`. Supported with
+    /// `--compress=rar` and `--compress=7z`; rejected with `--compress=zip`
+    /// (7z's zip backend has no volume support)
+    /// [config: compression.volume_size].
+    #[arg(long, value_name = "SIZE")]
+    compress_volume_size: Option<String>,
+
     /// Bundle files into a password-protected archive before posting. Optional
     /// PASSWORD: bare `--password` generates a random 24-character password
     /// and prints it; `--password=mypass` uses an explicit one. Implies
@@ -626,6 +634,7 @@ impl Cli {
                 .unwrap_or(None),
             compress_format: self.compress.clone(),
             compress_temp_dir: self.compress_temp_dir.clone(),
+            compress_volume_size: self.compress_volume_size.clone(),
             // None → no password (flag absent, or bare `--password` for
             // auto-random). Some(s) → an explicit password, reused verbatim
             // by every entry under --each/--season/--watch. The bare-flag
@@ -1055,20 +1064,21 @@ async fn run_single_upload(
             total_bytes: compress_input_bytes,
         });
 
-        let archive_path_for_poll =
-            tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
+        // Sum every file currently in the (per-run, exclusive) tmp_dir
+        // rather than watching one fixed name: with --compress-volume-size
+        // the compressor writes several `stem.partNN.rar` / `stem.7z.NNN`
+        // files instead of a single `stem.<ext>`, and this stays correct in
+        // both cases.
         let poll_tx = progress_tx.clone();
-        let poll_path = archive_path_for_poll.clone();
+        let poll_dir = tmp_dir.clone();
         let poll_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Ok(meta) = tokio::fs::metadata(&poll_path).await {
-                    let _ = poll_tx.send(pesto::progress::ProgressEvent::CompressProgress {
-                        bytes_written: meta.len(),
-                    });
-                }
+                let bytes_written = dir_or_file_size(&poll_dir);
+                let _ = poll_tx
+                    .send(pesto::progress::ProgressEvent::CompressProgress { bytes_written });
             }
         });
 
@@ -1076,6 +1086,7 @@ async fn run_single_upload(
         let compress_stem = archive_stem.clone();
         let compress_dest = tmp_dir.clone();
         let compress_pass = effective_password.clone();
+        let compress_volume_size = config.compress_volume_size.clone();
         let result = tokio::task::spawn_blocking(move || {
             compress(
                 &compress_inputs,
@@ -1083,6 +1094,7 @@ async fn run_single_upload(
                 &compress_dest,
                 format,
                 compress_pass.as_deref(),
+                compress_volume_size.as_deref(),
             )
         })
         .await
@@ -1094,16 +1106,17 @@ async fn run_single_upload(
         info!(elapsed_ms = compress_ms, phase = "compress", "phase done");
         timings.compress_ms = Some(compress_ms);
 
-        let archive_name = result
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        inputs = vec![pesto::walk::InputFile {
-            path: result.path,
-            name: archive_name,
-        }];
+        inputs = std::iter::once(result.path)
+            .chain(result.extra_paths)
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                pesto::walk::InputFile { path, name }
+            })
+            .collect();
 
         if let Some(pw) = &effective_password {
             let was_auto = params.archive_password_raw.as_deref() == Some("");
