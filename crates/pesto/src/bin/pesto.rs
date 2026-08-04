@@ -53,6 +53,7 @@ EXAMPLES:
   pesto --season ./Season01/      post each episode + a combined season NZB
   pesto --each --jobs 4 ./shows/  post up to 4 entries in parallel
   pesto --watch ./incoming/       watch a folder and post new entries
+  pesto --each --ext mkv ./shows/ post only .mkv per episode, skip .srt/etc.
 
 By default pesto posts under a freshly generated random identity. Set
 [posting].from (or --from) only if you need a fixed one.";
@@ -418,6 +419,15 @@ struct Cli {
     #[arg(long, value_name = "N", default_value = "1")]
     jobs: usize,
 
+    /// Restrict uploads to files with one of these extensions
+    /// (comma-separated, case-insensitive, without the dot: `--ext mkv,mp4`).
+    /// A directory argument is still walked as usual; only files that don't
+    /// match are dropped. Most useful with --each/--season/--watch to skip
+    /// subtitle, sample, or other extra files bundled next to the video.
+    /// Default: no filtering (every file is included).
+    #[arg(long, value_name = "EXT", value_delimiter = ',')]
+    ext: Vec<String>,
+
     /// Watch DIR for new entries and post each one automatically. A directory
     /// entry is posted as a single combined NZB by default, or split per
     /// top-level entry (one NZB per file) when --each or --season is also
@@ -673,6 +683,9 @@ struct UploadParams {
     /// Write a history record to history.jsonl after each successful upload.
     write_history: bool,
     renderer_opts: pesto::progress::RendererOptions,
+    /// Extensions from `--ext`, lowercased with any leading dot stripped.
+    /// Empty means no filtering.
+    ext_filter: Vec<String>,
 }
 
 /// The result of a single upload (one entry in `--each` / `--season`).
@@ -744,6 +757,7 @@ async fn run_single_upload(
     let mut timings = PhaseTimings::default();
 
     let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
+    apply_ext_filter(&mut inputs, &params.ext_filter, entry_label)?;
     let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
     // Snapshot the pre-compression file list: `inputs` gets overwritten below
     // with the single archive file when --compress is active, but hooks still
@@ -1558,14 +1572,56 @@ fn is_artifact_entry(path: &Path) -> bool {
         .is_some_and(|ext| ext == "nfo" || ext == "nzb")
 }
 
+/// Whether `path`'s extension is one of `ext_filter` (case-insensitive). An
+/// empty `ext_filter` matches everything (the `--ext` default: no filtering).
+fn matches_ext_filter(path: &Path, ext_filter: &[String]) -> bool {
+    if ext_filter.is_empty() {
+        return true;
+    }
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            ext_filter
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(ext))
+        })
+}
+
+/// Apply `--ext` to an already-expanded input list, in place. A no-op when
+/// `ext_filter` is empty. Errors out if the filter drops every input, so a
+/// mistyped extension (or an entry that is 100% subtitles/extras) fails
+/// loudly instead of silently posting nothing.
+fn apply_ext_filter(
+    inputs: &mut Vec<pesto::walk::InputFile>,
+    ext_filter: &[String],
+    entry_label: &str,
+) -> Result<()> {
+    if ext_filter.is_empty() {
+        return Ok(());
+    }
+    inputs.retain(|f| matches_ext_filter(&f.path, ext_filter));
+    if inputs.is_empty() {
+        anyhow::bail!(
+            "no files matching --ext {} found in `{entry_label}`",
+            ext_filter.join(",")
+        );
+    }
+    Ok(())
+}
+
 /// Enumerate top-level entries of `dir` (files and subdirectories), sorted by
 /// name using natural lexical ordering (so `E02` comes before `E10`).
-fn top_level_entries(dir: &Path) -> Result<Vec<PathBuf>> {
+///
+/// `ext_filter` (from `--ext`) drops non-matching *files*; subdirectories are
+/// always kept regardless of their name, since matching files may live inside
+/// them.
+fn top_level_entries(dir: &Path, ext_filter: &[String]) -> Result<Vec<PathBuf>> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading directory `{}`", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| !is_artifact_entry(p))
+        .filter(|p| p.is_dir() || matches_ext_filter(p, ext_filter))
         .collect();
     entries.sort_by(|a, b| {
         lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
@@ -1612,7 +1668,7 @@ async fn run_batch(
     for dir in dirs {
         let md = std::fs::metadata(dir).with_context(|| format!("reading `{}`", dir.display()))?;
         if md.is_dir() {
-            entries.extend(top_level_entries(dir)?);
+            entries.extend(top_level_entries(dir, &params.ext_filter)?);
         } else {
             // A plain file is its own "entry".
             entries.push(dir.clone());
@@ -1911,7 +1967,7 @@ async fn run_watch(
     // `done`: entries that have been successfully uploaded (or permanently failed).
     let mut done: HashSet<PathBuf> = HashSet::new();
     // Pre-populate done with whatever is already present so we don't re-post on startup.
-    if let Ok(existing) = top_level_entries(watch_dir) {
+    if let Ok(existing) = top_level_entries(watch_dir, &params.ext_filter) {
         for e in existing {
             done.insert(e);
         }
@@ -1980,7 +2036,7 @@ async fn run_watch(
             }
         }
 
-        let entries = match top_level_entries(watch_dir) {
+        let entries = match top_level_entries(watch_dir, &params.ext_filter) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("watch: error reading {}: {e}", watch_dir.display());
@@ -2532,6 +2588,11 @@ async fn main() -> Result<()> {
             bell: cli.bell || config.bell,
             plain: logs_to_stderr,
         },
+        ext_filter: cli
+            .ext
+            .iter()
+            .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
+            .collect(),
     });
 
     // Unified cancellation flag: one signal listener for the whole process.
@@ -3502,7 +3563,7 @@ mod tests {
         std::fs::write(dir.join("ep01.nfo"), b"x").unwrap();
         std::fs::write(dir.join("ep01.nzb"), b"x").unwrap();
 
-        let names: Vec<String> = top_level_entries(&dir)
+        let names: Vec<String> = top_level_entries(&dir, &[])
             .unwrap()
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -3510,6 +3571,73 @@ mod tests {
         assert_eq!(names, ["ep01.mkv"]);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn matches_ext_filter_is_case_insensitive_and_empty_means_everything() {
+        assert!(matches_ext_filter(Path::new("Show.MKV"), &["mkv".into()]));
+        assert!(matches_ext_filter(Path::new("Show.mkv"), &["MKV".into()]));
+        assert!(!matches_ext_filter(Path::new("Show.srt"), &["mkv".into()]));
+        assert!(matches_ext_filter(Path::new("Show.srt"), &[]));
+        assert!(!matches_ext_filter(Path::new("Show"), &["mkv".into()]));
+    }
+
+    #[test]
+    fn top_level_entries_filters_loose_files_by_ext_but_keeps_directories() {
+        let dir = std::env::temp_dir().join(format!(
+            "pesto_each_ext_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("Extras")).unwrap();
+        std::fs::write(dir.join("ep01.mkv"), b"x").unwrap();
+        std::fs::write(dir.join("ep01.srt"), b"x").unwrap();
+
+        let names: Vec<String> = top_level_entries(&dir, &["mkv".to_string()])
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // The loose .srt sibling is dropped; the subdirectory is kept even
+        // though "Extras" has no matching extension of its own, since a
+        // matching file could live inside it.
+        assert_eq!(names, ["ep01.mkv", "Extras"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_ext_filter_drops_non_matching_and_errors_when_nothing_left() {
+        let mut inputs = vec![
+            pesto::walk::InputFile {
+                path: PathBuf::from("ep01.mkv"),
+                name: "ep01.mkv".to_string(),
+            },
+            pesto::walk::InputFile {
+                path: PathBuf::from("ep01.srt"),
+                name: "ep01.srt".to_string(),
+            },
+        ];
+        apply_ext_filter(&mut inputs, &["mkv".to_string()], "entry").unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "ep01.mkv");
+
+        let mut only_subs = vec![pesto::walk::InputFile {
+            path: PathBuf::from("ep01.srt"),
+            name: "ep01.srt".to_string(),
+        }];
+        assert!(apply_ext_filter(&mut only_subs, &["mkv".to_string()], "entry").is_err());
+
+        // Empty filter is a no-op.
+        let mut untouched = vec![pesto::walk::InputFile {
+            path: PathBuf::from("ep01.srt"),
+            name: "ep01.srt".to_string(),
+        }];
+        apply_ext_filter(&mut untouched, &[], "entry").unwrap();
+        assert_eq!(untouched.len(), 1);
     }
 
     #[test]
