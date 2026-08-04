@@ -156,18 +156,55 @@ fn validate_volume_size(size: &str) -> Result<()> {
 /// Find the volume files `rar -v` produced for `archive_stem`, e.g.
 /// `stem.part01.rar`, `stem.part02.rar`, ... sorted in volume order (the
 /// zero-padded numbering rar generates sorts correctly as plain strings).
+///
+/// When the requested volume size is larger than the whole archive, rar
+/// decides a single volume is enough and falls back to writing the plain
+/// `stem.rar` (no `.partNN` suffix at all) instead — checked for as a
+/// fallback rather than an error.
 fn collect_rar_volumes(dest_dir: &Path, archive_stem: &str) -> Result<Vec<PathBuf>> {
     let prefix = format!("{archive_stem}.part");
     let volumes = list_matching(dest_dir, |name| {
         name.starts_with(&prefix) && name.ends_with(".rar")
     })?;
-    if volumes.is_empty() {
-        bail!(
-            "rar reported success but no `{archive_stem}.part*.rar` volumes were found in `{}`",
-            dest_dir.display()
-        );
+    if !volumes.is_empty() {
+        return Ok(volumes);
     }
-    Ok(volumes)
+    let single = dest_dir.join(format!("{archive_stem}.rar"));
+    if single.is_file() {
+        return Ok(vec![single]);
+    }
+    bail!(
+        "rar reported success but neither `{archive_stem}.part*.rar` volumes nor \
+         `{archive_stem}.rar` were found in `{}`",
+        dest_dir.display()
+    );
+}
+
+/// If `real_name` ends with a volume suffix this module's `compress()`
+/// produces (`.partNNN.rar` from rar, or `.NNN` after a `.7z`/`.zip` stem
+/// from 7z), return that suffix, e.g. `.part07.rar`. `None` for a
+/// single-file archive or a name unrelated to archive volumes.
+///
+/// Lets full-shared obfuscation (`poster::mod`) preserve the
+/// indexer-recognizable volume pattern on the wire instead of a generic
+/// numbered suffix — a `--compress-volume-size` release wouldn't group
+/// under `--obfuscate=full-shared` otherwise, since indexers key their
+/// "same release" grouping off this exact naming convention (issue #68).
+pub fn volume_suffix(real_name: &str) -> Option<&str> {
+    if let Some(rest) = real_name.strip_suffix(".rar") {
+        let part_at = rest.rfind(".part")?;
+        let digits = &rest[part_at + 5..];
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Some(&real_name[part_at..]);
+        }
+        return None;
+    }
+    let seven_zip_at = real_name.rfind(".7z.")?;
+    let digits = &real_name[seven_zip_at + 4..];
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(&real_name[seven_zip_at..]);
+    }
+    None
 }
 
 /// Find the volume files `7z -v` produced for `archive_name` (the full file
@@ -397,6 +434,63 @@ mod tests {
         let a = random_password();
         let b = random_password();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn volume_suffix_extracts_rar_part_pattern() {
+        assert_eq!(
+            volume_suffix("v0ZAlTJxqARhGwW4tH2.part07.rar"),
+            Some(".part07.rar")
+        );
+        assert_eq!(
+            volume_suffix("v0ZAlTJxqARhGwW4tH2.part001.rar"),
+            Some(".part001.rar")
+        );
+    }
+
+    #[test]
+    fn volume_suffix_extracts_7z_numeric_pattern() {
+        assert_eq!(volume_suffix("v0ZAlTJxqARhGwW4tH2.7z.001"), Some(".7z.001"));
+    }
+
+    #[test]
+    fn volume_suffix_is_none_for_unrelated_names() {
+        for name in [
+            "v0ZAlTJxqARhGwW4tH2.rar",
+            "v0ZAlTJxqARhGwW4tH2.7z",
+            "v0ZAlTJxqARhGwW4tH2.par2",
+            "v0ZAlTJxqARhGwW4tH2.vol000+001.par2",
+            "movie.partial.rar",
+            "movie.part.rar",
+        ] {
+            assert_eq!(volume_suffix(name), None, "expected `{name}` to be None");
+        }
+    }
+
+    #[test]
+    fn rar_volume_size_larger_than_content_falls_back_to_single_file() {
+        if find_binary("rar").is_none() {
+            eprintln!("skipping: rar CLI not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "pesto_compress_test_vol_fallback_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("input.bin");
+        std::fs::write(&src, vec![0u8; 1_000_000]).unwrap();
+
+        // Volume size (100m) far exceeds the 1MB input: rar decides one
+        // volume is enough and writes plain `stem.rar`, no `.partNN` suffix.
+        let result =
+            compress(&[src], "stem", &dir, ArchiveFormat::Rar, None, Some("100m")).unwrap();
+
+        assert!(result.path.exists());
+        assert_eq!(result.path.file_name().unwrap(), "stem.rar");
+        assert!(result.extra_paths.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
