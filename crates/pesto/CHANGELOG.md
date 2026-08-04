@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-08-04
+
 ### Added
 - **`--compress-volume-size` (`compression.volume_size`)**: splits the
   archive built by `--compress` into multiple volumes (e.g. `500m`, `4g`)
