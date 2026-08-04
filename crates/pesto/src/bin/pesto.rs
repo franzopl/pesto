@@ -274,25 +274,27 @@ struct Cli {
     /// `movie/<id>` or `tv/<id>` (`movie:<id>` / `tv:<id>` also accepted).
     /// When `--nzb-category` is not set, the category defaults to `movies`
     /// or `tv` accordingly. Also added as a line in the `.nfo` when `--nfo`
-    /// is set.
-    #[arg(long, value_name = "TYPE/ID")]
+    /// is set. Aliased as `--tmdb-id`.
+    #[arg(long, alias = "tmdb-id", value_name = "TYPE/ID")]
     tmdb: Option<String>,
 
     /// IMDb ID written to `<meta type="imdbid">` in the `.nzb`, e.g.
     /// `tt1234567`. The `tt` prefix is optional and added automatically
     /// (`133093` normalizes to `tt0133093`). Also added as a line in the
-    /// `.nfo` when `--nfo` is set.
-    #[arg(long, value_name = "ID")]
+    /// `.nfo` when `--nfo` is set. Aliased as `--imdb`.
+    #[arg(long, alias = "imdb", value_name = "ID")]
     imdb_id: Option<String>,
 
     /// TheTVDB ID written to `<meta type="tvdbid">` in the `.nzb`, e.g.
     /// `81189`. Also added as a line in the `.nfo` when `--nfo` is set.
-    #[arg(long, value_name = "ID")]
+    /// Aliased as `--tvdb`.
+    #[arg(long, alias = "tvdb", value_name = "ID")]
     tvdb_id: Option<String>,
 
     /// MyAnimeList ID written to `<meta type="malid">` in the `.nzb`, e.g.
     /// `1535`. Also added as a line in the `.nfo` when `--nfo` is set.
-    #[arg(long, value_name = "ID")]
+    /// Aliased as `--mal`.
+    #[arg(long, alias = "mal", value_name = "ID")]
     mal_id: Option<String>,
 
     /// `Date:` header for each article: `now` (current time), `random`
