@@ -481,6 +481,24 @@ Entries already present in the watched directory when `pesto` starts are ignored
 only new arrivals are posted. Completed entries are moved to `--watch-done` or
 deleted if `--watch-done` is not set.
 
+### `--ext` — restrict uploads to specific extensions
+
+```bash
+# Only post .mkv files: a subtitle sitting loose next to the video no longer
+# becomes its own release under --each/--watch, and a nested .srt is dropped
+# from an episode's upload instead of being bundled in
+pesto --each --ext mkv ./Season01/
+pesto --watch ./incoming/ --each --ext mkv
+
+# Comma-separate to allow more than one extension
+pesto --each --ext mkv,mp4 ./Season01/
+```
+
+`--ext` is a no-op by default (every file is included). It's most useful with
+`--each`/`--season`/`--watch`, where a downloaded release folder often mixes
+the video with subtitles, samples, or other extras you don't want posted as
+their own release or bundled into one.
+
 ---
 
 ## Reliability
@@ -942,6 +960,7 @@ picked up automatically — no config change needed.
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
 | `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |
 | `--watch-interval <SECS>` | — | `30` | Poll interval for `--watch` |
+| `--ext <EXT[,EXT...]>` | — | off | Only post files with these extensions (case-insensitive); drops non-matching top-level entries and files nested inside a directory |
 
 ---
 
