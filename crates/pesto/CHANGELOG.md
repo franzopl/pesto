@@ -12,6 +12,17 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **`--par2-before-upload` progress display double-counted data segments,
+  running the percentage/segment count past 100%.** The generation-only
+  pre-pass (`producer(.., None, .., 0)`) reused the same code path
+  `--par2-only` takes, which fakes a `SegmentDone` per data article since
+  `--par2-only` never posts anything for real. Under `--par2-before-upload`
+  the data files *do* get posted for real afterward, so every data segment
+  was counted twice — once fake during generation, once real during
+  posting — while the actual upload and NZB output were unaffected. Fake
+  progress is now gated on `--par2-only` specifically.
+
 ## [0.5.6] — 2026-08-04
 
 ### Fixed

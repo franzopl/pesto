@@ -1319,8 +1319,16 @@ fn feed_par2_slice(
 /// independently (slice boundaries reset at every file boundary), matching the
 /// behaviour of the standard path.
 ///
-/// Emits `SegmentDone` events in `article_size` increments so the progress bar
-/// advances at the same cadence as the standard path.
+/// Emits `SegmentDone` events in `article_size` increments so the progress
+/// bar advances at the same cadence as the standard path — but only for a
+/// genuine `--par2-only` run (`shared.config.par2_only`), where this is the
+/// *only* source of data-file progress since nothing is ever posted. This
+/// same `tx_opt: None` path is also used by `--par2-before-upload`'s
+/// generation-only pre-pass (`producer(.., None, .., 0)` in
+/// `post_files_with_progress_and_cancel`), where the data files *do* get
+/// posted for real afterward (`post_pregenerated_release`) — faking their
+/// progress here too would double-count every data segment once the real
+/// `SegmentDone` events arrive later.
 async fn par2_only_ingest(
     metas: &[Arc<FileMeta>],
     worker: &Par2Worker,
@@ -1379,14 +1387,18 @@ async fn par2_only_ingest(
             unsafe { slice_buf.set_len(base + to_read) };
             remaining -= to_read;
 
-            // Emit SegmentDone for each complete article worth of bytes consumed.
+            // Emit SegmentDone for each complete article worth of bytes
+            // consumed — only when this data will never actually be posted
+            // (see the doc comment above).
             let consumed = meta.size as usize - remaining;
             while credited + article_size <= consumed {
-                shared.emit(ProgressEvent::SegmentDone {
-                    file: meta.real_name.clone(),
-                    bytes: article_size as u64,
-                    ok: true,
-                });
+                if shared.config.par2_only {
+                    shared.emit(ProgressEvent::SegmentDone {
+                        file: meta.real_name.clone(),
+                        bytes: article_size as u64,
+                        ok: true,
+                    });
+                }
                 credited += article_size;
             }
 
@@ -1403,7 +1415,7 @@ async fn par2_only_ingest(
 
         // Credit the last partial article of this file.
         let leftover = meta.size as usize - credited;
-        if leftover > 0 {
+        if leftover > 0 && shared.config.par2_only {
             shared.emit(ProgressEvent::SegmentDone {
                 file: meta.real_name.clone(),
                 bytes: leftover as u64,

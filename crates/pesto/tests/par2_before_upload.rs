@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use pesto::config::{Config, ObfuscateMode};
 use pesto::poster::{post_files, post_files_with_progress};
+use pesto::progress::ProgressEvent;
 use pesto::walk::expand_inputs;
 
 /// Accept-all mock NNTP server that records the `Subject:` header of every
@@ -465,4 +466,59 @@ async fn file_counter_numbering_is_a_clean_bijection_under_multi_pass() {
         let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// Regression test for a progress-tracking bug: the generation-only
+/// `producer(.., None, .., 0)` pre-pass (see `post_files_with_progress_and_cancel`)
+/// reuses the same `tx_opt: None` path `--par2-only` takes, which fakes a
+/// `SegmentDone` per data article since `--par2-only` never posts anything
+/// for real. Under `--par2-before-upload` the data *does* get posted for
+/// real afterward (`post_pregenerated_release`), so without a fix each data
+/// segment would get double-counted — visible on screen as `done_segments`
+/// (and the progress percentage) running past `total_segments`.
+#[tokio::test(flavor = "multi_thread")]
+async fn par2_before_upload_does_not_double_count_data_segment_progress() {
+    let addr = spawn_recording_server(Arc::new(Mutex::new(Vec::new())));
+    let dir = std::env::temp_dir().join(format!(
+        "pesto_par2_before_upload_progress_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("movie.bin");
+    std::fs::write(&input, content(4, 8192 * 40)).unwrap();
+
+    let cfg = config(addr, true);
+    let expected_data_segments = (8192u64 * 40).div_ceil(cfg.article_size as u64);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+    let handle =
+        tokio::spawn(
+            async move { post_files_with_progress(&cfg, &inputs, Some(tx), None, None).await },
+        );
+
+    let mut data_segment_done_count: u64 = 0;
+    while let Some(ev) = rx.recv().await {
+        if let ProgressEvent::SegmentDone { file, .. } = ev {
+            if file == "movie.bin" {
+                data_segment_done_count += 1;
+            }
+        }
+    }
+
+    let outcome = handle.await.unwrap().unwrap();
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
+    assert_eq!(
+        data_segment_done_count, expected_data_segments,
+        "movie.bin should get exactly one SegmentDone per real segment, not double-counted \
+         by the generation-only pre-pass's fake --par2-only-style progress reporting"
+    );
+
+    let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
+    let _ = std::fs::remove_dir_all(&dir);
 }
