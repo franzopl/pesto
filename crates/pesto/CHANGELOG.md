@@ -21,6 +21,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   whether smaller per-file article counts help indexer grouping on very
   large releases — see issue #68.
 
+### Fixed
+- **`--compress-volume-size` archive parts lost their volume suffix under
+  `--obfuscate=full-shared`, breaking indexer grouping entirely.**
+  Full-shared's per-file wire naming renamed every extra data file to a
+  generic `prefix-NN.ext` suffix — fine for unrelated files (a season
+  pack), but it discarded the `.partNN.rar` / `.NNN` pattern indexers key
+  their "same release" grouping off of. A live test posted 10 rar volumes
+  that each showed up as its own disconnected 1-file release. The volume
+  suffix is now preserved verbatim onto the shared prefix instead.
+
 ## [0.5.7] — 2026-08-04
 
 ### Fixed
