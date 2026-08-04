@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-08-04
+
 ### Fixed
 - **`--nfo` no longer looks hung while `bdinfo` scans a large Blu-ray disc.**
   NFO generation ran `bdinfo`/`mediainfo` synchronously with no output in
