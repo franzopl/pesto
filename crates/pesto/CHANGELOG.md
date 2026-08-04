@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-08-04
+
 ### Fixed
 - **`--par2-before-upload` progress display double-counted data segments,
   running the percentage/segment count past 100%.** The generation-only
