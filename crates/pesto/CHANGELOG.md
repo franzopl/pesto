@@ -12,6 +12,24 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **`--nfo` no longer looks hung while `bdinfo` scans a large Blu-ray disc.**
+  NFO generation ran `bdinfo`/`mediainfo` synchronously with no output in
+  between, which on a big disc could sit silent long enough to look like the
+  process had frozen. Prints a message before starting and a heartbeat every
+  10 seconds while it works.
+
+### Changed
+- **`--par2-before-upload` no longer reserves PAR2 memory budget for
+  connections that aren't open yet, and no longer opens them during
+  generation at all.** Previously the connection pool was created (and its
+  8 MiB/connection overhead reserved against `--memory-limit`) before PAR2
+  generation started, even though nothing gets posted until generation is
+  fully done — wasted budget that could otherwise mean fewer read passes,
+  and idle connections sitting open (and needing keepalives) for however
+  long generation takes. The pool now spins up only once generation has
+  finished.
+
 ## [0.5.5] — 2026-08-04
 
 ### Added

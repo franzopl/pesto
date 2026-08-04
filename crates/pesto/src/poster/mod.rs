@@ -765,6 +765,13 @@ pub async fn post_files_with_progress_and_cancel(
     static RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let run_id = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
 
+    // Computed once, unconditionally, and reused below for `total_files`,
+    // `par2_bytes_hint`, and the `--par2-before-upload` decision.
+    // `par2_geometry` is metadata-only (file sizes + config, no I/O — see
+    // its doc comment) so this is exact, not an estimate, and safe to
+    // compute before `producer` actually runs the encoder.
+    let (par2_slice_size, _total_slices, recovery_count) = par2_geometry(&metas, config);
+
     // Total release file count for `--file-counter`: data files, plus (when
     // there's any recovery data to write) the index file and every volume
     // `plan_volumes` will produce. Gated on `recovery_count > 0`, exactly
@@ -772,12 +779,8 @@ pub async fn post_files_with_progress_and_cancel(
     // `config.par2 > 0` directly, since `par2_geometry` can still land on
     // zero recovery blocks with PAR2 "on" (e.g. a tiny release where
     // `total_slices * pct / 100` floors to 0), in which case `producer`
-    // never writes an index or volumes at all. `par2_geometry` is
-    // metadata-only (file sizes + config, no I/O — see its doc comment) so
-    // this is exact, not an estimate, and safe to compute before `producer`
-    // actually runs the encoder.
+    // never writes an index or volumes at all.
     let total_files: u32 = if config.file_counter {
-        let (_, _, recovery_count) = par2_geometry(&metas, config);
         let par2_file_count = if recovery_count > 0 {
             1 + layout::plan_volumes(recovery_count as u32).len()
         } else {
@@ -835,8 +838,7 @@ pub async fn post_files_with_progress_and_cancel(
                      // once PAR2 encoding finishes and its volumes get queued for posting.
     let (par2_bytes_hint, par2_segments_hint) =
         if config.par2 > 0 && !config.par2_only && !config.dry_run {
-            let (slice_size, _total_slices, recovery_count) = par2_geometry(&metas, config);
-            let recovery_bytes = recovery_count as u64 * slice_size as u64;
+            let recovery_bytes = recovery_count as u64 * par2_slice_size as u64;
             let packet_overhead = recovery_count as u64 * packet::HEADER_LEN as u64;
             // Small fixed overhead for the index file's Main/FileDesc/IFSC
             // packets — negligible next to recovery_bytes, not worth
@@ -905,6 +907,31 @@ pub async fn post_files_with_progress_and_cancel(
         })
     };
 
+    // `--par2-before-upload`: when there's real recovery data to generate,
+    // run PAR2 generation to completion *before* opening any NNTP
+    // connection. `producer(.., None, .., 0)` writes every index/volume
+    // file to `par2_dir` without posting (the `tx_opt: None` path already
+    // used by `--par2-only`), and `active_connections: 0` means the PAR2
+    // memory budget isn't shrunk to make room for connections that don't
+    // exist yet — the connection pool and its workers only spin up further
+    // down, once this is done. `post_pregenerated_release` then posts the
+    // data files followed by the files this call already wrote, back to
+    // back with no gap. See `ROADMAP.md` and GitHub issue #68.
+    let will_defer = config.par2_before_upload && recovery_count > 0 && worker_count > 0;
+    let par2_dir = par2_temp_dir(config.par2_temp_dir.as_deref(), run_id);
+    let mut failure_reason: Option<String> = None;
+    if will_defer {
+        if let Err(e) = producer(metas.clone(), None, shared.clone(), 0).await {
+            let description = format!("producer error: {e:#}");
+            error!(error = %e, "producer error");
+            shared.cancelled.store(true, Ordering::Relaxed);
+            shared.emit(ProgressEvent::Failed {
+                description: description.clone(),
+            });
+            failure_reason = Some(description);
+        }
+    }
+
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
@@ -942,20 +969,41 @@ pub async fn post_files_with_progress_and_cancel(
         None
     };
 
-    // Producer runs in this thread
-    let mut failure_reason: Option<String> = None;
-    if let Err(e) = producer(metas, tx_opt, shared.clone()).await {
-        let description = format!("producer error: {e:#}");
-        // `Failed` alone only reaches `--output-format json` consumers; log
-        // it too so the reason survives in the session log file even when
-        // the human-readable renderer (which only shows it via `Failed`,
-        // see `ui::terminal`) is what's on screen.
-        error!(error = %e, "producer error");
-        shared.cancelled.store(true, Ordering::Relaxed);
-        shared.emit(ProgressEvent::Failed {
-            description: description.clone(),
-        });
-        failure_reason = Some(description);
+    // Producer (or, when PAR2 was already generated above, the
+    // already-generated-files poster) runs in this thread. Skipped entirely
+    // if the generation phase above already failed — nothing valid to post.
+    if failure_reason.is_none() {
+        let result = if will_defer {
+            let result = match tx_opt.as_ref() {
+                Some(tx) => {
+                    post_pregenerated_release(&metas, &par2_dir, recovery_count, tx, &shared).await
+                }
+                None => Ok(()),
+            };
+            // Unlike `producer`, which owns (and so drops) `tx_opt` itself,
+            // `post_pregenerated_release` only borrows `tx` — drop the real
+            // owner explicitly now that posting is done. Without this the
+            // channel never closes, `rx.recv()` in each worker never sees
+            // the end of the stream, and the join loop below hangs forever
+            // waiting for workers that are just idling.
+            drop(tx_opt);
+            result
+        } else {
+            producer(metas, tx_opt, shared.clone(), total_conns).await
+        };
+        if let Err(e) = result {
+            let description = format!("producer error: {e:#}");
+            // `Failed` alone only reaches `--output-format json` consumers; log
+            // it too so the reason survives in the session log file even when
+            // the human-readable renderer (which only shows it via `Failed`,
+            // see `ui::terminal`) is what's on screen.
+            error!(error = %e, "producer error");
+            shared.cancelled.store(true, Ordering::Relaxed);
+            shared.emit(ProgressEvent::Failed {
+                description: description.clone(),
+            });
+            failure_reason = Some(description);
+        }
     }
 
     for handle in handles {
@@ -1505,6 +1553,14 @@ async fn producer(
     metas: Vec<Arc<FileMeta>>,
     tx_opt: Option<tokio::sync::mpsc::Sender<PostTask>>,
     shared: Arc<Shared>,
+    // Connections actually competing for RAM *right now*, used to size the
+    // PAR2 memory budget (see `connection_overhead_reserve`) — normally
+    // `shared.config.total_connections()`, but the caller passes `0` for a
+    // `--par2-before-upload` generation-only call (`tx_opt: None`), since no
+    // connection pool exists yet at that point (see
+    // `post_files_with_progress_and_cancel`): reserving RAM for connections
+    // that aren't open yet would just force more read passes than necessary.
+    active_connections: usize,
 ) -> Result<()> {
     let article_size = shared.config.article_size;
 
@@ -1543,19 +1599,6 @@ async fn producer(
         "PAR2 geometry"
     );
 
-    // `--par2-before-upload`: when there's actual recovery data to generate,
-    // suppress data-article and PAR2-file posting during the encode pass(es)
-    // below — every pass just reads/encodes, nothing goes out over the wire —
-    // then post everything (data files, then the already-written index and
-    // volumes) back to back once generation is fully done. With
-    // `recovery_count == 0` there's nothing to defer around, so posting stays
-    // interleaved as usual (matches the no-PAR2 case already being a no-op
-    // for the interleaved path). Also gated on `tx_opt` actually being a
-    // posting channel — `--par2-only` already never posts (`tx_opt` is
-    // `None`), so there is nothing to defer there either.
-    let defer_data_posting =
-        shared.config.par2_before_upload && recovery_count > 0 && tx_opt.is_some();
-
     // Auto-detect safe RAM limit if not specified (70% of available RAM).
     // `available_memory()` reports the host's RAM and ignores cgroup/container
     // limits, so on a memory-limited container it can report far more than is
@@ -1574,8 +1617,7 @@ async fn producer(
     } else {
         parmesan::performance_core_count()
     };
-    let overhead_reserve =
-        connection_overhead_reserve(shared.config.total_connections(), reserve_threads);
+    let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
     let as_budget = address_space_budget(overhead_reserve);
     let memory_limit = match shared.config.par2_memory_limit {
         Some(limit) => {
@@ -1591,7 +1633,7 @@ async fn producer(
                         crate::progress::format_size(address_space_limit().unwrap_or_default()),
                         crate::progress::format_size(budget),
                         crate::progress::format_size(overhead_reserve),
-                        shared.config.total_connections(),
+                        active_connections,
                         reserve_threads,
                     );
                 }
@@ -1812,7 +1854,7 @@ async fn producer(
                     }
 
                     i += 1;
-                    if pass_idx == 0 && !defer_data_posting {
+                    if pass_idx == 0 {
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
@@ -1845,10 +1887,7 @@ async fn producer(
                             });
                         }
                     } else {
-                        // Subsequent pass, or `--par2-before-upload` deferring
-                        // pass 0's data articles until PAR2 is fully generated
-                        // (posted afterward by `post_data_files`): buffer no
-                        // longer needed here, return it to the pool.
+                        // Subsequent pass: buffer no longer needed; return to pool.
                         shared.release_buffer(buf);
                     }
                 }
@@ -1977,31 +2016,23 @@ async fn producer(
                 let index_name = layout::index_name(par2_base(&metas[0].real_name));
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
-                // `defer_data_posting`: don't queue the index file yet — it
-                // (and every volume below) gets posted after the fact by the
-                // `post_data_files` + pre-generated-file block at the end of
-                // this function, once every pass has finished and PAR2
-                // generation is fully done.
                 if let Some(tx) = &tx_opt {
-                    if !defer_data_posting {
-                        // In `FullShared` mode, root the wire name at the release
-                        // prefix instead of the (possibly real) on-disk base name,
-                        // so this index file groups with the rest of the release.
-                        let wire_override =
-                            shared.release_prefix.as_deref().map(layout::index_name);
-                        // The index file is the release's first file after the
-                        // data files — see `Shared::total_files`'s doc comment.
-                        let file_index = metas.len() as u32 + 1;
-                        push_par2_file(
-                            &index_path,
-                            index_name,
-                            wire_override,
-                            file_index,
-                            &shared,
-                            tx,
-                        )
-                        .await?;
-                    }
+                    // In `FullShared` mode, root the wire name at the release
+                    // prefix instead of the (possibly real) on-disk base name,
+                    // so this index file groups with the rest of the release.
+                    let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
+                    // The index file is the release's first file after the
+                    // data files — see `Shared::total_files`'s doc comment.
+                    let file_index = metas.len() as u32 + 1;
+                    push_par2_file(
+                        &index_path,
+                        index_name,
+                        wire_override,
+                        file_index,
+                        &shared,
+                        tx,
+                    )
+                    .await?;
                 }
             }
 
@@ -2036,24 +2067,15 @@ async fn producer(
 
                 if slice.exponent == vol.first + vol.count - 1 {
                     if let Some(tx) = &tx_opt {
-                        if !defer_data_posting {
-                            let wire_override = shared
-                                .release_prefix
-                                .as_deref()
-                                .map(|prefix| layout::volume_name(prefix, *vol));
-                            // Volumes follow the data files and the index file
-                            // (+1), in `plan_volumes`' order (+vol_idx).
-                            let file_index = metas.len() as u32 + 2 + vol_idx as u32;
-                            push_par2_file(
-                                &vol_path,
-                                vol_name,
-                                wire_override,
-                                file_index,
-                                &shared,
-                                tx,
-                            )
+                        let wire_override = shared
+                            .release_prefix
+                            .as_deref()
+                            .map(|prefix| layout::volume_name(prefix, *vol));
+                        // Volumes follow the data files and the index file
+                        // (+1), in `plan_volumes`' order (+vol_idx).
+                        let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+                        push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
                             .await?;
-                        }
                     }
                 }
             }
@@ -2065,50 +2087,56 @@ async fn producer(
         }
     }
 
-    // `--par2-before-upload`: PAR2 generation (every pass, above) is now
-    // fully done and every index/volume file sits on disk in `par2_dir` —
-    // post the data files, then those already-generated PAR2 files, back to
-    // back. Nothing above this point put anything on the wire for this
-    // release.
-    if defer_data_posting {
-        if let Some(tx) = tx_opt.as_ref() {
-            if shared.cancelled.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            post_data_files(&metas, tx, &shared).await?;
+    Ok(())
+}
 
-            let par2_dir = par2_dir.as_ref().expect(
-                "par2_dir is set whenever recovery_count > 0, which defer_data_posting requires",
-            );
-
-            let index_name = layout::index_name(par2_base(&metas[0].real_name));
-            let index_path = par2_dir.join(&index_name);
-            let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-            let file_index = metas.len() as u32 + 1;
-            push_par2_file(
-                &index_path,
-                index_name,
-                wire_override,
-                file_index,
-                &shared,
-                tx,
-            )
-            .await?;
-
-            let volumes = layout::plan_volumes(recovery_count as u32);
-            for (vol_idx, vol) in volumes.iter().enumerate() {
-                let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
-                let vol_path = par2_dir.join(&vol_name);
-                let wire_override = shared
-                    .release_prefix
-                    .as_deref()
-                    .map(|prefix| layout::volume_name(prefix, *vol));
-                let file_index = metas.len() as u32 + 2 + vol_idx as u32;
-                push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx).await?;
-            }
-        }
+/// Posts a release whose PAR2 index/volumes were already fully generated by
+/// an earlier `producer(metas, None, shared, 0)` call — see
+/// `--par2-before-upload` in `post_files_with_progress_and_cancel`: that call
+/// writes every index/volume file to `par2_dir` without posting anything
+/// (`tx_opt: None` takes the `par2_only_ingest` path). This posts the data
+/// files, then reads back and posts the already-written index and every
+/// volume, so the whole release goes out back to back with no gap. Volume
+/// file names/`file_index`es are recomputed from `recovery_count` alone
+/// (via `layout::plan_volumes`), matching exactly what the generation call
+/// already wrote — no I/O needed to know what's there.
+async fn post_pregenerated_release(
+    metas: &[Arc<FileMeta>],
+    par2_dir: &Path,
+    recovery_count: usize,
+    tx: &tokio::sync::mpsc::Sender<PostTask>,
+    shared: &Arc<Shared>,
+) -> Result<()> {
+    if shared.cancelled.load(Ordering::Relaxed) {
+        return Ok(());
     }
+    post_data_files(metas, tx, shared).await?;
 
+    let index_name = layout::index_name(par2_base(&metas[0].real_name));
+    let index_path = par2_dir.join(&index_name);
+    let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
+    let file_index = metas.len() as u32 + 1;
+    push_par2_file(
+        &index_path,
+        index_name,
+        wire_override,
+        file_index,
+        shared,
+        tx,
+    )
+    .await?;
+
+    let volumes = layout::plan_volumes(recovery_count as u32);
+    for (vol_idx, vol) in volumes.iter().enumerate() {
+        let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
+        let vol_path = par2_dir.join(&vol_name);
+        let wire_override = shared
+            .release_prefix
+            .as_deref()
+            .map(|prefix| layout::volume_name(prefix, *vol));
+        let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+        push_par2_file(&vol_path, vol_name, wire_override, file_index, shared, tx).await?;
+    }
     Ok(())
 }
 
@@ -2152,13 +2180,13 @@ fn spawn_double_buffered_reader(
     (read_rx, reader_handle)
 }
 
-/// Posts every data file's articles with no PAR2 involvement. Used by
-/// `--par2-before-upload` after PAR2 generation has already fully completed
-/// (see the `defer_data_posting` branch in `producer`), to post the data
-/// files immediately before the already-generated PAR2 index/volumes so the
-/// whole release goes out back to back with no gap. Mirrors the data-posting
-/// half of `producer`'s interleaved per-file loop, minus the PAR2
-/// accumulation, which is unnecessary here since PAR2 is already on disk.
+/// Posts every data file's articles with no PAR2 involvement. Called from
+/// `post_pregenerated_release` (`--par2-before-upload`, after PAR2
+/// generation has already fully completed) to post the data files
+/// immediately before the already-generated PAR2 index/volumes so the whole
+/// release goes out back to back with no gap. Mirrors the data-posting half
+/// of `producer`'s interleaved per-file loop, minus the PAR2 accumulation,
+/// which is unnecessary here since PAR2 is already on disk.
 async fn post_data_files(
     metas: &[Arc<FileMeta>],
     tx: &tokio::sync::mpsc::Sender<PostTask>,

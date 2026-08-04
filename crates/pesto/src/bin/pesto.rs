@@ -1448,7 +1448,26 @@ async fn run_single_upload(
                     .map(|d| d.join(format!("{entry_label}.nfo")))
             });
         if let Some(ref nfo_out) = base {
-            match pesto::nfo::generate(entry_paths) {
+            // `nfo::generate` blocks on `bdinfo`/`mediainfo`, which can take
+            // a while on a large Blu-ray disc — long enough that, with no
+            // output in between, it looks like the process hung. Run it on
+            // a blocking-pool thread and print a heartbeat every 10s so
+            // there's always something on screen while it works.
+            println!(
+                "generating nfo (running bdinfo — this can take a while on large Blu-ray discs)..."
+            );
+            let nfo_paths = entry_paths.to_vec();
+            let nfo_handle = tokio::task::spawn_blocking(move || pesto::nfo::generate(&nfo_paths));
+            tokio::pin!(nfo_handle);
+            let nfo_content = loop {
+                tokio::select! {
+                    res = &mut nfo_handle => break res.context("nfo generation task panicked")?,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                        println!("... still generating nfo, please wait");
+                    }
+                }
+            };
+            match nfo_content {
                 Some(content) => match pesto::nfo::write(
                     nfo_out,
                     &format!("{}{content}", nfo_metadata_header(config)),

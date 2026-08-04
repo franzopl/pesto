@@ -570,14 +570,25 @@ before, NZBIndex/Binsearch's own codebase is unconfirmed (proprietary) — this 
 indexer in the same family, not proof for those two specifically.
 
 Rather than ask users to tune `--memory-limit` per release, `--par2-before-upload` (`posting.par2_before_upload`,
-default off) makes pesto avoid the gap itself: when set, `producer` suppresses all data-article and PAR2-file
-posting during the encode pass(es) — every pass just reads and encodes — then posts the data files followed by the
-already-generated index/volumes once generation is fully done, so the whole release goes out back to back with no
-gap regardless of how many passes generation needed. The default (interleaved) pipeline is unchanged for the common
-single-pass case. No special `--resume` handling was needed: `producer` already regenerates PAR2 deterministically
-from scratch on every resumed run (same bytes, given the same input/config and the already-reused `archive_stem`/
-`release_prefix`), and the existing per-article resume check at the worker level — not `producer` — is what skips
-already-posted segments, generically, regardless of when in the run they get queued.
+default off) makes pesto avoid the gap itself: when set, `post_files_with_progress_and_cancel` runs `producer` once
+with `tx_opt: None` to generate every PAR2 file first — no connection pool exists yet at this point, nothing is
+posted — then spins up the real connection pool and calls `post_pregenerated_release` to post the data files
+followed by the already-generated index/volumes, back to back with no gap regardless of how many read passes
+generation needed. The default (interleaved) pipeline, where `producer` computes PAR2 concurrently with posting in
+a single pass, is unchanged for the common case. No special `--resume` handling was needed: PAR2 generation is
+already redone deterministically on every resumed run (same bytes, given the same input/config and the
+already-reused `archive_stem`/`release_prefix`), and the existing per-article resume check at the worker level —
+not `producer` — is what skips already-posted segments, generically, regardless of when in the run they get queued.
+
+**Follow-up — the generation phase also stopped reserving RAM (and opening connections) for a pool that doesn't
+exist yet.** `producer`'s PAR2 memory-budget calculation reserves ~8 MiB per configured connection
+(`connection_overhead_reserve`) to leave room for their TLS/article buffers under load — a real cost when
+connections are actively posting, but dead weight during `--par2-before-upload`'s generation phase, where nothing
+is posted yet. Worse, the connection pool used to get created *before* generation started at all, so those
+connections sat open and idle (needing keepalives) for however long generation took. `producer` now takes an
+explicit `active_connections` parameter instead of reading `shared.config.total_connections()` directly, and
+`post_files_with_progress_and_cancel` passes `0` for the generation-only call — real budget back for PAR2, one
+fewer read pass on RAM-constrained hosts — and only builds the actual connection pool once generation is done.
 
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
