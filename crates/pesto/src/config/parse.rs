@@ -245,6 +245,7 @@ impl Config {
                     }
                 }),
             compress_password: cli.compress_password,
+            compress_volume_size: cli.compress_volume_size.or(file.compression.volume_size),
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: {

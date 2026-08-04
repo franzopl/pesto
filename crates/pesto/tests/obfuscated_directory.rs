@@ -41,6 +41,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        compress_volume_size: None,
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,

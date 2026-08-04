@@ -300,6 +300,11 @@ pub struct CompressionSection {
     /// on a different filesystem — with less free space or a stricter
     /// quota — than the destination disk.
     pub temp_dir: Option<String>,
+    /// Split the archive into multiple volumes instead of one monolithic
+    /// file, e.g. `"500m"` or `"4g"`. Supported with `format = "rar"` and
+    /// `format = "7z"`; rejected with `"zip"` (7z's zip backend has no
+    /// volume support). See [`crate::compress::compress`].
+    pub volume_size: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -361,6 +366,7 @@ pub struct Overrides {
     pub compress_format: Option<String>,
     pub compress_temp_dir: Option<String>,
     pub compress_password: Option<String>,
+    pub compress_volume_size: Option<String>,
     pub nzb_name: Option<String>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
@@ -447,6 +453,7 @@ pub struct Config {
     /// `std::env::temp_dir()`.
     pub compress_temp_dir: Option<PathBuf>,
     pub compress_password: Option<String>,
+    pub compress_volume_size: Option<String>,
     pub nzb_name: Option<String>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,

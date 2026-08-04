@@ -137,6 +137,7 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        compress_volume_size: None,
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,

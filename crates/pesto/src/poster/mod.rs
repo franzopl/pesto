@@ -653,18 +653,29 @@ pub async fn post_files_with_progress_and_cancel(
                     (wn.clone(), wn, from)
                 } else {
                     let prefix = release_prefix.as_deref().unwrap_or_default();
-                    let ext = Path::new(&real_name)
-                        .extension()
-                        .map(|e| format!(".{}", e.to_string_lossy()))
-                        .unwrap_or_default();
-                    // A single-file release (the common case: one archive, or
-                    // one loose file) keeps a bare `prefix.ext`; multiple
-                    // files get a sequential suffix so they stay distinct
-                    // while still grouping under the same prefix.
-                    let name = if files.len() == 1 {
-                        format!("{prefix}{ext}")
+                    // A `--compress-volume-size` archive part carries a
+                    // volume suffix (`.partNN.rar`, `.7z.NNN`) that indexers
+                    // key their "same release" grouping off of — preserve it
+                    // verbatim instead of the generic numbered suffix below,
+                    // or the release fails to group under full-shared
+                    // obfuscation (issue #68).
+                    let name = if let Some(suffix) = crate::compress::volume_suffix(&real_name) {
+                        format!("{prefix}{suffix}")
                     } else {
-                        format!("{prefix}-{:02}{ext}", idx + 1)
+                        let ext = Path::new(&real_name)
+                            .extension()
+                            .map(|e| format!(".{}", e.to_string_lossy()))
+                            .unwrap_or_default();
+                        // A single-file release (the common case: one archive,
+                        // or one loose file) keeps a bare `prefix.ext`;
+                        // multiple unrelated files get a sequential suffix so
+                        // they stay distinct while still grouping under the
+                        // same prefix.
+                        if files.len() == 1 {
+                            format!("{prefix}{ext}")
+                        } else {
+                            format!("{prefix}-{:02}{ext}", idx + 1)
+                        }
                     };
                     (name.clone(), name, from)
                 }

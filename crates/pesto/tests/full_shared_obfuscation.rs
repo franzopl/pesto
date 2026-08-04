@@ -46,6 +46,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        compress_volume_size: None,
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,
@@ -220,6 +221,58 @@ async fn full_shared_obfuscation_single_file_has_no_suffix() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+#[tokio::test]
+async fn full_shared_obfuscation_preserves_rar_volume_suffix() {
+    // Regression test for issue #68: `--compress-volume-size` splits an
+    // archive into `stem.partNN.rar` volumes, which indexers key their
+    // "same release" grouping off of. Full-shared naming must preserve that
+    // exact suffix on the wire instead of collapsing it to a generic `-NN`
+    // suffix, or the release fails to group.
+    let root =
+        std::env::temp_dir().join(format!("pesto_full_shared_rar_vol_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let vol_names = ["stem.part01.rar", "stem.part02.rar", "stem.part03.rar"];
+    let inputs: Vec<pesto::walk::InputFile> = vol_names
+        .iter()
+        .map(|name| {
+            let path = root.join(name);
+            std::fs::write(&path, vec![0x5Au8; 10_000]).unwrap();
+            pesto::walk::InputFile {
+                path,
+                name: name.to_string(),
+            }
+        })
+        .collect();
+
+    let config = dry_run_config(ObfuscateMode::FullShared);
+    let outcome = post_files(&config, &inputs).await.unwrap();
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
+
+    let prefix = shared_prefix(&outcome.segments[0].subject_name);
+    for real_name in vol_names {
+        let seg = outcome
+            .segments
+            .iter()
+            .find(|s| s.file_name == real_name)
+            .unwrap_or_else(|| panic!("no segment for `{real_name}`"));
+        let expected_suffix = &real_name["stem".len()..];
+        assert_eq!(
+            seg.subject_name,
+            format!("{prefix}{expected_suffix}"),
+            "expected the `.partNN.rar` suffix preserved verbatim, got `{}`",
+            seg.subject_name
+        );
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
 // ── Real post with PAR2 enabled: the archive and its PAR2 set must share ──
 // ── the same wire prefix, which is the exact grouping problem issue #58 ──
 // ── reports against plain `full`. ──────────────────────────────────────────
@@ -344,6 +397,7 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
         upload_rate: 0,
         compress_format: None,
         compress_password: None,
+        compress_volume_size: None,
         nzb_name: None,
         nzb_password: None,
         nzb_category: None,

@@ -106,20 +106,23 @@ pub async fn run_upload(
             },
         );
 
-        // Poll archive size every 200 ms for a live progress bar.
+        // Poll total bytes written under tmp_dir every 200 ms for a live
+        // progress bar. Summing the whole (per-run, exclusive) directory
+        // rather than watching one fixed name keeps this correct whether
+        // compression produces a single archive or, with
+        // `compress_volume_size`, several `stem.partNN.rar` / `stem.7z.NNN`
+        // volumes.
         let poll_tx = progress_tx.clone();
-        let poll_path = tmp_dir.join(format!("{}.{}", archive_stem, format.extension()));
+        let poll_dir = tmp_dir.clone();
         let poll_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Ok(meta) = tokio::fs::metadata(&poll_path).await {
-                    if let Some(ref tx) = poll_tx {
-                        let _ = tx.send(crate::progress::ProgressEvent::CompressProgress {
-                            bytes_written: meta.len(),
-                        });
-                    }
+                if let Some(ref tx) = poll_tx {
+                    let bytes_written = dir_or_file_size(&poll_dir);
+                    let _ =
+                        tx.send(crate::progress::ProgressEvent::CompressProgress { bytes_written });
                 }
             }
         });
@@ -128,6 +131,7 @@ pub async fn run_upload(
         let compress_stem = archive_stem;
         let compress_dest = tmp_dir;
         let compress_pass = effective_password.clone();
+        let compress_volume_size = config.compress_volume_size.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::compress::compress(
                 &compress_inputs,
@@ -135,6 +139,7 @@ pub async fn run_upload(
                 &compress_dest,
                 format,
                 compress_pass.as_deref(),
+                compress_volume_size.as_deref(),
             )
         })
         .await
@@ -143,16 +148,17 @@ pub async fn run_upload(
         poll_handle.abort();
         emit(&progress_tx, crate::progress::ProgressEvent::CompressDone);
 
-        let archive_name = result
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        inputs = vec![crate::walk::InputFile {
-            path: result.path,
-            name: archive_name,
-        }];
+        inputs = std::iter::once(result.path)
+            .chain(result.extra_paths)
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                crate::walk::InputFile { path, name }
+            })
+            .collect();
     } else {
         compress_temp_dir = None;
     }
