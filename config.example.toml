@@ -115,6 +115,13 @@ groups = ["alt.binaries.test"]
 # with --par2-only, which writes PAR2 files next to the sources instead.
 # par2_temp_dir = "/path/on/destination/disk/tmp"
 
+# par2_before_upload — generate all PAR2 recovery data before posting
+# anything, instead of computing it concurrently with the data upload (the
+# default). Every data file, the PAR2 index and every volume are then posted
+# back to back with no gap. Mirrors the two-phase workflow of tools like
+# ParPar+nyuu (generate, then post). Default: false.
+# par2_before_upload = false
+
 # check — confirm every posted article via a streaming STAT check that runs
 # concurrently with the upload: each article is checked check_delay seconds
 # after it posts, and misses are reposted automatically. Default: true.

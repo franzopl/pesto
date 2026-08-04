@@ -120,6 +120,7 @@ fn par2_config(port: u16) -> Config {
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,
+        par2_before_upload: false,
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
         extra_servers: vec![],

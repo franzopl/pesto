@@ -394,6 +394,14 @@ pesto --par2 0 movie.mkv
 # Generate PAR2 files next to the source without posting
 pesto --par2-only movie.mkv
 pesto --par2-only ./MyShow.S01/
+
+# Generate all PAR2 recovery data before posting anything, instead of
+# concurrently with the upload (the default) — posts the data files then
+# the already-generated PAR2 index/volumes back to back, no gap between
+# them. Useful on a memory-constrained host, where a large release's PAR2
+# generation can need multiple passes and end up posted a while after its
+# data files, which some indexers fail to group as one release.
+pesto --par2-before-upload movie.mkv
 ```
 
 ### SIMD acceleration
@@ -915,6 +923,7 @@ picked up automatically — no config change needed.
 | **Reliability** | | | |
 | `--par2 <PERCENT>` | `posting.par2` | `10` | PAR2 recovery percentage (0 = off) |
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
+| `--par2-before-upload` | `posting.par2_before_upload` | off | Generate all PAR2 recovery data before posting anything, instead of concurrently with the upload; posts data files then the PAR2 index/volumes back to back |
 | `--dry-run` | — | off | Encode only; never touch the network |
 | `--resume` | `output.resume` | off | Load a prior run's `.pesto-state` file and skip already-posted segments |
 | `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |

@@ -50,6 +50,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,
+        par2_before_upload: false,
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
         extra_servers: vec![],

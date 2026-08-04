@@ -1543,6 +1543,19 @@ async fn producer(
         "PAR2 geometry"
     );
 
+    // `--par2-before-upload`: when there's actual recovery data to generate,
+    // suppress data-article and PAR2-file posting during the encode pass(es)
+    // below — every pass just reads/encodes, nothing goes out over the wire —
+    // then post everything (data files, then the already-written index and
+    // volumes) back to back once generation is fully done. With
+    // `recovery_count == 0` there's nothing to defer around, so posting stays
+    // interleaved as usual (matches the no-PAR2 case already being a no-op
+    // for the interleaved path). Also gated on `tx_opt` actually being a
+    // posting channel — `--par2-only` already never posts (`tx_opt` is
+    // `None`), so there is nothing to defer there either.
+    let defer_data_posting =
+        shared.config.par2_before_upload && recovery_count > 0 && tx_opt.is_some();
+
     // Auto-detect safe RAM limit if not specified (70% of available RAM).
     // `available_memory()` reports the host's RAM and ignores cgroup/container
     // limits, so on a memory-limited container it can report far more than is
@@ -1753,31 +1766,8 @@ async fn producer(
                 // the exact bytes already being read for upload — this avoids
                 // a separate whole-file pre-pass that would otherwise block
                 // the first progress event on reading a multi-GB file twice.
-                let (read_tx, mut read_rx) =
-                    tokio::sync::mpsc::channel::<(u64, Vec<u8>, Option<u32>)>(2);
-
-                let reader_path = meta.path.clone();
-                let reader_shared = shared.clone();
-                let reader_segs = segments.clone();
-                let reader_handle = tokio::spawn(async move {
-                    let mut file = File::open(&reader_path).await?;
-                    let mut crc = yenc::Crc32::new();
-                    let last_idx = reader_segs.len().saturating_sub(1);
-                    for (idx, (offset, len)) in reader_segs.into_iter().enumerate() {
-                        // Phase 12b: acquire a buffer from the shared pool if
-                        // available, otherwise allocate. Workers return buffers
-                        // to the same pool after yEnc encoding.
-                        let buf = reader_shared.acquire_buffer(len);
-                        let mut buf = buf;
-                        file.read_exact(&mut buf).await?;
-                        crc.update(&buf);
-                        let full_crc32 = (idx == last_idx).then(|| crc.finalize());
-                        if read_tx.send((offset, buf, full_crc32)).await.is_err() {
-                            break; // producer dropped its end (cancelled)
-                        }
-                    }
-                    Ok::<_, anyhow::Error>(())
-                });
+                let (mut read_rx, reader_handle) =
+                    spawn_double_buffered_reader(meta.path.clone(), segments.clone(), &shared);
 
                 // Real bytes of the PAR2 input slice currently being assembled.
                 // Source the buffer from the worker's recycled-buffer pool so
@@ -1822,7 +1812,7 @@ async fn producer(
                     }
 
                     i += 1;
-                    if pass_idx == 0 {
+                    if pass_idx == 0 && !defer_data_posting {
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
@@ -1855,7 +1845,10 @@ async fn producer(
                             });
                         }
                     } else {
-                        // Subsequent pass: buffer no longer needed; return to pool.
+                        // Subsequent pass, or `--par2-before-upload` deferring
+                        // pass 0's data articles until PAR2 is fully generated
+                        // (posted afterward by `post_data_files`): buffer no
+                        // longer needed here, return it to the pool.
                         shared.release_buffer(buf);
                     }
                 }
@@ -1984,23 +1977,31 @@ async fn producer(
                 let index_name = layout::index_name(par2_base(&metas[0].real_name));
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
+                // `defer_data_posting`: don't queue the index file yet — it
+                // (and every volume below) gets posted after the fact by the
+                // `post_data_files` + pre-generated-file block at the end of
+                // this function, once every pass has finished and PAR2
+                // generation is fully done.
                 if let Some(tx) = &tx_opt {
-                    // In `FullShared` mode, root the wire name at the release
-                    // prefix instead of the (possibly real) on-disk base name,
-                    // so this index file groups with the rest of the release.
-                    let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-                    // The index file is the release's first file after the
-                    // data files — see `Shared::total_files`'s doc comment.
-                    let file_index = metas.len() as u32 + 1;
-                    push_par2_file(
-                        &index_path,
-                        index_name,
-                        wire_override,
-                        file_index,
-                        &shared,
-                        tx,
-                    )
-                    .await?;
+                    if !defer_data_posting {
+                        // In `FullShared` mode, root the wire name at the release
+                        // prefix instead of the (possibly real) on-disk base name,
+                        // so this index file groups with the rest of the release.
+                        let wire_override =
+                            shared.release_prefix.as_deref().map(layout::index_name);
+                        // The index file is the release's first file after the
+                        // data files — see `Shared::total_files`'s doc comment.
+                        let file_index = metas.len() as u32 + 1;
+                        push_par2_file(
+                            &index_path,
+                            index_name,
+                            wire_override,
+                            file_index,
+                            &shared,
+                            tx,
+                        )
+                        .await?;
+                    }
                 }
             }
 
@@ -2035,15 +2036,24 @@ async fn producer(
 
                 if slice.exponent == vol.first + vol.count - 1 {
                     if let Some(tx) = &tx_opt {
-                        let wire_override = shared
-                            .release_prefix
-                            .as_deref()
-                            .map(|prefix| layout::volume_name(prefix, *vol));
-                        // Volumes follow the data files and the index file
-                        // (+1), in `plan_volumes`' order (+vol_idx).
-                        let file_index = metas.len() as u32 + 2 + vol_idx as u32;
-                        push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
+                        if !defer_data_posting {
+                            let wire_override = shared
+                                .release_prefix
+                                .as_deref()
+                                .map(|prefix| layout::volume_name(prefix, *vol));
+                            // Volumes follow the data files and the index file
+                            // (+1), in `plan_volumes`' order (+vol_idx).
+                            let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+                            push_par2_file(
+                                &vol_path,
+                                vol_name,
+                                wire_override,
+                                file_index,
+                                &shared,
+                                tx,
+                            )
                             .await?;
+                        }
                     }
                 }
             }
@@ -2055,6 +2065,140 @@ async fn producer(
         }
     }
 
+    // `--par2-before-upload`: PAR2 generation (every pass, above) is now
+    // fully done and every index/volume file sits on disk in `par2_dir` —
+    // post the data files, then those already-generated PAR2 files, back to
+    // back. Nothing above this point put anything on the wire for this
+    // release.
+    if defer_data_posting {
+        if let Some(tx) = tx_opt.as_ref() {
+            if shared.cancelled.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            post_data_files(&metas, tx, &shared).await?;
+
+            let par2_dir = par2_dir.as_ref().expect(
+                "par2_dir is set whenever recovery_count > 0, which defer_data_posting requires",
+            );
+
+            let index_name = layout::index_name(par2_base(&metas[0].real_name));
+            let index_path = par2_dir.join(&index_name);
+            let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
+            let file_index = metas.len() as u32 + 1;
+            push_par2_file(
+                &index_path,
+                index_name,
+                wire_override,
+                file_index,
+                &shared,
+                tx,
+            )
+            .await?;
+
+            let volumes = layout::plan_volumes(recovery_count as u32);
+            for (vol_idx, vol) in volumes.iter().enumerate() {
+                let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
+                let vol_path = par2_dir.join(&vol_name);
+                let wire_override = shared
+                    .release_prefix
+                    .as_deref()
+                    .map(|prefix| layout::volume_name(prefix, *vol));
+                let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+                push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// One read article: byte offset, buffer, and (on the file's last article)
+/// the whole-file CRC-32 needed for the `=yend` line.
+type ReadArticle = (u64, Vec<u8>, Option<u32>);
+
+/// Spawns the double-buffered reader task shared by the data-posting loop in
+/// `producer` and `post_data_files`: reads `segments` from `path` into a
+/// bounded channel of capacity 2 so the OS can fetch article N+1 while the
+/// caller processes article N, accumulating the whole-file CRC-32 (needed on
+/// the `=yend` line of the last segment) as it goes.
+fn spawn_double_buffered_reader(
+    path: PathBuf,
+    segments: Vec<(u64, usize)>,
+    shared: &Arc<Shared>,
+) -> (
+    tokio::sync::mpsc::Receiver<ReadArticle>,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let (read_tx, read_rx) = tokio::sync::mpsc::channel::<ReadArticle>(2);
+    let reader_shared = shared.clone();
+    let reader_handle = tokio::spawn(async move {
+        let mut file = File::open(&path).await?;
+        let mut crc = yenc::Crc32::new();
+        let last_idx = segments.len().saturating_sub(1);
+        for (idx, (offset, len)) in segments.into_iter().enumerate() {
+            // Phase 12b: acquire a buffer from the shared pool if available,
+            // otherwise allocate. Workers return buffers to the same pool
+            // after yEnc encoding.
+            let mut buf = reader_shared.acquire_buffer(len);
+            file.read_exact(&mut buf).await?;
+            crc.update(&buf);
+            let full_crc32 = (idx == last_idx).then(|| crc.finalize());
+            if read_tx.send((offset, buf, full_crc32)).await.is_err() {
+                break; // caller dropped its end (cancelled)
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    (read_rx, reader_handle)
+}
+
+/// Posts every data file's articles with no PAR2 involvement. Used by
+/// `--par2-before-upload` after PAR2 generation has already fully completed
+/// (see the `defer_data_posting` branch in `producer`), to post the data
+/// files immediately before the already-generated PAR2 index/volumes so the
+/// whole release goes out back to back with no gap. Mirrors the data-posting
+/// half of `producer`'s interleaved per-file loop, minus the PAR2
+/// accumulation, which is unnecessary here since PAR2 is already on disk.
+async fn post_data_files(
+    metas: &[Arc<FileMeta>],
+    tx: &tokio::sync::mpsc::Sender<PostTask>,
+    shared: &Arc<Shared>,
+) -> Result<()> {
+    let article_size = shared.config.article_size;
+    for meta in metas {
+        let segments: Vec<(u64, usize)> = yenc::segments(meta.size, article_size);
+        let total_parts = segments.len() as u32;
+        let (mut read_rx, reader_handle) =
+            spawn_double_buffered_reader(meta.path.clone(), segments, shared);
+
+        let mut i: u32 = 0;
+        while let Some((offset, buf, file_crc32)) = read_rx.recv().await {
+            if shared.cancelled.load(Ordering::Relaxed) {
+                drop(read_rx);
+                let _ = reader_handle.await;
+                return Ok(());
+            }
+            i += 1;
+            if tx
+                .send(make_task(
+                    meta.clone(),
+                    i,
+                    total_parts,
+                    offset,
+                    buf,
+                    file_crc32,
+                    &shared.config,
+                ))
+                .await
+                .is_err()
+            {
+                drop(read_rx);
+                let _ = reader_handle.await;
+                return Ok(());
+            }
+        }
+        let _ = reader_handle.await?;
+    }
     Ok(())
 }
 

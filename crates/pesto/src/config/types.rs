@@ -215,6 +215,14 @@ pub struct PostingSection {
     /// `--par2-only` is set, since PAR2 files are then written next to the
     /// sources instead of a scratch directory.
     pub par2_temp_dir: Option<String>,
+    /// Generate all PAR2 recovery data before posting anything, instead of
+    /// computing it concurrently with the data upload (the default). Every
+    /// data file, the PAR2 index and every volume are then posted back to
+    /// back with no gap. Mirrors the two-phase workflow of tools like
+    /// ParPar+nyuu (generate, then post) instead of pesto's usual
+    /// streaming/overlapped pipeline. Default: false. See `ROADMAP.md`,
+    /// GitHub issue #68.
+    pub par2_before_upload: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -340,6 +348,7 @@ pub struct Overrides {
     pub dry_run: Option<bool>,
     pub par2: Option<u8>,
     pub par2_only: Option<bool>,
+    pub par2_before_upload: Option<bool>,
     pub par2_memory_limit: Option<u64>,
     pub par2_temp_dir: Option<String>,
     pub par2_slice_size: Option<u64>,
@@ -426,6 +435,8 @@ pub struct Config {
     pub par2_slice_count: Option<usize>,
     pub par2_recovery_count: Option<usize>,
     pub par2_only: bool,
+    /// See [`PostingSection::par2_before_upload`].
+    pub par2_before_upload: bool,
     pub threads: usize,
     pub simd: SimdPath,
     pub resume: bool,
