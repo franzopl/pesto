@@ -590,6 +590,16 @@ explicit `active_connections` parameter instead of reading `shared.config.total_
 `post_files_with_progress_and_cancel` passes `0` for the generation-only call — real budget back for PAR2, one
 fewer read pass on RAM-constrained hosts — and only builds the actual connection pool once generation is done.
 
+**Follow-up — the generation phase's `tx_opt: None` call also double-counted progress for real uploads.** That
+same `tx_opt: None` path is shared with `--par2-only`, which fakes a `SegmentDone` per data article via
+`par2_only_ingest` since a `--par2-only` run never posts anything for real — that fake progress is the *only*
+source of data-file progress in that mode, so it's correct there. `--par2-before-upload`'s generation pre-pass took
+the same path, but the data files *do* get posted for real afterward (`post_pregenerated_release`), so every data
+segment got counted twice: once fake during generation, once real during posting. Visible on screen as the upload
+bar's segment count and percentage running past 100% (upload and NZB output were unaffected — this was a display
+bug only). `par2_only_ingest`'s `SegmentDone` emission is now gated on `shared.config.par2_only` specifically,
+rather than firing whenever `tx_opt` is `None`.
+
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
