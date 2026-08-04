@@ -12,6 +12,18 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-08-03
+
+### Added
+- **`--ext <EXT[,EXT...]>` filters `--each`/`--season`/`--watch` entries and
+  uploads by file extension** (comma-separated, case-insensitive, no-op by
+  default): fixes a real foot-gun where a subtitle file (`.srt`) sitting
+  loose next to a `.mkv` in a watched/each directory was posted as its own
+  standalone release, and a `.srt` nested inside an episode folder was
+  bundled into that episode's upload alongside the video. `--ext mkv` keeps
+  only matching files; directories are always kept while filtering
+  top-level entries so nested matches are still found.
+
 ## [0.5.2] — 2026-08-03
 
 ### Fixed
