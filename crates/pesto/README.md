@@ -767,10 +767,10 @@ Environment variables available to the pre-hook:
 | `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
-| `PESTO_TMDB_ID` | Value of `--tmdb` (empty when not set) |
-| `PESTO_IMDB_ID` | Value of `--imdb-id` (empty when not set) |
-| `PESTO_TVDB_ID` | Value of `--tvdb-id` (empty when not set) |
-| `PESTO_MAL_ID` | Value of `--mal-id` (empty when not set) |
+| `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
+| `PESTO_IMDB_ID` | Value of `--imdb-id` / `--imdb` (empty when not set) |
+| `PESTO_TVDB_ID` | Value of `--tvdb-id` / `--tvdb` (empty when not set) |
+| `PESTO_MAL_ID` | Value of `--mal-id` / `--mal` (empty when not set) |
 
 > `PESTO_NZB`, `PESTO_NFO`, and `PESTO_PASSWORD` are **not** available in the
 > pre-hook — the NZB and NFO don't exist yet, and the archive password is only
@@ -798,10 +798,10 @@ following environment variables:
 | `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
-| `PESTO_TMDB_ID` | Value of `--tmdb` (empty when not set) |
-| `PESTO_IMDB_ID` | Value of `--imdb-id` (empty when not set) |
-| `PESTO_TVDB_ID` | Value of `--tvdb-id` (empty when not set) |
-| `PESTO_MAL_ID` | Value of `--mal-id` (empty when not set) |
+| `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
+| `PESTO_IMDB_ID` | Value of `--imdb-id` / `--imdb` (empty when not set) |
+| `PESTO_TVDB_ID` | Value of `--tvdb-id` / `--tvdb` (empty when not set) |
+| `PESTO_MAL_ID` | Value of `--mal-id` / `--mal` (empty when not set) |
 
 Scripts must have the executable bit set on Unix (`chmod +x`). On Windows,
 files with `.exe`, `.cmd`, `.bat`, `.ps1`, or `.py` extensions are recognised

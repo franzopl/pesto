@@ -12,6 +12,12 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **`--tmdb-id`, `--imdb`, `--tvdb`, `--mal` aliases** for `--tmdb`,
+  `--imdb-id`, `--tvdb-id`, and `--mal-id` respectively: the `-id` suffix
+  was inconsistent across the four flags (only `--tmdb` lacked it), so both
+  spellings now work for all of them.
+
 ## [0.5.4] — 2026-08-04
 
 ### Added
