@@ -377,3 +377,92 @@ async fn par2_before_upload_resume_skips_already_posted_segments() {
     let _ = std::fs::remove_dir_all(&resumed.par2_temp_dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Extract `(filenum, total_files)` from a `--file-counter` subject's
+/// `[filenum/total_files] - "name" ...` prefix.
+fn parse_counter(subject: &str) -> Option<(u32, u32)> {
+    let rest = subject.strip_prefix('[')?;
+    let (nums, _) = rest.split_once(']')?;
+    let (n, m) = nums.split_once('/')?;
+    Some((n.parse().ok()?, m.parse().ok()?))
+}
+
+/// `--file-counter`'s `[filenum/total]` numbering must stay a clean bijection
+/// over every file in the release — no gaps, no duplicates, one consistent
+/// `total` — regardless of whether PAR2 generation needed multiple read
+/// passes (forced here via a tiny `--memory-limit`) and regardless of
+/// `--par2-before-upload`. Multi-pass generation only changes *when* a
+/// volume's bytes get produced (a volume's recovery blocks can even span two
+/// passes — see the `append` open mode on the volume file), never *which*
+/// file-index/total any file gets: both come from `layout::plan_volumes`
+/// applied to the release's total recovery-block count, computed once up
+/// front, independent of how many passes it takes to actually fill it in.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_counter_numbering_is_a_clean_bijection_under_multi_pass() {
+    for defer in [false, true] {
+        let subjects = Arc::new(Mutex::new(Vec::new()));
+        let addr = spawn_recording_server(subjects.clone());
+        let dir = std::env::temp_dir().join(format!(
+            "pesto_par2_before_upload_counter_{}_{defer}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("movie.bin");
+        std::fs::write(&input, content(3, 8192 * 40)).unwrap();
+
+        let mut cfg = config(addr, defer);
+        cfg.file_counter = true;
+        let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+        let outcome = post_files(&cfg, &inputs).await.unwrap();
+        assert!(
+            outcome.failures.is_empty(),
+            "defer={defer}: failures: {:?}",
+            outcome.failures
+        );
+
+        let wire_subjects = subjects.lock().unwrap().clone();
+        let parsed: Vec<(u32, u32)> = wire_subjects
+            .iter()
+            .map(|s| {
+                parse_counter(s)
+                    .unwrap_or_else(|| panic!("defer={defer}: no [N/M] prefix in subject: {s}"))
+            })
+            .collect();
+        assert!(
+            !parsed.is_empty(),
+            "defer={defer}: mock server recorded no posted subjects"
+        );
+
+        // Every segment of the same file repeats that file's `filenum`, so
+        // dedupe by (filenum) to get the actual per-file numbering.
+        let mut per_file: Vec<u32> = parsed.iter().map(|(n, _)| *n).collect();
+        per_file.sort_unstable();
+        per_file.dedup();
+
+        let totals: std::collections::HashSet<u32> = parsed.iter().map(|(_, m)| *m).collect();
+        assert_eq!(
+            totals.len(),
+            1,
+            "defer={defer}: inconsistent total across subjects: {totals:?}"
+        );
+        let total = *totals.iter().next().unwrap();
+
+        assert_eq!(
+            per_file,
+            (1..=total).collect::<Vec<u32>>(),
+            "defer={defer}: file-index numbering isn't a clean 1..=total bijection: {per_file:?}"
+        );
+
+        // At least one data file and at least one PAR2 file, or this test
+        // isn't actually exercising the interesting part of the release.
+        let has_par2 = outcome
+            .segments
+            .iter()
+            .any(|s| s.file_name.ends_with(".par2"));
+        assert!(has_par2, "defer={defer}: expected PAR2 segments");
+
+        let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
