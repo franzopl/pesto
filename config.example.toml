@@ -201,6 +201,12 @@ groups = ["alt.binaries.test"]
 #
 # format = "7z"
 
+# temp_dir — directory where the archive built by --compress is staged,
+# before it's read back and posted. Default: the OS temp directory (e.g.
+# /tmp), which may sit on a different filesystem — with less free space or a
+# stricter disk quota — than the destination disk.
+# temp_dir = "/path/on/destination/disk/tmp"
+
 [output]
 # nzb_dir — directory where .nzb hardlinks/copies are placed after each upload.
 # Every upload is also archived to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb so

@@ -94,6 +94,7 @@ fn test_config(port: u16) -> Config {
         par2: 100,
         par2_memory_limit: Some(1_000_000_000),
         par2_temp_dir: None,
+        compress_temp_dir: None,
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,

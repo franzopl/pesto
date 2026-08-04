@@ -286,6 +286,12 @@ pub struct IndexerSection {
 #[serde(deny_unknown_fields)]
 pub struct CompressionSection {
     pub format: Option<String>,
+    /// Base directory for the scratch archive built by `--compress` before
+    /// it's read back and posted. Default: the OS temp directory
+    /// (`std::env::temp_dir()`, usually `/tmp` or `$TMPDIR`), which may sit
+    /// on a different filesystem — with less free space or a stricter
+    /// quota — than the destination disk.
+    pub temp_dir: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -344,6 +350,7 @@ pub struct Overrides {
     pub resume: Option<bool>,
     pub upload_rate: Option<u64>,
     pub compress_format: Option<String>,
+    pub compress_temp_dir: Option<String>,
     pub compress_password: Option<String>,
     pub nzb_name: Option<String>,
     pub nzb_password: Option<String>,
@@ -424,6 +431,10 @@ pub struct Config {
     pub resume: bool,
     pub upload_rate: u64,
     pub compress_format: Option<String>,
+    /// Base directory for the scratch archive built by `--compress`. See
+    /// [`CompressionSection::temp_dir`]. `None` falls back to
+    /// `std::env::temp_dir()`.
+    pub compress_temp_dir: Option<PathBuf>,
     pub compress_password: Option<String>,
     pub nzb_name: Option<String>,
     pub nzb_password: Option<String>,

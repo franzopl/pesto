@@ -231,6 +231,14 @@ struct Cli {
     #[arg(long, value_name = "FORMAT", num_args = 0..=1, default_missing_value = "7z")]
     compress: Option<String>,
 
+    /// Directory where the archive built by --compress is staged, before
+    /// it's read back and posted. Defaults to the OS temp directory (e.g.
+    /// /tmp), which may sit on a different filesystem — with less free
+    /// space or a stricter disk quota — than the destination disk
+    /// [config: compression.temp_dir].
+    #[arg(long, value_name = "DIR")]
+    compress_temp_dir: Option<String>,
+
     /// Bundle files into a password-protected archive before posting. Optional
     /// PASSWORD: bare `--password` generates a random 24-character password
     /// and prints it; `--password=mypass` uses an explicit one. Implies
@@ -597,6 +605,7 @@ impl Cli {
                 .transpose()
                 .unwrap_or(None),
             compress_format: self.compress.clone(),
+            compress_temp_dir: self.compress_temp_dir.clone(),
             // None → no password (flag absent, or bare `--password` for
             // auto-random). Some(s) → an explicit password, reused verbatim
             // by every entry under --each/--season/--watch. The bare-flag
@@ -1007,7 +1016,11 @@ async fn run_single_upload(
             archive_stem
         };
 
-        let tmp_dir = std::env::temp_dir().join(format!(
+        let tmp_base = config
+            .compress_temp_dir
+            .clone()
+            .unwrap_or_else(std::env::temp_dir);
+        let tmp_dir = tmp_base.join(format!(
             "pesto_compress_{}_{}",
             std::process::id(),
             entry_label

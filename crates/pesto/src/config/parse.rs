@@ -228,6 +228,18 @@ impl Config {
                 }
             },
             compress_format: cli.compress_format.or(file.compression.format),
+            compress_temp_dir: cli
+                .compress_temp_dir
+                .or(file.compression.temp_dir)
+                .map(|s| {
+                    if let Some(rest) = s.strip_prefix("~/") {
+                        std::env::var_os("HOME")
+                            .map(|h| PathBuf::from(h).join(rest))
+                            .unwrap_or_else(|| PathBuf::from(&s))
+                    } else {
+                        PathBuf::from(&s)
+                    }
+                }),
             compress_password: cli.compress_password,
             nzb_name: cli.nzb_name.or(file.output.nzb_name),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
