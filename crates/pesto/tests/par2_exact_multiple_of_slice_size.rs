@@ -141,6 +141,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,
+        par2_before_upload: false,
         threads: 0,
         simd: pesto::par2::SimdPath::Auto,
         extra_servers: vec![],

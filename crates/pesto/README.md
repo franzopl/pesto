@@ -400,6 +400,35 @@ The startup banner reports the numbers behind the decision:
 memory: address-space limit 9.5 GiB | reserved for overhead (connections+threads+runtime) 4.0 GiB | PAR2 budget 2.8 GiB/pass
 ```
 
+When the recovery data needed exceeds this budget, PAR2 generation splits
+into multiple passes — each one re-reads the source files from scratch. By
+default those extra passes run concurrently with posting (data files go out
+while later passes are still catching up), so on a memory-constrained host a
+large release's PAR2 index/volumes can end up posted a while after its data
+files. See `--par2-before-upload` below if that gap matters for how your
+target indexer groups a release's files together.
+
+### Generating PAR2 before posting
+
+By default pesto computes PAR2 recovery data concurrently with the upload —
+posting starts as soon as the first data article is ready, and PAR2 volumes
+get posted as their recovery data finishes, interleaved with the rest of the
+release. `--par2-before-upload` switches to a two-phase workflow instead,
+closer to tools like ParPar+nyuu: generate every PAR2 file first (index and
+volumes, nothing posted yet), then post the data files followed by the
+already-generated PAR2 files, back to back with no gap between them.
+
+```bash
+pesto --par2-before-upload movie.mkv
+```
+
+This trades a longer wait before the first article goes out for a release
+whose articles all land within a tight time window on the wire — useful if
+you've observed an indexer failing to group a large release's PAR2 volumes
+with its data files, which can happen when generation needs multiple passes
+(see the memory budget note above) and the resulting gap outlasts however
+long that indexer waits before considering a release's file set complete.
+
 ### SIMD acceleration
 
 pesto selects the fastest available Reed-Solomon path at startup via runtime
@@ -897,6 +926,7 @@ picked up automatically — no config change needed.
 | **Reliability** | | | |
 | `--par2 <PERCENT>` | `posting.par2` | `10` | PAR2 recovery percentage (0 = off) |
 | `--par2-only` | — | off | Write PAR2 files only; do not post |
+| `--par2-before-upload` | `posting.par2_before_upload` | off | Generate all PAR2 recovery data before posting anything, instead of concurrently with the upload; posts data files then the PAR2 index/volumes back to back |
 | `--dry-run` | — | off | Encode only; never touch the network |
 | `--resume` | `output.resume` | off | Load a prior run's `.pesto-state` file and skip already-posted segments |
 | `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |

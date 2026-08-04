@@ -203,6 +203,19 @@ struct Cli {
     #[arg(long)]
     par2_only: bool,
 
+    /// Generate all PAR2 recovery data before posting anything, instead of
+    /// computing it concurrently with the data upload (the default). Every
+    /// data file, the PAR2 index and every volume are then posted back to
+    /// back with no gap between them. This trades a longer wait before the
+    /// first article goes out for a release whose articles all land within
+    /// a tight time window — mirrors the two-phase workflow of tools like
+    /// ParPar+nyuu (generate, then post), instead of pesto's usual
+    /// streaming/overlapped pipeline where PAR2 encoding runs concurrently
+    /// with the upload
+    /// [config: posting.par2_before_upload, default false].
+    #[arg(long)]
+    par2_before_upload: bool,
+
     /// Skip network posting and just measure generation speed.
     #[arg(long)]
     dry_run: bool,
@@ -586,6 +599,11 @@ impl Cli {
             dry_run: if self.dry_run { Some(true) } else { None },
             par2: self.par2,
             par2_only: if self.par2_only { Some(true) } else { None },
+            par2_before_upload: if self.par2_before_upload {
+                Some(true)
+            } else {
+                None
+            },
             par2_memory_limit: self
                 .memory_limit
                 .as_ref()

@@ -13,6 +13,18 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 ## [Unreleased]
 
 ### Added
+- **`--par2-before-upload` (`posting.par2_before_upload`)**, default off:
+  generates all PAR2 recovery data before posting anything, instead of
+  concurrently with the upload (the default), then posts the data files
+  followed by the already-generated PAR2 index/volumes back to back with no
+  gap between them. Closer to the two-phase ParPar+nyuu workflow than
+  pesto's usual streaming/overlapped pipeline. On a memory-constrained host,
+  PAR2 generation for a large release can need multiple read passes (see
+  `--memory-limit`); by default only the first pass posts data, so later
+  passes — pure re-reads, nothing posted — can leave a real gap between a
+  release's last data article and its last PAR2 article, which some
+  indexers fail to group as one release. See `ROADMAP.md` and GitHub issue
+  #68.
 - **`--tmdb-id`, `--imdb`, `--tvdb`, `--mal` aliases** for `--tmdb`,
   `--imdb-id`, `--tvdb-id`, and `--mal-id` respectively: the `-id` suffix
   was inconsistent across the four flags (only `--tmdb` lacked it), so both

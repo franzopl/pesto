@@ -99,6 +99,7 @@ fn test_config(port: u16) -> Config {
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_only: false,
+        par2_before_upload: false,
         threads: 0,
         simd: parmesan::SimdPath::Auto,
         extra_servers: vec![],

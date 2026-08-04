@@ -215,6 +215,10 @@ impl Config {
             par2_slice_count: cli.par2_slice_count,
             par2_recovery_count: cli.par2_recovery_count,
             par2_only,
+            par2_before_upload: cli
+                .par2_before_upload
+                .or(file.posting.par2_before_upload)
+                .unwrap_or(false),
             threads: cli.threads.unwrap_or(0), // 0 means auto
             simd: cli.simd.unwrap_or_default(),
             resume: cli.resume.or(file.output.resume).unwrap_or(false),

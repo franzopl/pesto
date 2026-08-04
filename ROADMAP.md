@@ -549,6 +549,36 @@ Confirmed live against Binsearch: a `--compress`/`--par2` release went from 8 of
 excluded) to 9 of 9 once every file's subject had the same shape. See the CHANGELOG `[Unreleased]` entry for
 issue #68.
 
+**Follow-up — a second, size-correlated symptom, and `--par2-before-upload`:** issue #68 was reopened again after
+reports that large releases (~40 GB+) intermittently fail to group even with the subject-shape fix above, in a
+different way (a data file or volume left out, not just the bare index). `producer` (`crates/pesto/src/poster/mod.rs`)
+splits PAR2 generation into multiple read passes over the source files whenever the recovery data needed exceeds
+`--memory-limit`; only the first pass posts data articles, so on a memory-constrained host the later passes — pure
+re-reads, nothing posted — can open a real wall-clock gap between the release's last data article and its last PAR2
+article. Confirmed the mechanism itself fires as documented with a local, network-free `--dry-run` test (small file,
+tiny `--memory-limit` to force several passes): `split into N passes` appears in the log, and each extra pass posts
+nothing.
+
+Checked the open-source indexer software this ecosystem is built on (nZEDb → NNTmux/newznab-tmux) for a concrete,
+sourced mechanism a gap like this could trip: `ProcessReleasesSettings` (`app/Support/Data/ProcessReleasesSettings.php`)
+defines `collectionDelayTime` (DB key `delaytime`, default **2 hours**) — not a fixed deadline from the first article,
+but an *idle-gap* threshold (`ReleaseProcessingService.php`: `COALESCE(last_seen_at, dateadded, added) < now() -
+delaytime hours`). A collection that goes quiet for longer than that is finalized with whatever arrived so far;
+anything posted after is a new collection — matching [NNTmux/newznab-tmux#1227](https://github.com/NNTmux/newznab-tmux/issues/1227),
+the same bug class already linked above. Multi-pass PAR2 generation can produce exactly that kind of idle gap. As
+before, NZBIndex/Binsearch's own codebase is unconfirmed (proprietary) — this is precedent from an open-source
+indexer in the same family, not proof for those two specifically.
+
+Rather than ask users to tune `--memory-limit` per release, `--par2-before-upload` (`posting.par2_before_upload`,
+default off) makes pesto avoid the gap itself: when set, `producer` suppresses all data-article and PAR2-file
+posting during the encode pass(es) — every pass just reads and encodes — then posts the data files followed by the
+already-generated index/volumes once generation is fully done, so the whole release goes out back to back with no
+gap regardless of how many passes generation needed. The default (interleaved) pipeline is unchanged for the common
+single-pass case. No special `--resume` handling was needed: `producer` already regenerates PAR2 deterministically
+from scratch on every resumed run (same bytes, given the same input/config and the already-reused `archive_stem`/
+`release_prefix`), and the existing per-article resume check at the worker level — not `producer` — is what skips
+already-posted segments, generically, regardless of when in the run they get queued.
+
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
