@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-08-04
+
 ### Added
 - **`--par2-before-upload` (`posting.par2_before_upload`)**, default off:
   generates all PAR2 recovery data before posting anything, instead of
