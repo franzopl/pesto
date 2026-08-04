@@ -12,6 +12,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-08-04
+
+### Added
+- **`--compress-temp-dir <DIR>` (`compression.temp_dir`) controls where the
+  `--compress` archive is staged**, fixes #84: mirrors the existing
+  `--par2-temp-dir` / `posting.par2_temp_dir` pattern (same `~/` expansion,
+  same `std::env::temp_dir()` fallback when unset), letting the scratch
+  archive live on a different filesystem (SSD/RAM disk) than the
+  destination disk instead of always using the OS temp directory.
+
 ## [0.5.3] — 2026-08-03
 
 ### Added
