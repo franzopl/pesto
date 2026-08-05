@@ -74,6 +74,18 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   that composition to avoid haircutting it twice (once inside `Ceiling`,
   again as PAR2's stage share), which would otherwise silently starve PAR2's
   budget far below either model alone.
+- **Memory management, Phase 4 — fallible allocation at the big sites.**
+  Five large buffer allocation sites are now fallible: `parmesan`'s
+  `RecoveryEncoder` constructors (`try_new`, `try_new_altmap`,
+  `try_new_shuffle2x`, `try_new_smart`) and `take_buffer` (now
+  `try_take_buffer`); `Par2Worker::try_take_buffer` for buffer pool
+  recycling; `pesto`'s PAR2 pass loop now uses `try_new_smart` with
+  graceful error handling; article-body buffers via `Shared::
+  try_acquire_buffer`; and the repost read buffer in `check.rs`. On
+  allocation failure, callers now receive an `anyhow::Result` or `TryReserveError`
+  instead of a panic/`SIGABRT`. Existing infallible methods in `parmesan`
+  remain unchanged (zero behavior risk for backward compatibility). See
+  `docs/memory-management.md` §5 and §8.
 
 ## [0.5.8] — 2026-08-04
 

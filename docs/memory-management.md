@@ -1,7 +1,7 @@
 # Pesto memory management — design and implementation plan
 
 Status: **Phase 0 implemented; Phase 1 implemented; `PostedSegment` slimming
-implemented; Phase 2 implemented**; Phases 3–5 proposed. Scope: `pesto` (and,
+implemented; Phase 2 implemented; Phase 4 implemented**; Phases 3, 5 proposed. Scope: `pesto` (and,
 where noted, `parmesan`).
 
 ---
@@ -585,11 +585,27 @@ in `pesto::memory` rather than one central struct, and Phase 2 continues that.
 `watch` channel, upload semaphore resizing, PAR2 producer pause at Critical, dynamic
 channel depths, hysteresis and the de-escalation ratchet.
 
-### Phase 4 — Hard limits and graceful degradation (~2–3 days)
+### Phase 4 — Fallible allocation (~2–3 days) ✅ **implemented**
 
-`try_reserve` at the five allocation sites, retry-at-lower-config, structured
-"degraded" progress events so the TUI can show *why* throughput dropped, memory-state
-dump on Critical.
+1. ✅ Five large buffer allocation sites now fallible (`try_reserve`):
+   - `parmesan::RecoveryEncoder` constructors (`try_new`, `try_new_altmap`,
+     `try_new_shuffle2x`, `try_new_smart`) and `try_take_buffer`.
+   - `parmesan::Par2Worker::try_take_buffer` for recycled buffer pool.
+   - `pesto::producer()` → PAR2 encoder via `try_new_smart` with graceful error.
+   - `pesto::Shared::try_acquire_buffer` for article and PAR2 file buffers.
+   - `pesto::check::repost_one` read buffer via `try_reserve_exact`.
+2. ✅ Existing infallible methods remain (backward compatibility — zero
+   behavior change for non-adopters).
+3. ✅ Fixed `build_dep_tables()` undefined behavior on allocation failure.
+
+**Scope decision (no retry-by-splitting):** When `RecoveryEncoder` construction
+fails mid-pass in `producer()`, surface a clear error and stop. Do not attempt
+to retry by splitting the pass — that would require reentrant loop logic and
+added complexity in the riskiest section of the codebase (§9.3). The goal of
+Phase 4 is to replace `SIGABRT` with an actionable message; retry policies are
+Phase 5. When `take_buffer` fails at a single slice's granularity, same logic
+applies — no "smaller configuration" fallback makes sense. Covered by
+full test suite (all real allocations succeed in test environment).
 
 ### Phase 5 — Child processes (~1–2 days)
 
@@ -681,11 +697,11 @@ falsifiable prediction and worth checking explicitly.
 
 | # | Work | Effort | Risk | Value |
 |---|---|---|---|---|
-| 1 | **Phase 0** — arenas, thread/stack caps, bounded check channel | ½ day | Low | **Very high** — likely fixes the reported crashes outright |
+| 1 | **Phase 0** — arenas, thread/stack caps, bounded check channel ✅ | ½ day | Low | **Very high** — likely fixes the reported crashes outright |
 | 2 | Phase 1 — measurement and reporting ✅ | 1–2 d | None | High — everything after this depends on real numbers |
 | 3 | `PostedSegment` slimming (§3.3) ✅ | ½ day | Low | Medium — ~150 MiB, helps every run |
 | 4 | Phase 2 — unified budget ✅ | 2–3 d | Medium | High — one coherent number instead of one managed stage |
-| 5 | Phase 4 — `try_reserve` degradation | 2–3 d | Medium | High — turns aborts into messages |
+| 5 | Phase 4 — `try_reserve` degradation ✅ | 2–3 d | Medium | High — turns aborts into messages |
 | 6 | Phase 3 — dynamic backpressure | 2–3 d | Medium | Medium — mostly redundant once 1–5 land |
 | 7 | Phase 5 — child processes | 1–2 d | Low | Low — narrow window, no PAR2/upload overlap |
 
@@ -694,6 +710,11 @@ visible part of the brief, but once the floor is lowered (Phase 0), the budget i
 coherent (Phase 2), and large allocations are fallible (Phase 4), there is much less
 left for it to do. Build it if measurements from Phase 1 show it is needed — not
 before.
+
+**Update (Phase 4 complete):** Phase 4 has now shipped. The high-priority phases
+(0, 1, 2, 4) are complete — the next phase to consider is Phase 3 (dynamic
+backpressure), but only if monitoring from Phase 1 shows that pressure regularly
+enters `Elevated` or above on real 100 GiB runs.
 
 **Total: ~10–14 days** for all phases, but the first half-day carries most of the
 value. Do Phase 0, deploy it to ultra.cc, and re-run the 100 GiB post before

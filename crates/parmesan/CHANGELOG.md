@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Fallible allocation API for `RecoveryEncoder` and `Par2Worker`.** Added
+  `try_new`, `try_new_altmap`, `try_new_shuffle2x`, `try_new_smart`, and
+  `try_take_buffer` methods, all returning `Result<T, TryReserveError>`.
+  These allow callers to distinguish allocation failures from other errors
+  and respond gracefully (e.g., with an actionable message) instead of
+  panicking. Existing infallible methods remain as thin wrappers over the
+  new `try_*` versions for backward compatibility.
+
+### Fixed
+- **`build_dep_tables()` had undefined behavior on allocation failure.** It
+  called raw `std::alloc::alloc_zeroed` and constructed a `Box` without
+  checking the returned pointer for null, which is undefined if that 2 MiB
+  allocation ever fails. Switched to `Vec::try_reserve_exact` for a
+  checkable, well-defined failure path.
+
 ## [0.4.0] — 2026-07-24
 
 ### Fixed
