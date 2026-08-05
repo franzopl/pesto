@@ -2450,8 +2450,37 @@ fn write_session_summary(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Entry point.
+///
+/// Deliberately *not* `#[tokio::main]`: two things have to happen before the
+/// runtime spawns its first thread, and the attribute leaves no room for
+/// either.
+///
+/// 1. `tune_allocator()` must run before any thread exists — on glibc,
+///    malloc's per-core arenas are created lazily on first allocation from a
+///    new thread and can never be reclaimed afterwards.
+/// 2. The runtime itself must be built with bounded thread counts and stack
+///    sizes. `#[tokio::main]`'s defaults (`ncores` workers, 2 MiB stacks) are
+///    the largest avoidable consumer of address space on a many-core seedbox:
+///    measured over a full `--par2-only --threads 128` run, bounding them
+///    takes peak address space from 803.5 MiB to 443.3 MiB. Against a typical
+///    seedbox `ulimit -v` that headroom is the difference between finishing a
+///    100 GiB post and aborting mid-encode. See [`pesto::memory`].
+fn main() -> Result<()> {
+    pesto::memory::tune_allocator();
+    let tuning = pesto::memory::ThreadTuning::detect();
+    let runtime = tuning
+        .build_runtime()
+        .context("building the tokio runtime")?;
+    let result = runtime.block_on(run(tuning));
+    // Logged from here rather than at the end of `run` so it covers the error
+    // paths too. It does not cover the `std::process::exit` calls on Ctrl-C —
+    // those bypass every unwind and destructor by design.
+    info!("memory: {} (exit)", pesto::memory::peak_summary());
+    result
+}
+
+async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     let mut cli = Cli::parse();
 
     // `pesto --config` with no value: launch the interactive setup wizard.
@@ -2630,6 +2659,17 @@ async fn main() -> Result<()> {
     };
     logging::init(cli.verbose, cli.log_file.as_deref(), session_log.as_deref())?;
     logging::log_system_info();
+    // Logged unconditionally at INFO (not gated on -vv): when a run dies to
+    // `handle_alloc_error` there is no unwind and no further output, so the
+    // last line already in the log is the only evidence of how much address
+    // space was left. See `pesto::memory`.
+    info!(
+        worker_threads = tuning.worker_threads,
+        max_blocking_threads = tuning.max_blocking_threads,
+        thread_stack_kib = tuning.thread_stack_size / 1024,
+        "memory: {} (startup)",
+        pesto::memory::footprint_summary(),
+    );
     if let Some(p) = &session_log {
         tracing::debug!(path = %p.display(), "session log");
     }
