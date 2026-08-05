@@ -109,6 +109,16 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `LIVE`/`PEAK` are process-global statics — that's the whole point of
+    // `CountingAlloc` — but it means any test that reads a "before" snapshot
+    // and later asserts against `before + N` needs exclusive access to them,
+    // or a standalone instance's allocations in one test thread corrupt
+    // another's expected count. `cargo test` runs test fns on separate OS
+    // threads by default, so this lock (not `#[serial]`-style crates, to
+    // avoid a new dependency for two tests) is what actually serializes them.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn live_bytes_and_peak_are_readable() {
@@ -122,6 +132,7 @@ mod tests {
 
     #[test]
     fn a_standalone_instance_tracks_its_own_allocations() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let alloc = CountingAlloc::new();
         let layout = Layout::from_size_align(64, 8).unwrap();
         let before = live_bytes();
@@ -137,6 +148,7 @@ mod tests {
 
     #[test]
     fn realloc_growing_and_shrinking_both_update_live_bytes_correctly() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let alloc = CountingAlloc::new();
         let layout = Layout::from_size_align(64, 8).unwrap();
         let before = live_bytes();
