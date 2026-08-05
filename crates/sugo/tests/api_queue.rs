@@ -12,7 +12,7 @@ fn minimal_nzb_bytes() -> Vec<u8> {
     let groups = vec!["alt.binaries.test".to_string()];
     let segments = vec![pesto::poster::PostedSegment {
         file_name: "release.bin".into(),
-        file_path: "release.bin".into(),
+        file_path: std::path::Path::new("release.bin").into(),
         subject_name: "release.bin".into(),
         file_size: 10,
         part: 1,

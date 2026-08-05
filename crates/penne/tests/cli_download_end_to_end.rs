@@ -105,7 +105,7 @@ fn write_dot_stuffed(w: &mut impl Write, body: &[u8]) -> std::io::Result<()> {
 fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) -> PostedSegment {
     PostedSegment {
         file_name: file_name.into(),
-        file_path: file_name.into(),
+        file_path: std::path::Path::new(file_name).into(),
         subject_name: file_name.into(),
         file_size: size,
         part,

@@ -592,7 +592,7 @@ async fn repost_one(
     let mut message_id = generate_message_id(config.message_id_domain.as_deref());
     let article = Article {
         message_id: message_id.clone(),
-        from: seg.from.clone(),
+        from: seg.from.to_string(),
         newsgroups: groups.to_vec(),
         subject: default_subject(
             &seg.subject_name,

@@ -4,7 +4,8 @@
 //! `.nzb` XML document (newzbin NZB 1.1). Segments are expected pre-sorted by
 //! file name then part number, as [`crate::poster::post_files`] returns them.
 
-use std::path::PathBuf;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::article::default_subject;
@@ -334,14 +335,14 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 // machine; `file_path` is only meaningful for segments
                 // produced by a live upload, which is the only place a
                 // post-check repost can use it.
-                file_path: PathBuf::from(&current_file_name),
-                subject_name: current_subject_name.clone(),
+                file_path: Arc::from(Path::new(&current_file_name)),
+                subject_name: Arc::from(current_subject_name.as_str()),
                 file_size: 0,
                 part,
                 total: 0, // fixed up when </file> is seen
                 message_id,
                 bytes,
-                from: current_poster.clone(),
+                from: Arc::from(current_poster.as_str()),
                 date: (None, current_date),
                 // Not recoverable from an .nzb (it only exists on the
                 // `=yend` line of the last segment's body, which the .nzb
@@ -494,14 +495,14 @@ mod tests {
     fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         PostedSegment {
             file_name: name.to_string(),
-            file_path: PathBuf::from(name),
-            subject_name: name.to_string(),
+            file_path: Arc::from(Path::new(name)),
+            subject_name: Arc::from(name),
             file_size: 1000,
             part,
             total,
             message_id: id.to_string(),
             bytes: 500,
-            from: "poster <p@x>".to_string(),
+            from: Arc::from("poster <p@x>"),
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
@@ -632,14 +633,14 @@ mod tests {
     fn obfuscated_subject_keeps_real_name_in_attribute() {
         let segment = PostedSegment {
             file_name: "secret-movie.mkv".to_string(),
-            file_path: PathBuf::from("secret-movie.mkv"),
-            subject_name: "deadbeefcafe0000".to_string(),
+            file_path: Arc::from(Path::new("secret-movie.mkv")),
+            subject_name: Arc::from("deadbeefcafe0000"),
             file_size: 1000,
             part: 1,
             total: 1,
             message_id: "<id@x>".to_string(),
             bytes: 500,
-            from: String::new(),
+            from: Arc::from(""),
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
@@ -657,14 +658,14 @@ mod tests {
     fn full_obfuscation_preserves_real_name_in_nzb() {
         let segment = PostedSegment {
             file_name: "secret-movie.mkv".to_string(),
-            file_path: PathBuf::from("secret-movie.mkv"),
-            subject_name: "deadbeefcafe0000".to_string(),
+            file_path: Arc::from(Path::new("secret-movie.mkv")),
+            subject_name: Arc::from("deadbeefcafe0000"),
             file_size: 1000,
             part: 1,
             total: 1,
             message_id: "<id@x>".to_string(),
             bytes: 500,
-            from: String::new(),
+            from: Arc::from(""),
             date: (None, None),
             full_crc32: 0,
             server_idx: 0,
@@ -681,7 +682,7 @@ mod tests {
     #[test]
     fn xml_special_characters_are_escaped() {
         let mut s = seg("a&b<c>.bin", 1, 1, "<i@x>");
-        s.from = "a \"b\" & <c>".to_string();
+        s.from = Arc::from("a \"b\" & <c>");
         let segments = vec![s];
         let xml = generate(&["alt.test".into()], &segments, &no_meta());
         assert!(xml.contains("poster=\"a &quot;b&quot; &amp; &lt;c&gt;\""));

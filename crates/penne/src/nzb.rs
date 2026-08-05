@@ -51,7 +51,7 @@ mod tests {
         let segments = vec![
             pesto::poster::PostedSegment {
                 file_name: "a.bin".into(),
-                file_path: "a.bin".into(),
+                file_path: Path::new("a.bin").into(),
                 subject_name: "a.bin".into(),
                 file_size: 1000,
                 part: 1,
@@ -67,7 +67,7 @@ mod tests {
             },
             pesto::poster::PostedSegment {
                 file_name: "a.bin".into(),
-                file_path: "a.bin".into(),
+                file_path: Path::new("a.bin").into(),
                 subject_name: "a.bin".into(),
                 file_size: 1000,
                 part: 2,

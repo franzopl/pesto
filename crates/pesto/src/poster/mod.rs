@@ -182,6 +182,17 @@ fn split_connections(config: &Config, check_enabled: bool) -> (usize, usize) {
 }
 
 /// A posted segment, retained for later `.nzb` generation.
+///
+/// `file_path`, `subject_name` and `from` are `Arc`-shared rather than owned
+/// `PathBuf`/`String`: every segment is held twice at once — once in
+/// `Shared::results`, once again as a `check::QueueItem` in the streaming
+/// check queue's per-server heap while it awaits its `STAT` — and these three
+/// fields are identical across every segment of the same file (or, for
+/// `from` outside paranoid mode, the whole run). Measured on an
+/// 83.4 GiB / 116 619-segment run, the two copies together cost ~150 MiB;
+/// sharing these three turns the second copy's allocation for them into a
+/// refcount bump. `file_name`/`message_id` stay owned `String` — they're
+/// unique per segment, so there's nothing to share.
 #[derive(Debug, Clone)]
 pub struct PostedSegment {
     pub file_name: String,
@@ -190,14 +201,14 @@ pub struct PostedSegment {
     /// directory. `file_name` alone (the published/relative name) is
     /// insufficient — see `FailedTask::file_path` (issue #23), which this
     /// mirrors for the `--check` repost path.
-    pub file_path: PathBuf,
-    pub subject_name: String,
+    pub file_path: Arc<Path>,
+    pub subject_name: Arc<str>,
     pub file_size: u64,
     pub part: u32,
     pub total: u32,
     pub message_id: String,
     pub bytes: u64,
-    pub from: String,
+    pub from: Arc<str>,
     /// Date header as `(rfc_string, unix_timestamp)`. Both parts are preserved
     /// so fixed dates survive round-trips and retries.
     pub date: (Option<String>, Option<u64>),
@@ -2571,14 +2582,14 @@ async fn worker(
                 if let Some(existing) = existing {
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
-                        file_path: task.meta.path.clone(),
-                        subject_name: task.subject_name.clone(),
+                        file_path: Arc::from(task.meta.path.as_path()),
+                        subject_name: Arc::from(task.subject_name.as_str()),
                         file_size: task.meta.size,
                         part: task.part,
                         total: task.total,
                         message_id: existing.message_id,
                         bytes: existing.bytes,
-                        from: task.from.clone(),
+                        from: Arc::from(task.from.as_str()),
                         date: task.date.clone(),
                         full_crc32: task.file_crc32.unwrap_or(0),
                         // Resumed from a prior run's state, not re-entered
@@ -2700,14 +2711,14 @@ async fn worker(
             for p in pending {
                 shared.results.lock().unwrap().push(PostedSegment {
                     file_name: p.task.meta.real_name.clone(),
-                    file_path: p.task.meta.path.clone(),
-                    subject_name: p.task.subject_name.clone(),
+                    file_path: Arc::from(p.task.meta.path.as_path()),
+                    subject_name: Arc::from(p.task.subject_name.as_str()),
                     file_size: p.task.meta.size,
                     part: p.task.part,
                     total: p.task.total,
                     message_id: p.message_id,
                     bytes: (p.headers.len() + p.encoded.body.len()) as u64,
-                    from: p.task.from.clone(),
+                    from: Arc::from(p.task.from.as_str()),
                     date: p.date.clone(),
                     full_crc32: p.task.file_crc32.unwrap_or(0),
                     // Nothing was actually posted in dry-run mode, so there's
@@ -3096,14 +3107,14 @@ fn commit_result(
         }
         let seg = PostedSegment {
             file_name: task.meta.real_name.clone(),
-            file_path: task.meta.path.clone(),
-            subject_name: task.subject_name.clone(),
+            file_path: Arc::from(task.meta.path.as_path()),
+            subject_name: Arc::from(task.subject_name.as_str()),
             file_size: task.meta.size,
             part: task.part,
             total: task.total,
             message_id,
             bytes: wire_bytes as u64,
-            from: task.from.clone(),
+            from: Arc::from(task.from.as_str()),
             date,
             full_crc32: task.file_crc32.unwrap_or(0),
             server_idx,
@@ -3347,8 +3358,8 @@ pub async fn repost_failed_tasks(
         if ok {
             recovered.push(PostedSegment {
                 file_name: task.file_name.clone(),
-                file_path: task.file_path.clone(),
-                subject_name: task.subject_name.clone(),
+                file_path: Arc::from(task.file_path.as_path()),
+                subject_name: Arc::from(task.subject_name.as_str()),
                 file_size: task.file_size,
                 part: task.part,
                 total: task.total,
@@ -3358,7 +3369,7 @@ pub async fn repost_failed_tasks(
                 // `config.all_servers()` too — see its "primary first" order),
                 // since this blind end-of-run retry doesn't fail over.
                 server_idx: slot.server_idx(),
-                from: task.from.clone(),
+                from: Arc::from(task.from.as_str()),
                 date: task.date.clone(),
                 full_crc32: task.full_crc32,
                 file_index: task.file_index,
@@ -4190,7 +4201,7 @@ mod tests {
         assert_eq!(outcome.segments.len(), 1);
         // file_name keeps the real name; subject_name is randomised.
         assert_eq!(outcome.segments[0].file_name, "secret.mkv");
-        assert_ne!(outcome.segments[0].subject_name, "secret.mkv");
+        assert_ne!(outcome.segments[0].subject_name.as_ref(), "secret.mkv");
     }
 
     #[tokio::test]

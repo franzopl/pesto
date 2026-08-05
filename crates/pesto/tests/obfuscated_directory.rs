@@ -147,7 +147,7 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     let mut subjects: Vec<&str> = outcome
         .segments
         .iter()
-        .map(|s| s.subject_name.as_str())
+        .map(|s| s.subject_name.as_ref())
         .collect();
     subjects.sort_unstable();
     subjects.dedup();

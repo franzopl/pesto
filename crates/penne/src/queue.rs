@@ -128,7 +128,7 @@ mod tests {
     fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         PostedSegment {
             file_name: name.into(),
-            file_path: name.into(),
+            file_path: std::path::Path::new(name).into(),
             subject_name: name.into(),
             file_size: 1000,
             part,

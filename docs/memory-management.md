@@ -1,7 +1,7 @@
 # Pesto memory management — design and implementation plan
 
-Status: **Phase 0 implemented; Phase 1 implemented**; Phases 2–5 proposed.
-Scope: `pesto` (and, where noted, `parmesan`).
+Status: **Phase 0 implemented; Phase 1 implemented; `PostedSegment` slimming
+implemented**; Phases 2–5 proposed. Scope: `pesto` (and, where noted, `parmesan`).
 
 ---
 
@@ -412,7 +412,12 @@ Also worth doing independently of pressure: `PostedSegment` (`poster/mod.rs:186-
 carries six heap strings and is stored twice (once in `results`, once cloned into the
 check heap). At ~550 bytes × 136k segments × 2 that is ~150 MiB. `Arc<str>` for the
 repeated `from`/`subject_name`/`file_path` fields, or interning them, would cut most
-of it. Cheap, contained, and helps every run rather than only pressured ones.
+of it. Cheap, contained, and helps every run rather than only pressured ones. ✅
+**Implemented**: `file_path`/`subject_name`/`from` are now `Arc<Path>`/`Arc<str>`; the
+one `seg.clone()` that feeds the streaming check queue (`poster/mod.rs`, both the main
+posting path and the end-of-run retry path) is a refcount bump instead of a second
+allocation+copy of all three fields. `file_name`/`message_id` stay owned `String` —
+they're unique per segment, so there's nothing to share.
 
 ### 3.4 Graceful degradation (requirement 5)
 
@@ -650,7 +655,7 @@ falsifiable prediction and worth checking explicitly.
 |---|---|---|---|---|
 | 1 | **Phase 0** — arenas, thread/stack caps, bounded check channel | ½ day | Low | **Very high** — likely fixes the reported crashes outright |
 | 2 | Phase 1 — measurement and reporting ✅ | 1–2 d | None | High — everything after this depends on real numbers |
-| 3 | `PostedSegment` slimming (§3.3) | ½ day | Low | Medium — ~150 MiB, helps every run |
+| 3 | `PostedSegment` slimming (§3.3) ✅ | ½ day | Low | Medium — ~150 MiB, helps every run |
 | 4 | Phase 2 — unified budget | 2–3 d | Medium | High — one coherent number instead of one managed stage |
 | 5 | Phase 4 — `try_reserve` degradation | 2–3 d | Medium | High — turns aborts into messages |
 | 6 | Phase 3 — dynamic backpressure | 2–3 d | Medium | Medium — mostly redundant once 1–5 land |

@@ -48,6 +48,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   **`--memory-report`** flag prints a one-shot summary at exit: the ceiling
   breakdown, the live-heap-vs-`VmPeak` gap, and the worst pressure level
   reached.
+- **`PostedSegment` slimming.** Every posted segment was held twice at
+  once — once in the final results list, once again in the streaming check
+  queue while it awaits its `STAT` — and `file_path`/`subject_name`/`from`
+  were plain `PathBuf`/`String`, so the second copy re-allocated all three
+  in full. On an 83.4 GiB / 116 619-segment run the two copies together cost
+  ~150 MiB. The three fields are now `Arc<Path>`/`Arc<str>`, so the clone
+  that feeds the check queue is a refcount bump instead of a second
+  allocation — `file_name`/`message_id` stay owned `String` since they're
+  unique per segment. No behaviour change.
 
 ## [0.5.8] — 2026-08-04
 
