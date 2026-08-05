@@ -1,5 +1,6 @@
 use crate::encoder::{FileHashes, RecoveryEncoder, RecoverySlice};
 use crate::packet::SliceChecksum;
+use std::collections::TryReserveError;
 
 /// A unit of work for the [`Par2Worker`].
 pub enum Par2Work {
@@ -149,15 +150,37 @@ impl Par2Worker {
         }
     }
 
-    /// Return a reused buffer from the pool, or allocate a fresh one.
-    pub fn take_buffer(&self, slice_size: usize) -> Vec<u8> {
+    /// Return a reused buffer from the pool, or allocate a fresh one, with fallible allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TryReserveError` if buffer allocation fails.
+    pub fn try_take_buffer(&self, slice_size: usize) -> Result<Vec<u8>, TryReserveError> {
         match self.free_rx.lock().unwrap().try_recv() {
             Ok(mut buf) => {
                 buf.clear();
-                buf
+                Ok(buf)
             }
-            Err(_) => Vec::with_capacity(slice_size),
+            Err(_) => {
+                let mut buf = Vec::new();
+                buf.try_reserve_exact(slice_size)?;
+                Ok(buf)
+            }
         }
+    }
+
+    /// Return a reused buffer from the pool, or allocate a fresh one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if buffer allocation fails.
+    pub fn take_buffer(&self, slice_size: usize) -> Vec<u8> {
+        self.try_take_buffer(slice_size).unwrap_or_else(|e| {
+            panic!(
+                "PAR2 slice buffer allocation failed ({} bytes): {e}",
+                slice_size
+            )
+        })
     }
 
     /// Send a completed, zero-padded slice to the worker.

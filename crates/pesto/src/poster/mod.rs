@@ -421,18 +421,31 @@ struct Shared {
 }
 
 impl Shared {
-    /// Take a buffer from the pool, or allocate a fresh one. The returned
-    /// buffer is always exactly `size` bytes long (content is uninitialised).
-    fn acquire_buffer(&self, size: usize) -> Vec<u8> {
+    /// Take a buffer from the pool, or allocate a fresh one, with fallible allocation.
+    /// The returned buffer is always exactly `size` bytes long (content is zero-filled).
+    ///
+    /// # Errors
+    ///
+    /// Returns `TryReserveError` if buffer allocation or expansion fails.
+    fn try_acquire_buffer(&self, size: usize) -> anyhow::Result<Vec<u8>> {
         let mut pool = self.pool.lock().unwrap();
         match pool.pop() {
             Some(mut buf) => {
+                buf.try_reserve_exact(size.saturating_sub(buf.len()))
+                    .map_err(|e| anyhow::anyhow!("buffer expansion failed: {e}"))?;
                 buf.resize(size, 0);
-                buf
+                Ok(buf)
             }
-            None => vec![0u8; size],
+            None => {
+                let mut buf = Vec::new();
+                buf.try_reserve_exact(size)
+                    .map_err(|e| anyhow::anyhow!("buffer allocation failed: {e}"))?;
+                buf.resize(size, 0);
+                Ok(buf)
+            }
         }
     }
+
 
     /// Return a buffer to the pool. Oversized or empty buffers are dropped.
     fn release_buffer(&self, buf: Vec<u8>) {
@@ -1316,15 +1329,19 @@ fn feed_par2_slice(
     par2_slice_size: usize,
     worker: &Par2Worker,
     is_last_of_file: bool,
-) {
+) -> anyhow::Result<()> {
     if accum.len() == par2_slice_size {
         // Zero-copy optimization for the common case (slice size matches accumulation).
-        let next = worker.take_buffer(par2_slice_size);
+        let next = worker
+            .try_take_buffer(par2_slice_size)
+            .context("allocating PAR2 slice buffer")?;
         let padded = std::mem::replace(accum, next);
         tokio::task::block_in_place(|| worker.send_slice(padded, par2_slice_size, is_last_of_file));
     } else if accum.len() > par2_slice_size {
         // Splitting case (manual slice size < article size): take exactly one slice.
-        let mut slice_buf = worker.take_buffer(par2_slice_size);
+        let mut slice_buf = worker
+            .try_take_buffer(par2_slice_size)
+            .context("allocating PAR2 slice buffer")?;
         slice_buf.extend_from_slice(&accum[..par2_slice_size]);
         accum.drain(..par2_slice_size);
         tokio::task::block_in_place(|| {
@@ -1337,6 +1354,7 @@ fn feed_par2_slice(
         padded.resize(par2_slice_size, 0);
         tokio::task::block_in_place(|| worker.send_slice(padded, actual_len, is_last_of_file));
     }
+    Ok(())
 }
 
 /// Base name for the PAR2 set's on-disk files. A published name may be a
@@ -1434,7 +1452,7 @@ async fn par2_only_ingest(
 
             if slice_buf.len() >= par2_slice_size {
                 let is_last = remaining == 0;
-                feed_par2_slice(&mut slice_buf, par2_slice_size, worker, is_last);
+                feed_par2_slice(&mut slice_buf, par2_slice_size, worker, is_last)?;
                 *par2_slices_fed += 1;
                 shared.emit(ProgressEvent::Par2InputProgress {
                     done: *par2_slices_fed,
@@ -1456,7 +1474,7 @@ async fn par2_only_ingest(
         // Flush the final partial slice for this file (zero-padded inside
         // feed_par2_slice).
         if !slice_buf.is_empty() {
-            feed_par2_slice(&mut slice_buf, par2_slice_size, worker, true);
+            feed_par2_slice(&mut slice_buf, par2_slice_size, worker, true)?;
             *par2_slices_fed += 1;
             shared.emit(ProgressEvent::Par2InputProgress {
                 done: *par2_slices_fed,
@@ -1890,7 +1908,18 @@ async fn producer(
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         let worker_opt: Option<Par2Worker> = if rec_count > 0 {
             let enc =
-                RecoveryEncoder::new_smart(par2_slice_size, total_slices, exp_start, rec_count);
+                RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, exp_start, rec_count)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "not enough memory to allocate PAR2 recovery buffers for pass {} \
+                     ({} recovery blocks × {} bytes each): {}. Lower --memory-limit or \
+                     --par2-memory-limit, or increase available memory.",
+                            pass_idx,
+                            rec_count,
+                            par2_slice_size,
+                            e
+                        )
+                    })?;
             // On passes with many recovery blocks, increasing the queue size
             // (cache blocking) amortizes the flush cost over more input data.
             // We use 1/4 of the available memory limit for the queue, capped
@@ -1956,7 +1985,9 @@ async fn producer(
                 // Source the buffer from the worker's recycled-buffer pool so
                 // subsequent files reuse allocations from earlier flushes.
                 let mut par2_accum: Vec<u8> = match worker_opt.as_ref() {
-                    Some(w) => w.take_buffer(par2_slice_size),
+                    Some(w) => w
+                        .try_take_buffer(par2_slice_size)
+                        .context("allocating PAR2 slice buffer")?,
                     None => Vec::new(),
                 };
 
@@ -1985,7 +2016,7 @@ async fn producer(
                         // buffered here always routes the file's final slice
                         // through the trailing flush instead.
                         while par2_accum.len() > par2_slice_size {
-                            feed_par2_slice(&mut par2_accum, par2_slice_size, worker, false);
+                            feed_par2_slice(&mut par2_accum, par2_slice_size, worker, false)?;
                             par2_slices_fed += 1;
                             shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
                                 done: par2_slices_fed,
@@ -2038,7 +2069,7 @@ async fn producer(
                 // Flush the file's final, partial PAR2 slice (zero-padded).
                 if let Some(worker) = &worker_opt {
                     if !par2_accum.is_empty() {
-                        feed_par2_slice(&mut par2_accum, par2_slice_size, worker, true);
+                        feed_par2_slice(&mut par2_accum, par2_slice_size, worker, true)?;
                         par2_slices_fed += 1;
                         shared.emit(crate::progress::ProgressEvent::Par2InputProgress {
                             done: par2_slices_fed,
@@ -2308,7 +2339,9 @@ fn spawn_double_buffered_reader(
             // Phase 12b: acquire a buffer from the shared pool if available,
             // otherwise allocate. Workers return buffers to the same pool
             // after yEnc encoding.
-            let mut buf = reader_shared.acquire_buffer(len);
+            let mut buf = reader_shared
+                .try_acquire_buffer(len)
+                .context("allocating article buffer")?;
             file.read_exact(&mut buf).await?;
             crc.update(&buf);
             let full_crc32 = (idx == last_idx).then(|| crc.finalize());
@@ -2431,7 +2464,9 @@ async fn push_par2_file(
     let last_idx = total.saturating_sub(1);
     let mut file = tokio::fs::File::open(path).await?;
     for (i, (offset, len)) in segments.into_iter().enumerate() {
-        let mut buf = vec![0u8; len];
+        let mut buf = shared
+            .try_acquire_buffer(len)
+            .context("allocating PAR2 file buffer")?;
         file.read_exact(&mut buf).await?;
         crc.update(&buf);
         let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
@@ -4115,10 +4150,10 @@ mod tests {
     #[test]
     fn buffer_pool_reuses_released_buffer() {
         let shared = minimal_shared(1024);
-        let buf = shared.acquire_buffer(1024);
+        let buf = shared.try_acquire_buffer(1024).unwrap();
         let cap = buf.capacity();
         shared.release_buffer(buf);
-        let buf2 = shared.acquire_buffer(1024);
+        let buf2 = shared.try_acquire_buffer(1024).unwrap();
         // Reused buffer has at least the same capacity as the released one.
         assert!(buf2.capacity() >= cap);
         assert_eq!(buf2.len(), 1024);
@@ -4137,7 +4172,7 @@ mod tests {
     #[test]
     fn buffer_pool_acquire_fresh_when_empty() {
         let shared = minimal_shared(512);
-        let buf = shared.acquire_buffer(256);
+        let buf = shared.try_acquire_buffer(256).unwrap();
         assert_eq!(buf.len(), 256);
     }
 
