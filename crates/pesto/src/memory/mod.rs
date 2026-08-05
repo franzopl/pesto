@@ -54,6 +54,7 @@
 //! saving; see [`DEFAULT_MAX_BLOCKING_THREADS`].
 
 pub mod alloc;
+pub mod budget;
 pub mod ceiling;
 pub mod cgroup;
 pub mod pressure;
@@ -370,6 +371,27 @@ pub fn set_report_enabled(enabled: bool) {
 /// Whether `--memory-report` was requested — see [`set_report_enabled`].
 pub fn report_enabled() -> bool {
     REPORT_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Sentinel for "no explicit `--memory-limit`" in [`EXPLICIT_MEMORY_LIMIT`].
+/// No real invocation sets an 18 exabyte budget.
+const NO_EXPLICIT_LIMIT: u64 = u64::MAX;
+static EXPLICIT_MEMORY_LIMIT: AtomicU64 = AtomicU64::new(NO_EXPLICIT_LIMIT);
+
+/// Record the resolved global `--memory-limit` (`Config::memory_limit`), so
+/// `main()`'s exit-time `--memory-report` can rediscover the same
+/// [`Ceiling`] `run()` used for startup/sampling — `Config` itself isn't
+/// available across that call boundary. Mirrors [`set_report_enabled`].
+pub fn set_explicit_memory_limit(limit: Option<u64>) {
+    EXPLICIT_MEMORY_LIMIT.store(limit.unwrap_or(NO_EXPLICIT_LIMIT), Ordering::Relaxed);
+}
+
+/// The value recorded by [`set_explicit_memory_limit`], if any.
+pub fn explicit_memory_limit() -> Option<u64> {
+    match EXPLICIT_MEMORY_LIMIT.load(Ordering::Relaxed) {
+        NO_EXPLICIT_LIMIT => None,
+        v => Some(v),
+    }
 }
 
 /// How often the sampler reads `/proc/self/statm`.

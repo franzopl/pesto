@@ -57,6 +57,23 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   that feeds the check queue is a refcount bump instead of a second
   allocation — `file_name`/`message_id` stay owned `String` since they're
   unique per segment. No behaviour change.
+- **Memory management, Phase 2 — unified budget.** `--memory-limit` used to
+  bound only the PAR2 recovery-encoding pass; it's now a **global** budget
+  for the whole process, with PAR2 drawing a 60% share of it (upload/check
+  shares are defined for a later phase, not enforced yet). Accepts an
+  absolute size, a percentage of host RAM (`"70%"`), or `auto` (default).
+  **New `--par2-memory-limit`** takes over the exact old PAR2-only behavior
+  for anyone who wants to override PAR2's share directly. Migration is safe
+  by construction: an existing `--memory-limit 8G` now means "the whole
+  process may use 8 GiB" rather than "PAR2 may use 8 GiB" — PAR2's actual
+  share only gets smaller, never larger. PAR2's existing RLIMIT_AS-specific
+  pass-sizing model (validated against a live 83.4 GiB run, see
+  `docs/memory-management.md` §9) is unchanged; the new global ceiling is
+  folded in as an additional, independent cap via `Ceiling::
+  effective_excluding_address_space` — deliberately excluding RLIMIT_AS from
+  that composition to avoid haircutting it twice (once inside `Ceiling`,
+  again as PAR2's stage share), which would otherwise silently starve PAR2's
+  budget far below either model alone.
 
 ## [0.5.8] — 2026-08-04
 

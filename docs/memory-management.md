@@ -1,7 +1,8 @@
 # Pesto memory management — design and implementation plan
 
 Status: **Phase 0 implemented; Phase 1 implemented; `PostedSegment` slimming
-implemented**; Phases 2–5 proposed. Scope: `pesto` (and, where noted, `parmesan`).
+implemented; Phase 2 implemented**; Phases 3–5 proposed. Scope: `pesto` (and,
+where noted, `parmesan`).
 
 ---
 
@@ -545,12 +546,39 @@ The budget model itself was re-derived ahead of this phase — see
 [§9](#9-the-budget-model-validated-against-a-live-run), which supersedes the
 `connection_overhead_reserve` note that used to sit here.
 
-### Phase 2 — Unified budget (~2–3 days)
+### Phase 2 — Unified budget (~2–3 days) ✅ **implemented**
 
-`--memory-limit` becomes global; stage sub-budgets; PAR2 sizing moves from the ad-hoc
-calculation at `poster/mod.rs:1645-1685` to `governor.budget(Stage::Par2)`. Still no
-dynamic reaction — but every stage is now bounded by a single coherent number instead
-of one stage being bounded and the rest unmanaged.
+1. ✅ `--memory-limit <SIZE|PCT|auto>` is now the global process budget; the
+   old PAR2-only behavior moved to a new `--par2-memory-limit <SIZE>`. Safe
+   migration by construction — an existing `--memory-limit 8G` now means "the
+   whole process may use 8 GiB" rather than "PAR2 may use 8 GiB", so PAR2's
+   actual share only shrinks, never grows.
+2. ✅ Stage shares (`memory::budget::Stage` — `Par2` 60% / `Upload` 25% /
+   `Check` 10% / `Reserve` 5%) of `Ceiling::effective`, per §4.2. Only `Par2`
+   is consumed anywhere yet; `Upload`/`Check` are defined so Phase 3's
+   backpressure has them ready.
+3. ✅ PAR2 sizing (`producer`, `poster/mod.rs`) now folds the global ceiling
+   in as an *additional* cap on top of the existing RLIMIT_AS-specific
+   `address_space_budget` model (§9) — not a replacement for it. That model
+   is validated against a live 83.4 GiB run and stayed untouched.
+4. ⚠️ **The one correctness trap found while implementing this**:
+   `Ceiling::effective` already haircuts RLIMIT_AS (`× 0.60`); naively taking
+   `share_of(ceiling.effective, Par2)` and combining it with
+   `address_space_budget()` via `min()` would haircut RLIMIT_AS a *second*
+   time (once inside `Ceiling`, again as the 60% stage share), silently
+   producing a needlessly tiny budget on any run where AS is the binding
+   source — which is the common case on a seedbox. Fixed with
+   `Ceiling::effective_excluding_address_space()`: the same min-of-sources
+   logic without the AS term, so PAR2's stage share only comes from
+   cgroup/host/explicit — RLIMIT_AS is left entirely to the model that was
+   already tuned for it. Covered by a unit test
+   (`effective_excluding_address_space_ignores_a_tight_as_limit`) and an
+   integration test
+   (`tests/global_memory_limit_bounds_par2.rs`).
+
+Governor-style API (`governor.budget(Stage::Par2)`) from §1.2's original sketch was
+not built — Phase 0/1 already established a simpler pattern of flat functions/types
+in `pesto::memory` rather than one central struct, and Phase 2 continues that.
 
 ### Phase 3 — Soft backpressure (~2–3 days)
 
@@ -656,7 +684,7 @@ falsifiable prediction and worth checking explicitly.
 | 1 | **Phase 0** — arenas, thread/stack caps, bounded check channel | ½ day | Low | **Very high** — likely fixes the reported crashes outright |
 | 2 | Phase 1 — measurement and reporting ✅ | 1–2 d | None | High — everything after this depends on real numbers |
 | 3 | `PostedSegment` slimming (§3.3) ✅ | ½ day | Low | Medium — ~150 MiB, helps every run |
-| 4 | Phase 2 — unified budget | 2–3 d | Medium | High — one coherent number instead of one managed stage |
+| 4 | Phase 2 — unified budget ✅ | 2–3 d | Medium | High — one coherent number instead of one managed stage |
 | 5 | Phase 4 — `try_reserve` degradation | 2–3 d | Medium | High — turns aborts into messages |
 | 6 | Phase 3 — dynamic backpressure | 2–3 d | Medium | Medium — mostly redundant once 1–5 land |
 | 7 | Phase 5 — child processes | 1–2 d | Low | Low — narrow window, no PAR2/upload overlap |

@@ -202,6 +202,15 @@ impl Config {
                     None
                 }
             },
+            memory_limit: {
+                if let Some(limit) = cli.memory_limit {
+                    Some(limit)
+                } else if let Some(s) = file.posting.memory_limit {
+                    parse_memory_limit_spec(&s).with_context(|| "parsing posting.memory_limit")?
+                } else {
+                    None
+                }
+            },
             par2_temp_dir: cli.par2_temp_dir.or(file.posting.par2_temp_dir).map(|s| {
                 if let Some(rest) = s.strip_prefix("~/") {
                     std::env::var_os("HOME")

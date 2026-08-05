@@ -580,6 +580,11 @@ already redone deterministically on every resumed run (same bytes, given the sam
 already-reused `archive_stem`/`release_prefix`), and the existing per-article resume check at the worker level —
 not `producer` — is what skips already-posted segments, generically, regardless of when in the run they get queued.
 
+*(Note: at the time of the two entries above, `--memory-limit` bounded PAR2's recovery-encoding pass specifically.
+The memory-management work (`docs/memory-management.md`) later split it into a global `--memory-limit` — covering
+PAR2/upload/check together — plus a PAR2-specific `--par2-memory-limit` that keeps the exact old behavior. Read
+`--memory-limit` in those two entries as `--par2-memory-limit`.)*
+
 **Follow-up — the generation phase also stopped reserving RAM (and opening connections) for a pool that doesn't
 exist yet.** `producer`'s PAR2 memory-budget calculation reserves ~8 MiB per configured connection
 (`connection_overhead_reserve`) to leave room for their TLS/article buffers under load — a real cost when

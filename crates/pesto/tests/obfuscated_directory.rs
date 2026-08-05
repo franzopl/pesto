@@ -30,6 +30,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,

@@ -93,6 +93,7 @@ fn test_config(port: u16) -> Config {
         dry_run: false,
         par2: 100,
         par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_slice_size: None,

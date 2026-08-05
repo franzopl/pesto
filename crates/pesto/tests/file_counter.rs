@@ -35,6 +35,7 @@ fn dry_run_config(file_counter: bool, par2_recovery_count: Option<usize>) -> Con
         par2_slice_count: None,
         par2_recovery_count,
         par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,

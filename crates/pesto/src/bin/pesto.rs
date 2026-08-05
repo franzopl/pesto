@@ -13,7 +13,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use parmesan::SimdPath;
 use pesto::compress::{compress, random_password, ArchiveFormat};
-use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
+use pesto::config::{
+    self, parse_memory_limit_spec, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides,
+};
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
@@ -184,9 +186,20 @@ struct Cli {
     #[arg(long, value_name = "N")]
     recovery_count: Option<usize>,
 
-    /// Maximum RAM for PAR2 recovery buffers, e.g. "512 MiB"
-    /// [config: posting.par2_memory_limit, default "1 GiB"].
+    /// Maximum RAM for PAR2 recovery buffers specifically, e.g. "512 MiB"
+    /// [config: posting.par2_memory_limit, default "1 GiB"]. For the whole
+    /// process's budget, see --memory-limit.
     #[arg(long, value_name = "SIZE")]
+    par2_memory_limit: Option<String>,
+
+    /// Global memory budget for the whole process (PAR2, uploads, check
+    /// queue together), not just PAR2: an absolute size ("8 GiB"), a
+    /// percentage of host RAM ("70%"), or "auto" (default) to derive it from
+    /// RLIMIT_AS/cgroup/host RAM with no explicit override. PAR2 draws a 60%
+    /// share of this ceiling, bounded together with (not looser than)
+    /// --par2-memory-limit and the RLIMIT_AS-specific pass-sizing model
+    /// [config: posting.memory_limit, default "auto"].
+    #[arg(long, value_name = "SIZE|PCT|auto")]
     memory_limit: Option<String>,
 
     /// Log address-space and RSS usage once a second, tagged with the stage
@@ -634,9 +647,13 @@ impl Cli {
                 None
             },
             par2_memory_limit: self
-                .memory_limit
+                .par2_memory_limit
                 .as_ref()
                 .and_then(|s| parse_upload_rate(s).ok()),
+            memory_limit: self
+                .memory_limit
+                .as_ref()
+                .and_then(|s| parse_memory_limit_spec(s).ok().flatten()),
             par2_temp_dir: self.par2_temp_dir.clone(),
             par2_slice_size: self
                 .slice_size
@@ -2500,10 +2517,8 @@ fn main() -> Result<()> {
     // those bypass every unwind and destructor by design.
     info!("memory: {} (exit)", pesto::memory::peak_summary());
     if pesto::memory::report_enabled() {
-        println!(
-            "{}",
-            pesto::memory::report_summary(&pesto::memory::Ceiling::discover(None))
-        );
+        let ceiling = pesto::memory::Ceiling::discover(pesto::memory::explicit_memory_limit());
+        println!("{}", pesto::memory::report_summary(&ceiling));
     }
     result
 }
@@ -2702,9 +2717,16 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     // go. Peak-and-stage tracking (and pressure-level logging) is always on;
     // only the per-sample trace line is gated on the flag. `Ceiling` is cheap
     // to (re)compute — see `memory::Ceiling::discover` — so it's read fresh
-    // here rather than threaded through from anywhere earlier.
+    // here rather than threaded through from anywhere earlier. It does need
+    // `config.memory_limit` (the resolved global `--memory-limit`, if any)
+    // so the sampler's pressure percentages and `--memory-report`'s
+    // breakdown agree with what `producer` actually enforced.
     pesto::memory::set_report_enabled(cli.memory_report);
-    pesto::memory::start_sampler(cli.memory_trace, pesto::memory::Ceiling::discover(None));
+    pesto::memory::set_explicit_memory_limit(config.memory_limit);
+    pesto::memory::start_sampler(
+        cli.memory_trace,
+        pesto::memory::Ceiling::discover(config.memory_limit),
+    );
     if let Some(p) = &session_log {
         tracing::debug!(path = %p.display(), "session log");
     }

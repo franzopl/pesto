@@ -69,6 +69,19 @@ impl Ceiling {
             effective,
         }
     }
+
+    /// [`Self::effective`], but without the `RLIMIT_AS` source.
+    ///
+    /// For callers that already have their own RLIMIT_AS-specific budget
+    /// model — PAR2's pass sizing (`poster::address_space_budget`), tuned and
+    /// validated against a live 83.4 GiB run — and only want this struct's
+    /// *other* sources (cgroup/host/explicit) as an additional cap. Using
+    /// [`Self::effective`] there would haircut `RLIMIT_AS` twice: once here
+    /// (`× 0.60`), again as that caller's own stage share on top, silently
+    /// shrinking the budget far below what either model alone would produce.
+    pub fn effective_excluding_address_space(&self) -> u64 {
+        effective_ceiling(None, self.cgroup_max, self.host_total, self.explicit)
+    }
 }
 
 fn host_total_memory() -> u64 {
@@ -146,5 +159,26 @@ mod tests {
         let explicit = 2 * 1024 * 1024 * 1024u64;
         let effective = effective_ceiling(Some(as_limit), None, host, Some(explicit));
         assert_eq!(effective, haircut(as_limit, ADDRESS_SPACE_HAIRCUT));
+    }
+
+    #[test]
+    fn effective_excluding_address_space_ignores_a_tight_as_limit() {
+        // A tiny RLIMIT_AS would otherwise dominate `effective`; the
+        // AS-excluding variant must fall through to the next source instead
+        // of returning 0 or the AS-haircut value.
+        let ceiling = Ceiling {
+            address_space: Some(1024 * 1024 * 1024), // 1 GiB — would haircut to 0.6 GiB
+            cgroup_max: None,
+            host_total: 64 * 1024 * 1024 * 1024,
+            explicit: None,
+            effective: 0, // not under test here
+        };
+        let host_share = haircut(ceiling.host_total, HOST_HAIRCUT);
+        assert_eq!(ceiling.effective_excluding_address_space(), host_share);
+        assert!(
+            ceiling.effective_excluding_address_space()
+                > haircut(1024 * 1024 * 1024, ADDRESS_SPACE_HAIRCUT),
+            "excluding AS must not silently fall back to the AS-haircut value"
+        );
     }
 }

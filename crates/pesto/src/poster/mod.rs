@@ -1725,44 +1725,64 @@ async fn producer(
             reserve_threads,
         );
     }
+    // The global `--memory-limit` ceiling (RLIMIT_AS/cgroup/host/explicit,
+    // each haircut for its own failure mode — see `crate::memory::Ceiling`),
+    // minus the RLIMIT_AS term: PAR2's pass sizing already has its own
+    // RLIMIT_AS-specific model just below (`as_budget`, validated against a
+    // live 83.4 GiB run — see `docs/memory-management.md` §9), tuned more
+    // precisely than `Ceiling`'s flat haircut. Taking PAR2's share of the
+    // *full* `Ceiling::effective` and combining it with `as_budget` via
+    // `min()` would haircut RLIMIT_AS twice — once inside `Ceiling`, again as
+    // the 60% share — silently starving PAR2 far below either model alone.
+    // `effective_excluding_address_space` is exactly the fix: it folds in
+    // cgroup/host/explicit as additional caps without re-litigating RLIMIT_AS.
+    let ceiling = crate::memory::Ceiling::discover(shared.config.memory_limit);
+    let non_as_par2_share = crate::memory::budget::share_of(
+        ceiling.effective_excluding_address_space(),
+        crate::memory::budget::Stage::Par2,
+    );
+    // The binding constraint is whichever of the two independent models is
+    // tighter for this run.
+    let binding_budget = as_budget.map_or(non_as_par2_share, |b| b.min(non_as_par2_share));
+
     let memory_limit = match shared.config.par2_memory_limit {
         Some(limit) => {
-            if let Some(budget) = as_budget {
-                if limit as u64 > budget {
-                    anyhow::bail!(
-                        "--memory-limit {} won't fit safely: this session's address-space \
-                         limit (RLIMIT_AS = {}) leaves a safe budget of only {} once ~{} is \
-                         reserved for {} connections and {} PAR2 threads. Lower \
-                         --memory-limit (or --connections/--threads), or raise `ulimit -v` \
-                         for this session.",
-                        crate::progress::format_size(limit as u64),
-                        crate::progress::format_size(address_space_limit().unwrap_or_default()),
-                        crate::progress::format_size(budget),
-                        crate::progress::format_size(overhead_reserve),
-                        active_connections,
-                        reserve_threads,
-                    );
-                }
+            if limit as u64 > binding_budget {
+                // Name whichever source actually bound the budget instead of
+                // always blaming RLIMIT_AS, now that there are two candidates.
+                let bound_by_as = as_budget.is_some_and(|b| b <= non_as_par2_share);
+                anyhow::bail!(
+                    "--par2-memory-limit {} won't fit safely: {} leaves a safe budget of \
+                     only {} once ~{} is reserved for {} connections and {} PAR2 threads. \
+                     Lower --par2-memory-limit (or --memory-limit / --connections/--threads), \
+                     or {}.",
+                    crate::progress::format_size(limit as u64),
+                    if bound_by_as {
+                        format!(
+                            "this session's address-space limit (RLIMIT_AS = {})",
+                            crate::progress::format_size(address_space_limit().unwrap_or_default())
+                        )
+                    } else {
+                        format!(
+                            "the global --memory-limit budget (effective ceiling {})",
+                            crate::progress::format_size(ceiling.effective)
+                        )
+                    },
+                    crate::progress::format_size(binding_budget),
+                    crate::progress::format_size(overhead_reserve),
+                    active_connections,
+                    reserve_threads,
+                    if bound_by_as {
+                        "raise `ulimit -v` for this session"
+                    } else {
+                        "raise --memory-limit"
+                    },
+                );
             }
             limit
         }
-        None => {
-            let mut sys = sysinfo::System::new();
-            sys.refresh_memory();
-            let available_ram = sys.available_memory();
-            let available_ram = match sys.cgroup_limits() {
-                Some(limits) if limits.free_memory > 0 => available_ram.min(limits.free_memory),
-                _ => available_ram,
-            };
-            let safe_limit = (available_ram as f64 * 0.70) as u64;
-            let safe_limit = match as_budget {
-                Some(budget) => safe_limit.min(budget),
-                None => safe_limit,
-            };
-
-            // At least 256MB as a bare minimum fallback
-            (safe_limit as usize).max(256 * 1024 * 1024)
-        }
+        // At least 256MB as a bare minimum fallback.
+        None => (binding_budget as usize).max(256 * 1024 * 1024),
     };
 
     let slices_per_pass = (memory_limit / par2_slice_size).max(1);
@@ -1798,14 +1818,28 @@ async fn producer(
         } else {
             String::new()
         };
+        // Only named when the user actually set a global budget — in the
+        // "auto" case this would just restate host-RAM-derived numbers
+        // nobody asked about, adding noise rather than clarity.
+        let global_suffix = shared
+            .config
+            .memory_limit
+            .map(|_| {
+                format!(
+                    " | global --memory-limit ceiling {}",
+                    crate::progress::format_size(ceiling.effective)
+                )
+            })
+            .unwrap_or_default();
         shared.emit(crate::progress::ProgressEvent::Status {
             text: format!(
                 "memory: address-space limit {} | reserved for overhead \
-                 (connections+threads+runtime) {} | PAR2 budget {}/pass{}",
+                 (connections+threads+runtime) {} | PAR2 budget {}/pass{}{}",
                 ceiling_text,
                 crate::progress::format_size(overhead_reserve),
                 crate::progress::format_size(memory_limit as u64),
                 passes_suffix,
+                global_suffix,
             ),
         });
     }
