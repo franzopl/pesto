@@ -287,6 +287,125 @@ fn env_usize(key: &str) -> Option<usize> {
         .filter(|n| *n > 0)
 }
 
+/// Coarse stage of a run, used to attribute the address-space high-water mark
+/// to the work that caused it.
+///
+/// Knowing a run peaked at 85% of the ceiling is only half the answer; the
+/// actionable half is *where*. A production run that peaked at 8.13 GiB was
+/// assumed to have done so inside the PAR2 passes — they are the largest
+/// single budgeted allocation — but the passes topped out at 7.38 GiB and the
+/// remaining 0.75 GiB appeared afterwards, in a stage nothing was measuring.
+/// Guessing at which one cost two wrong hypotheses; this records it instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Phase {
+    Startup = 0,
+    Compress = 1,
+    Par2 = 2,
+    Posting = 3,
+    Check = 4,
+    Nzb = 5,
+    Nfo = 6,
+    Hooks = 7,
+    Shutdown = 8,
+}
+
+impl Phase {
+    fn name(self) -> &'static str {
+        match self {
+            Phase::Startup => "startup",
+            Phase::Compress => "compress",
+            Phase::Par2 => "par2",
+            Phase::Posting => "posting",
+            Phase::Check => "check",
+            Phase::Nzb => "nzb",
+            Phase::Nfo => "nfo",
+            Phase::Hooks => "hooks",
+            Phase::Shutdown => "shutdown",
+        }
+    }
+
+    fn from_u8(v: u8) -> Phase {
+        match v {
+            1 => Phase::Compress,
+            2 => Phase::Par2,
+            3 => Phase::Posting,
+            4 => Phase::Check,
+            5 => Phase::Nzb,
+            6 => Phase::Nfo,
+            7 => Phase::Hooks,
+            8 => Phase::Shutdown,
+            _ => Phase::Startup,
+        }
+    }
+}
+
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+
+static CURRENT_PHASE: AtomicU8 = AtomicU8::new(0);
+static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
+static PEAK_PHASE: AtomicU8 = AtomicU8::new(0);
+static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Record that the run has entered `phase`.
+///
+/// A single relaxed store — safe to call from anywhere, including inside the
+/// posting hot path, though callers only mark coarse boundaries.
+pub fn set_phase(phase: Phase) {
+    CURRENT_PHASE.store(phase as u8, Ordering::Relaxed);
+}
+
+/// Start the background sampler.
+///
+/// Deliberately a plain OS thread rather than a tokio task: under memory
+/// pressure the runtime may be saturated or parked in `block_in_place`, and the
+/// one component that must keep reporting is the thing watching memory.
+///
+/// The sampler always tracks the peak and the phase it occurred in — one
+/// `/proc/self/statm` read per interval, far below the noise floor. `trace`
+/// additionally logs every sample, which is opt-in because at one line per
+/// second it would bury everything else in a long run.
+pub fn start_sampler(trace: bool) {
+    TRACE_ENABLED.store(trace, Ordering::Relaxed);
+    std::thread::Builder::new()
+        .name("pesto-memwatch".into())
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let limit = address_space_limit();
+            loop {
+                if let Some(stats) = VmStats::read() {
+                    let phase = CURRENT_PHASE.load(Ordering::Relaxed);
+                    // Keep the phase consistent with the peak it belongs to:
+                    // only claim the phase when we actually raise the peak.
+                    let prev = PEAK_BYTES.fetch_max(stats.vm_size, Ordering::Relaxed);
+                    if stats.vm_size > prev {
+                        PEAK_PHASE.store(phase, Ordering::Relaxed);
+                    }
+                    if TRACE_ENABLED.load(Ordering::Relaxed) {
+                        let pct = limit
+                            .map(|l| format!(" ({:.1}%)", stats.vm_size as f64 / l as f64 * 100.0))
+                            .unwrap_or_default();
+                        tracing::info!(
+                            phase = Phase::from_u8(phase).name(),
+                            "memory: address space {}{pct}, RSS {}",
+                            crate::progress::format_size(stats.vm_size),
+                            crate::progress::format_size(stats.vm_rss),
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .ok();
+}
+
+/// The phase that was active when the sampler last raised the peak, if the
+/// sampler ever observed one.
+fn peak_phase() -> Option<Phase> {
+    (PEAK_BYTES.load(Ordering::Relaxed) > 0)
+        .then(|| Phase::from_u8(PEAK_PHASE.load(Ordering::Relaxed)))
+}
+
 /// One-line summary of the current footprint against the address-space
 /// ceiling, for the startup and exit log lines.
 ///
@@ -332,13 +451,33 @@ pub fn peak_summary() -> String {
                 ""
             };
             format!(
-                "peak address space {} / {} ({pct:.1}%){note}",
+                "peak address space {} / {} ({pct:.1}%){}{note}",
                 fmt(peak),
                 fmt(limit),
+                during(),
             )
         }
-        (Some(peak), None) => format!("peak address space {} (no RLIMIT_AS)", fmt(peak)),
+        (Some(peak), None) => {
+            format!(
+                "peak address space {}{} (no RLIMIT_AS)",
+                fmt(peak),
+                during()
+            )
+        }
         (None, _) => "peak memory usage unavailable".to_string(),
+    }
+}
+
+/// ` during <phase>` when the sampler attributed the peak, else empty.
+///
+/// `VmPeak` from the kernel is authoritative for the *value*; the sampler is
+/// what knows *when*. They can disagree slightly — the kernel sees every
+/// instant, the sampler only its polling interval — so the phase is reported
+/// as supporting detail next to the kernel's number rather than replacing it.
+fn during() -> String {
+    match peak_phase() {
+        Some(p) => format!(" during {}", p.name()),
+        None => String::new(),
     }
 }
 
@@ -386,6 +525,58 @@ mod tests {
     #[test]
     fn footprint_summary_is_non_empty() {
         assert!(!footprint_summary().is_empty());
+    }
+
+    #[test]
+    fn every_phase_has_a_stable_name_and_round_trips() {
+        // The exit line's "during <phase>" is only useful if the discriminant
+        // survives the AtomicU8 round trip; a mismatch would silently
+        // misattribute the peak, which is worse than reporting nothing.
+        let all = [
+            Phase::Startup,
+            Phase::Compress,
+            Phase::Par2,
+            Phase::Posting,
+            Phase::Check,
+            Phase::Nzb,
+            Phase::Nfo,
+            Phase::Hooks,
+            Phase::Shutdown,
+        ];
+        for p in all {
+            assert_eq!(
+                Phase::from_u8(p as u8),
+                p,
+                "{} did not round trip",
+                p.name()
+            );
+            assert!(!p.name().is_empty());
+        }
+        // Unknown discriminants must degrade to Startup, never panic.
+        assert_eq!(Phase::from_u8(200), Phase::Startup);
+    }
+
+    #[test]
+    fn set_phase_is_observable() {
+        set_phase(Phase::Nzb);
+        assert_eq!(
+            Phase::from_u8(CURRENT_PHASE.load(Ordering::Relaxed)),
+            Phase::Nzb
+        );
+        set_phase(Phase::Startup);
+    }
+
+    #[test]
+    fn peak_summary_mentions_the_phase_once_a_peak_is_recorded() {
+        // Simulate what the sampler does, without racing the real one.
+        PEAK_BYTES.store(4096, Ordering::Relaxed);
+        PEAK_PHASE.store(Phase::Nzb as u8, Ordering::Relaxed);
+        assert!(
+            peak_summary().contains("during nzb"),
+            "peak_summary should attribute the peak: {}",
+            peak_summary()
+        );
+        PEAK_BYTES.store(0, Ordering::Relaxed);
     }
 
     #[test]

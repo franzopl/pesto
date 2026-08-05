@@ -181,6 +181,12 @@ struct Cli {
     #[arg(long, value_name = "SIZE")]
     memory_limit: Option<String>,
 
+    /// Log address-space and RSS usage once a second, tagged with the stage
+    /// of the run. The peak and the stage it occurred in are always reported
+    /// at exit; this adds the full trace, for diagnosing *when* a run grows.
+    #[arg(long)]
+    memory_trace: bool,
+
     /// Directory where intermediate PAR2 files are written during posting,
     /// before they're read back and posted. Defaults to the OS temp
     /// directory (e.g. /tmp), which may sit on a different filesystem —
@@ -1469,6 +1475,7 @@ async fn run_single_upload(
             println!(
                 "generating nfo (running bdinfo — this can take a while on large Blu-ray discs)..."
             );
+            pesto::memory::set_phase(pesto::memory::Phase::Nfo);
             let nfo_paths = entry_paths.to_vec();
             let nfo_handle = tokio::task::spawn_blocking(move || pesto::nfo::generate(&nfo_paths));
             tokio::pin!(nfo_handle);
@@ -2670,6 +2677,10 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
         "memory: {} (startup)",
         pesto::memory::footprint_summary(),
     );
+    // Started after logging is up so `--memory-trace` output has somewhere to
+    // go. Peak-and-stage tracking is always on (one /proc read per second);
+    // only the per-sample logging is gated on the flag.
+    pesto::memory::start_sampler(cli.memory_trace);
     if let Some(p) = &session_log {
         tracing::debug!(path = %p.display(), "session log");
     }
@@ -3197,6 +3208,7 @@ fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
             hooks_dir.display()
         );
     }
+    pesto::memory::set_phase(pesto::memory::Phase::Hooks);
     for script in &scripts {
         println!("running hook: {}", script.display());
         let mut child = hook_script_command(script);

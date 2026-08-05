@@ -99,6 +99,7 @@ pub async fn run_upload(
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
         let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
 
+        crate::memory::set_phase(crate::memory::Phase::Compress);
         emit(
             &progress_tx,
             crate::progress::ProgressEvent::CompressStarted {
@@ -294,6 +295,7 @@ pub async fn run_upload(
             mal_id: config.mal_id.clone(),
             tags: config.nzb_tags.clone(),
         };
+        crate::memory::set_phase(crate::memory::Phase::Nzb);
         let xml = crate::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
         match tokio::fs::write(&out, &xml).await {
             Ok(()) => {

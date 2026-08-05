@@ -960,6 +960,7 @@ pub async fn post_files_with_progress_and_cancel(
     };
     let check_tx = check_coordinator.as_ref().map(|c| c.sender());
 
+    crate::memory::set_phase(crate::memory::Phase::Posting);
     let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
     let tx_opt = if worker_count > 0 {
@@ -1080,6 +1081,7 @@ pub async fn post_files_with_progress_and_cancel(
     // removing `par2_temp_dir()` once it's truly done with the run (see
     // `run_single_upload` / `run_upload`).
     drop(check_tx);
+    crate::memory::set_phase(crate::memory::Phase::Check);
     let mut still_missing = if let Some(coordinator) = check_coordinator {
         coordinator.finish_and_drain().await
     } else {
@@ -1818,6 +1820,7 @@ async fn producer(
         );
 
         let chunk_size_bytes = 16384usize * 2; // 16384 u16 words × 2 bytes = 32 KiB
+        crate::memory::set_phase(crate::memory::Phase::Par2);
         shared.emit(crate::progress::ProgressEvent::Par2EncodeStarted {
             input_bytes: metas.iter().map(|m| m.size).sum(),
             input_slices: total_slices,
