@@ -286,7 +286,7 @@ mod tests {
         let groups = vec!["alt.binaries.test".to_string()];
         let segments = vec![pesto::poster::PostedSegment {
             file_name: "movie.bin".into(),
-            file_path: "movie.bin".into(),
+            file_path: std::path::Path::new("movie.bin").into(),
             subject_name: "movie.bin".into(),
             file_size: 10,
             part: 1,

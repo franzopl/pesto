@@ -1,30 +1,32 @@
-//! Issue #57: a `producer` error (bad PAR2 geometry, a memory-budget check,
-//! file I/O, …) used to be indistinguishable from a real user cancellation —
-//! both just set `PostOutcome::cancelled = true`, so a caller had no way to
-//! tell "the user pressed Ctrl-C" apart from "the run failed, and here's
-//! why". Since the failure is a deterministic function of the file and the
-//! config, the same file then fails identically on every retry, with no clue
-//! that retrying won't help. `PostOutcome::failure_reason` fixes that by
-//! carrying the actual error message through.
+//! Phase 2 of the memory-management work (`docs/memory-management.md`):
+//! `--memory-limit`/`Config::memory_limit` is a *global* process budget, not
+//! just PAR2's. This is the regression guard for the double-haircut trap
+//! that design explicitly calls out: PAR2's share of the global ceiling must
+//! actually constrain `--par2-memory-limit`, and it must do so without
+//! silently collapsing to a needlessly tiny number by counting RLIMIT_AS
+//! twice (see `Ceiling::effective_excluding_address_space`).
+//!
+//! Asserting on the *value* of the effective share is already covered by
+//! fast unit tests in `memory::ceiling`/`memory::budget`; this test instead
+//! asserts the end-to-end, observable behavior: a tiny global `memory_limit`
+//! must cause a `par2_memory_limit` that doesn't fit inside PAR2's share to
+//! be rejected up front, exactly like an over-tight RLIMIT_AS already was
+//! before this phase.
 
 use pesto::config::{Config, ObfuscateMode};
 use pesto::poster::post_files;
 use pesto::walk::expand_inputs;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation() {
-    let dir = std::env::temp_dir().join(format!("pesto_producer_error_{}", std::process::id()));
+async fn tiny_global_memory_limit_rejects_an_oversized_par2_memory_limit() {
+    let dir = std::env::temp_dir().join(format!(
+        "pesto_global_memory_limit_bounds_par2_{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("movie.bin");
-
-    // A tiny PAR2 slice size relative to the file size pushes the input slice
-    // count past the PAR2 spec's 32768 limit (see `producer`'s
-    // `total_slices > 32768` check), which is a deterministic function of
-    // the file size and this config — exactly the "same file fails every
-    // time" pattern from the issue.
-    const FILE_SIZE: usize = 3_000_000;
-    std::fs::write(&input, vec![0u8; FILE_SIZE]).unwrap();
+    std::fs::write(&input, vec![0u8; 500_000]).unwrap();
 
     let config = Config {
         host: "unused".to_string(),
@@ -43,11 +45,19 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 10,
-        par2_slice_size: Some(64),
+        par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
-        par2_memory_limit: Some(1_000_000_000),
-        memory_limit: None,
+        // Explicit PAR2-stage limit, deliberately larger than PAR2's 60%
+        // share of the tiny global ceiling below.
+        par2_memory_limit: Some(2_000_000),
+        // Global ceiling small enough that even PAR2's 60% share
+        // (~600_000 bytes) can't fit the explicit par2_memory_limit above —
+        // regardless of this test host's own RLIMIT_AS, which is why the
+        // assertion below checks for the shared "won't fit safely" wording
+        // rather than which specific source (RLIMIT_AS vs this global
+        // ceiling) turned out to be the binding one.
+        memory_limit: Some(1_000_000),
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,
@@ -105,19 +115,15 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
 
     assert!(
         outcome.cancelled,
-        "a producer error should still set `cancelled` (existing callers rely on it)"
-    );
-    assert!(
-        outcome.segments.is_empty(),
-        "nothing should have been posted when producer fails before queuing any article"
+        "a producer budget error should still set `cancelled`"
     );
     let reason = outcome
         .failure_reason
         .as_deref()
-        .expect("producer error should populate failure_reason");
+        .expect("the oversized par2_memory_limit should have been rejected up front");
     assert!(
-        reason.contains("too many input slices"),
-        "failure_reason should carry the actual producer error, got: {reason}"
+        reason.contains("won't fit safely"),
+        "expected a budget-rejection message, got: {reason}"
     );
 
     std::fs::remove_dir_all(&dir).ok();

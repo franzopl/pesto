@@ -12,6 +12,81 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **Memory management, Phase 0 — reduce the address-space floor.** `pesto`
+  was aborting on seedboxes with `memory allocation of N bytes failed` even
+  with system RAM to spare, because the wall being hit is `RLIMIT_AS`
+  (`ulimit -v`), not RAM. New `pesto::memory` module: caps glibc malloc's
+  per-core arena reservations (`mallopt(M_ARENA_MAX, 2)`, ~8 GiB saved on a
+  128-core host, no-op on musl), replaces `#[tokio::main]`'s defaults with an
+  explicit runtime (workers capped at `min(ncores, 16)`, 1 MiB stacks), and
+  shrinks the rayon pool's stacks the same way — measured 803.5 → 443.3 MiB
+  peak address space on a 128-thread profile before a single PAR2 slice is
+  accounted for. Also corrects the PAR2 memory-budget model against a live
+  83.4 GiB / 116 619-segment run (predicted vs observed peak: 1.1% error),
+  fixing an over-sized per-thread reserve constant that was silently
+  compensating for a missing cross-pass-retention term. See
+  `docs/memory-management.md`.
+- **`--memory-trace`**: logs address-space and RSS usage roughly once a
+  second, tagged with the run's current stage (compress/par2/posting/check/
+  nzb/nfo/hooks). The peak address space and the stage it occurred in are
+  now always reported at exit, regardless of the flag — attribution matters
+  most exactly when a run dies with no unwind to explain why.
+- **Memory management, Phase 1 — observability.** `CountingAlloc` (an opt-in
+  `GlobalAlloc` wrapper, declared only in `pesto`'s own binary) tracks this
+  process's exact live-heap bytes, for comparison against the kernel's
+  `VmSize`/`VmPeak`; a large gap between the two is the signal that
+  allocator/VA overhead — not live data — is consuming the address-space
+  budget. `Ceiling::discover` computes the effective memory budget as the
+  minimum of `RLIMIT_AS`, cgroup `memory.max`, and host RAM, each with its
+  own haircut for how tolerant its failure mode is. cgroup v1/v2 and PSI
+  (`memory.pressure` / `/proc/pressure/memory`) are read directly, resolved
+  through `/proc/self/cgroup` rather than assumed at the cgroup root. A
+  `Normal`/`Elevated`/`Critical`/`Emergency` pressure level is computed every
+  ~1s (with hysteresis and a 5s de-escalation ratchet) and logged on every
+  transition — nothing reacts to it yet, that's a later phase. New
+  **`--memory-report`** flag prints a one-shot summary at exit: the ceiling
+  breakdown, the live-heap-vs-`VmPeak` gap, and the worst pressure level
+  reached.
+- **`PostedSegment` slimming.** Every posted segment was held twice at
+  once — once in the final results list, once again in the streaming check
+  queue while it awaits its `STAT` — and `file_path`/`subject_name`/`from`
+  were plain `PathBuf`/`String`, so the second copy re-allocated all three
+  in full. On an 83.4 GiB / 116 619-segment run the two copies together cost
+  ~150 MiB. The three fields are now `Arc<Path>`/`Arc<str>`, so the clone
+  that feeds the check queue is a refcount bump instead of a second
+  allocation — `file_name`/`message_id` stay owned `String` since they're
+  unique per segment. No behaviour change.
+- **Memory management, Phase 2 — unified budget.** `--memory-limit` used to
+  bound only the PAR2 recovery-encoding pass; it's now a **global** budget
+  for the whole process, with PAR2 drawing a 60% share of it (upload/check
+  shares are defined for a later phase, not enforced yet). Accepts an
+  absolute size, a percentage of host RAM (`"70%"`), or `auto` (default).
+  **New `--par2-memory-limit`** takes over the exact old PAR2-only behavior
+  for anyone who wants to override PAR2's share directly. Migration is safe
+  by construction: an existing `--memory-limit 8G` now means "the whole
+  process may use 8 GiB" rather than "PAR2 may use 8 GiB" — PAR2's actual
+  share only gets smaller, never larger. PAR2's existing RLIMIT_AS-specific
+  pass-sizing model (validated against a live 83.4 GiB run, see
+  `docs/memory-management.md` §9) is unchanged; the new global ceiling is
+  folded in as an additional, independent cap via `Ceiling::
+  effective_excluding_address_space` — deliberately excluding RLIMIT_AS from
+  that composition to avoid haircutting it twice (once inside `Ceiling`,
+  again as PAR2's stage share), which would otherwise silently starve PAR2's
+  budget far below either model alone.
+- **Memory management, Phase 4 — fallible allocation at the big sites.**
+  Five large buffer allocation sites are now fallible: `parmesan`'s
+  `RecoveryEncoder` constructors (`try_new`, `try_new_altmap`,
+  `try_new_shuffle2x`, `try_new_smart`) and `take_buffer` (now
+  `try_take_buffer`); `Par2Worker::try_take_buffer` for buffer pool
+  recycling; `pesto`'s PAR2 pass loop now uses `try_new_smart` with
+  graceful error handling; article-body buffers via `Shared::
+  try_acquire_buffer`; and the repost read buffer in `check.rs`. On
+  allocation failure, callers now receive an `anyhow::Result` or `TryReserveError`
+  instead of a panic/`SIGABRT`. Existing infallible methods in `parmesan`
+  remain unchanged (zero behavior risk for backward compatibility). See
+  `docs/memory-management.md` §5 and §8.
+
 ## [0.5.8] — 2026-08-04
 
 ### Added

@@ -1705,6 +1705,7 @@ fn build_dry_run_config() -> Config {
         dry_run: true, // ← never touches the network
         par2: 5,
         par2_memory_limit: None,
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_slice_size: None,

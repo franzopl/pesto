@@ -31,6 +31,7 @@ pub mod config;
 pub mod history;
 pub mod hooks;
 pub mod logging;
+pub mod memory;
 pub mod nfo;
 pub mod nntp;
 pub mod notify;

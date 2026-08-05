@@ -133,6 +133,7 @@ fn config(addr: SocketAddr, par2_before_upload: bool) -> Config {
         // read passes (see the multi-pass log line `split into N passes`
         // `producer` emits when this happens).
         par2_memory_limit: Some(16 * 1024),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,

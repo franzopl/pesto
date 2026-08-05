@@ -44,7 +44,7 @@ async fn a_staged_job_downloads_and_lands_in_history() {
     let groups = vec!["alt.binaries.test".to_string()];
     let segments = vec![PostedSegment {
         file_name: "greeting.txt".into(),
-        file_path: "greeting.txt".into(),
+        file_path: std::path::Path::new("greeting.txt").into(),
         subject_name: "greeting.txt".into(),
         file_size: article_len.max(data.len() as u64),
         part: 1,

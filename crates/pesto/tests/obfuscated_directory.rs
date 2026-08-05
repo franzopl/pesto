@@ -30,6 +30,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,
@@ -147,7 +148,7 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     let mut subjects: Vec<&str> = outcome
         .segments
         .iter()
-        .map(|s| s.subject_name.as_str())
+        .map(|s| s.subject_name.as_ref())
         .collect();
     subjects.sort_unstable();
     subjects.dedup();

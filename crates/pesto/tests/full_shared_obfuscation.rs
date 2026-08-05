@@ -35,6 +35,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,
@@ -159,7 +160,7 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
     let mut subjects: Vec<&str> = outcome
         .segments
         .iter()
-        .map(|s| s.subject_name.as_str())
+        .map(|s| s.subject_name.as_ref())
         .collect();
     subjects.sort_unstable();
     subjects.dedup();
@@ -263,8 +264,8 @@ async fn full_shared_obfuscation_preserves_rar_volume_suffix() {
             .unwrap_or_else(|| panic!("no segment for `{real_name}`"));
         let expected_suffix = &real_name["stem".len()..];
         assert_eq!(
-            seg.subject_name,
-            format!("{prefix}{expected_suffix}"),
+            seg.subject_name.as_ref(),
+            format!("{prefix}{expected_suffix}").as_str(),
             "expected the `.partNN.rar` suffix preserved verbatim, got `{}`",
             seg.subject_name
         );
@@ -386,6 +387,7 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
         par2_slice_count: None,
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
         par2_temp_dir: None,
         compress_temp_dir: None,
         par2_only: false,

@@ -385,20 +385,38 @@ pesto --par2-only ./MyShow.S01/
 
 ### Memory budget
 
-`--memory-limit` bounds the PAR2 recovery-encoding pass specifically, not
-the whole process. When it's left unset, pesto auto-detects a safe value
-from available host RAM, any cgroup memory limit, and this process's own
-address-space ceiling (`RLIMIT_AS` / `ulimit -v`) — shared hosting and
-seedbox accounts commonly cap the latter well below host RAM, invisible to
-the first two. A manually-set `--memory-limit` that doesn't fit safely
-inside that ceiling is rejected up front with an actionable error, instead
-of the process aborting partway through the upload with no explanation.
+Two flags, two scopes:
+
+- **`--memory-limit <SIZE|PCT|auto>`** bounds the whole process — PAR2,
+  uploads and the check queue together, as shares of one ceiling (PAR2 gets
+  60%). Accepts an absolute size (`"8 GiB"`), a percentage of host RAM
+  (`"70%"`), or `auto` (default): derive it from host RAM, any cgroup memory
+  limit, and this process's own address-space ceiling (`RLIMIT_AS` /
+  `ulimit -v`) — shared hosting and seedbox accounts commonly cap the latter
+  well below host RAM, invisible to the first two.
+- **`--par2-memory-limit <SIZE>`** bounds the PAR2 recovery-encoding pass
+  specifically, on top of (not instead of) the share above — whichever is
+  tighter wins. Most invocations only need `--memory-limit`; reach for this
+  one when PAR2 specifically needs a different number than its default
+  share, e.g. to deliberately force multiple passes on a very
+  memory-constrained host.
+
+A manually-set limit that doesn't fit safely inside the effective ceiling is
+rejected up front with an actionable error, instead of the process aborting
+partway through the upload with no explanation.
 
 The startup banner reports the numbers behind the decision:
 
 ```
 memory: address-space limit 9.5 GiB | reserved for overhead (connections+threads+runtime) 4.0 GiB | PAR2 budget 2.8 GiB/pass
 ```
+
+When `--memory-limit` is set explicitly, the banner also names the global
+ceiling it resolved to, so the two-flag split is never silent even though
+migrating from the old single-flag behavior is strictly safer by
+construction (a `--memory-limit` that used to mean "PAR2 may use this much"
+now means "the whole process may use this much" — PAR2's actual share is
+smaller, never larger).
 
 When the recovery data needed exceeds this budget, PAR2 generation splits
 into multiple passes — each one re-reads the source files from scratch. By
@@ -932,7 +950,8 @@ picked up automatically — no config change needed.
 | `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |
 | `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
-| `--memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers |
+| `--memory-limit <SIZE\|PCT\|auto>` | `posting.memory_limit` | `auto` | Global memory budget for the whole process (PAR2/upload/check share it) |
+| `--par2-memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers specifically |
 | `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
 | `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
 | `--verify` | `posting.verify` | off | Confirm each article with STAT |

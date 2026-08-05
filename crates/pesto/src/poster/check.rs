@@ -571,7 +571,10 @@ async fn repost_one(
     let mut file = tokio::fs::File::open(&seg.file_path).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
     let read_len = (seg.file_size - offset).min(config.article_size as u64) as usize;
-    let mut buf = vec![0u8; read_len];
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(read_len)
+        .map_err(|e| anyhow::anyhow!("allocating repost buffer: {e}"))?;
+    buf.resize(read_len, 0);
     file.read_exact(&mut buf).await?;
 
     let spec = yenc::PartSpec {
@@ -592,7 +595,7 @@ async fn repost_one(
     let mut message_id = generate_message_id(config.message_id_domain.as_deref());
     let article = Article {
         message_id: message_id.clone(),
-        from: seg.from.clone(),
+        from: seg.from.to_string(),
         newsgroups: groups.to_vec(),
         subject: default_subject(
             &seg.subject_name,

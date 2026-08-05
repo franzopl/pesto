@@ -207,6 +207,13 @@ pub struct PostingSection {
     /// the encoder splits recovery blocks into multiple passes, re-reading
     /// the input files once per pass. Default: `"1 GiB"`.
     pub par2_memory_limit: Option<String>,
+    /// Global memory budget for the whole process, not just PAR2: an
+    /// absolute size (`"8 GiB"`), a percentage of host RAM (`"70%"`), or
+    /// `"auto"` (default) to derive it from `RLIMIT_AS`/cgroup/host RAM with
+    /// no explicit override. PAR2 draws a 60% share of this ceiling — see
+    /// `pesto::memory::budget` — bounded together with (not looser than)
+    /// `par2_memory_limit` and the RLIMIT_AS-specific pass-sizing model.
+    pub memory_limit: Option<String>,
     /// Base directory for the intermediate PAR2 files written during a
     /// normal posting run, before they're read back and posted. Default:
     /// the OS temp directory (`std::env::temp_dir()`, usually `/tmp` or
@@ -355,6 +362,8 @@ pub struct Overrides {
     pub par2_only: Option<bool>,
     pub par2_before_upload: Option<bool>,
     pub par2_memory_limit: Option<u64>,
+    /// `None` = auto. See [`PostingSection::memory_limit`].
+    pub memory_limit: Option<u64>,
     pub par2_temp_dir: Option<String>,
     pub par2_slice_size: Option<u64>,
     pub par2_slice_count: Option<usize>,
@@ -433,6 +442,9 @@ pub struct Config {
     pub dry_run: bool,
     pub par2: u8,
     pub par2_memory_limit: Option<usize>,
+    /// Global process memory budget. `None` = auto. See
+    /// [`PostingSection::memory_limit`] and `pesto::memory::budget`.
+    pub memory_limit: Option<u64>,
     /// Base directory for the per-run PAR2 scratch directory. See
     /// [`PostingSection::par2_temp_dir`]. `None` falls back to
     /// `std::env::temp_dir()`.
@@ -551,6 +563,32 @@ impl Config {
             self.check_connections
         }
     }
+}
+
+/// Parse `--memory-limit`'s global-budget spec: an absolute size (delegates
+/// to [`parse_upload_rate`] — harmless reuse, there's no `/s` suffix on a
+/// memory size), a percentage of host RAM (`"70%"`), or `"auto"`/empty
+/// (`None` — let `pesto::memory::Ceiling` derive it from RLIMIT_AS/cgroup/
+/// host RAM with no explicit override).
+pub fn parse_memory_limit_spec(s: &str) -> Result<Option<u64>> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if let Some(pct) = s.strip_suffix('%') {
+        let pct: f64 = pct
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid memory-limit percentage `{s}`"))?;
+        if !(0.0..=100.0).contains(&pct) {
+            bail!("memory-limit percentage `{s}` must be between 0% and 100%");
+        }
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let host_total = sys.total_memory();
+        return Ok(Some((host_total as f64 * pct / 100.0) as u64));
+    }
+    Ok(Some(parse_upload_rate(s)?))
 }
 
 /// Parse a human-readable upload rate string into bytes per second.

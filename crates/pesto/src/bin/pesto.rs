@@ -13,11 +13,21 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use parmesan::SimdPath;
 use pesto::compress::{compress, random_password, ArchiveFormat};
-use pesto::config::{self, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides};
+use pesto::config::{
+    self, parse_memory_limit_spec, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides,
+};
 use pesto::logging;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
 use tracing::{error, info};
+
+/// Tracks this process's exact live-heap byte count (see
+/// [`pesto::memory::alloc`]), for comparison against `VmSize`/`RLIMIT_AS` in
+/// `--memory-report`. Declared here — in the binary, not the `pesto` library
+/// — because `#[global_allocator]` is a whole-binary choice; `upapasta`,
+/// `penne` and `sugo` link `pesto` as a library and are unaffected by it.
+#[global_allocator]
+static ALLOC: pesto::memory::alloc::CountingAlloc = pesto::memory::alloc::CountingAlloc::new();
 
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
@@ -176,10 +186,34 @@ struct Cli {
     #[arg(long, value_name = "N")]
     recovery_count: Option<usize>,
 
-    /// Maximum RAM for PAR2 recovery buffers, e.g. "512 MiB"
-    /// [config: posting.par2_memory_limit, default "1 GiB"].
+    /// Maximum RAM for PAR2 recovery buffers specifically, e.g. "512 MiB"
+    /// [config: posting.par2_memory_limit, default "1 GiB"]. For the whole
+    /// process's budget, see --memory-limit.
     #[arg(long, value_name = "SIZE")]
+    par2_memory_limit: Option<String>,
+
+    /// Global memory budget for the whole process (PAR2, uploads, check
+    /// queue together), not just PAR2: an absolute size ("8 GiB"), a
+    /// percentage of host RAM ("70%"), or "auto" (default) to derive it from
+    /// RLIMIT_AS/cgroup/host RAM with no explicit override. PAR2 draws a 60%
+    /// share of this ceiling, bounded together with (not looser than)
+    /// --par2-memory-limit and the RLIMIT_AS-specific pass-sizing model
+    /// [config: posting.memory_limit, default "auto"].
+    #[arg(long, value_name = "SIZE|PCT|auto")]
     memory_limit: Option<String>,
+
+    /// Log address-space and RSS usage once a second, tagged with the stage
+    /// of the run. The peak and the stage it occurred in are always reported
+    /// at exit; this adds the full trace, for diagnosing *when* a run grows.
+    #[arg(long)]
+    memory_trace: bool,
+
+    /// Print a detailed memory report at exit: the effective ceiling
+    /// (address-space/cgroup/host, whichever is tightest), the gap between
+    /// live heap data and VmSize (allocator/VA overhead), and the worst
+    /// pressure level reached during the run.
+    #[arg(long)]
+    memory_report: bool,
 
     /// Directory where intermediate PAR2 files are written during posting,
     /// before they're read back and posted. Defaults to the OS temp
@@ -613,9 +647,13 @@ impl Cli {
                 None
             },
             par2_memory_limit: self
-                .memory_limit
+                .par2_memory_limit
                 .as_ref()
                 .and_then(|s| parse_upload_rate(s).ok()),
+            memory_limit: self
+                .memory_limit
+                .as_ref()
+                .and_then(|s| parse_memory_limit_spec(s).ok().flatten()),
             par2_temp_dir: self.par2_temp_dir.clone(),
             par2_slice_size: self
                 .slice_size
@@ -1469,6 +1507,7 @@ async fn run_single_upload(
             println!(
                 "generating nfo (running bdinfo — this can take a while on large Blu-ray discs)..."
             );
+            pesto::memory::set_phase(pesto::memory::Phase::Nfo);
             let nfo_paths = entry_paths.to_vec();
             let nfo_handle = tokio::task::spawn_blocking(move || pesto::nfo::generate(&nfo_paths));
             tokio::pin!(nfo_handle);
@@ -2450,8 +2489,41 @@ fn write_session_summary(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Entry point.
+///
+/// Deliberately *not* `#[tokio::main]`: two things have to happen before the
+/// runtime spawns its first thread, and the attribute leaves no room for
+/// either.
+///
+/// 1. `tune_allocator()` must run before any thread exists — on glibc,
+///    malloc's per-core arenas are created lazily on first allocation from a
+///    new thread and can never be reclaimed afterwards.
+/// 2. The runtime itself must be built with bounded thread counts and stack
+///    sizes. `#[tokio::main]`'s defaults (`ncores` workers, 2 MiB stacks) are
+///    the largest avoidable consumer of address space on a many-core seedbox:
+///    measured over a full `--par2-only --threads 128` run, bounding them
+///    takes peak address space from 803.5 MiB to 443.3 MiB. Against a typical
+///    seedbox `ulimit -v` that headroom is the difference between finishing a
+///    100 GiB post and aborting mid-encode. See [`pesto::memory`].
+fn main() -> Result<()> {
+    pesto::memory::tune_allocator();
+    let tuning = pesto::memory::ThreadTuning::detect();
+    let runtime = tuning
+        .build_runtime()
+        .context("building the tokio runtime")?;
+    let result = runtime.block_on(run(tuning));
+    // Logged from here rather than at the end of `run` so it covers the error
+    // paths too. It does not cover the `std::process::exit` calls on Ctrl-C —
+    // those bypass every unwind and destructor by design.
+    info!("memory: {} (exit)", pesto::memory::peak_summary());
+    if pesto::memory::report_enabled() {
+        let ceiling = pesto::memory::Ceiling::discover(pesto::memory::explicit_memory_limit());
+        println!("{}", pesto::memory::report_summary(&ceiling));
+    }
+    result
+}
+
+async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     let mut cli = Cli::parse();
 
     // `pesto --config` with no value: launch the interactive setup wizard.
@@ -2630,6 +2702,31 @@ async fn main() -> Result<()> {
     };
     logging::init(cli.verbose, cli.log_file.as_deref(), session_log.as_deref())?;
     logging::log_system_info();
+    // Logged unconditionally at INFO (not gated on -vv): when a run dies to
+    // `handle_alloc_error` there is no unwind and no further output, so the
+    // last line already in the log is the only evidence of how much address
+    // space was left. See `pesto::memory`.
+    info!(
+        worker_threads = tuning.worker_threads,
+        max_blocking_threads = tuning.max_blocking_threads,
+        thread_stack_kib = tuning.thread_stack_size / 1024,
+        "memory: {} (startup)",
+        pesto::memory::footprint_summary(),
+    );
+    // Started after logging is up so `--memory-trace` output has somewhere to
+    // go. Peak-and-stage tracking (and pressure-level logging) is always on;
+    // only the per-sample trace line is gated on the flag. `Ceiling` is cheap
+    // to (re)compute — see `memory::Ceiling::discover` — so it's read fresh
+    // here rather than threaded through from anywhere earlier. It does need
+    // `config.memory_limit` (the resolved global `--memory-limit`, if any)
+    // so the sampler's pressure percentages and `--memory-report`'s
+    // breakdown agree with what `producer` actually enforced.
+    pesto::memory::set_report_enabled(cli.memory_report);
+    pesto::memory::set_explicit_memory_limit(config.memory_limit);
+    pesto::memory::start_sampler(
+        cli.memory_trace,
+        pesto::memory::Ceiling::discover(config.memory_limit),
+    );
     if let Some(p) = &session_log {
         tracing::debug!(path = %p.display(), "session log");
     }
@@ -3157,6 +3254,7 @@ fn run_hooks_dir(hooks_dir: &std::path::Path, env: &HookEnv<'_>) {
             hooks_dir.display()
         );
     }
+    pesto::memory::set_phase(pesto::memory::Phase::Hooks);
     for script in &scripts {
         println!("running hook: {}", script.display());
         let mut child = hook_script_command(script);
