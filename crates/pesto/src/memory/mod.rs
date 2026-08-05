@@ -53,6 +53,14 @@
 //! Note that the tokio blocking-pool cap is a bound on the tail rather than a
 //! saving; see [`DEFAULT_MAX_BLOCKING_THREADS`].
 
+pub mod alloc;
+pub mod ceiling;
+pub mod cgroup;
+pub mod pressure;
+
+pub use ceiling::Ceiling;
+pub use pressure::{Pressure, PressureTracker};
+
 /// A snapshot of this process's memory footprint, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VmStats {
@@ -345,7 +353,24 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 static CURRENT_PHASE: AtomicU8 = AtomicU8::new(0);
 static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_PHASE: AtomicU8 = AtomicU8::new(0);
+static PEAK_PRESSURE: AtomicU8 = AtomicU8::new(Pressure::Normal as u8);
 static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+static REPORT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable `--memory-report`'s exit-time summary block.
+///
+/// A module-level flag rather than a return value threaded back out of
+/// `run()`: `main()` logs the exit summary after `run()` returns regardless
+/// of which of its several return points was taken (including error paths),
+/// and this mirrors `start_sampler`'s own `trace` flag for the same reason.
+pub fn set_report_enabled(enabled: bool) {
+    REPORT_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether `--memory-report` was requested — see [`set_report_enabled`].
+pub fn report_enabled() -> bool {
+    REPORT_ENABLED.load(Ordering::Relaxed)
+}
 
 /// How often the sampler reads `/proc/self/statm`.
 ///
@@ -374,13 +399,21 @@ pub fn set_phase(phase: Phase) {
 /// `/proc/self/statm` read per interval, far below the noise floor. `trace`
 /// additionally logs every sample, which is opt-in because at one line per
 /// second it would bury everything else in a long run.
-pub fn start_sampler(trace: bool) {
+///
+/// Every fourth tick (~1 s) it also reads cgroup memory + PSI and re-evaluates
+/// the pressure level against `ceiling`. Level *transitions* are logged
+/// unconditionally — not gated on `trace` — because an escalation is exactly
+/// the kind of thing worth surfacing by default; nothing yet reacts to it
+/// (that's Phase 3, see `docs/memory-management.md`), this phase only reports
+/// it.
+pub fn start_sampler(trace: bool, ceiling: Ceiling) {
     TRACE_ENABLED.store(trace, Ordering::Relaxed);
     std::thread::Builder::new()
         .name("pesto-memwatch".into())
         .stack_size(256 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             let limit = address_space_limit();
+            let mut tracker = PressureTracker::new(std::time::Instant::now());
             let mut tick: u32 = 0;
             loop {
                 if let Some(stats) = VmStats::read() {
@@ -397,16 +430,44 @@ pub fn start_sampler(trace: bool) {
                     // current at the next one — but a trace at the sampling
                     // rate would be four lines a second of mostly identical
                     // output, so only every fourth sample is logged.
-                    if TRACE_ENABLED.load(Ordering::Relaxed) && tick.is_multiple_of(4) {
-                        let pct = limit
-                            .map(|l| format!(" ({:.1}%)", stats.vm_size as f64 / l as f64 * 100.0))
-                            .unwrap_or_default();
-                        tracing::info!(
-                            phase = Phase::from_u8(phase).name(),
-                            "memory: address space {}{pct}, RSS {}",
-                            crate::progress::format_size(stats.vm_size),
-                            crate::progress::format_size(stats.vm_rss),
-                        );
+                    if tick.is_multiple_of(4) {
+                        if TRACE_ENABLED.load(Ordering::Relaxed) {
+                            let pct = limit
+                                .map(|l| {
+                                    format!(" ({:.1}%)", stats.vm_size as f64 / l as f64 * 100.0)
+                                })
+                                .unwrap_or_default();
+                            tracing::info!(
+                                phase = Phase::from_u8(phase).name(),
+                                "memory: address space {}{pct}, RSS {}",
+                                crate::progress::format_size(stats.vm_size),
+                                crate::progress::format_size(stats.vm_rss),
+                            );
+                        }
+
+                        let psi = cgroup::read_cgroup_memory().and_then(|c| c.psi_avg10);
+                        let pct_of_ceiling =
+                            stats.vm_size as f64 / ceiling.effective as f64 * 100.0;
+                        if let Some(level) =
+                            tracker.update(pct_of_ceiling, psi, std::time::Instant::now())
+                        {
+                            PEAK_PRESSURE.fetch_max(level as u8, Ordering::Relaxed);
+                            let psi_text = psi
+                                .map(|p| format!(", PSI avg10 {p:.1}%"))
+                                .unwrap_or_default();
+                            let msg = format!(
+                                "memory pressure: {} ({:.1}% of effective ceiling {}{psi_text})",
+                                level.name(),
+                                pct_of_ceiling,
+                                crate::progress::format_size(ceiling.effective),
+                            );
+                            match level {
+                                Pressure::Normal | Pressure::Elevated => tracing::info!("{msg}"),
+                                Pressure::Critical | Pressure::Emergency => {
+                                    tracing::warn!("{msg}")
+                                }
+                            }
+                        }
                     }
                 }
                 tick = tick.wrapping_add(1);
@@ -421,6 +482,13 @@ pub fn start_sampler(trace: bool) {
 fn peak_phase() -> Option<Phase> {
     (PEAK_BYTES.load(Ordering::Relaxed) > 0)
         .then(|| Phase::from_u8(PEAK_PHASE.load(Ordering::Relaxed)))
+}
+
+/// The worst pressure level the sampler observed over the life of the run,
+/// for `--memory-report`. `Normal` if the sampler never escalated (or was
+/// never started).
+pub fn peak_pressure() -> Pressure {
+    Pressure::from_u8(PEAK_PRESSURE.load(Ordering::Relaxed))
 }
 
 /// One-line summary of the current footprint against the address-space
@@ -496,6 +564,44 @@ fn during() -> String {
         Some(p) => format!(" during {}", p.name()),
         None => String::new(),
     }
+}
+
+/// Multi-line `--memory-report` block, printed once at exit. Complements
+/// [`peak_summary`] (the kernel's `VmPeak` against `RLIMIT_AS`) with the
+/// three other things that only this run's own accounting knows: the full
+/// ceiling breakdown, the live-heap-vs-`VmSize` gap (allocator/VA overhead),
+/// and the worst pressure level reached.
+pub fn report_summary(ceiling: &Ceiling) -> String {
+    let fmt = crate::progress::format_size;
+    let opt = |v: Option<u64>| v.map(fmt).unwrap_or_else(|| "none detected".to_string());
+
+    let live_peak = alloc::live_bytes_peak();
+    let vm_peak = address_space_peak();
+    let gap = match vm_peak {
+        Some(vm) if vm >= live_peak => format!(
+            "gap {} (allocator/VA overhead)",
+            fmt(vm.saturating_sub(live_peak))
+        ),
+        Some(_) => "gap unavailable (VmPeak below live heap — allocator not the process's actual global allocator)".to_string(),
+        None => "gap unavailable (VmPeak unreadable)".to_string(),
+    };
+
+    format!(
+        "memory report:\n  \
+         ceiling: address-space {} | cgroup {} | host {} | effective {}\n  \
+         live heap peak {}, VmPeak {} — {}\n  \
+         pressure: worst level reached {}",
+        opt(ceiling.address_space),
+        opt(ceiling.cgroup_max),
+        fmt(ceiling.host_total),
+        fmt(ceiling.effective),
+        fmt(live_peak),
+        vm_peak
+            .map(fmt)
+            .unwrap_or_else(|| "unavailable".to_string()),
+        gap,
+        peak_pressure().name(),
+    )
 }
 
 #[cfg(test)]
@@ -600,5 +706,23 @@ mod tests {
     fn tune_allocator_is_safe_to_call() {
         // No-op on musl; on glibc it must not fault or abort.
         tune_allocator();
+    }
+
+    #[test]
+    fn peak_pressure_defaults_to_normal_and_is_observable() {
+        let before = PEAK_PRESSURE.load(Ordering::Relaxed);
+        assert_eq!(peak_pressure(), Pressure::from_u8(before));
+        PEAK_PRESSURE.fetch_max(Pressure::Critical as u8, Ordering::Relaxed);
+        assert_eq!(peak_pressure(), Pressure::Critical);
+        PEAK_PRESSURE.store(before, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn report_summary_includes_ceiling_and_pressure() {
+        let ceiling = Ceiling::discover(None);
+        let report = report_summary(&ceiling);
+        assert!(report.contains("memory report:"));
+        assert!(report.contains("ceiling:"));
+        assert!(report.contains("pressure:"));
     }
 }

@@ -12,6 +12,43 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **Memory management, Phase 0 — reduce the address-space floor.** `pesto`
+  was aborting on seedboxes with `memory allocation of N bytes failed` even
+  with system RAM to spare, because the wall being hit is `RLIMIT_AS`
+  (`ulimit -v`), not RAM. New `pesto::memory` module: caps glibc malloc's
+  per-core arena reservations (`mallopt(M_ARENA_MAX, 2)`, ~8 GiB saved on a
+  128-core host, no-op on musl), replaces `#[tokio::main]`'s defaults with an
+  explicit runtime (workers capped at `min(ncores, 16)`, 1 MiB stacks), and
+  shrinks the rayon pool's stacks the same way — measured 803.5 → 443.3 MiB
+  peak address space on a 128-thread profile before a single PAR2 slice is
+  accounted for. Also corrects the PAR2 memory-budget model against a live
+  83.4 GiB / 116 619-segment run (predicted vs observed peak: 1.1% error),
+  fixing an over-sized per-thread reserve constant that was silently
+  compensating for a missing cross-pass-retention term. See
+  `docs/memory-management.md`.
+- **`--memory-trace`**: logs address-space and RSS usage roughly once a
+  second, tagged with the run's current stage (compress/par2/posting/check/
+  nzb/nfo/hooks). The peak address space and the stage it occurred in are
+  now always reported at exit, regardless of the flag — attribution matters
+  most exactly when a run dies with no unwind to explain why.
+- **Memory management, Phase 1 — observability.** `CountingAlloc` (an opt-in
+  `GlobalAlloc` wrapper, declared only in `pesto`'s own binary) tracks this
+  process's exact live-heap bytes, for comparison against the kernel's
+  `VmSize`/`VmPeak`; a large gap between the two is the signal that
+  allocator/VA overhead — not live data — is consuming the address-space
+  budget. `Ceiling::discover` computes the effective memory budget as the
+  minimum of `RLIMIT_AS`, cgroup `memory.max`, and host RAM, each with its
+  own haircut for how tolerant its failure mode is. cgroup v1/v2 and PSI
+  (`memory.pressure` / `/proc/pressure/memory`) are read directly, resolved
+  through `/proc/self/cgroup` rather than assumed at the cgroup root. A
+  `Normal`/`Elevated`/`Critical`/`Emergency` pressure level is computed every
+  ~1s (with hysteresis and a 5s de-escalation ratchet) and logged on every
+  transition — nothing reacts to it yet, that's a later phase. New
+  **`--memory-report`** flag prints a one-shot summary at exit: the ceiling
+  breakdown, the live-heap-vs-`VmPeak` gap, and the worst pressure level
+  reached.
+
 ## [0.5.8] — 2026-08-04
 
 ### Added

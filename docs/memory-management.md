@@ -1,7 +1,7 @@
 # Pesto memory management — design and implementation plan
 
-Status: **Phase 0 implemented**; Phases 1–5 proposed. Scope: `pesto` (and, where
-noted, `parmesan`).
+Status: **Phase 0 implemented; Phase 1 implemented**; Phases 2–5 proposed.
+Scope: `pesto` (and, where noted, `parmesan`).
 
 ---
 
@@ -510,18 +510,35 @@ Overrides for odd hosts, no rebuild needed: `PESTO_WORKER_THREADS`,
 Deploy and re-run the 100 GiB post before starting Phase 1 — that result determines
 whether the remaining phases are needed at all.
 
-### Phase 1 — Observability (~1–2 days, no behaviour change)
+### Phase 1 — Observability (~1–2 days, no behaviour change) ✅ **implemented**
 
-`CountingAlloc`, `/proc/self/statm` + cgroup + PSI sampler, `Ceiling` discovery,
-`--memory-report` / `--memory-trace`, pressure levels **computed and logged but not
-acted on**. Run real 100 GiB posts and collect the numbers before writing policy —
-this is what tells you whether the §4.2 shares are right.
+1. ✅ `/proc/self/statm` sampler + `VmPeak`/phase attribution, `--memory-trace`
+   (landed alongside Phase 0 — see the commits fixing the sampling interval
+   to 250ms so short runs attribute correctly).
+2. ✅ `CountingAlloc` (`memory::alloc`) — exact live-heap byte accounting via
+   an opt-in `GlobalAlloc` wrapper, declared only in `pesto`'s own binary
+   (not the library, so `upapasta`/`penne`/`sugo` are unaffected).
+3. ✅ `Ceiling` discovery (`memory::ceiling`) — effective budget as the
+   minimum of `RLIMIT_AS × 0.60`, cgroup `memory.max × 0.75`, host RAM
+   `× 0.70`, each read directly rather than through `sysinfo`.
+4. ✅ cgroup v1/v2 + PSI reader (`memory::cgroup`), resolved via
+   `/proc/self/cgroup` rather than assumed at the root.
+5. ✅ Pressure state machine (`memory::pressure`) —
+   `Normal`/`Elevated`/`Critical`/`Emergency` with hysteresis and a 5s
+   de-escalation ratchet, evaluated every ~1s and logged on every
+   transition. **Computed and logged only — nothing reacts to it yet**;
+   that's Phase 3.
+6. ✅ `--memory-report`: one-shot summary at exit (ceiling breakdown,
+   live-heap-vs-`VmPeak` gap, worst pressure level reached).
+
+Run real 100 GiB posts with `--memory-trace --memory-report` and collect the
+numbers before writing Phase 2/3 policy — this is what tells you whether the
+§4.2 shares are right, and what the real pressure-level time distribution
+looks like on ultra.cc.
 
 The budget model itself was re-derived ahead of this phase — see
 [§9](#9-the-budget-model-validated-against-a-live-run), which supersedes the
-`connection_overhead_reserve` note that used to sit here. The remaining Phase 1
-work is the sampler and attribution, which is what turns §9's flat constants into
-measured per-segment figures.
+`connection_overhead_reserve` note that used to sit here.
 
 ### Phase 2 — Unified budget (~2–3 days)
 
@@ -632,7 +649,7 @@ falsifiable prediction and worth checking explicitly.
 | # | Work | Effort | Risk | Value |
 |---|---|---|---|---|
 | 1 | **Phase 0** — arenas, thread/stack caps, bounded check channel | ½ day | Low | **Very high** — likely fixes the reported crashes outright |
-| 2 | Phase 1 — measurement and reporting | 1–2 d | None | High — everything after this depends on real numbers |
+| 2 | Phase 1 — measurement and reporting ✅ | 1–2 d | None | High — everything after this depends on real numbers |
 | 3 | `PostedSegment` slimming (§3.3) | ½ day | Low | Medium — ~150 MiB, helps every run |
 | 4 | Phase 2 — unified budget | 2–3 d | Medium | High — one coherent number instead of one managed stage |
 | 5 | Phase 4 — `try_reserve` degradation | 2–3 d | Medium | High — turns aborts into messages |

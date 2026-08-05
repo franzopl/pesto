@@ -19,6 +19,14 @@ use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
 use tracing::{error, info};
 
+/// Tracks this process's exact live-heap byte count (see
+/// [`pesto::memory::alloc`]), for comparison against `VmSize`/`RLIMIT_AS` in
+/// `--memory-report`. Declared here — in the binary, not the `pesto` library
+/// — because `#[global_allocator]` is a whole-binary choice; `upapasta`,
+/// `penne` and `sugo` link `pesto` as a library and are unaffected by it.
+#[global_allocator]
+static ALLOC: pesto::memory::alloc::CountingAlloc = pesto::memory::alloc::CountingAlloc::new();
+
 /// One-line summary shown at the top of `--help`.
 const ABOUT: &str = "Fast, lean Usenet poster: yEnc-encode files, post over NNTP, emit an .nzb.";
 
@@ -186,6 +194,13 @@ struct Cli {
     /// at exit; this adds the full trace, for diagnosing *when* a run grows.
     #[arg(long)]
     memory_trace: bool,
+
+    /// Print a detailed memory report at exit: the effective ceiling
+    /// (address-space/cgroup/host, whichever is tightest), the gap between
+    /// live heap data and VmSize (allocator/VA overhead), and the worst
+    /// pressure level reached during the run.
+    #[arg(long)]
+    memory_report: bool,
 
     /// Directory where intermediate PAR2 files are written during posting,
     /// before they're read back and posted. Defaults to the OS temp
@@ -2484,6 +2499,12 @@ fn main() -> Result<()> {
     // paths too. It does not cover the `std::process::exit` calls on Ctrl-C —
     // those bypass every unwind and destructor by design.
     info!("memory: {} (exit)", pesto::memory::peak_summary());
+    if pesto::memory::report_enabled() {
+        println!(
+            "{}",
+            pesto::memory::report_summary(&pesto::memory::Ceiling::discover(None))
+        );
+    }
     result
 }
 
@@ -2678,9 +2699,12 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
         pesto::memory::footprint_summary(),
     );
     // Started after logging is up so `--memory-trace` output has somewhere to
-    // go. Peak-and-stage tracking is always on (one /proc read per second);
-    // only the per-sample logging is gated on the flag.
-    pesto::memory::start_sampler(cli.memory_trace);
+    // go. Peak-and-stage tracking (and pressure-level logging) is always on;
+    // only the per-sample trace line is gated on the flag. `Ceiling` is cheap
+    // to (re)compute — see `memory::Ceiling::discover` — so it's read fresh
+    // here rather than threaded through from anywhere earlier.
+    pesto::memory::set_report_enabled(cli.memory_report);
+    pesto::memory::start_sampler(cli.memory_trace, pesto::memory::Ceiling::discover(None));
     if let Some(p) = &session_log {
         tracing::debug!(path = %p.display(), "session log");
     }
