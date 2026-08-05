@@ -446,7 +446,6 @@ impl Shared {
         }
     }
 
-
     /// Return a buffer to the pool. Oversized or empty buffers are dropped.
     fn release_buffer(&self, buf: Vec<u8>) {
         if buf.capacity() > 0 && buf.capacity() <= self.config.article_size * 2 {
