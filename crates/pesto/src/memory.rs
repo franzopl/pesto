@@ -347,6 +347,15 @@ static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_PHASE: AtomicU8 = AtomicU8::new(0);
 static TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// How often the sampler reads `/proc/self/statm`.
+///
+/// This is the resolution of peak attribution, so it wants to be short: a
+/// 3-second `--par2-only` run at a 1 s interval credited its peak to `startup`
+/// simply because the allocation and the release both fell between samples.
+/// Four reads a second of a single-line pseudo-file is far below the noise
+/// floor of anything `pesto` does.
+const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Record that the run has entered `phase`.
 ///
 /// A single relaxed store — safe to call from anywhere, including inside the
@@ -372,6 +381,7 @@ pub fn start_sampler(trace: bool) {
         .stack_size(256 * 1024)
         .spawn(|| {
             let limit = address_space_limit();
+            let mut tick: u32 = 0;
             loop {
                 if let Some(stats) = VmStats::read() {
                     let phase = CURRENT_PHASE.load(Ordering::Relaxed);
@@ -381,7 +391,13 @@ pub fn start_sampler(trace: bool) {
                     if stats.vm_size > prev {
                         PEAK_PHASE.store(phase, Ordering::Relaxed);
                     }
-                    if TRACE_ENABLED.load(Ordering::Relaxed) {
+                    // Sample fast, log slow. Attribution accuracy is bounded by
+                    // the sampling interval — a peak reached and released
+                    // between two samples gets credited to whichever phase was
+                    // current at the next one — but a trace at the sampling
+                    // rate would be four lines a second of mostly identical
+                    // output, so only every fourth sample is logged.
+                    if TRACE_ENABLED.load(Ordering::Relaxed) && tick.is_multiple_of(4) {
                         let pct = limit
                             .map(|l| format!(" ({:.1}%)", stats.vm_size as f64 / l as f64 * 100.0))
                             .unwrap_or_default();
@@ -393,7 +409,8 @@ pub fn start_sampler(trace: bool) {
                         );
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                tick = tick.wrapping_add(1);
+                std::thread::sleep(SAMPLE_INTERVAL);
             }
         })
         .ok();
