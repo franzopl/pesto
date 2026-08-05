@@ -3,12 +3,103 @@ use crate::config::types::*;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Maps every known config field to the section it actually lives in, so an
+/// `unknown field` error (raised by `#[serde(deny_unknown_fields)]`) can
+/// point the user at the right place instead of just naming what's wrong —
+/// e.g. `temp_dir` and `par2_temp_dir` are easy to swap between
+/// `[compression]` and `[posting]`, or to drop under `[output]` by analogy
+/// with `history_dir`.
+const FIELD_SECTIONS: &[(&str, &str)] = &[
+    // [server]
+    ("host", "[server]"),
+    ("port", "[server]"),
+    ("ssl", "[server]"),
+    ("connections", "[server]"),
+    ("retry_delay", "[server]"),
+    ("timeout", "[server]"),
+    ("keepalive", "[server]"),
+    // [auth]
+    ("username", "[auth]"),
+    ("password", "[auth]"),
+    // [posting]
+    ("from", "[posting]"),
+    ("groups", "[posting]"),
+    ("article_size", "[posting]"),
+    ("line_length", "[posting]"),
+    ("retries", "[posting]"),
+    ("obfuscate", "[posting]"),
+    ("par2", "[posting]"),
+    ("upload_rate", "[posting]"),
+    ("date", "[posting]"),
+    ("no_archive", "[posting]"),
+    ("file_counter", "[posting]"),
+    ("message_id_domain", "[posting]"),
+    ("check", "[posting]"),
+    ("check_delay", "[posting]"),
+    ("check_retries", "[posting]"),
+    ("check_connections", "[posting]"),
+    ("check_post_retries", "[posting]"),
+    ("allow_incomplete_nzb", "[posting]"),
+    ("check_recover_percent", "[posting]"),
+    ("check_recover_max", "[posting]"),
+    ("pipeline_depth", "[posting]"),
+    ("par2_memory_limit", "[posting]"),
+    ("memory_limit", "[posting]"),
+    ("par2_temp_dir", "[posting]"),
+    ("par2_before_upload", "[posting]"),
+    // [output]
+    ("history", "[output]"),
+    ("history_dir", "[output]"),
+    ("session_log", "[output]"),
+    ("nzb", "[output]"),
+    ("nzb_dir", "[output]"),
+    ("nzb_name", "[output]"),
+    ("nzb_password", "[output]"),
+    ("nzb_category", "[output]"),
+    ("nzb_tags", "[output]"),
+    ("pre_hook", "[output]"),
+    ("pre_hooks", "[output]"),
+    ("post_hook", "[output]"),
+    ("post_hooks", "[output]"),
+    ("no_hooks", "[output]"),
+    ("nfo", "[output]"),
+    ("nzb_conflict", "[output]"),
+    ("resume", "[output]"),
+    ("quiet", "[output]"),
+    ("bell", "[output]"),
+    // [output.indexer]
+    ("url", "[output.indexer]"),
+    ("api_key", "[output.indexer]"),
+    // [compression]
+    ("format", "[compression]"),
+    ("temp_dir", "[compression]"),
+    ("volume_size", "[compression]"),
+    // [notify]
+    ("webhook_url", "[notify]"),
+    ("ntfy_topic", "[notify]"),
+];
+
+/// Given a TOML deserialize error, if it's an `unknown field` rejection for a
+/// field name we recognise under a different section, return a hint
+/// pointing at that section.
+fn section_hint(err: &toml::de::Error) -> Option<String> {
+    let field = err.message().strip_prefix("unknown field `")?;
+    let field = &field[..field.find('`')?];
+    let (_, section) = FIELD_SECTIONS.iter().find(|(name, _)| *name == field)?;
+    Some(format!("`{field}` belongs under {section}, not here"))
+}
+
 impl FileConfig {
     /// Load and parse a TOML config file.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file `{}`", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing config file `{}`", path.display()))
+        toml::from_str(&text)
+            .map_err(|e| match section_hint(&e) {
+                Some(hint) => anyhow::Error::new(e).context(hint),
+                None => anyhow::Error::new(e),
+            })
+            .with_context(|| format!("parsing config file `{}`", path.display()))
     }
 }
 
