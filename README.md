@@ -478,16 +478,32 @@ pesto --season --jobs 2 ./Season01/
 # Watch a folder and post every new entry automatically (Ctrl-C / SIGTERM to stop)
 pesto --watch ./incoming/
 
-# Move completed entries to a done folder instead of deleting them
-pesto --watch ./incoming/ --watch-done ./done/
-
 # Post up to 3 entries in parallel with a 60-second poll interval
 pesto --watch ./incoming/ --jobs 3 --watch-interval 60
 ```
 
 Entries already present in the watched directory when `pesto` starts are ignored;
-only new arrivals are posted. Completed entries are moved to `--watch-done` or
-deleted if `--watch-done` is not set.
+only new arrivals are posted. By default, completed entries are left in place.
+
+### `--cleanup` and `--cleanup-to` — source cleanup after upload
+
+After a successful upload (with no failures or cancellation), automatically clean up the source files/directories:
+
+```bash
+# Delete sources after upload
+pesto --cleanup movie.mkv
+pesto --watch ./incoming/ --cleanup
+
+# Move sources to an archive directory after upload (safer than delete)
+pesto --cleanup-to ./archive/ movie.mkv
+pesto --each ./Season01/ --cleanup-to ./uploaded/
+pesto --watch ./incoming/ --cleanup-to ./archive/
+```
+
+Both flags work with any upload mode (`--watch`, `--each`, `--season`, or direct uploads).
+Use `--cleanup-to` for a non-destructive approach: sources remain accessible in the archive
+directory if you need to verify or re-post them. The `--cleanup` and `--cleanup-to` flags
+are mutually exclusive.
 
 ### `--ext` — restrict uploads to specific extensions
 
@@ -968,8 +984,10 @@ picked up automatically — no config change needed.
 | `--merge-season <DIR>` | — | — | Merge per-episode NZBs in DIR into season NZBs (offline) |
 | `--jobs <N>` | — | `1` | Parallel uploads for `--each`/`--season` (0 = CPU count) |
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
-| `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |
+| `--watch-done <DIR>` | — | — | Move completed watch entries here (legacy; use `--cleanup-to` instead) |
 | `--watch-interval <SECS>` | — | `30` | Poll interval for `--watch` |
+| `--cleanup` | — | off | Delete successfully uploaded sources (files or directories) |
+| `--cleanup-to <DIR>` | — | — | Move successfully uploaded sources to a directory instead of deleting |
 | `--ext <EXT[,EXT...]>` | — | off | Only post files with these extensions (case-insensitive); drops non-matching top-level entries and files nested inside a directory |
 
 ---
