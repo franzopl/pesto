@@ -12,6 +12,12 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.10] — 2026-08-06
+
+### Added
+- **`--cleanup` and `--cleanup-to` flags:** general-purpose source cleanup after successful upload, works with any upload mode (`--watch`, `--each`, `--season`, or direct file uploads). `--cleanup` deletes sources, `--cleanup-to DIR` moves them to an archive directory (non-destructive). Cleanup only occurs when an upload completes successfully with no failures or cancellation.
+- **Unit tests for `CleanupMode`:** comprehensive coverage of cleanup behavior (leave/delete/move for both files and directories).
+
 ## [0.5.9] — 2026-08-05
 
 ### Added
