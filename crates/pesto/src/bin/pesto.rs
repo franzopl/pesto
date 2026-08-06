@@ -1950,7 +1950,7 @@ async fn post_season_par2_volumes(
         .filter_map(|entry| {
             entry.ok().and_then(|e| {
                 let path = e.path();
-                if path.extension().map_or(false, |ext| ext == "par2") {
+                if path.extension().is_some_and(|ext| ext == "par2") {
                     Some(path)
                 } else {
                     None
