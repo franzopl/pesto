@@ -2151,6 +2151,7 @@ async fn run_batch(
             // Generate and post global PAR2 for the entire season (Phase 47b).
             // This produces a single, coherent recovery set covering all episodes
             // instead of multiple independent rsids for each episode.
+            let mut season_par2_segments = Vec::new();
             if config.par2 > 0 && entries.len() > 1 {
                 match post_season_par2_volumes(
                     &entries,
@@ -2166,8 +2167,7 @@ async fn run_batch(
                                 par2_segments = par2_segments.len(),
                                 "season PAR2 volumes posted successfully"
                             );
-                            // Add PAR2 segments to the consolidated NZB.
-                            all_segments.extend(par2_segments);
+                            season_par2_segments = par2_segments;
                         }
                     }
                     Err(e) => {
@@ -2177,6 +2177,24 @@ async fn run_batch(
                     }
                 }
             }
+
+            // Filter segments for the season NZB:
+            // - Keep: episode data files (no .par2 in name)
+            // - Remove: per-episode PAR2 sets (have .par2 in name)
+            // - Add: global season PAR2 (replaces individual sets with single coherent rsid)
+            let season_segments: Vec<PostedSegment> = if !season_par2_segments.is_empty() {
+                let data_segments: Vec<_> = all_segments
+                    .iter()
+                    .filter(|s| !s.file_name.ends_with(".par2"))
+                    .cloned()
+                    .collect();
+                let mut combined = data_segments;
+                combined.extend(season_par2_segments);
+                combined
+            } else {
+                // If season PAR2 generation failed, use all segments (with per-episode PAR2 sets)
+                all_segments.clone()
+            };
 
             let nzb_meta = NzbMeta {
                 name: season_name,
@@ -2191,7 +2209,7 @@ async fn run_batch(
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
             };
-            let xml = pesto::nzb::generate(&all_groups, &all_segments, &nzb_meta);
+            let xml = pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
