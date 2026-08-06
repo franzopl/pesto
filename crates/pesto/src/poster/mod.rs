@@ -3617,24 +3617,42 @@ pub async fn generate_season_par2(
             .with_context(|| format!("opening episode `{}`", episode_path.display()))?;
         let file_size = file.metadata().await.ok().map(|m| m.len()).unwrap_or(0);
         let mut slices_for_episode = 0;
+        let mut bytes_read_total = 0u64;
 
         loop {
-            let n = file
-                .read(&mut buf)
-                .await
-                .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
+            // Read a full slice_size worth of data (or less at EOF)
+            let mut buf_offset = 0;
+            loop {
+                let n = file
+                    .read(&mut buf[buf_offset..])
+                    .await
+                    .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
 
-            if n == 0 {
+                if n == 0 {
+                    // EOF reached
+                    break;
+                }
+
+                buf_offset += n;
+                bytes_read_total += n as u64;
+
+                // If we've filled the slice or reached EOF, we're done reading for this slice
+                if buf_offset >= par2_slice_size {
+                    break;
+                }
+            }
+
+            if buf_offset == 0 {
+                // No more data to read
                 break;
             }
 
-            // Pad to slice_size with zeros (standard PAR2 behavior).
-            if n < par2_slice_size {
-                buf[n..par2_slice_size].fill(0);
-                encoder.add_slice(buf.clone());
-            } else {
-                encoder.add_slice(buf[..par2_slice_size].to_vec());
+            // Pad to slice_size with zeros (standard PAR2 behavior) if needed
+            if buf_offset < par2_slice_size {
+                buf[buf_offset..par2_slice_size].fill(0);
             }
+
+            encoder.add_slice(buf.clone());
             slices_for_episode += 1;
         }
 
@@ -3643,7 +3661,9 @@ pub async fn generate_season_par2(
             episode_idx = ep_idx + 1,
             total_episodes = episode_paths.len(),
             file_size,
+            bytes_read_total,
             slices_for_episode,
+            expected_slices = (file_size as usize).div_ceil(par2_slice_size),
             "finished reading episode"
         );
     }
