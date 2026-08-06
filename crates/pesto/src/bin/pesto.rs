@@ -785,15 +785,17 @@ impl CleanupMode {
                         format!("failed to delete directory `{}`", source.display())
                     })?;
                 } else {
-                    std::fs::remove_file(source).with_context(|| {
-                        format!("failed to delete file `{}`", source.display())
-                    })?;
+                    std::fs::remove_file(source)
+                        .with_context(|| format!("failed to delete file `{}`", source.display()))?;
                 }
                 Ok(())
             }
             CleanupMode::MoveTo(dest_dir) => {
                 std::fs::create_dir_all(dest_dir).with_context(|| {
-                    format!("failed to create cleanup directory `{}`", dest_dir.display())
+                    format!(
+                        "failed to create cleanup directory `{}`",
+                        dest_dir.display()
+                    )
                 })?;
                 let dest_path = dest_dir.join(source.file_name().unwrap_or_default());
                 std::fs::rename(source, &dest_path).with_context(|| {
@@ -1689,7 +1691,8 @@ async fn run_single_upload(
     }
 
     // Apply cleanup only if upload succeeded completely (no failures/cancellation).
-    let no_failures = outcome.failures.is_empty() && check_missing.is_empty() && !has_unrecoverable_failures;
+    let no_failures =
+        outcome.failures.is_empty() && check_missing.is_empty() && !has_unrecoverable_failures;
     let should_cleanup = !cancelled && no_failures;
 
     if should_cleanup {
@@ -2340,7 +2343,8 @@ async fn run_watch(
                                 CleanupMode::Leave => {
                                     // Legacy: use --watch-done if specified.
                                     if let Some(done_dir) = &watch_done {
-                                        let dest = done_dir.join(entry.file_name().unwrap_or_default());
+                                        let dest =
+                                            done_dir.join(entry.file_name().unwrap_or_default());
                                         if let Err(e) = std::fs::rename(&entry, &dest) {
                                             eprintln!(
                                                 "watch: could not move `{}` to `{}`: {e}",
