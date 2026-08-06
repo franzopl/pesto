@@ -848,7 +848,10 @@ mod cleanup_tests {
 
         let mode = CleanupMode::Delete;
         assert!(mode.cleanup(&dir_path).is_ok());
-        assert!(!dir_path.exists(), "directory should be deleted in Delete mode");
+        assert!(
+            !dir_path.exists(),
+            "directory should be deleted in Delete mode"
+        );
     }
 
     #[test]
@@ -1929,8 +1932,8 @@ async fn post_season_par2_volumes(
     println!("generating season PAR2 volumes...");
 
     // Create a persistent directory for PAR2 volumes (not temp).
-    let par2_output_dir = tempfile::tempdir()
-        .context("creating directory for season PAR2 volumes")?;
+    let par2_output_dir =
+        tempfile::tempdir().context("creating directory for season PAR2 volumes")?;
     let par2_dir_path = par2_output_dir.path().to_path_buf();
 
     // Generate the PAR2 volumes.
@@ -1945,16 +1948,14 @@ async fn post_season_par2_volumes(
     // Read the generated `.par2` files.
     let par2_files: Vec<PathBuf> = std::fs::read_dir(&par2_dir_path)?
         .filter_map(|entry| {
-            entry
-                .ok()
-                .and_then(|e| {
-                    let path = e.path();
-                    if path.extension().map_or(false, |ext| ext == "par2") {
-                        Some(path)
-                    } else {
-                        None
-                    }
-                })
+            entry.ok().and_then(|e| {
+                let path = e.path();
+                if path.extension().map_or(false, |ext| ext == "par2") {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
         })
         .collect();
 
@@ -1975,7 +1976,7 @@ async fn post_season_par2_volumes(
         "season-par2",
         None, // no progress reporting for PAR2 volumes
         Some(cancel.clone()),
-        None, // no custom NZB output
+        None,  // no custom NZB output
         false, // don't write history for PAR2 volumes
     )
     .await?;

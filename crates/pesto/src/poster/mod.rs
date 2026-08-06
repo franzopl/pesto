@@ -3486,11 +3486,8 @@ async fn write_season_par2_volumes(
 
     // Serialize base packets (Main + Creator).
     let pkt_main = packet::serialize_packet(&rsid, &packet::TYPE_MAIN, &main_b);
-    let pkt_creator = packet::serialize_packet(
-        &rsid,
-        &packet::TYPE_CREATOR,
-        &packet::creator_body("pesto"),
-    );
+    let pkt_creator =
+        packet::serialize_packet(&rsid, &packet::TYPE_CREATOR, &packet::creator_body("pesto"));
     let mut base_packets = pkt_main;
     base_packets.extend(pkt_creator);
 
@@ -3503,9 +3500,7 @@ async fn write_season_par2_volumes(
         let (_vol_idx, vol) = volumes
             .iter()
             .enumerate()
-            .find(|(_, v)| {
-                slice.exponent >= v.first && slice.exponent < v.first + v.count
-            })
+            .find(|(_, v)| slice.exponent >= v.first && slice.exponent < v.first + v.count)
             .ok_or_else(|| anyhow::anyhow!("recovery slice exponent out of range"))?;
 
         let vol_name = layout::volume_name(release_name, *vol);
@@ -3603,14 +3598,12 @@ pub async fn generate_season_par2(
 
     info!(
         episodes = episode_paths.len(),
-        par2_slice_size,
-        total_slices,
-        recovery_count,
-        "season PAR2 configuration"
+        par2_slice_size, total_slices, recovery_count, "season PAR2 configuration"
     );
 
-    let mut encoder = RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, 0, recovery_count)
-        .context("allocating season PAR2 recovery buffers")?;
+    let mut encoder =
+        RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, 0, recovery_count)
+            .context("allocating season PAR2 recovery buffers")?;
 
     let mut buf = vec![0u8; par2_slice_size];
 
