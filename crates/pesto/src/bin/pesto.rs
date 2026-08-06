@@ -305,7 +305,7 @@ struct Cli {
           num_args = 0..=1, default_missing_value = "")]
     archive_password: Option<String>,
 
-    /// Friendly display name emitted as `<meta type="name">` in the `.nzb`
+    /// Friendly display name emitted as `<meta type="title">` in the `.nzb`
     /// (shown by NZBGet / SABnzbd) [config: output.nzb_name].
     #[arg(long, value_name = "NAME")]
     nzb_name: Option<String>,

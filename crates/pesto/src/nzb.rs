@@ -13,12 +13,13 @@ use crate::poster::PostedSegment;
 
 /// NZB `<head>` metadata fields emitted as `<meta type="...">` elements.
 ///
-/// All fields are optional. NZBGet and SABnzbd recognise `name`, `password`
+/// All fields are optional. NZBGet and SABnzbd recognise `title`, `password`
 /// and `category` natively; other values are ignored by those clients but
 /// kept in the XML for informational use.
 #[derive(Debug, Default, Clone)]
 pub struct NzbMeta {
-    /// Friendly display name for the download (`<meta type="name">`).
+    /// Friendly display name for the download (`<meta type="title">`,
+    /// SABnzbd's documented meta type for a human-readable NZB name).
     pub name: Option<String>,
     /// Extraction password (`<meta type="password">`).
     /// Set this from the archive password when `--nzb-password` is absent.
@@ -138,8 +139,16 @@ fn parse_numeric_ref(s: &str, label: &str) -> Result<String, String> {
 ///
 /// [`NzbMeta`] fields are emitted as `<meta>` elements in the `<head>` block.
 ///
-/// The NZB always carries the real filename regardless of obfuscation mode.
-/// Only what goes on the wire (subject + yEnc `name=`) is obfuscated.
+/// `<file>` only carries the standard `poster`, `date` and `subject`
+/// attributes — no non-standard `name=` — matching the real NZB 1.1 DTD,
+/// which every other posting/downloading tool follows. The `.nzb` always
+/// carries the real filename in `subject`'s quoted string, regardless of
+/// `--obfuscate` mode: obfuscation only scrambles the `Subject:` header of
+/// the actual NNTP article posted to the server (a separate, transient
+/// value — see `ObfuscateMode` in `poster/mod.rs`), so that header-scraping
+/// on the newsgroup can't identify the release. Anyone holding the `.nzb`
+/// itself already has it through a private channel and needs the real name
+/// to use it, same as any other obfuscated scene/P2P release.
 ///
 /// NZB 1.1 has one `poster` and one `date` per `<file>` element. When
 /// obfuscation rotates these per article (paranoid mode) the first segment's
@@ -154,8 +163,10 @@ pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -
     out.push_str("<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n");
 
     // Collect only the meta fields that are set.
-    // Note: "name" is not part of the NZB 1.1 spec; subject in <file> serves that purpose.
+    // "title" is SABnzbd's documented meta type for a human-readable name;
+    // plain "name" isn't part of the NZB spec (see NzbMeta::name's doc).
     let metas: Vec<(&str, &str)> = [
+        ("title", meta.name.as_deref()),
         ("password", meta.password.as_deref()),
         ("category", meta.category.as_deref()),
         ("tmdbid", meta.tmdb_id.as_deref()),
@@ -195,10 +206,6 @@ pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -
 /// Write a single `<file>` element for one file's segments.
 fn write_file(out: &mut String, groups: &[String], segs: &[PostedSegment]) {
     let first = &segs[0];
-    // The NZB always carries the real filename so that download clients can
-    // restore it correctly. Only what goes on the wire (subject + yEnc name=)
-    // is obfuscated — see ObfuscateMode::Full in poster/mod.rs.
-    let file_name = &first.file_name;
     let file_counter = (first.total_files > 0).then_some((first.file_index, first.total_files));
     let subject = default_subject(&first.subject_name, 1, first.total, file_counter);
     let poster = &first.from;
@@ -210,9 +217,12 @@ fn write_file(out: &mut String, groups: &[String], segs: &[PostedSegment]) {
             .unwrap_or(0)
     });
 
+    // Standard NZB 1.1 `<file>` attributes only — poster, date, subject.
+    // No non-standard `name=`; `first.subject_name` is always the real
+    // filename regardless of `--obfuscate` (see `generate`'s doc comment),
+    // so `subject`'s quoted string already carries it.
     out.push_str(&format!(
-        "  <file name=\"{}\" poster=\"{}\" date=\"{}\" subject=\"{}\">\n",
-        escape(file_name),
+        "  <file poster=\"{}\" date=\"{}\" subject=\"{}\">\n",
         escape(poster),
         date,
         escape(&subject),
@@ -287,16 +297,14 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
             current_date = xml_attr(t, "date").and_then(|s| s.parse().ok());
             let subject = xml_attr(t, "subject").unwrap_or_default();
             current_subject_name = strip_part_suffix(&subject);
-            // `name` is a `pesto`-only convention (see this module's doc
-            // comment); standard NZB 1.1 (every real indexer/posting tool)
-            // only writes `subject`, with the real name as the quoted
-            // string inside it — exactly what `strip_part_suffix` already
-            // extracts into `current_subject_name`. Fall back to that
-            // instead of erroring, so foreign `.nzb`s parse at all. A fully
-            // obfuscated subject (no quotes) yields the raw hash-like text
-            // here — not the real name, but a valid starting point for
-            // `penne::deobfuscate` to recover the true one from PAR2.
-            current_file_name = xml_attr(t, "name").unwrap_or_else(|| current_subject_name.clone());
+            // Standard NZB 1.1 has no `name` attribute on `<file>` — only
+            // `subject`, with the real name as the quoted string inside it,
+            // exactly what `strip_part_suffix` already extracted into
+            // `current_subject_name`. A fully obfuscated subject (no
+            // quotes) yields the raw hash-like text here instead — not the
+            // real name, but a valid starting point for `penne::
+            // deobfuscate` to recover the true one from PAR2.
+            current_file_name = current_subject_name.clone();
             file_segment_start = segments.len();
         } else if t == "</file>" {
             // Back-fill `total` now that we know how many segments this file has.
@@ -363,7 +371,7 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
             let kind = xml_attr(t, "type").unwrap_or_default();
             let value = xml_text(t, "meta").unwrap_or_default();
             match kind.as_str() {
-                "name" => meta.name = Some(value),
+                "title" => meta.name = Some(value),
                 "password" => meta.password = Some(value),
                 "category" => meta.category = Some(value),
                 "tag" => meta.tags.push(value),
@@ -630,11 +638,14 @@ mod tests {
     }
 
     #[test]
-    fn obfuscated_subject_keeps_real_name_in_attribute() {
+    fn file_element_never_carries_a_name_attribute() {
+        // Standard NZB 1.1's <file> only defines poster/date/subject; pesto
+        // used to add a non-standard `name=` carrying the real filename —
+        // see write_file's doc comment for why that was removed.
         let segment = PostedSegment {
-            file_name: "secret-movie.mkv".to_string(),
-            file_path: Arc::from(Path::new("secret-movie.mkv")),
-            subject_name: Arc::from("deadbeefcafe0000"),
+            file_name: "movie.mkv".to_string(),
+            file_path: Arc::from(Path::new("movie.mkv")),
+            subject_name: Arc::from("movie.mkv"),
             file_size: 1000,
             part: 1,
             total: 1,
@@ -648,35 +659,8 @@ mod tests {
             total_files: 0,
         };
         let xml = generate(&["alt.test".into()], &[segment], &no_meta());
-        // The wire subject is obfuscated; the NZB always carries the real filename.
-        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc (1/1)\""));
-        assert!(xml.contains("name=\"secret-movie.mkv\""));
-        assert!(!xml.contains("subject=\"secret-movie.mkv\""));
-    }
-
-    #[test]
-    fn full_obfuscation_preserves_real_name_in_nzb() {
-        let segment = PostedSegment {
-            file_name: "secret-movie.mkv".to_string(),
-            file_path: Arc::from(Path::new("secret-movie.mkv")),
-            subject_name: Arc::from("deadbeefcafe0000"),
-            file_size: 1000,
-            part: 1,
-            total: 1,
-            message_id: "<id@x>".to_string(),
-            bytes: 500,
-            from: Arc::from(""),
-            date: (None, None),
-            full_crc32: 0,
-            server_idx: 0,
-            file_index: 0,
-            total_files: 0,
-        };
-        let xml = generate(&["alt.test".into()], &[segment], &no_meta());
-        // Subject on the wire is obfuscated; NZB name= always uses the real filename.
-        assert!(xml.contains("subject=\"&quot;deadbeefcafe0000&quot; yEnc (1/1)\""));
-        assert!(xml.contains("name=\"secret-movie.mkv\""));
-        assert!(!xml.contains("name=\"deadbeefcafe0000\""));
+        assert!(!xml.contains("name=\""));
+        assert!(xml.contains("<file poster="));
     }
 
     #[test]
@@ -702,7 +686,7 @@ mod tests {
             tags: Vec::new(),
         };
         let xml = generate(&["alt.test".into()], &[], &meta);
-        assert!(xml.contains("<meta type=\"name\">My Upload</meta>"));
+        assert!(xml.contains("<meta type=\"title\">My Upload</meta>"));
         assert!(xml.contains("<meta type=\"password\">s3cr3t</meta>"));
         assert!(xml.contains("<meta type=\"category\">TV &gt; HD</meta>"));
         assert!(xml.contains("<meta type=\"tmdbid\">tv/12345</meta>"));
@@ -738,8 +722,8 @@ mod tests {
         // Five <segment> entries total.
         assert_eq!(xml.matches("<segment ").count(), 5);
         // PAR2 files appear.
-        assert!(xml.contains("name=\"movie.par2\""));
-        assert!(xml.contains("name=\"movie.vol00+01.par2\""));
+        assert!(xml.contains("subject=\"&quot;movie.par2&quot; yEnc (1/1)\""));
+        assert!(xml.contains("subject=\"&quot;movie.vol00+01.par2&quot; yEnc (1/1)\""));
         // Multi-part subject rendered correctly for movie.mkv.
         assert!(xml.contains("subject=\"&quot;movie.mkv&quot; yEnc (1/3)\""));
     }
@@ -778,12 +762,12 @@ mod tests {
     #[test]
     fn file_name_with_slash_is_not_escaped() {
         // A relative path like "Season01/ep01.mkv" — forward slash is not an
-        // XML entity and must appear verbatim in the output.
+        // XML entity and must appear verbatim in the subject's quoted name.
         let mut s = seg("Season01/ep01.mkv", 1, 1, "<id@x>");
         s.file_name = "Season01/ep01.mkv".into();
         s.subject_name = "Season01/ep01.mkv".into();
         let xml = generate(&["alt.test".into()], &[s], &no_meta());
-        assert!(xml.contains("name=\"Season01/ep01.mkv\""));
+        assert!(xml.contains("subject=\"&quot;Season01/ep01.mkv&quot; yEnc (1/1)\""));
     }
 
     #[test]
@@ -871,7 +855,7 @@ mod tests {
         };
         let xml = generate(&["alt.test".into()], &[], &meta);
         assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
-        assert!(!xml.contains("type=\"name\""));
+        assert!(!xml.contains("type=\"title\""));
         assert!(!xml.contains("type=\"category\""));
     }
 
@@ -938,12 +922,11 @@ mod tests {
         assert_eq!(parsed.segments[0].message_id, "<msgid@host>");
     }
 
-    /// Real-world NZBs (every indexer/posting tool other than `pesto`
-    /// itself) never write a `name` attribute on `<file>` — only `subject`,
-    /// per the standard NZB 1.1 DTD. `parse()` must derive the filename
-    /// from the quoted string inside `subject` in that case instead of
-    /// erroring, or `penne` could never download anything but its own
-    /// self-posted content.
+    /// Real-world NZBs (every indexer/posting tool, `pesto` included) never
+    /// write a `name` attribute on `<file>` — only `subject`, per the
+    /// standard NZB 1.1 DTD. `parse()` must derive the filename from the
+    /// quoted string inside `subject` in that case instead of erroring, or
+    /// `penne` could never download anything at all.
     #[test]
     fn parse_derives_file_name_from_subject_when_name_attribute_is_absent() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>

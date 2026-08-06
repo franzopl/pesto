@@ -168,7 +168,8 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
         );
     }
 
-    // The NZB carries the real relative paths (in subject_name for download-client renaming).
+    // The NZB carries the real relative paths in subject's quoted string
+    // (standard NZB 1.1 has no `name=`) for download-client renaming.
     let nzb = pesto::nzb::generate(
         &config.groups,
         &outcome.segments,
@@ -176,8 +177,8 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
     );
     for rel in &expected {
         assert!(
-            nzb.contains(&format!("name=\"{rel}\"")),
-            "real path `{rel}` missing from nzb name= attribute"
+            nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
+            "real path `{rel}` missing from nzb subject"
         );
     }
 
