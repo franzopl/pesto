@@ -2079,6 +2079,7 @@ async fn run_batch(
             // This produces a single, coherent recovery set covering all episodes
             // instead of multiple independent rsids for each episode.
             if config.par2 > 0 && entries.len() > 1 {
+                println!("generating season PAR2 (global recovery set for all {} episodes)...", entries.len());
                 let par2_dir = tempfile::tempdir()
                     .context("creating temporary directory for season PAR2")?;
                 match pesto::poster::generate_and_write_season_par2(
@@ -2090,13 +2091,15 @@ async fn run_batch(
                 .await
                 {
                     Ok(_) => {
+                        println!("✓ season PAR2 generated successfully (volumes in temp dir)");
                         info!("season PAR2 generated successfully");
                         // TODO: Phase 47b — Post PAR2 volumes and add to all_segments.
                         // For now, volumes are written but not posted.
                         // User can manually post them or wait for integrated posting.
                     }
                     Err(e) => {
-                        eprintln!("season PAR2 generation failed: {e:#}");
+                        eprintln!("✗ season PAR2 generation failed: {e:#}");
+                        eprintln!("  (continuing with per-episode PAR2 sets)");
                         // Non-fatal; continue with season consolidation without global PAR2.
                     }
                 }
