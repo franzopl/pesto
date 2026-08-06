@@ -64,6 +64,9 @@ EXAMPLES:
   pesto --each --jobs 4 ./shows/  post up to 4 entries in parallel
   pesto --watch ./incoming/       watch a folder and post new entries
   pesto --each --ext mkv ./shows/ post only .mkv per episode, skip .srt/etc.
+  pesto --cleanup movie.mkv       delete source after successful upload
+  pesto --cleanup-to ./archive/   move sources to ./archive/ after upload
+  pesto --watch ./in/ --cleanup   watch and auto-delete after upload
 
 By default pesto posts under a freshly generated random identity. Set
 [posting].from (or --from) only if you need a fixed one.";
@@ -507,6 +510,17 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     watch_done: Option<PathBuf>,
 
+    /// Delete successfully uploaded sources (files or directories) instead of
+    /// leaving them in place. Works with any upload mode (--watch, --each,
+    /// --season, or direct file upload). Mutually exclusive with --cleanup-to.
+    #[arg(long)]
+    cleanup: bool,
+
+    /// Move successfully uploaded sources to DIR instead of leaving them in
+    /// place. Works with any upload mode. Mutually exclusive with --cleanup.
+    #[arg(long, value_name = "DIR")]
+    cleanup_to: Option<PathBuf>,
+
     /// How often (in seconds) to poll the watched directory for new entries
     /// [default: 30].
     #[arg(long, value_name = "SECS", default_value = "30")]
@@ -749,6 +763,52 @@ impl Cli {
 }
 
 /// Parameters for a single upload job that don't change between entries.
+/// Source cleanup behavior after a successful upload.
+#[derive(Clone, Debug)]
+enum CleanupMode {
+    /// Leave sources in place (default).
+    Leave,
+    /// Delete sources.
+    Delete,
+    /// Move sources to a directory.
+    MoveTo(PathBuf),
+}
+
+impl CleanupMode {
+    /// Apply cleanup to a source path after successful upload.
+    fn cleanup(&self, source: &Path) -> anyhow::Result<()> {
+        match self {
+            CleanupMode::Leave => Ok(()),
+            CleanupMode::Delete => {
+                if source.is_dir() {
+                    std::fs::remove_dir_all(source).with_context(|| {
+                        format!("failed to delete directory `{}`", source.display())
+                    })?;
+                } else {
+                    std::fs::remove_file(source).with_context(|| {
+                        format!("failed to delete file `{}`", source.display())
+                    })?;
+                }
+                Ok(())
+            }
+            CleanupMode::MoveTo(dest_dir) => {
+                std::fs::create_dir_all(dest_dir).with_context(|| {
+                    format!("failed to create cleanup directory `{}`", dest_dir.display())
+                })?;
+                let dest_path = dest_dir.join(source.file_name().unwrap_or_default());
+                std::fs::rename(source, &dest_path).with_context(|| {
+                    format!(
+                        "failed to move `{}` to `{}`",
+                        source.display(),
+                        dest_path.display()
+                    )
+                })?;
+                Ok(())
+            }
+        }
+    }
+}
+
 struct UploadParams {
     config: Arc<Config>,
     /// The raw `--password` flag value (used to detect "was it auto-generated?").
@@ -762,6 +822,8 @@ struct UploadParams {
     /// Extensions from `--ext`, lowercased with any leading dot stripped.
     /// Empty means no filtering.
     ext_filter: Vec<String>,
+    /// Behavior for cleaning up source files/directories after successful upload.
+    cleanup_mode: CleanupMode,
 }
 
 /// The result of a single upload (one entry in `--each` / `--season`).
@@ -1626,6 +1688,18 @@ async fn run_single_upload(
         );
     }
 
+    // Apply cleanup only if upload succeeded completely (no failures/cancellation).
+    let no_failures = outcome.failures.is_empty() && check_missing.is_empty() && !has_unrecoverable_failures;
+    let should_cleanup = !cancelled && no_failures;
+
+    if should_cleanup {
+        for entry_path in entry_paths {
+            if let Err(e) = params.cleanup_mode.cleanup(entry_path) {
+                eprintln!("cleanup: {e:#}");
+            }
+        }
+    }
+
     Ok(UploadResult {
         segments: outcome.segments,
         groups: outcome.groups,
@@ -2250,15 +2324,31 @@ async fn run_watch(
                             }
                         };
                         if success {
-                            // Move to --watch-done if specified; otherwise leave in place.
-                            if let Some(done_dir) = &watch_done {
-                                let dest = done_dir.join(entry.file_name().unwrap_or_default());
-                                if let Err(e) = std::fs::rename(&entry, &dest) {
-                                    eprintln!(
-                                        "watch: could not move `{}` to `{}`: {e}",
-                                        entry.display(),
-                                        dest.display()
-                                    );
+                            // Apply cleanup based on cleanup_mode or --watch-done.
+                            // Priority: --cleanup/--cleanup-to > --watch-done (legacy compatibility).
+                            match &params.cleanup_mode {
+                                CleanupMode::Delete => {
+                                    if let Err(e) = params.cleanup_mode.cleanup(&entry) {
+                                        eprintln!("watch: {e:#}");
+                                    }
+                                }
+                                CleanupMode::MoveTo(_dir) => {
+                                    if let Err(e) = params.cleanup_mode.cleanup(&entry) {
+                                        eprintln!("watch: {e:#}");
+                                    }
+                                }
+                                CleanupMode::Leave => {
+                                    // Legacy: use --watch-done if specified.
+                                    if let Some(done_dir) = &watch_done {
+                                        let dest = done_dir.join(entry.file_name().unwrap_or_default());
+                                        if let Err(e) = std::fs::rename(&entry, &dest) {
+                                            eprintln!(
+                                                "watch: could not move `{}` to `{}`: {e}",
+                                                entry.display(),
+                                                dest.display()
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2738,6 +2828,20 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     // redirected logs to a file with --log-file the panel can run safely.
     let logs_to_stderr = cli.verbose >= 1 && cli.log_file.is_none();
 
+    // Validate mutually exclusive flags.
+    anyhow::ensure!(
+        !(cli.cleanup && cli.cleanup_to.is_some()),
+        "--cleanup and --cleanup-to are mutually exclusive"
+    );
+
+    let cleanup_mode = if cli.cleanup {
+        CleanupMode::Delete
+    } else if let Some(dir) = cli.cleanup_to.clone() {
+        CleanupMode::MoveTo(dir)
+    } else {
+        CleanupMode::Leave
+    };
+
     let params = Arc::new(UploadParams {
         config: Arc::clone(&config),
         archive_password_raw: cli.archive_password.clone(),
@@ -2755,6 +2859,7 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
             .iter()
             .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
             .collect(),
+        cleanup_mode,
     });
 
     // Unified cancellation flag: one signal listener for the whole process.
