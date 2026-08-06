@@ -154,8 +154,8 @@ pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -
     out.push_str("<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n");
 
     // Collect only the meta fields that are set.
+    // Note: "name" is not part of the NZB 1.1 spec; subject in <file> serves that purpose.
     let metas: Vec<(&str, &str)> = [
-        ("name", meta.name.as_deref()),
         ("password", meta.password.as_deref()),
         ("category", meta.category.as_deref()),
         ("tmdbid", meta.tmdb_id.as_deref()),
