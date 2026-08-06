@@ -162,8 +162,10 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
 
     // Verify the real filenames match what was uploaded.
     for real_name in &expected {
-        let found = filenames.iter().any(|&f| f == real_name.as_str());
-        assert!(found, "real filename `{real_name}` not found in segment subjects");
+        assert!(
+            filenames.contains(&real_name.as_str()),
+            "real filename `{real_name}` not found in segment subjects"
+        );
     }
 
     // The NZB carries the real relative paths (in subject_name for download-client renaming).

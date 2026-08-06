@@ -84,11 +84,6 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
     }
 }
 
-/// `true` when `s` looks like a pesto obfuscated name: 10–30 alphanumeric chars.
-fn is_obfuscated_name(s: &str) -> bool {
-    (10..=30).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
 /// Build a two-root directory tree under a fresh temp directory and return
 /// `(temp_root, [directory args], [expected relative paths])`.
 fn build_tree() -> (std::path::PathBuf, Vec<std::path::PathBuf>, Vec<String>) {

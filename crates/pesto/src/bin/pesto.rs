@@ -1537,6 +1537,8 @@ async fn run_single_upload(
                 nzb_reported_path = None;
                 None
             } else {
+                let mut nzb_tags = config.nzb_tags.clone();
+                add_obfuscation_tag(&mut nzb_tags, &config.obfuscate);
                 let nzb_meta = NzbMeta {
                     name: config.nzb_name.clone(),
                     password: config
@@ -1548,7 +1550,7 @@ async fn run_single_upload(
                     imdb_id: config.imdb_id.clone(),
                     tvdb_id: config.tvdb_id.clone(),
                     mal_id: config.mal_id.clone(),
-                    tags: config.nzb_tags.clone(),
+                    tags: nzb_tags,
                 };
                 let xml = pesto::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
                 tokio::fs::write(out, &xml)
@@ -2220,6 +2222,8 @@ async fn run_batch(
                 all_segments.clone()
             };
 
+            let mut nzb_tags = config.nzb_tags.clone();
+            add_obfuscation_tag(&mut nzb_tags, &config.obfuscate);
             let nzb_meta = NzbMeta {
                 name: season_name,
                 password: config
@@ -2231,7 +2235,7 @@ async fn run_batch(
                 imdb_id: config.imdb_id.clone(),
                 tvdb_id: config.tvdb_id.clone(),
                 mal_id: config.mal_id.clone(),
-                tags: config.nzb_tags.clone(),
+                tags: nzb_tags,
             };
             let xml = pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
@@ -2621,6 +2625,25 @@ async fn run_watch(
     let _ = semaphore.acquire_many(effective_jobs as u32).await;
     eprintln!("watch: all uploads finished, exiting");
     Ok(any_cancelled)
+}
+
+// ── NZB metadata helpers ──────────────────────────────────────────────────────
+
+/// Add obfuscation mode tag to NZB metadata tags.
+/// This helps indexers understand what mode was used during posting.
+fn add_obfuscation_tag(tags: &mut Vec<String>, obfuscate: &ObfuscateMode) {
+    match obfuscate {
+        ObfuscateMode::None => {}
+        ObfuscateMode::Full => {
+            tags.push("obfuscated:full".to_string());
+        }
+        ObfuscateMode::Paranoid => {
+            tags.push("obfuscated:paranoid".to_string());
+        }
+        ObfuscateMode::FullShared => {
+            tags.push("obfuscated:full-shared".to_string());
+        }
+    }
 }
 
 // ── merge-season ─────────────────────────────────────────────────────────────
