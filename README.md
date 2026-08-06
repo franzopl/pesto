@@ -307,6 +307,34 @@ pesto --obfuscate=full movie.mkv
 pesto --obfuscate --password movie.mkv
 ```
 
+### Full-shared mode (for indexer compatibility)
+
+`--obfuscate=full-shared` obfuscates filenames like `full` mode, but reuses a single
+random name across the entire release (all data files, PAR2 index, and recovery
+volumes). This preserves the ability for Usenet indexers to group files together,
+while still keeping the release hidden from casual observation.
+
+Use this when you want obfuscation but need indexer grouping (e.g. posting to
+private trackers, or when your indexer has trouble with fully random names).
+
+```bash
+# Full obfuscation with shared name across all files (indexer-friendly)
+pesto --obfuscate=full-shared movie.mkv
+
+# With PAR2 and compression
+pesto --obfuscate=full-shared --par2=5 --compress movie.mkv
+
+# Typical use: multi-episode season with file numbering
+pesto --obfuscate=full-shared --par2=5 --file-counter ./MyShow.S01/
+```
+
+| Mode | Wire names | Indexer grouping | Privacy |
+|------|-----------|------------------|---------|
+| `none` | Real filenames | ✓ Good | None |
+| `full-shared` | Shared random name | ✓ Good | Moderate |
+| `full` | Per-file random names | ✗ Poor | High |
+| `paranoid` | Per-article random names | ✗ None | Maximum |
+
 ### Paranoid mode (experimental)
 
 `--obfuscate=paranoid` goes one step further: every individual article gets its
@@ -930,7 +958,7 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none` or `full`; bare flag = `full` |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `full`, `full-shared`; bare flag = `full` (`paranoid` experimental) |
 | `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random` (last 24 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
