@@ -345,6 +345,10 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 // post-check repost can use it.
                 file_path: Arc::from(Path::new(&current_file_name)),
                 subject_name: Arc::from(current_subject_name.as_str()),
+                // Not recoverable from an .nzb (only `subject_name`, always
+                // the real name, is written) — harmless for the same reason
+                // as `full_crc32` below: never re-encoded once parsed back.
+                wire_name: Arc::from(""),
                 file_size: 0,
                 part,
                 total: 0, // fixed up when </file> is seen
@@ -505,6 +509,7 @@ mod tests {
             file_name: name.to_string(),
             file_path: Arc::from(Path::new(name)),
             subject_name: Arc::from(name),
+            wire_name: Arc::from(name),
             file_size: 1000,
             part,
             total,
@@ -646,6 +651,7 @@ mod tests {
             file_name: "movie.mkv".to_string(),
             file_path: Arc::from(Path::new("movie.mkv")),
             subject_name: Arc::from("movie.mkv"),
+            wire_name: Arc::from("movie.mkv"),
             file_size: 1000,
             part: 1,
             total: 1,

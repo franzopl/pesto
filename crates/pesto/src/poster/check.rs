@@ -583,8 +583,12 @@ async fn repost_one(
         offset,
     };
     let file_crc32 = (seg.part == seg.total).then_some(seg.full_crc32);
+    // `seg.subject_name` is always the *real* filename (see `PostedSegment`'s
+    // doc comment) — using it here would repost an obfuscated release under
+    // its real name, undoing `--obfuscate` the moment one article needs a
+    // repost. `wire_name` carries the identity actually posted with.
     let encoded = yenc::encode_part(
-        &seg.subject_name,
+        &seg.wire_name,
         seg.file_size,
         spec,
         &buf,
@@ -598,7 +602,7 @@ async fn repost_one(
         from: seg.from.to_string(),
         newsgroups: groups.to_vec(),
         subject: default_subject(
-            &seg.subject_name,
+            &seg.wire_name,
             seg.part,
             seg.total,
             (seg.total_files > 0).then_some((seg.file_index, seg.total_files)),
@@ -629,6 +633,7 @@ async fn repost_one(
                         file_name: seg.file_name.clone(),
                         file_path: seg.file_path.clone(),
                         subject_name: seg.subject_name.clone(),
+                        wire_name: seg.wire_name.clone(),
                         file_size: seg.file_size,
                         part: seg.part,
                         total: seg.total,

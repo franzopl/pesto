@@ -46,6 +46,7 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         file_name: "greeting.txt".into(),
         file_path: std::path::Path::new("greeting.txt").into(),
         subject_name: "greeting.txt".into(),
+        wire_name: "greeting.txt".into(),
         file_size: article_len.max(data.len() as u64),
         part: 1,
         total: 1,

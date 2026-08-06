@@ -107,6 +107,7 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
         file_name: file_name.into(),
         file_path: std::path::Path::new(file_name).into(),
         subject_name: file_name.into(),
+        wire_name: file_name.into(),
         file_size: size,
         part,
         total,

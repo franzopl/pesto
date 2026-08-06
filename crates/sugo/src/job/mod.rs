@@ -288,6 +288,7 @@ mod tests {
             file_name: "movie.bin".into(),
             file_path: std::path::Path::new("movie.bin").into(),
             subject_name: "movie.bin".into(),
+            wire_name: "movie.bin".into(),
             file_size: 10,
             part: 1,
             total: 1,

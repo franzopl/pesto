@@ -203,6 +203,15 @@ pub struct PostedSegment {
     /// mirrors for the `--check` repost path.
     pub file_path: Arc<Path>,
     pub subject_name: Arc<str>,
+    /// The wire identity (Subject/yEnc `name=`) actually used to post this
+    /// segment — independent of `subject_name`, which is always the real
+    /// filename for NZB purposes regardless of `--obfuscate` (see
+    /// `generate`'s doc comment in `nzb.rs`). A `--check` repost of a
+    /// missing article must reuse *this*, not `subject_name`, or an
+    /// obfuscated release leaks its real name back onto the wire the moment
+    /// one article needs reposting. Empty for segments reconstructed from a
+    /// parsed `.nzb` (`nzb::parse`), which never re-encode.
+    pub wire_name: Arc<str>,
     pub file_size: u64,
     pub part: u32,
     pub total: u32,
@@ -256,6 +265,13 @@ pub struct FailedTask {
     /// under a fresh ID. Mirrors nyuu's same-Message-ID repost strategy.
     pub message_id: String,
     pub subject_name: String,
+    /// The yEnc `=ybegin ... name=` value the in-run attempt used —
+    /// independent of `subject_name` under `Full`/`Paranoid`/`FullShared`
+    /// obfuscation (see `poster/mod.rs`'s `ObfuscateMode` match arms).
+    /// Carried through so a repost doesn't fall back to reusing
+    /// `subject_name` for both, which would reintroduce the exact-match
+    /// signature those modes deliberately avoid.
+    pub yenc_name: String,
     pub file_size: u64,
     pub part: u32,
     pub total: u32,
@@ -665,8 +681,12 @@ pub async fn post_files_with_progress_and_cancel(
                     let wn = wire_name(&real_name).to_string();
                     (wn.clone(), wn, random_from())
                 } else {
-                    let obfuscated = obfuscated_name();
-                    (obfuscated.clone(), obfuscated, random_from())
+                    // Independently-random subject and yEnc name: reusing the
+                    // same string for both leaves an exact-match signature
+                    // (Subject header == yEnc body name=) that fingerprints
+                    // this specific tool's obfuscation, undermining part of
+                    // what obfuscation is for.
+                    (obfuscated_name(), obfuscated_name(), random_from())
                 }
             }
             ObfuscateMode::FullShared => {
@@ -700,7 +720,14 @@ pub async fn post_files_with_progress_and_cancel(
                             format!("{prefix}-{:02}{ext}", idx + 1)
                         }
                     };
-                    (name.clone(), name, from)
+                    // The shared prefix stays on the subject — that's what
+                    // indexers actually key "same release" grouping off of
+                    // (issue #58/#68, both subject-based). The yEnc body
+                    // name= has no grouping role, so it's independently
+                    // random instead of repeating the same prefixed name,
+                    // which would otherwise leave an exact-match signature
+                    // across every file's body in the release.
+                    (name, obfuscated_name(), from)
                 }
             }
         };
@@ -2422,9 +2449,13 @@ async fn push_par2_file(
     });
 
     let (subject_name, yenc_name, from) = if let Some(name) = wire_override {
+        // `name` carries the release's shared prefix (FullShared) — keep it
+        // on the subject for indexer grouping, but give the yEnc body an
+        // independently-random name instead of repeating it (see the main
+        // FullShared branch above for why).
         (
-            name.clone(),
             name,
+            obfuscated_name(),
             shared.release_from.clone().unwrap_or_default(),
         )
     } else {
@@ -2434,8 +2465,7 @@ async fn push_par2_file(
                 (wn.clone(), wn, shared.config.from.clone())
             }
             ObfuscateMode::Full | ObfuscateMode::Paranoid | ObfuscateMode::FullShared => {
-                let obfuscated = obfuscated_name();
-                (obfuscated.clone(), obfuscated, random_from())
+                (obfuscated_name(), obfuscated_name(), random_from())
             }
         }
     };
@@ -2654,6 +2684,7 @@ async fn worker(
                         // NZB always uses the real filename for proper client-side renaming.
                         // task.subject_name is what was posted to Usenet (may be obfuscated).
                         subject_name: Arc::from(task.meta.real_name.as_str()),
+                        wire_name: Arc::from(task.subject_name.as_str()),
                         file_size: task.meta.size,
                         part: task.part,
                         total: task.total,
@@ -2784,6 +2815,7 @@ async fn worker(
                     file_path: Arc::from(p.task.meta.path.as_path()),
                     // NZB uses the real filename, not wire subject (may be obfuscated).
                     subject_name: Arc::from(p.task.meta.real_name.as_str()),
+                    wire_name: Arc::from(p.task.subject_name.as_str()),
                     file_size: p.task.meta.size,
                     part: p.task.part,
                     total: p.task.total,
@@ -3181,6 +3213,7 @@ fn commit_result(
             file_path: Arc::from(task.meta.path.as_path()),
             // NZB uses the real filename for proper client-side renaming.
             subject_name: Arc::from(task.meta.real_name.as_str()),
+            wire_name: Arc::from(task.subject_name.as_str()),
             file_size: task.meta.size,
             part: task.part,
             total: task.total,
@@ -3281,6 +3314,7 @@ fn record_failure(
         file_path: meta.path.clone(),
         message_id,
         subject_name: task.subject_name.clone(),
+        yenc_name: meta.yenc_name.clone(),
         file_size: meta.size,
         part: task.part,
         total: task.total,
@@ -3355,7 +3389,7 @@ pub async fn repost_failed_tasks(
         };
         let file_crc32 = (task.part == task.total).then_some(task.full_crc32);
         let encoded = yenc::encode_part(
-            &task.subject_name,
+            &task.yenc_name,
             task.file_size,
             spec,
             &buf,
@@ -3433,6 +3467,7 @@ pub async fn repost_failed_tasks(
                 file_path: Arc::from(task.file_path.as_path()),
                 // NZB uses the real filename, not obfuscated wire subject.
                 subject_name: Arc::from(task.file_name.as_str()),
+                wire_name: Arc::from(task.subject_name.as_str()),
                 file_size: task.file_size,
                 part: task.part,
                 total: task.total,
