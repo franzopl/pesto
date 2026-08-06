@@ -1588,6 +1588,16 @@ impl RecoveryEncoder {
         //   tNormB: lane0 = loN1, lane1 = hiN3
         //   tSwapA: lane0 = loN2, lane1 = hiN0
         //   tSwapB: lane0 = loN3, lane1 = hiN1
+        // Bounds check: ensure start_index + q_idx is within logbases
+        if start_index + n_queued > logbases.len() {
+            panic!(
+                "PAR2 slice index overflow: start_index({}) + n_queued({}) > logbases.len({})",
+                start_index,
+                n_queued,
+                logbases.len()
+            );
+        }
+
         let all_tables: Vec<Avx2Shuffle2xTable> = (0..n_rec * n_queued)
             .into_par_iter()
             .map(|flat| unsafe {
