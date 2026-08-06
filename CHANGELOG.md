@@ -41,8 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Validated with small season (3 × 5 MB episodes): ✓ single global rsid
 - Validated with large season (10 × 10 MB episodes): ✓ 157 segments with single coherent rsid
+- Validated with 26-episode season (6.2 GB): ✓ single global rsid with 99 recovery blocks
 - Individual episodes still independently recoverable via their own NZBs
 - Season-wide recovery via global PAR2 set
+- SABnzbd verification: ✓ all files correct, repair not required
+
+### Notes
+
+- **PAR2 File Cleanup**: SABnzbd's automatic PAR2 cleanup (`enable_par_cleanup`) only works for simple downloads (1 file : 1 PAR2). Season mode creates a complex download (multiple files : 1 PAR2 set), so SABnzbd does not delete PAR2 files automatically. Workaround: keep Radarr/Sonarr active — it automatically deletes PAR2 when moving files to the library.
+- **Backwards Compatible**: NZBs created before Phase 47 still work correctly with their individual per-episode PAR2 sets.
 
 ---
 
