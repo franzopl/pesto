@@ -811,6 +811,108 @@ impl CleanupMode {
     }
 }
 
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn leave_mode_does_nothing() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let mode = CleanupMode::Leave;
+        assert!(mode.cleanup(&file_path).is_ok());
+        assert!(file_path.exists(), "file should still exist in Leave mode");
+    }
+
+    #[test]
+    fn delete_mode_removes_file() {
+        let temp = TempDir::new().unwrap();
+        let file_path = temp.path().join("test.txt");
+        fs::write(&file_path, "content").unwrap();
+
+        let mode = CleanupMode::Delete;
+        assert!(mode.cleanup(&file_path).is_ok());
+        assert!(!file_path.exists(), "file should be deleted in Delete mode");
+    }
+
+    #[test]
+    fn delete_mode_removes_directory() {
+        let temp = TempDir::new().unwrap();
+        let dir_path = temp.path().join("test_dir");
+        fs::create_dir(&dir_path).unwrap();
+        fs::write(dir_path.join("file.txt"), "content").unwrap();
+
+        let mode = CleanupMode::Delete;
+        assert!(mode.cleanup(&dir_path).is_ok());
+        assert!(!dir_path.exists(), "directory should be deleted in Delete mode");
+    }
+
+    #[test]
+    fn move_to_mode_moves_file() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.txt");
+        let archive = temp.path().join("archive");
+
+        fs::write(&source, "content").unwrap();
+
+        let mode = CleanupMode::MoveTo(archive.clone());
+        assert!(mode.cleanup(&source).is_ok());
+
+        let moved_file = archive.join("source.txt");
+        assert!(!source.exists(), "source file should be removed");
+        assert!(moved_file.exists(), "file should be moved to archive");
+        assert_eq!(
+            fs::read_to_string(&moved_file).unwrap(),
+            "content",
+            "file content should be preserved"
+        );
+    }
+
+    #[test]
+    fn move_to_mode_moves_directory() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source_dir");
+        let archive = temp.path().join("archive");
+
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file.txt"), "content").unwrap();
+
+        let mode = CleanupMode::MoveTo(archive.clone());
+        assert!(mode.cleanup(&source).is_ok());
+
+        let moved_dir = archive.join("source_dir");
+        assert!(!source.exists(), "source directory should be removed");
+        assert!(moved_dir.exists(), "directory should be moved to archive");
+        assert_eq!(
+            fs::read_to_string(moved_dir.join("file.txt")).unwrap(),
+            "content",
+            "directory content should be preserved"
+        );
+    }
+
+    #[test]
+    fn move_to_mode_creates_archive_directory() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.txt");
+        let archive = temp.path().join("archive");
+
+        fs::write(&source, "content").unwrap();
+
+        // archive doesn't exist yet
+        assert!(!archive.exists());
+
+        let mode = CleanupMode::MoveTo(archive.clone());
+        assert!(mode.cleanup(&source).is_ok());
+
+        assert!(archive.exists(), "archive directory should be created");
+        assert!(archive.join("source.txt").exists());
+    }
+}
+
 struct UploadParams {
     config: Arc<Config>,
     /// The raw `--password` flag value (used to detect "was it auto-generated?").
