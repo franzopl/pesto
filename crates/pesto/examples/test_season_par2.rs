@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
-use pesto::config::Config;
 use parmesan::SimdPath;
+use pesto::config::Config;
+use std::path::{Path, PathBuf};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,11 +29,20 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
         .sum();
-    println!("Total size: {} bytes ({:.2} GB)", total_size, total_size as f64 / 1e9);
+    println!(
+        "Total size: {} bytes ({:.2} GB)",
+        total_size,
+        total_size as f64 / 1e9
+    );
 
     for (i, path) in episode_paths.iter().enumerate() {
         let size = std::fs::metadata(path)?.len();
-        println!("  Episode {:2}: {} bytes ({:.2} MB)", i + 1, size, size as f64 / 1e6);
+        println!(
+            "  Episode {:2}: {} bytes ({:.2} MB)",
+            i + 1,
+            size,
+            size as f64 / 1e6
+        );
     }
 
     // Create a minimal Config for testing
@@ -116,7 +125,10 @@ async fn main() -> anyhow::Result<()> {
     println!("\nGenerating season PAR2...");
     match pesto::poster::generate_season_par2(&episode_paths, &config).await {
         Ok(recovery_slices) => {
-            println!("✓ Success! Generated {} recovery slices", recovery_slices.len());
+            println!(
+                "✓ Success! Generated {} recovery slices",
+                recovery_slices.len()
+            );
         }
         Err(e) => {
             println!("✗ Error: {}", e);

@@ -914,6 +914,70 @@ mod cleanup_tests {
         assert!(archive.exists(), "archive directory should be created");
         assert!(archive.join("source.txt").exists());
     }
+
+    // ── apply_watch_cleanup: issue #92 regression ─────────────────────────
+
+    #[test]
+    fn watch_cleanup_skips_delete_when_run_single_upload_already_did_it() {
+        let temp = TempDir::new().unwrap();
+        let entry = temp.path().join("already_gone.mkv");
+        // Deliberately never created — mirrors run_single_upload having
+        // already deleted it. If apply_watch_cleanup tried to delete it
+        // again (the pre-fix bug), this would return an I/O error.
+        let result = apply_watch_cleanup(&CleanupMode::Delete, &entry, None, false);
+        assert!(
+            result.is_ok(),
+            "must not re-attempt cleanup for the run_single_upload path: {result:?}"
+        );
+    }
+
+    #[test]
+    fn watch_cleanup_skips_move_to_when_run_single_upload_already_did_it() {
+        let temp = TempDir::new().unwrap();
+        let entry = temp.path().join("already_moved.mkv");
+        let archive = temp.path().join("archive");
+        let result =
+            apply_watch_cleanup(&CleanupMode::MoveTo(archive.clone()), &entry, None, false);
+        assert!(result.is_ok());
+        assert!(
+            !archive.exists(),
+            "must not create/touch the archive dir a second time"
+        );
+    }
+
+    #[test]
+    fn watch_cleanup_deletes_for_the_run_batch_path() {
+        let temp = TempDir::new().unwrap();
+        let entry = temp.path().join("season_dir");
+        fs::create_dir(&entry).unwrap();
+        fs::write(entry.join("ep01.mkv"), "content").unwrap();
+
+        let result = apply_watch_cleanup(&CleanupMode::Delete, &entry, None, true);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !entry.exists(),
+            "run_batch doesn't clean up itself, so apply_watch_cleanup must"
+        );
+    }
+
+    #[test]
+    fn watch_cleanup_legacy_watch_done_runs_regardless_of_used_run_batch() {
+        for used_run_batch in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let entry = temp.path().join("legacy.mkv");
+            let done_dir = temp.path().join("done");
+            fs::write(&entry, "content").unwrap();
+
+            let result =
+                apply_watch_cleanup(&CleanupMode::Leave, &entry, Some(&done_dir), used_run_batch);
+            assert!(result.is_ok(), "{result:?}");
+            assert!(
+                done_dir.join("legacy.mkv").exists(),
+                "--watch-done must fire regardless of which path posted the entry \
+                 (used_run_batch={used_run_batch})"
+            );
+        }
+    }
 }
 
 struct UploadParams {
@@ -1972,8 +2036,8 @@ async fn post_season_par2_volumes(
     par2_config.no_hooks = true; // Disable hooks for PAR2 volumes (no NZB to upload)
 
     // Write PAR2 NZB to a temp file (will be discarded, not sent to indexers)
-    let par2_nzb_temp = tempfile::NamedTempFile::new()
-        .context("creating temp file for PAR2 NZB")?;
+    let par2_nzb_temp =
+        tempfile::NamedTempFile::new().context("creating temp file for PAR2 NZB")?;
     let par2_nzb_path = par2_nzb_temp.path().to_path_buf();
 
     let outcome = pesto::upload::run_upload(
@@ -1983,7 +2047,7 @@ async fn post_season_par2_volumes(
         None, // no progress reporting for PAR2 volumes
         Some(cancel.clone()),
         Some(par2_nzb_path), // write NZB to temp (discarded after)
-        false, // don't write history for PAR2 volumes
+        false,               // don't write history for PAR2 volumes
     )
     .await?;
 
@@ -2363,6 +2427,56 @@ struct WatchBatchOpts {
     explicit_out: Option<PathBuf>,
 }
 
+/// Apply post-upload source cleanup for one `--watch` entry, after a
+/// successful upload. The caller just logs a returned `Err` — a cleanup
+/// failure never fails the watch run.
+///
+/// `used_run_batch` must be `true` only when `entry` went through
+/// `run_batch` (the `--each`/`--season` directory path inside `--watch`),
+/// which — unlike `run_single_upload` — does not apply `cleanup_mode`
+/// itself. Passing `false` here for an entry that actually went through
+/// `run_batch` leaves it uncleaned; passing `true` for one that went
+/// through `run_single_upload` double-applies the cleanup, and the second
+/// attempt fails with "No such file or directory" (issue #92).
+fn apply_watch_cleanup(
+    cleanup_mode: &CleanupMode,
+    entry: &Path,
+    watch_done: Option<&Path>,
+    used_run_batch: bool,
+) -> anyhow::Result<()> {
+    match cleanup_mode {
+        // --cleanup/--cleanup-to take priority over legacy --watch-done.
+        CleanupMode::Delete | CleanupMode::MoveTo(_) => {
+            if used_run_batch {
+                cleanup_mode.cleanup(entry)?;
+            }
+            Ok(())
+        }
+        CleanupMode::Leave => {
+            // Legacy: use --watch-done if specified. run_single_upload has
+            // no notion of --watch-done, so this always runs here
+            // regardless of which path was taken.
+            if let Some(done_dir) = watch_done {
+                std::fs::create_dir_all(done_dir).with_context(|| {
+                    format!(
+                        "failed to create --watch-done directory `{}`",
+                        done_dir.display()
+                    )
+                })?;
+                let dest = done_dir.join(entry.file_name().unwrap_or_default());
+                std::fs::rename(entry, &dest).with_context(|| {
+                    format!(
+                        "could not move `{}` to `{}`",
+                        entry.display(),
+                        dest.display()
+                    )
+                })?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Run `--watch DIR`: poll for new entries and post each one automatically.
 ///
 /// New entries are held in a "pending" state until their total byte size is
@@ -2525,7 +2639,16 @@ async fn run_watch(
                         // Directories are posted as one combined NZB by default. With
                         // --each/--season, split per top-level entry instead, reusing
                         // the same batch machinery --each/--season use outside --watch.
-                        let (success, task_cancelled) = if (each || season) && entry.is_dir() {
+                        // run_single_upload (the `else` branch below) already
+                        // applies `params.cleanup_mode` to `entry` itself once
+                        // its upload succeeds — see its own `should_cleanup`
+                        // block. run_batch does not. Only the run_batch path
+                        // needs the outer cleanup below, or a --cleanup/
+                        // --cleanup-to entry gets deleted/moved twice: once
+                        // here succeeding silently, once more failing with
+                        // "No such file or directory" (issue #92).
+                        let used_run_batch = (each || season) && entry.is_dir();
+                        let (success, task_cancelled) = if used_run_batch {
                             let season_nzb = season.then(|| {
                                 derive_season_nzb_path(
                                     explicit_out.as_deref(),
@@ -2575,33 +2698,13 @@ async fn run_watch(
                             }
                         };
                         if success {
-                            // Apply cleanup based on cleanup_mode or --watch-done.
-                            // Priority: --cleanup/--cleanup-to > --watch-done (legacy compatibility).
-                            match &params.cleanup_mode {
-                                CleanupMode::Delete => {
-                                    if let Err(e) = params.cleanup_mode.cleanup(&entry) {
-                                        eprintln!("watch: {e:#}");
-                                    }
-                                }
-                                CleanupMode::MoveTo(_dir) => {
-                                    if let Err(e) = params.cleanup_mode.cleanup(&entry) {
-                                        eprintln!("watch: {e:#}");
-                                    }
-                                }
-                                CleanupMode::Leave => {
-                                    // Legacy: use --watch-done if specified.
-                                    if let Some(done_dir) = &watch_done {
-                                        let dest =
-                                            done_dir.join(entry.file_name().unwrap_or_default());
-                                        if let Err(e) = std::fs::rename(&entry, &dest) {
-                                            eprintln!(
-                                                "watch: could not move `{}` to `{}`: {e}",
-                                                entry.display(),
-                                                dest.display()
-                                            );
-                                        }
-                                    }
-                                }
+                            if let Err(e) = apply_watch_cleanup(
+                                &params.cleanup_mode,
+                                &entry,
+                                watch_done.as_deref(),
+                                used_run_batch,
+                            ) {
+                                eprintln!("watch: {e:#}");
                             }
                         }
                         // Report outcome; if the channel is closed we're shutting down.
