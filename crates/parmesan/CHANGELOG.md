@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-08-05
+
 ### Added
 - **Fallible allocation API for `RecoveryEncoder` and `Par2Worker`.** Added
   `try_new`, `try_new_altmap`, `try_new_shuffle2x`, `try_new_smart`, and
