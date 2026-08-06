@@ -2220,21 +2220,6 @@ async fn run_batch(
                 all_segments.clone()
             };
 
-            // Restore real filenames to subject_name for consolidated season NZB.
-            // When episodes were posted with obfuscation (--obfuscate full/paranoid),
-            // their subject_name is a random hash. For the consolidated NZB, we need
-            // to use the real filename (from file_name) so SABnzbd can rename correctly.
-            let consolidated_segments: Vec<PostedSegment> = season_segments
-                .iter()
-                .map(|seg| {
-                    let mut s = seg.clone();
-                    // Use file_name as the subject_name base to ensure consolidated
-                    // NZB has proper human-readable subjects, not obfuscated hashes.
-                    s.subject_name = Arc::from(s.file_name.as_str());
-                    s
-                })
-                .collect();
-
             let nzb_meta = NzbMeta {
                 name: season_name,
                 password: config
@@ -2248,7 +2233,7 @@ async fn run_batch(
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
             };
-            let xml = pesto::nzb::generate(&all_groups, &consolidated_segments, &nzb_meta);
+            let xml = pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;

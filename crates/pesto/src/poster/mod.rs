@@ -2651,7 +2651,9 @@ async fn worker(
                     shared.results.lock().unwrap().push(PostedSegment {
                         file_name: task.meta.real_name.clone(),
                         file_path: Arc::from(task.meta.path.as_path()),
-                        subject_name: Arc::from(task.subject_name.as_str()),
+                        // NZB always uses the real filename for proper client-side renaming.
+                        // task.subject_name is what was posted to Usenet (may be obfuscated).
+                        subject_name: Arc::from(task.meta.real_name.as_str()),
                         file_size: task.meta.size,
                         part: task.part,
                         total: task.total,
@@ -2780,7 +2782,8 @@ async fn worker(
                 shared.results.lock().unwrap().push(PostedSegment {
                     file_name: p.task.meta.real_name.clone(),
                     file_path: Arc::from(p.task.meta.path.as_path()),
-                    subject_name: Arc::from(p.task.subject_name.as_str()),
+                    // NZB uses the real filename, not wire subject (may be obfuscated).
+                    subject_name: Arc::from(p.task.meta.real_name.as_str()),
                     file_size: p.task.meta.size,
                     part: p.task.part,
                     total: p.task.total,
@@ -3176,7 +3179,8 @@ fn commit_result(
         let seg = PostedSegment {
             file_name: task.meta.real_name.clone(),
             file_path: Arc::from(task.meta.path.as_path()),
-            subject_name: Arc::from(task.subject_name.as_str()),
+            // NZB uses the real filename for proper client-side renaming.
+            subject_name: Arc::from(task.meta.real_name.as_str()),
             file_size: task.meta.size,
             part: task.part,
             total: task.total,
@@ -3427,7 +3431,8 @@ pub async fn repost_failed_tasks(
             recovered.push(PostedSegment {
                 file_name: task.file_name.clone(),
                 file_path: Arc::from(task.file_path.as_path()),
-                subject_name: Arc::from(task.subject_name.as_str()),
+                // NZB uses the real filename, not obfuscated wire subject.
+                subject_name: Arc::from(task.file_name.as_str()),
                 file_size: task.file_size,
                 part: task.part,
                 total: task.total,
@@ -4527,9 +4532,10 @@ mod tests {
 
         let outcome = post_files(&config, &files).await.unwrap();
         assert_eq!(outcome.segments.len(), 1);
-        // file_name keeps the real name; subject_name is randomised.
+        // NZB subject_name: for Full/Paranoid obfuscation with hash subjects, nzb_subject_name
+        // returns the real file_name (secret.mkv) so download clients can rename correctly.
         assert_eq!(outcome.segments[0].file_name, "secret.mkv");
-        assert_ne!(outcome.segments[0].subject_name.as_ref(), "secret.mkv");
+        assert_eq!(outcome.segments[0].subject_name.as_ref(), "secret.mkv");
     }
 
     #[tokio::test]
