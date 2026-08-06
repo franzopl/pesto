@@ -1969,6 +1969,12 @@ async fn post_season_par2_volumes(
     // Create a config copy with PAR2 disabled to prevent recursive PAR2 generation.
     let mut par2_config = (*params.config).clone();
     par2_config.par2 = 0; // Disable PAR2 for PAR2 volumes themselves
+    par2_config.no_hooks = true; // Disable hooks for PAR2 volumes (no NZB to upload)
+
+    // Write PAR2 NZB to a temp file (will be discarded, not sent to indexers)
+    let par2_nzb_temp = tempfile::NamedTempFile::new()
+        .context("creating temp file for PAR2 NZB")?;
+    let par2_nzb_path = par2_nzb_temp.path().to_path_buf();
 
     let outcome = pesto::upload::run_upload(
         &par2_config,
@@ -1976,7 +1982,7 @@ async fn post_season_par2_volumes(
         "season-par2",
         None, // no progress reporting for PAR2 volumes
         Some(cancel.clone()),
-        None,  // no custom NZB output
+        Some(par2_nzb_path), // write NZB to temp (discarded after)
         false, // don't write history for PAR2 volumes
     )
     .await?;
