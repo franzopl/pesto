@@ -605,6 +605,49 @@ bar's segment count and percentage running past 100% (upload and NZB output were
 bug only). `par2_only_ingest`'s `SegmentDone` emission is now gated on `shared.config.par2_only` specifically,
 rather than firing whenever `tx_opt` is `None`.
 
+---
+
+## Phase 47 — Season Mode: Global PAR2 *(In Progress)*
+
+**Problem Statement:** In `--season` mode, each episode is posted with its own independent PAR2 recovery set
+(rsid). When consolidating into a season NZB, this results in multiple unrelated rsids, confusing downloaders
+that expect a single, coherent PAR2 set covering the entire season.
+
+**Solution Architecture:** Implement global PAR2 generation for `--season` consolidation without re-posting
+episode data. Two phases:
+
+### 47a — Generate Season PAR2 *(Phase 47a — currently in progress)*
+
+Reads episode files once after individual postings complete, generates a unified PAR2 recovery set covering
+all episodes at once, and includes recovery blocks in the consolidated season NZB.
+
+- [x] `pub async fn generate_season_par2()` — accepts episode paths, returns recovery slices without posting.
+  - Uses existing `RecoveryEncoder::try_new_smart()` to compute optimal PAR2 geometry.
+  - Reads episodes sequentially; accumulates input slices; returns recovery blocks.
+  - Memory-efficient: shares the same buffer-pool strategy as the main posting pipeline.
+- [ ] Integration into `run_batch()` — after all episodes complete, generate season PAR2.
+- [ ] Write recovery blocks to temporary `.par2` volume files (layout matches `parmesan::layout`).
+- [ ] Post PAR2 volumes as articles (reuse `push_par2_file()` or equivalent).
+- [ ] Consolidate all segments (data + local PAR2 from episodes + global PAR2) into season NZB.
+- [ ] Tests: verify recovery set ID (rsid) consistency across volumes; verify reconstructability.
+
+### 47b — Optimization: Spool Slices *(Planned — Phase 47b+)*
+
+**Goal:** Zero re-read of episode data; instead, store intermediate slices during episode posting and reuse them
+for global PAR2 generation.
+
+- [ ] During `producer()`, store each input slice to a temporary spool database (via `crate::spool`).
+- [ ] After all episodes, `generate_season_par2_from_spool()` reads pre-computed slices, feeds to encoder.
+- [ ] Benefit: avoid one full re-read pass (~5–10% speedup on large seasons, negligible on small ones).
+- [ ] Trade-off: additional disk I/O for spool (sequential writes; typically faster than network uplinks).
+- [ ] Complexity: requires `FileHasher` to serialize/deserialize state (MD5, CRC32) alongside slices.
+
+**Rationale for deferring:** The single re-read (Phase 47a) is simple, predictable, and acceptable for most users.
+Phase 47b eliminates the re-read but adds spool lifecycle management complexity. Implemented on demand if
+user feedback indicates re-read overhead is meaningful on real-world workloads.
+
+---
+
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>

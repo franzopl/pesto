@@ -3466,6 +3466,120 @@ pub async fn repost_failed_tasks(
     Ok(recovered)
 }
 
+/// Generate a global PAR2 recovery set that covers all episodes in a season.
+///
+/// Reads the episode files once, accumulates input slices into a single PAR2
+/// encoder, and returns the recovery slices. These can then be posted separately
+/// and combined with data segments in a consolidated season NZB.
+///
+/// This enables a coherent PAR2 recovery set ID (rsid) that covers the entire
+/// season, rather than multiple independent rsids for individual episodes.
+pub async fn generate_season_par2(
+    episode_paths: &[PathBuf],
+    config: &Config,
+) -> Result<Vec<parmesan::encoder::RecoverySlice>> {
+    if episode_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if config.par2 == 0 {
+        return Ok(Vec::new());
+    }
+
+    debug!(episodes = episode_paths.len(), "generating season PAR2");
+
+    let article_size = config.article_size;
+    let per_file_articles: Vec<usize> = episode_paths
+        .iter()
+        .map(|path| {
+            let size = std::fs::metadata(path)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
+            if size == 0 {
+                0
+            } else {
+                yenc::segments(size as u64, article_size).len()
+            }
+        })
+        .collect();
+
+    let (par2_slice_size, total_slices) = if let Some(size) = config.par2_slice_size {
+        let s = (size / 64 * 64).max(64);
+        let n: usize = episode_paths
+            .iter()
+            .map(|path| {
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                (size as usize).div_ceil(s)
+            })
+            .sum();
+        (s, n)
+    } else {
+        optimal_par2_slice_size(&per_file_articles, article_size, config.par2)
+    };
+
+    if total_slices == 0 {
+        return Ok(Vec::new());
+    }
+
+    let recovery_pct = config.par2;
+    let recovery_count = (total_slices as u32 * recovery_pct as u32 / 100).min(65535) as usize;
+
+    if recovery_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    info!(
+        episodes = episode_paths.len(),
+        par2_slice_size,
+        total_slices,
+        recovery_count,
+        "season PAR2 configuration"
+    );
+
+    let mut encoder = RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, 0, recovery_count)
+        .context("allocating season PAR2 recovery buffers")?;
+
+    let mut buf = vec![0u8; par2_slice_size];
+
+    for (ep_idx, episode_path) in episode_paths.iter().enumerate() {
+        let mut file = tokio::fs::File::open(episode_path)
+            .await
+            .with_context(|| format!("opening episode `{}`", episode_path.display()))?;
+
+        loop {
+            let n = file
+                .read(&mut buf)
+                .await
+                .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
+
+            if n == 0 {
+                break;
+            }
+
+            // Pad to slice_size with zeros (standard PAR2 behavior).
+            if n < par2_slice_size {
+                buf[n..par2_slice_size].fill(0);
+                encoder.add_slice(buf.clone());
+            } else {
+                encoder.add_slice(buf[..par2_slice_size].to_vec());
+            }
+        }
+
+        debug!(
+            episode_idx = ep_idx + 1,
+            total_episodes = episode_paths.len(),
+            "finished reading episode"
+        );
+    }
+
+    let (recovery_slices, _checksums) = encoder.finish();
+    info!(
+        recovery_slices = recovery_slices.len(),
+        "season PAR2 generation complete"
+    );
+    Ok(recovery_slices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
