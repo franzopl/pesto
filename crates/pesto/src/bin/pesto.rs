@@ -1965,8 +1965,12 @@ async fn post_season_par2_volumes(
     println!("posting {} PAR2 volume(s)...", par2_files.len());
 
     // Post the PAR2 volumes using the standard upload pipeline.
+    // Create a config copy with PAR2 disabled to prevent recursive PAR2 generation.
+    let mut par2_config = (*params.config).clone();
+    par2_config.par2 = 0; // Disable PAR2 for PAR2 volumes themselves
+
     let outcome = pesto::upload::run_upload(
-        &params.config,
+        &par2_config,
         &par2_files,
         "season-par2",
         None, // no progress reporting for PAR2 volumes
