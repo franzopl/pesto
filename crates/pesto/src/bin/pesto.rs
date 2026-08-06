@@ -2193,11 +2193,24 @@ async fn run_batch(
                     .filter(|s| !s.file_name.ends_with(".par2"))
                     .cloned()
                     .collect();
+                info!(
+                    total_segments = all_segments.len(),
+                    data_segments_count = data_segments.len(),
+                    par2_segments_count = season_par2_segments.len(),
+                    "season NZB consolidation: filtering segments"
+                );
+                if data_segments.is_empty() {
+                    eprintln!("⚠ WARNING: No episode data segments found! Season NZB will contain only PAR2.");
+                }
                 let mut combined = data_segments;
                 combined.extend(season_par2_segments);
                 combined
             } else {
                 // If season PAR2 generation failed, use all segments (with per-episode PAR2 sets)
+                info!(
+                    total_segments = all_segments.len(),
+                    "season NZB consolidation: using all segments (no global PAR2)"
+                );
                 all_segments.clone()
             };
 
