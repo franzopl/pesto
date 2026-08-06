@@ -546,6 +546,38 @@ fn file_config_load_missing_file_errors() {
 }
 
 #[test]
+fn misplaced_temp_dir_hints_at_compression_section() {
+    let mut f = NamedTempFile::new().unwrap();
+    write!(
+        f,
+        "[server]\nhost = \"h\"\n[output]\ntemp_dir = \"/tmp/x\"\n"
+    )
+    .unwrap();
+    let err = FileConfig::load(f.path()).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("`temp_dir` belongs under [compression]"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[test]
+fn misplaced_par2_temp_dir_hints_at_posting_section() {
+    let mut f = NamedTempFile::new().unwrap();
+    write!(
+        f,
+        "[server]\nhost = \"h\"\n[compression]\npar2_temp_dir = \"/tmp/x\"\n"
+    )
+    .unwrap();
+    let err = FileConfig::load(f.path()).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("`par2_temp_dir` belongs under [posting]"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[test]
 fn cli_overrides_article_size_and_retries() {
     let mut file = FileConfig::default();
     file.server.host = Some("h".into());

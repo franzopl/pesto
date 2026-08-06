@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-08-05
+
 ### Added
 - **Memory management, Phase 0 — reduce the address-space floor.** `pesto`
   was aborting on seedboxes with `memory allocation of N bytes failed` even
@@ -86,6 +88,11 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   instead of a panic/`SIGABRT`. Existing infallible methods in `parmesan`
   remain unchanged (zero behavior risk for backward compatibility). See
   `docs/memory-management.md` §5 and §8.
+- **Config error hints**: When a TOML config field is placed in the wrong
+  section, `pesto` now hints at the correct section (e.g. "`temp_dir` belongs
+  under [compression], not here") instead of just reporting "unknown field".
+  This improves UX for common mistakes like confusing `[posting]` and
+  `[compression]` sections.
 
 ## [0.5.8] — 2026-08-04
 
