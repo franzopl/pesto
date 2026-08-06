@@ -1912,6 +1912,83 @@ fn top_level_entries(dir: &Path, ext_filter: &[String]) -> Result<Vec<PathBuf>> 
     Ok(entries)
 }
 
+/// Post season PAR2 volumes and return the resulting segments.
+///
+/// Generates and posts global PAR2 recovery volumes covering all episodes,
+/// then collects the posted segments for inclusion in the consolidated season NZB.
+async fn post_season_par2_volumes(
+    episode_paths: &[PathBuf],
+    release_name: &str,
+    params: &Arc<UploadParams>,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Vec<PostedSegment>> {
+    if episode_paths.is_empty() || params.config.par2 == 0 {
+        return Ok(Vec::new());
+    }
+
+    println!("generating season PAR2 volumes...");
+
+    // Create a persistent directory for PAR2 volumes (not temp).
+    let par2_output_dir = tempfile::tempdir()
+        .context("creating directory for season PAR2 volumes")?;
+    let par2_dir_path = par2_output_dir.path().to_path_buf();
+
+    // Generate the PAR2 volumes.
+    pesto::poster::generate_and_write_season_par2(
+        episode_paths,
+        release_name,
+        &par2_dir_path,
+        &params.config,
+    )
+    .await?;
+
+    // Read the generated `.par2` files.
+    let par2_files: Vec<PathBuf> = std::fs::read_dir(&par2_dir_path)?
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .and_then(|e| {
+                    let path = e.path();
+                    if path.extension().map_or(false, |ext| ext == "par2") {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+
+    if par2_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    println!("posting {} PAR2 volume(s)...", par2_files.len());
+
+    // Post the PAR2 volumes using the standard upload pipeline.
+    // Create a config copy with PAR2 disabled to prevent recursive PAR2 generation.
+    let mut par2_config = (*params.config).clone();
+    par2_config.par2 = 0; // Disable PAR2 for PAR2 volumes themselves
+
+    let outcome = pesto::upload::run_upload(
+        &par2_config,
+        &par2_files,
+        "season-par2",
+        None, // no progress reporting for PAR2 volumes
+        Some(cancel.clone()),
+        None, // no custom NZB output
+        false, // don't write history for PAR2 volumes
+    )
+    .await?;
+
+    println!(
+        "✓ posted {} PAR2 segments from {} volume(s)",
+        outcome.segments.len(),
+        par2_files.len()
+    );
+
+    Ok(outcome.segments)
+}
+
 /// Derive the path for a `--season` consolidated NZB for `entry`. Prefers
 /// `explicit_out` (from `--out`) if given; otherwise names the file after
 /// `entry` and places it under `nzb_dir` (from config), or the current
@@ -2074,6 +2151,55 @@ async fn run_batch(
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
             });
+
+            // Generate and post global PAR2 for the entire season (Phase 47b).
+            // This produces a single, coherent recovery set covering all episodes
+            // instead of multiple independent rsids for each episode.
+            let mut season_par2_segments = Vec::new();
+            if config.par2 > 0 && entries.len() > 1 {
+                match post_season_par2_volumes(
+                    &entries,
+                    &season_name.clone().unwrap_or_else(|| "season".to_string()),
+                    &params,
+                    &cancel,
+                )
+                .await
+                {
+                    Ok(par2_segments) => {
+                        if !par2_segments.is_empty() {
+                            info!(
+                                par2_segments = par2_segments.len(),
+                                "season PAR2 volumes posted successfully"
+                            );
+                            season_par2_segments = par2_segments;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("✗ season PAR2 posting failed: {e:#}");
+                        eprintln!("  (continuing with per-episode PAR2 sets)");
+                        // Non-fatal; continue with season consolidation without global PAR2.
+                    }
+                }
+            }
+
+            // Filter segments for the season NZB:
+            // - Keep: episode data files (no .par2 in name)
+            // - Remove: per-episode PAR2 sets (have .par2 in name)
+            // - Add: global season PAR2 (replaces individual sets with single coherent rsid)
+            let season_segments: Vec<PostedSegment> = if !season_par2_segments.is_empty() {
+                let data_segments: Vec<_> = all_segments
+                    .iter()
+                    .filter(|s| !s.file_name.ends_with(".par2"))
+                    .cloned()
+                    .collect();
+                let mut combined = data_segments;
+                combined.extend(season_par2_segments);
+                combined
+            } else {
+                // If season PAR2 generation failed, use all segments (with per-episode PAR2 sets)
+                all_segments.clone()
+            };
+
             let nzb_meta = NzbMeta {
                 name: season_name,
                 password: config
@@ -2087,7 +2213,7 @@ async fn run_batch(
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
             };
-            let xml = pesto::nzb::generate(&all_groups, &all_segments, &nzb_meta);
+            let xml = pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
