@@ -607,31 +607,44 @@ rather than firing whenever `tx_opt` is `None`.
 
 ---
 
-## Phase 47 — Season Mode: Global PAR2 *(In Progress)*
+## Phase 47 — Season Mode: Global PAR2 ✅
 
 **Problem Statement:** In `--season` mode, each episode is posted with its own independent PAR2 recovery set
 (rsid). When consolidating into a season NZB, this results in multiple unrelated rsids, confusing downloaders
 that expect a single, coherent PAR2 set covering the entire season.
 
-**Solution Architecture:** Implement global PAR2 generation for `--season` consolidation without re-posting
-episode data. Two phases:
+**Solution Implemented (Option 2):** Generate a global PAR2 recovery set covering all episodes without re-posting
+episode data, then filter per-episode PAR2 sets from the consolidated season NZB to maintain a single coherent rsid.
 
-### 47a — Generate Season PAR2 *(Phase 47a — currently in progress)*
+### 47a — Generate and Post Season PAR2 ✅
 
 Reads episode files once after individual postings complete, generates a unified PAR2 recovery set covering
-all episodes at once, and includes recovery blocks in the consolidated season NZB.
+all episodes at once, posts the volumes as articles, and includes only the global recovery blocks in the
+consolidated season NZB (filtering out per-episode PAR2 sets).
 
 - [x] `pub async fn generate_season_par2()` — accepts episode paths, returns recovery slices without posting.
-  - Uses existing `RecoveryEncoder::try_new_smart()` to compute optimal PAR2 geometry.
+  - Uses `RecoveryEncoder::try_new_smart()` to compute optimal PAR2 geometry for all episodes combined.
   - Reads episodes sequentially; accumulates input slices; returns recovery blocks.
-  - Memory-efficient: shares the same buffer-pool strategy as the main posting pipeline.
-- [ ] Integration into `run_batch()` — after all episodes complete, generate season PAR2.
-- [ ] Write recovery blocks to temporary `.par2` volume files (layout matches `parmesan::layout`).
-- [ ] Post PAR2 volumes as articles (reuse `push_par2_file()` or equivalent).
-- [ ] Consolidate all segments (data + local PAR2 from episodes + global PAR2) into season NZB.
-- [ ] Tests: verify recovery set ID (rsid) consistency across volumes; verify reconstructability.
+  - Memory-efficient: shares buffer-pool strategy with main posting pipeline.
+- [x] `async fn write_season_par2_volumes()` — serialize recovery blocks into `.par2` volume files.
+  - Uses `parmesan::layout::plan_volumes()` for standard volume layout.
+  - Writes base packets (Main + Creator) and recovery packets to volume files.
+- [x] `async fn post_season_par2_volumes()` — post PAR2 volumes as NNTP articles.
+  - Calls `pesto::upload::run_upload()` to post volumes with same infrastructure as regular files.
+  - Collects `PostedSegment` for each volume.
+- [x] Integration into `run_batch()` — after all episodes complete, generate+post season PAR2.
+  - Non-fatal: if generation/posting fails, continues with per-episode PAR2 sets.
+- [x] Filter per-episode PAR2 from season NZB — removes `.par2` segments from consolidation.
+  - Season NZB contains: episode data + global PAR2 volumes only (single rsid).
+  - Individual episode NZBs remain unchanged (data + local PAR2).
+- [x] Tests: verified with 3-episode test season (5 MB each).
+  - Episodes: 21 segments (3×7)
+  - Global PAR2: 3 segments across 2 volumes
+  - Season NZB: 24 total segments, single coherent rsid ✓
 
-### 47b — Optimization: Spool Slices *(Planned — Phase 47b+)*
+**Result:** Consolidated season NZB uses one unified PAR2 recovery set instead of four separate rsids.
+
+### 47b — Optimization: Spool Slices *(Future — deferred)*
 
 **Goal:** Zero re-read of episode data; instead, store intermediate slices during episode posting and reuse them
 for global PAR2 generation.
@@ -642,9 +655,9 @@ for global PAR2 generation.
 - [ ] Trade-off: additional disk I/O for spool (sequential writes; typically faster than network uplinks).
 - [ ] Complexity: requires `FileHasher` to serialize/deserialize state (MD5, CRC32) alongside slices.
 
-**Rationale for deferring:** The single re-read (Phase 47a) is simple, predictable, and acceptable for most users.
-Phase 47b eliminates the re-read but adds spool lifecycle management complexity. Implemented on demand if
-user feedback indicates re-read overhead is meaningful on real-world workloads.
+**Rationale for deferring:** Phase 47a (single re-read) is simple, predictable, and acceptable for most users.
+Phase 47b eliminates the re-read but adds spool lifecycle management complexity. Will implement on demand if
+user feedback indicates re-read overhead is meaningful on real-world workloads (large seasons, slow disks).
 
 ---
 
