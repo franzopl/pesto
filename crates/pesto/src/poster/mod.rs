@@ -3580,11 +3580,17 @@ pub async fn generate_season_par2(
                 (size as usize).div_ceil(s)
             })
             .sum();
-        debug!("season PAR2: using config slice_size={} (rounded from {}), total_slices={}", s, size, n);
+        debug!(
+            "season PAR2: using config slice_size={} (rounded from {}), total_slices={}",
+            s, size, n
+        );
         (s, n)
     } else {
         let (s, n) = optimal_par2_slice_size(&per_file_articles, article_size, config.par2);
-        debug!("season PAR2: using optimal slice_size={}, total_slices={}", s, n);
+        debug!(
+            "season PAR2: using optimal slice_size={}, total_slices={}",
+            s, n
+        );
         (s, n)
     };
 

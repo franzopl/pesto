@@ -1972,8 +1972,8 @@ async fn post_season_par2_volumes(
     par2_config.no_hooks = true; // Disable hooks for PAR2 volumes (no NZB to upload)
 
     // Write PAR2 NZB to a temp file (will be discarded, not sent to indexers)
-    let par2_nzb_temp = tempfile::NamedTempFile::new()
-        .context("creating temp file for PAR2 NZB")?;
+    let par2_nzb_temp =
+        tempfile::NamedTempFile::new().context("creating temp file for PAR2 NZB")?;
     let par2_nzb_path = par2_nzb_temp.path().to_path_buf();
 
     let outcome = pesto::upload::run_upload(
@@ -1983,7 +1983,7 @@ async fn post_season_par2_volumes(
         None, // no progress reporting for PAR2 volumes
         Some(cancel.clone()),
         Some(par2_nzb_path), // write NZB to temp (discarded after)
-        false, // don't write history for PAR2 volumes
+        false,               // don't write history for PAR2 volumes
     )
     .await?;
 
@@ -2220,6 +2220,21 @@ async fn run_batch(
                 all_segments.clone()
             };
 
+            // Restore real filenames to subject_name for consolidated season NZB.
+            // When episodes were posted with obfuscation (--obfuscate full/paranoid),
+            // their subject_name is a random hash. For the consolidated NZB, we need
+            // to use the real filename (from file_name) so SABnzbd can rename correctly.
+            let consolidated_segments: Vec<PostedSegment> = season_segments
+                .iter()
+                .map(|seg| {
+                    let mut s = seg.clone();
+                    // Use file_name as the subject_name base to ensure consolidated
+                    // NZB has proper human-readable subjects, not obfuscated hashes.
+                    s.subject_name = Arc::from(s.file_name.as_str());
+                    s
+                })
+                .collect();
+
             let nzb_meta = NzbMeta {
                 name: season_name,
                 password: config
@@ -2233,7 +2248,7 @@ async fn run_batch(
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
             };
-            let xml = pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta);
+            let xml = pesto::nzb::generate(&all_groups, &consolidated_segments, &nzb_meta);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
