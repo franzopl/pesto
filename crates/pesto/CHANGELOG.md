@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.5.9] — 2026-08-05
+
 ### Added
 - **Memory management, Phase 0 — reduce the address-space floor.** `pesto`
   was aborting on seedboxes with `memory allocation of N bytes failed` even
