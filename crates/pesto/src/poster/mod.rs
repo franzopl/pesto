@@ -3466,6 +3466,79 @@ pub async fn repost_failed_tasks(
     Ok(recovered)
 }
 
+/// Write season PAR2 recovery volumes to disk.
+///
+/// Takes recovery slices, serializes them into PAR2 packet format, and writes
+/// to volume files (.par2.vol0+1, .par2.vol1+2, etc.) in the output directory.
+/// Returns (index_packet_bytes, volume_file_paths) for use in NZB generation.
+async fn write_season_par2_volumes(
+    recovery_slices: &[parmesan::encoder::RecoverySlice],
+    release_name: &str,
+    output_dir: &Path,
+) -> Result<(Vec<u8>, Vec<PathBuf>)> {
+    if recovery_slices.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // Compute RSID from first recovery slice.
+    let main_b = packet::main_body(recovery_slices[0].data.len() as u64, &[]);
+    let rsid = packet::recovery_set_id(&main_b);
+
+    // Serialize base packets (Main + Creator).
+    let pkt_main = packet::serialize_packet(&rsid, &packet::TYPE_MAIN, &main_b);
+    let pkt_creator = packet::serialize_packet(
+        &rsid,
+        &packet::TYPE_CREATOR,
+        &packet::creator_body("pesto"),
+    );
+    let mut base_packets = pkt_main;
+    base_packets.extend(pkt_creator);
+
+    // Plan volume layout.
+    let volumes = layout::plan_volumes(recovery_slices.len() as u32);
+    let mut volume_paths = Vec::new();
+
+    // Write each recovery slice to its volume file.
+    for slice in recovery_slices {
+        let (_vol_idx, vol) = volumes
+            .iter()
+            .enumerate()
+            .find(|(_, v)| {
+                slice.exponent >= v.first && slice.exponent < v.first + v.count
+            })
+            .ok_or_else(|| anyhow::anyhow!("recovery slice exponent out of range"))?;
+
+        let vol_name = layout::volume_name(release_name, *vol);
+        let vol_path = output_dir.join(&vol_name);
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&vol_path)
+            .await?;
+
+        // Write base packets on first slice of volume.
+        if slice.exponent == vol.first {
+            file.write_all(&base_packets).await?;
+        }
+
+        // Serialize and write recovery packet.
+        let pkt = packet::serialize_packet(
+            &rsid,
+            &packet::TYPE_RECOVERY,
+            &packet::recovery_body(slice.exponent, &slice.data),
+        );
+        file.write_all(&pkt).await?;
+
+        // Track volume path (add once).
+        if slice.exponent == vol.first {
+            volume_paths.push(vol_path);
+        }
+    }
+
+    Ok((base_packets, volume_paths))
+}
+
 /// Generate a global PAR2 recovery set that covers all episodes in a season.
 ///
 /// Reads the episode files once, accumulates input slices into a single PAR2
@@ -3578,6 +3651,44 @@ pub async fn generate_season_par2(
         "season PAR2 generation complete"
     );
     Ok(recovery_slices)
+}
+
+/// Generate and write global PAR2 volumes for season consolidation.
+///
+/// High-level wrapper that:
+/// 1. Generates recovery slices covering all episodes
+/// 2. Writes volumes to output directory
+/// 3. Returns path to output directory
+///
+/// Used by season consolidation to create a single, coherent PAR2 set
+/// that covers the entire season at once.
+pub async fn generate_and_write_season_par2(
+    episode_paths: &[PathBuf],
+    release_name: &str,
+    output_dir: &Path,
+    config: &Config,
+) -> Result<PathBuf> {
+    if episode_paths.is_empty() || config.par2 == 0 {
+        return Ok(output_dir.to_path_buf());
+    }
+
+    debug!(episodes = episode_paths.len(), "generating season PAR2");
+
+    let recovery_slices = generate_season_par2(episode_paths, config).await?;
+
+    if recovery_slices.is_empty() {
+        return Ok(output_dir.to_path_buf());
+    }
+
+    info!(
+        recovery_slices = recovery_slices.len(),
+        output_dir = %output_dir.display(),
+        "writing season PAR2 volumes"
+    );
+
+    write_season_par2_volumes(&recovery_slices, release_name, output_dir)
+        .await
+        .map(|(_, _)| output_dir.to_path_buf())
 }
 
 #[cfg(test)]
