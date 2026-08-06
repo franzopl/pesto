@@ -3580,9 +3580,12 @@ pub async fn generate_season_par2(
                 (size as usize).div_ceil(s)
             })
             .sum();
+        debug!("season PAR2: using config slice_size={} (rounded from {}), total_slices={}", s, size, n);
         (s, n)
     } else {
-        optimal_par2_slice_size(&per_file_articles, article_size, config.par2)
+        let (s, n) = optimal_par2_slice_size(&per_file_articles, article_size, config.par2);
+        debug!("season PAR2: using optimal slice_size={}, total_slices={}", s, n);
+        (s, n)
     };
 
     if total_slices == 0 {
@@ -3606,11 +3609,14 @@ pub async fn generate_season_par2(
             .context("allocating season PAR2 recovery buffers")?;
 
     let mut buf = vec![0u8; par2_slice_size];
+    let mut total_slices_added = 0;
 
     for (ep_idx, episode_path) in episode_paths.iter().enumerate() {
         let mut file = tokio::fs::File::open(episode_path)
             .await
             .with_context(|| format!("opening episode `{}`", episode_path.display()))?;
+        let file_size = file.metadata().await.ok().map(|m| m.len()).unwrap_or(0);
+        let mut slices_for_episode = 0;
 
         loop {
             let n = file
@@ -3629,14 +3635,24 @@ pub async fn generate_season_par2(
             } else {
                 encoder.add_slice(buf[..par2_slice_size].to_vec());
             }
+            slices_for_episode += 1;
         }
 
+        total_slices_added += slices_for_episode;
         debug!(
             episode_idx = ep_idx + 1,
             total_episodes = episode_paths.len(),
+            file_size,
+            slices_for_episode,
             "finished reading episode"
         );
     }
+
+    debug!(
+        calculated_total_slices = total_slices,
+        actual_slices_added = total_slices_added,
+        "season PAR2 slice count mismatch"
+    );
 
     let (recovery_slices, _checksums) = encoder.finish();
     info!(
