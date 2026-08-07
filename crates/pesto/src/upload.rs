@@ -314,6 +314,7 @@ pub async fn run_upload(
                     // configured primary — see the analogous comment on
                     // `group` below.
                     let history_servers_str = outcome.servers.join(", ");
+                    let wire_subjects_vec = crate::nzb::wire_subjects(&outcome.segments);
                     crate::history::record_upload(
                         &crate::history::UploadRecord {
                             name: entry_label,
@@ -334,6 +335,7 @@ pub async fn run_upload(
                             duration_secs: upload_start.elapsed().as_secs_f64(),
                             nzb_path: Some(&out.display().to_string()),
                             subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                            wire_subjects: &wire_subjects_vec,
                         },
                         config.history_dir.as_deref(),
                     );
@@ -450,6 +452,7 @@ pub async fn run_upload(
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            wire_subject: crate::nzb::wire_subject(&outcome.segments).unwrap_or_default(),
         };
         let hook_cfg = config.clone();
         let log_lines =

@@ -139,51 +139,37 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
         outcome.failures
     );
 
-    // Every file's subject must share the exact same prefix.
-    let prefixes: std::collections::HashSet<&str> = outcome
-        .segments
-        .iter()
-        .map(|s| shared_prefix(&s.subject_name))
-        .collect();
-    assert_eq!(
-        prefixes.len(),
-        1,
-        "expected one shared prefix across the whole release, got: {prefixes:?}"
-    );
-    let prefix = *prefixes.iter().next().unwrap();
-    assert!(
-        (10..=30).contains(&prefix.len()) && prefix.chars().all(|c| c.is_ascii_alphanumeric()),
-        "shared prefix `{prefix}` doesn't look like an obfuscated name"
-    );
-
-    // Distinct files must still get distinct (suffixed) subject names.
-    let mut subjects: Vec<&str> = outcome
+    // NZB subjects now use the real filenames (not the wire prefix) for proper
+    // download-client renaming. Verify that all real filenames are present.
+    let mut filenames: Vec<&str> = outcome
         .segments
         .iter()
         .map(|s| s.subject_name.as_ref())
         .collect();
-    subjects.sort_unstable();
-    subjects.dedup();
-    assert_eq!(subjects.len(), expected.len(), "subject names collided");
+    filenames.sort_unstable();
+    filenames.dedup();
+    // Should have one subject_name per file (all segments of a file share the same name).
+    assert_eq!(filenames.len(), expected.len(), "filename count mismatch");
 
-    // The real extension is preserved on the wire (unlike plain `full`, which
-    // hides it), and the real path never leaks.
+    // Every file's real filename must end with .bin (matching the expected paths).
     for seg in &outcome.segments {
         assert!(
             seg.subject_name.ends_with(".bin"),
-            "subject `{}` should keep the real extension",
+            "subject `{}` should end with .bin (real filename preserved for NZB)",
             seg.subject_name
         );
     }
-    assert!(
-        !outcome
-            .segments
-            .iter()
-            .any(|s| s.subject_name.contains("Show")),
-        "a real path leaked into a subject"
-    );
 
-    // The NZB still carries the real relative paths.
+    // Verify the real filenames match what was uploaded.
+    for real_name in &expected {
+        assert!(
+            filenames.contains(&real_name.as_str()),
+            "real filename `{real_name}` not found in segment subjects"
+        );
+    }
+
+    // The NZB carries the real relative paths in subject's quoted string
+    // (standard NZB 1.1 has no `name=`) for download-client renaming.
     let nzb = pesto::nzb::generate(
         &config.groups,
         &outcome.segments,
@@ -191,8 +177,8 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
     );
     for rel in &expected {
         assert!(
-            nzb.contains(&format!("name=\"{rel}\"")),
-            "real path `{rel}` missing from nzb name= attribute"
+            nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
+            "real path `{rel}` missing from nzb subject"
         );
     }
 

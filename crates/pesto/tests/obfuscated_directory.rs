@@ -84,11 +84,6 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
     }
 }
 
-/// `true` when `s` looks like a pesto obfuscated name: 10–30 alphanumeric chars.
-fn is_obfuscated_name(s: &str) -> bool {
-    (10..=30).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric())
-}
-
 /// Build a two-root directory tree under a fresh temp directory and return
 /// `(temp_root, [directory args], [expected relative paths])`.
 fn build_tree() -> (std::path::PathBuf, Vec<std::path::PathBuf>, Vec<String>) {
@@ -128,23 +123,22 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
         outcome.failures
     );
 
-    // Every expected relative path must appear as a posted segment's real
-    // file name, and its subject must be a fresh obfuscated name — never the
-    // path itself.
+    // Every expected relative path must appear as both file_name and subject_name
+    // in the segments. NZB now uses real filenames for download-client compatibility.
     for rel in &expected {
         let seg = outcome
             .segments
             .iter()
             .find(|s| &s.file_name == rel)
             .unwrap_or_else(|| panic!("no segment for `{rel}`"));
-        assert!(
-            is_obfuscated_name(&seg.subject_name),
-            "subject `{}` for `{rel}` is not obfuscated",
-            seg.subject_name
+        assert_eq!(
+            seg.subject_name.as_ref(),
+            rel,
+            "subject should equal the real filename for NZB generation"
         );
     }
 
-    // Distinct files get distinct obfuscated names across the whole tree.
+    // Distinct files get distinct subjects (which are now their real filenames).
     let mut subjects: Vec<&str> = outcome
         .segments
         .iter()
@@ -152,9 +146,10 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
         .collect();
     subjects.sort_unstable();
     subjects.dedup();
-    assert_eq!(subjects.len(), expected.len(), "obfuscated names collided");
+    assert_eq!(subjects.len(), expected.len(), "subject names collided");
 
-    // The NZB always carries the real filename even in full obfuscation mode.
+    // The NZB always carries the real filename even in full obfuscation mode
+    // — in `subject`'s quoted string (standard NZB 1.1 has no `name=`).
     let nzb = pesto::nzb::generate(
         &config.groups,
         &outcome.segments,
@@ -162,8 +157,8 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
     );
     for rel in &expected {
         assert!(
-            nzb.contains(&format!("name=\"{rel}\"")),
-            "real path `{rel}` missing from nzb name= attribute"
+            nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
+            "real path `{rel}` missing from nzb subject"
         );
     }
     assert!(

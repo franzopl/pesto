@@ -305,7 +305,9 @@ groups = ["alt.binaries.test"]
 # variables are available: PESTO_NZB, PESTO_NFO, PESTO_NAME, PESTO_BYTES,
 # PESTO_INPUT_PATHS, PESTO_SERVER, PESTO_GROUP, PESTO_GROUPS, PESTO_PASSWORD,
 # PESTO_CATEGORY, PESTO_NZB_NAME, PESTO_OBFUSCATE, PESTO_PAR2, PESTO_TAGS,
-# PESTO_TMDB_ID, PESTO_IMDB_ID, PESTO_TVDB_ID, PESTO_MAL_ID.
+# PESTO_TMDB_ID, PESTO_IMDB_ID, PESTO_TVDB_ID, PESTO_MAL_ID, PESTO_WIRE_SUBJECT
+# (the actual Subject: header sent to the NNTP server for the first posted
+# file — differs from the real filename under --obfuscate).
 # post_hook = "notify-send 'pesto' 'Upload done: $PESTO_NAME'"
 #
 # See examples/hooks/ for ready-made hook scripts (curupira.sh, generic-indexer.sh, etc.).

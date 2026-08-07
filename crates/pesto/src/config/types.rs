@@ -247,7 +247,7 @@ pub struct OutputSection {
     pub nzb: Option<String>,
     /// Directory where `.nzb` files are written by default.
     pub nzb_dir: Option<String>,
-    /// Friendly name emitted as `<meta type="name">` in the `.nzb`.
+    /// Friendly name emitted as `<meta type="title">` in the `.nzb`.
     pub nzb_name: Option<String>,
     /// Extraction password emitted as `<meta type="password">` in the `.nzb`.
     pub nzb_password: Option<String>,

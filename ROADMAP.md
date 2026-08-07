@@ -659,6 +659,37 @@ for global PAR2 generation.
 Phase 47b eliminates the re-read but adds spool lifecycle management complexity. Will implement on demand if
 user feedback indicates re-read overhead is meaningful on real-world workloads (large seasons, slow disks).
 
+### 47c — Fix: Global PAR2 Had No File Description Packets ✅
+
+**Problem Statement:** 47a's global PAR2 set was recovery data only — `write_season_par2_volumes()` built its
+Main packet with an *empty* File ID list and never emitted File Description/IFSC packets for any episode. That's
+syntactically valid PAR2 (a compliant reader just sees zero described files), but no PAR2 client (par2cmdline,
+MultiPar, SABnzbd) can verify, repair, or — under `--obfuscate` — de-obfuscate a season pack's episodes against
+anonymous parity with no file association. The per-episode PAR2 sets generated during individual posting *did*
+carry each episode's real name correctly, but 47a discards them from the consolidated season NZB in favor of
+the (file-less) global set — so a season pack under `--obfuscate=full` shipped with no working de-obfuscation
+path at all: articles decode under their random yEnc name and nothing ever renames them back.
+
+- [x] `generate_season_par2()` now streams episodes through a [`parmesan::worker::Par2Worker`] (`compute_hashes:
+  true`) instead of a bare `RecoveryEncoder::add_slice()` loop, so it gets each episode's MD5-16k/MD5-full/length
+  and per-slice checksums for free, matching the per-file PAR2 path's own approach.
+- [x] Episodes are re-sorted by File ID before any slice is fed. PAR2 numbers its input blocks by File-ID order
+  (Main packet, per spec); third-party tools assume that canonical order when mapping Reed-Solomon coefficients
+  back to input slices, regardless of feed order. Missing this produced volumes that looked fine (right names,
+  right Main/FileDesc packets) but failed real repair against par2cmdline — verified by temporarily reverting
+  the sort and watching `par2 repair` fail with "no data found" on a deleted episode.
+- [x] `write_season_par2_volumes()` builds the Main packet with every episode's real File ID and emits a File
+  Description + IFSC pair per episode, using each episode's bare file name (no directory components) — same
+  identity a real PAR2 client needs to verify/repair/de-obfuscate, always the real name regardless of
+  `--obfuscate` (obfuscation only scrambles the posted article's `Subject:`/yEnc `name=`, never the PAR2 record).
+- [x] New test `season_par2_file_desc.rs`: generates a 3-episode season PAR2 set, then round-trips it through
+  the real `par2cmdline` binary — `verify` against the pristine tree, delete one episode, `repair`, and assert
+  the restored bytes and file name are exactly right. Skips cleanly when `par2cmdline` isn't installed.
+
+**Result:** A `--season --obfuscate=full` pack's global PAR2 set is now a fully spec-compliant recovery set that
+verifies and repairs against real third-party PAR2 tools, and correctly renames de-obfuscated episodes back to
+their real names — exactly like a single-file `--obfuscate=full` upload already did.
+
 ---
 
 References:

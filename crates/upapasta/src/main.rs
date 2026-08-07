@@ -1046,6 +1046,11 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            // No live `PostedSegment`s here (this re-runs hooks for an
+            // already-completed NZB) — the `.nzb` itself only ever carries
+            // the real filename (see `nzb::generate`'s doc comment), never
+            // the wire identity, so there is nothing to recover it from.
+            wire_subject: String::new(),
         };
 
         let (ok, mut log) = pesto::hooks::run_one_hook(&hook, &ctx);
@@ -1847,6 +1852,10 @@ async fn run_season_hooks(
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        // No per-segment record survives the season-pack merge on disk
+        // either — same reasoning as `server`/`servers` above — so there is
+        // no wire identity left to report.
+        wire_subject: String::new(),
     };
 
     let hook_cfg = config.clone();

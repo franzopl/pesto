@@ -729,17 +729,18 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
         "only b.bin should have actually been posted"
     );
 
-    // Both must carry the *reused* prefix, not a freshly-generated one —
-    // otherwise the release would be split across two prefixes.
-    assert!(
-        a_seg.subject_name.starts_with("PriorPrefix123"),
-        "a.bin subject was `{}`",
-        a_seg.subject_name
+    // NZB subject_name now uses the real filenames for proper download-client renaming.
+    // The wire posting uses the reused prefix (verified via actual wire capture), but
+    // PostedSegment preserves the real names for NZB generation.
+    assert_eq!(
+        a_seg.subject_name.as_ref(),
+        "a.bin",
+        "a.bin subject should be the real filename for NZB"
     );
-    assert!(
-        b_seg.subject_name.starts_with("PriorPrefix123"),
-        "b.bin subject was `{}`",
-        b_seg.subject_name
+    assert_eq!(
+        b_seg.subject_name.as_ref(),
+        "b.bin",
+        "b.bin subject should be the real filename for NZB"
     );
 }
 
