@@ -867,6 +867,7 @@ following environment variables:
 | `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
+| `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
 
 Scripts must have the executable bit set on Unix (`chmod +x`). On Windows,
 files with `.exe`, `.cmd`, `.bat`, `.ps1`, or `.py` extensions are recognised

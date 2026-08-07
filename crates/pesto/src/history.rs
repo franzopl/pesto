@@ -35,6 +35,11 @@ pub struct UploadRecord<'a> {
     pub nzb_path: Option<&'a str>,
     /// Subject / NZB name used for the upload.
     pub subject: Option<&'a str>,
+    /// The actual wire identity posted to the NNTP server, one entry per
+    /// file — see [`crate::nzb::wire_subjects`]. Differs from `subject`
+    /// (the display name) whenever `--obfuscate` scrambled the on-wire
+    /// `Subject:` header. Empty when unknown (dry run, nothing posted).
+    pub wire_subjects: &'a [(String, String)],
 }
 
 /// Returns the history catalog directory, creating it (and `nzb/`) if necessary.
@@ -375,8 +380,23 @@ pub fn record_upload(rec: &UploadRecord<'_>, history_dir: Option<&Path>) {
             .or(rec.nzb_path),
     );
 
+    let wire_subjects_json: String = {
+        let items: Vec<String> = rec
+            .wire_subjects
+            .iter()
+            .map(|(file, subject)| {
+                format!(
+                    r#"{{"file":"{}","subject":"{}"}}"#,
+                    json_str(file),
+                    json_str(subject)
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+
     let line = format!(
-        r#"{{"data_upload":"{iso}","nome_original":{nome},"categoria":"{category}","nome_ofuscado":{obf},"senha_rar":{pw},"tamanho_bytes":{bytes},"tmdb_id":null,"grupo_usenet":{group},"servidor_nntp":{srv},"redundancia_par2":{par2},"duracao_upload_s":{dur:.3},"num_arquivos_rar":null,"caminho_nzb":{nzb},"subject":{subject}}}"#,
+        r#"{{"data_upload":"{iso}","nome_original":{nome},"categoria":"{category}","nome_ofuscado":{obf},"senha_rar":{pw},"tamanho_bytes":{bytes},"tmdb_id":null,"grupo_usenet":{group},"servidor_nntp":{srv},"redundancia_par2":{par2},"duracao_upload_s":{dur:.3},"num_arquivos_rar":null,"caminho_nzb":{nzb},"subject":{subject},"wire_subjects":{wire_subjects_json}}}"#,
         nome = json_opt(Some(rec.name)),
         obf = json_opt(rec.obfuscated_name),
         pw = json_opt(rec.password),

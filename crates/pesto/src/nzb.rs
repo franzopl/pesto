@@ -203,6 +203,56 @@ pub fn generate(groups: &[String], segments: &[PostedSegment], meta: &NzbMeta) -
     out
 }
 
+/// Reconstruct the exact `Subject:` header that was actually sent to the
+/// NNTP server for the first posted file, using its wire identity
+/// (`PostedSegment::wire_name`) rather than the real filename that
+/// [`generate`] always writes into the `.nzb` (see its doc comment).
+///
+/// Under `--obfuscate=full`/`paranoid` every file draws its own independent
+/// wire identity, so this is only representative of one file, not the whole
+/// release — same scope as the `entry_label` already surfaced to hooks and
+/// history. `None` when there are no segments, or the first one's
+/// `wire_name` is empty (segments reconstructed from a parsed `.nzb` via
+/// [`parse`], which never re-encode and so never had a wire identity).
+pub fn wire_subject(segments: &[PostedSegment]) -> Option<String> {
+    let first = segments.first()?;
+    if first.wire_name.is_empty() {
+        return None;
+    }
+    let file_counter = (first.total_files > 0).then_some((first.file_index, first.total_files));
+    Some(default_subject(
+        &first.wire_name,
+        1,
+        first.total,
+        file_counter,
+    ))
+}
+
+/// Like [`wire_subject`], but for every file in the release rather than just
+/// the first — returns `(file_name, wire_subject)` pairs. Under
+/// `--obfuscate=full`/`paranoid` each file draws an independent wire
+/// identity, so a multi-file release (e.g. a video plus its PAR2 volumes)
+/// needs one entry per file, not one for the whole run — that's what feeds
+/// `history::UploadRecord::wire_subjects`. Files whose first segment has an
+/// empty `wire_name` (segments reconstructed from a parsed `.nzb`, which
+/// never re-encode) are skipped.
+pub fn wire_subjects(segments: &[PostedSegment]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < segments.len() {
+        let name = &segments[i].file_name;
+        let count = segments[i..]
+            .iter()
+            .take_while(|s| &s.file_name == name)
+            .count();
+        if let Some(subject) = wire_subject(&segments[i..i + count]) {
+            out.push((name.clone(), subject));
+        }
+        i += count;
+    }
+    out
+}
+
 /// Write a single `<file>` element for one file's segments.
 fn write_file(out: &mut String, groups: &[String], segs: &[PostedSegment]) {
     let first = &segs[0];
@@ -1017,5 +1067,65 @@ mod tests {
             strip_part_suffix("\"[LEAK] movie.mkv\" yEnc (1/1)"),
             "[LEAK] movie.mkv"
         );
+    }
+
+    // ── wire_subject / wire_subjects ─────────────────────────────────────────
+
+    fn obf(name: &str, part: u32, total: u32, id: &str, wire: &str) -> PostedSegment {
+        PostedSegment {
+            wire_name: Arc::from(wire),
+            ..seg(name, part, total, id)
+        }
+    }
+
+    #[test]
+    fn wire_subject_uses_the_wire_name_not_the_real_name() {
+        let segments = vec![
+            obf("movie.mkv", 1, 2, "id1", "aB3xyz"),
+            obf("movie.mkv", 2, 2, "id2", "aB3xyz"),
+        ];
+        assert_eq!(
+            wire_subject(&segments).as_deref(),
+            Some("\"aB3xyz\" yEnc (1/2)")
+        );
+    }
+
+    #[test]
+    fn wire_subject_none_when_no_segments() {
+        assert_eq!(wire_subject(&[]), None);
+    }
+
+    #[test]
+    fn wire_subject_none_when_wire_name_is_empty() {
+        // Segments reconstructed from a parsed `.nzb` never re-encode, so
+        // `wire_name` is left empty (see `parse`).
+        let segments = vec![obf("movie.mkv", 1, 1, "id1", "")];
+        assert_eq!(wire_subject(&segments), None);
+    }
+
+    #[test]
+    fn wire_subjects_returns_one_entry_per_file() {
+        // A video file plus its PAR2 volumes, each with an independently
+        // obfuscated wire identity — the `Full`/`Paranoid` case.
+        let segments = vec![
+            obf("movie.mkv", 1, 2, "id1", "aB3xyz"),
+            obf("movie.mkv", 2, 2, "id2", "aB3xyz"),
+            obf("movie.par2", 1, 1, "id3", "Qz9wvu"),
+        ];
+        assert_eq!(
+            wire_subjects(&segments),
+            vec![
+                ("movie.mkv".to_string(), "\"aB3xyz\" yEnc (1/2)".to_string()),
+                (
+                    "movie.par2".to_string(),
+                    "\"Qz9wvu\" yEnc (1/1)".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn wire_subjects_empty_when_no_segments() {
+        assert_eq!(wire_subjects(&[]), Vec::<(String, String)>::new());
     }
 }

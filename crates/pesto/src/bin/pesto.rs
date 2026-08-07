@@ -1667,6 +1667,7 @@ async fn run_single_upload(
                     // configured primary — a multi-server (failover) config
                     // commonly uses every configured server at once.
                     let history_servers_str = outcome.servers.join(", ");
+                    let wire_subjects_vec = pesto::nzb::wire_subjects(&outcome.segments);
                     pesto::history::record_upload(
                         &pesto::history::UploadRecord {
                             name: entry_label,
@@ -1683,6 +1684,7 @@ async fn run_single_upload(
                             duration_secs: upload_start.elapsed().as_secs_f64(),
                             nzb_path: Some(&reported.display().to_string()),
                             subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                            wire_subjects: &wire_subjects_vec,
                         },
                         config.history_dir.as_deref(),
                     );

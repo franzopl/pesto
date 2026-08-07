@@ -12,7 +12,7 @@
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
 //! `PESTO_SERVERS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`,
 //! `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
-//! `PESTO_TAGS`.
+//! `PESTO_TAGS`, `PESTO_WIRE_SUBJECT`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -48,6 +48,11 @@ pub struct HookContext {
     pub tags: String,
     pub nzb_path: String,
     pub nfo_path: String,
+    /// The actual `Subject:` header sent to the NNTP server for the first
+    /// posted file — see [`crate::nzb::wire_subject`]. Under `--obfuscate`
+    /// this differs from the real filename the `.nzb` carries; empty when
+    /// no segments were posted.
+    pub wire_subject: String,
 }
 
 /// Run all configured post-upload hooks.
@@ -239,7 +244,8 @@ fn apply_env(cmd: &mut Command, ctx: &HookContext) {
         .env("PESTO_PAR2", ctx.par2.to_string())
         .env("PESTO_TAGS", &ctx.tags)
         .env("PESTO_NZB", &ctx.nzb_path)
-        .env("PESTO_NFO", &ctx.nfo_path);
+        .env("PESTO_NFO", &ctx.nfo_path)
+        .env("PESTO_WIRE_SUBJECT", &ctx.wire_subject);
 }
 
 #[cfg(unix)]

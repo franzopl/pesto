@@ -849,6 +849,7 @@ following environment variables:
 | `PESTO_IMDB_ID` | Value of `--imdb-id` / `--imdb` (empty when not set) |
 | `PESTO_TVDB_ID` | Value of `--tvdb-id` / `--tvdb` (empty when not set) |
 | `PESTO_MAL_ID` | Value of `--mal-id` / `--mal` (empty when not set) |
+| `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
 
 Scripts must have the executable bit set on Unix (`chmod +x`). On Windows,
 files with `.exe`, `.cmd`, `.bat`, `.ps1`, or `.py` extensions are recognised
