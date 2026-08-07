@@ -1737,9 +1737,13 @@ async fn run_single_upload(
             // output in between, it looks like the process hung. Run it on
             // a blocking-pool thread and print a heartbeat every 10s so
             // there's always something on screen while it works.
-            println!(
-                "generating nfo (running bdinfo — this can take a while on large Blu-ray discs)..."
-            );
+            if pesto::nfo::looks_like_bluray(entry_paths) {
+                println!(
+                    "generating nfo (running bdinfo — this can take a while on large Blu-ray discs)..."
+                );
+            } else {
+                println!("generating nfo...");
+            }
             pesto::memory::set_phase(pesto::memory::Phase::Nfo);
             let nfo_paths = entry_paths.to_vec();
             let nfo_handle = tokio::task::spawn_blocking(move || pesto::nfo::generate(&nfo_paths));
