@@ -21,6 +21,27 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   PAR2-only NZB content was never deleted, so it could sit on disk and get picked up and submitted to an
   indexer ahead of the real season NZB. The temp NZB is now written inside the same `TempDir` already used for
   the PAR2 volumes, so it's removed along with everything else in that directory when the function returns.
+- **`--season`'s internal PAR2-only upload no longer runs the user's configured `post_hooks`.** Setting
+  `no_hooks = true` for this internal upload only ever suppressed the `~/.config/pesto/hooks/` directory scan —
+  `hooks::run_hooks` documents that explicit `post_hooks` entries "still run regardless". A configured
+  post-hook (e.g. an indexer-submission script) fired against this PAR2-only NZB mid-batch, submitting it to
+  an indexer before the real season NZB existed — the same leaked-artifact problem as above, reachable even
+  once the disk leak itself is fixed. Both `post_hooks` and the directory scan are now disabled for this
+  upload.
+- **`--season`'s global PAR2 now covers what was actually posted, not the original episode files.** Under
+  `--compress`/`--password`, each episode is compressed into an archive that's segmented and posted — the
+  archive, not the source file — and its temp dir is deleted right after that episode finishes. The season's
+  global PAR2 step ran afterward against the original `entries` paths regardless, producing a recovery set
+  whose File Description packets named data (filename, size, hash) that was never on the wire at all — useless
+  for verification or repair against what a downloader actually receives. Each episode's upload now optionally
+  keeps its compressed archive on disk (`keep_compress_temp`) until the season PAR2 step has read the real
+  posted bytes, then a `Drop` guard cleans it up regardless of how the batch exits.
+- **`--season`'s PAR2 volumes no longer get compressed/encrypted themselves under `--compress`/`--password`.**
+  The internal upload that posts the season's own `.par2` volumes cloned the season `Config` — including
+  `compress_password`/`compress_format` — so `run_upload`'s independent compression step wrapped each already-
+  generated `.par2` volume in its own password-protected archive before posting it. The result was a season
+  "PAR2" set that was really an encrypted blob no downloader could read as PAR2 at all. Compression is now
+  explicitly disabled for this upload, alongside the PAR2-generation and hook settings already cleared above.
 
 ## [0.6.0] — 2026-08-07
 
