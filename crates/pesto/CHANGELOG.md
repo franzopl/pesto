@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-07
+
 This cycle overhauls how `--obfuscate` interacts with the generated `.nzb`: the `.nzb` itself must always be
 recoverable to the real release (it's already private to whoever holds it), while the actual NNTP article — Subject
 header and yEnc body — is what obfuscation is supposed to scramble. Several rounds of fixes below converge on that
