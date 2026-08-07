@@ -12,6 +12,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **`--season`'s internal PAR2-only NZB no longer leaks onto disk.** `post_season_par2_volumes` posted the
+  season's global PAR2 volumes through the normal upload pipeline and wrote the resulting NZB to a
+  `NamedTempFile`, expecting it to be discarded once posting finished. `run_upload` never writes to the exact
+  path it's given, though — `versioned_nzb_path` normalizes the extension and creates a sibling `{stem}.nzb`
+  file instead. The `NamedTempFile` (empty) was cleaned up on drop, but the sibling actually holding the
+  PAR2-only NZB content was never deleted, so it could sit on disk and get picked up and submitted to an
+  indexer ahead of the real season NZB. The temp NZB is now written inside the same `TempDir` already used for
+  the PAR2 volumes, so it's removed along with everything else in that directory when the function returns.
+
 ## [0.6.0] — 2026-08-07
 
 This cycle overhauls how `--obfuscate` interacts with the generated `.nzb`: the `.nzb` itself must always be
