@@ -71,6 +71,10 @@ jobs:
       contents: write
 
     steps:
+      # Needed for crates/pesto/CHANGELOG.md, read below — the release notes
+      # embed that version's actual entries instead of just linking to it.
+      - uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
 
@@ -85,6 +89,51 @@ jobs:
       - name: Generate checksums
         run: sha256sum pesto-linux-x86_64 pesto-linux-x86_64-musl pesto-windows-x86_64.exe > SHA256SUMS
 
+      # Extracts this version's own section from crates/pesto/CHANGELOG.md
+      # (between its "## [<version>]" heading and the next "## [" heading)
+      # so the release notes carry the actual bullet points instead of just
+      # a link to go read them. Not `generate_release_notes: true` — GitHub's
+      # auto-generated notes pick the previous *tag by creation time* across
+      # the whole repo, which would pull in unrelated `parmesan-v*`/
+      # `penne-v*` tags interleaved with `pesto-v*` ones.
+      #
+      # Fails loudly (rather than shipping an empty release body) when the
+      # tagged version has no matching CHANGELOG heading — almost always
+      # means CHANGELOG.md wasn't updated before tagging (see RELEASING.md
+      # step 4).
+      - name: Extract changelog section
+        run: |
+          VERSION="${GITHUB_REF_NAME#pesto-v}"
+          awk -v ver="$VERSION" '
+            BEGIN { found = 0 }
+            $0 ~ /^## \[/ {
+              if (found) exit
+              if ($0 ~ ("^## \\[" ver "\\]")) { found = 1; next }
+              next
+            }
+            found { print }
+          ' crates/pesto/CHANGELOG.md > /tmp/changelog-raw.md
+
+          # Trim leading/trailing blank lines left over from the heading and
+          # the blank line separating entries.
+          sed -e '/./,$!d' /tmp/changelog-raw.md \
+            | tac | sed -e '/./,$!d' | tac > /tmp/changelog-section.md
+
+          if [ ! -s /tmp/changelog-section.md ]; then
+            echo "::error::No '## [$VERSION]' section found in crates/pesto/CHANGELOG.md — update it before tagging (see RELEASING.md step 4)." >&2
+            exit 1
+          fi
+
+          {
+            cat /tmp/changelog-section.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "Full history: [\`crates/pesto/CHANGELOG.md\`](https://github.com/franzopl/pesto/blob/main/crates/pesto/CHANGELOG.md)."
+            echo ""
+            echo "Also published to [crates.io](https://crates.io/crates/pesto-poster) and documented on [docs.rs](https://docs.rs/pesto-poster)."
+          } > /tmp/release-body.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -93,12 +142,4 @@ jobs:
             pesto-linux-x86_64-musl
             pesto-windows-x86_64.exe
             SHA256SUMS
-          # Not `generate_release_notes: true` — GitHub's auto-generated notes
-          # pick the previous *tag by creation time* across the whole repo,
-          # which would pull in unrelated `parmesan-v*`/`penne-v*` tags
-          # interleaved with `pesto-v*` ones. Point at the crate's own
-          # changelog instead.
-          body: |
-            See [`crates/pesto/CHANGELOG.md`](https://github.com/franzopl/pesto/blob/main/crates/pesto/CHANGELOG.md) for what changed in this release.
-
-            Also published to [crates.io](https://crates.io/crates/pesto-poster) and documented on [docs.rs](https://docs.rs/pesto-poster).
+          body_path: /tmp/release-body.md
