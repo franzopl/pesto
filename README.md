@@ -279,7 +279,7 @@ from cataloguing plain posts; obfuscation hides the content from them.
 | Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
-| `full` | random, 10–30 chars | random, 10–30 chars | random per file | yes |
+| `full` | random, 10–30 chars, independent per file | random, 10–30 chars, independent per file | random per file | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
@@ -310,9 +310,12 @@ pesto --obfuscate --password movie.mkv
 ### Full-shared mode (for indexer compatibility)
 
 `--obfuscate=full-shared` obfuscates filenames like `full` mode, but reuses a single
-random name across the entire release (all data files, PAR2 index, and recovery
-volumes). This preserves the ability for Usenet indexers to group files together,
-while still keeping the release hidden from casual observation.
+random *Subject* prefix (real extension, or archive volume suffix, kept) across the
+entire release — all data files, PAR2 index, and recovery volumes. Only the Subject
+is shared; the yEnc body `name=` stays independently random per file, same as `full`,
+since reusing it too would leave an exact subject/body match across every article.
+This preserves the ability for Usenet indexers to group files together, while still
+keeping the release hidden from casual observation.
 
 Use this when you want obfuscation but need indexer grouping (e.g. posting to
 private trackers, or when your indexer has trouble with fully random names).
@@ -739,7 +742,7 @@ pesto --nzb-tag hd --nzb-tag 2024 --nzb-tag dts movie.mkv
 These values are written as `<meta>` elements in the `.nzb`:
 
 ```xml
-<meta type="name">My Movie (2024)</meta>
+<meta type="title">My Movie (2024)</meta>
 <meta type="category">Movies</meta>
 <meta type="password">archive_pass</meta>
 <meta type="tag">hd</meta>
@@ -747,9 +750,15 @@ These values are written as `<meta>` elements in the `.nzb`:
 <meta type="tag">dts</meta>
 ```
 
+`--nzb-name` maps to `<meta type="title">` — SABnzbd's documented meta type for a
+human-readable NZB name; plain `<meta type="name">` isn't part of the NZB 1.1 spec.
+
 `--nzb-tag` can be repeated; each occurrence produces one `<meta type="tag">`.
 If `--nzb-tag` is used on the command line, it replaces any `nzb_tags` set in
-`config.toml`.
+`config.toml`. When `--obfuscate` is active, pesto also adds its own
+`<meta type="tag">obfuscated:<mode></meta>` (e.g. `obfuscated:full`) automatically,
+so an indexer can tell an obfuscated release apart from a plain one without
+inspecting article headers.
 
 ### NZB output path
 
@@ -837,7 +846,7 @@ Environment variables available to the pre-hook:
 | `PESTO_GROUPS` | Colon-separated list of all configured newsgroups |
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 
@@ -864,7 +873,7 @@ following environment variables:
 | `PESTO_PASSWORD` | Archive password (empty when none) |
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
@@ -990,7 +999,7 @@ picked up automatically — no config change needed.
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |
-| `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="name">` in the `.nzb` |
+| `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="title">` in the `.nzb` |
 | `--nzb-password <PASS>` | `output.nzb_password` | — | `<meta type="password">` in the `.nzb` |
 | `--nzb-category <CAT>` | `output.nzb_category` | — | `<meta type="category">` in the `.nzb` |
 | `--nzb-tag <TAG>` | `output.nzb_tags` | — | `<meta type="tag">` in the `.nzb`; repeatable. Replaces config `nzb_tags` when used. |

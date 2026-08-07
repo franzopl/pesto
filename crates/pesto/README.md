@@ -250,7 +250,7 @@ from cataloguing plain posts; obfuscation hides the content from them.
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, 10–30 chars, unique per file | random, unique per file | random per file | yes |
-| `full-shared` | random, shared across the release | random, shared across the release | random, shared across the release | yes |
+| `full-shared` | shared prefix + real extension, same across the release | random, independent per file | random, shared across the release | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
@@ -277,10 +277,14 @@ wire. Some public indexers rely on a shared base name to recognise that a
 PAR2 set belongs to a given release, so under `full` those posts often show
 up unindexed or split apart (see [issue #58]).
 
-`--obfuscate=full-shared` fixes that by generating one random name per run and
-reusing it — with the real extension kept — for every file: the archive (or
-loose input files) and every PAR2 index/volume. The real names still never
-touch the wire; only the *grouping* changes.
+`--obfuscate=full-shared` fixes that by generating one random *prefix* per run
+and reusing it — with the real extension (or archive volume suffix) kept — as
+the **Subject** of every file: the archive (or loose input files) and every
+PAR2 index/volume. Only the subject prefix is shared; the yEnc body `name=`
+stays independently random per file (reusing it too would leave an exact
+subject/body match across every article in the release — the same
+fingerprint plain `full` avoids by keeping Subject and yEnc name independent).
+The real names still never touch the wire; only the *grouping* changes.
 
 ```bash
 pesto --obfuscate=full-shared movie.mkv
@@ -713,7 +717,7 @@ pesto --nzb-tag hd --nzb-tag 2024 --nzb-tag dts movie.mkv
 These values are written as `<meta>` elements in the `.nzb`:
 
 ```xml
-<meta type="name">My Movie (2024)</meta>
+<meta type="title">My Movie (2024)</meta>
 <meta type="category">Movies</meta>
 <meta type="password">archive_pass</meta>
 <meta type="tag">hd</meta>
@@ -721,9 +725,15 @@ These values are written as `<meta>` elements in the `.nzb`:
 <meta type="tag">dts</meta>
 ```
 
+`--nzb-name` maps to `<meta type="title">` — SABnzbd's documented meta type for a
+human-readable NZB name; plain `<meta type="name">` isn't part of the NZB 1.1 spec.
+
 `--nzb-tag` can be repeated; each occurrence produces one `<meta type="tag">`.
 If `--nzb-tag` is used on the command line, it replaces any `nzb_tags` set in
-`config.toml`.
+`config.toml`. When `--obfuscate` is active, pesto also adds its own
+`<meta type="tag">obfuscated:<mode></meta>` (e.g. `obfuscated:full`) automatically,
+so an indexer can tell an obfuscated release apart from a plain one without
+inspecting article headers.
 
 ### NZB output path
 
@@ -811,7 +821,7 @@ Environment variables available to the pre-hook:
 | `PESTO_GROUPS` | Colon-separated list of all configured newsgroups |
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
@@ -842,7 +852,7 @@ following environment variables:
 | `PESTO_PASSWORD` | Archive password (empty when none) |
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
@@ -972,7 +982,7 @@ picked up automatically — no config change needed.
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |
-| `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="name">` in the `.nzb` |
+| `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="title">` in the `.nzb` |
 | `--nzb-password <PASS>` | `output.nzb_password` | — | `<meta type="password">` in the `.nzb` |
 | `--nzb-category <CAT>` | `output.nzb_category` | — | `<meta type="category">` in the `.nzb` |
 | `--nzb-tag <TAG>` | `output.nzb_tags` | — | `<meta type="tag">` in the `.nzb`; repeatable. Replaces config `nzb_tags` when used. |

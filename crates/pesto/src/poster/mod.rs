@@ -3060,11 +3060,6 @@ async fn worker(
     slot.quit().await;
 }
 
-/// Choose the newsgroup(s) for a whole run.
-///
-/// When several groups are configured, one is picked at random (once per run)
-/// rather than cross-posting every article to all of them. The whole upload
-/// then stays together in a single group, while the footprint still spreads
 /// Build a `PostTask`, generating per-article subject and From when in
 /// `ObfuscateMode::Paranoid`; otherwise copies them from `FileMeta`.
 fn make_task(
@@ -3099,6 +3094,11 @@ fn make_task(
     }
 }
 
+/// Choose the newsgroup(s) for a whole run.
+///
+/// When several groups are configured, one is picked at random (once per run)
+/// rather than cross-posting every article to all of them. The whole upload
+/// then stays together in a single group, while the footprint still spreads
 /// across the configured groups over many runs. Each entry in `groups` is a
 /// "target" that may itself be several newsgroup names joined with `+` (or
 /// the deprecated `,` alias) for a simultaneous cross-post (see
@@ -3106,7 +3106,16 @@ fn make_task(
 /// assumes has already been validated); the chosen target is split into the
 /// flat list every caller expects. With zero or one configured entry
 /// there's nothing to pick between, but the split still applies.
-fn pick_post_group(groups: &[String]) -> Vec<String> {
+///
+/// `pub` so a `--season` batch (`bin/pesto.rs`'s `run_batch`) can call this
+/// once up front and force every episode's `Config::groups` to the same
+/// pre-picked single-entry target. Otherwise each episode's own internal
+/// call (inside [`post_files`]) re-rolls independently, scattering a
+/// season's episodes across different newsgroups — the merged season NZB
+/// then needs a `<groups>` list wide enough to cover all of them, and any
+/// one episode's actual group may not even be among the ones another
+/// episode's segments were checked against.
+pub fn pick_post_group(groups: &[String]) -> Vec<String> {
     let target = match groups {
         [] => return Vec::new(),
         [one] => one.as_str(),
@@ -3506,22 +3515,61 @@ pub async fn repost_failed_tasks(
     Ok(recovered)
 }
 
+/// One episode's identity within a season-wide PAR2 recovery set: enough to
+/// emit a File Description + IFSC packet pair for it. `name` is the bare
+/// file name (no directory components) — the season equivalent of
+/// [`wire_name`] for a single-file entry, since each episode path here is
+/// already one standalone top-level entry, never a release subdirectory.
+struct SeasonFileEntry {
+    file_id: [u8; 16],
+    name: String,
+    hashes: FileHashes,
+    slice_checksums: Vec<SliceChecksum>,
+}
+
+/// A season-wide PAR2 recovery set, ready to be serialized to disk by
+/// [`write_season_par2_volumes`]. Carries one [`SeasonFileEntry`] per
+/// episode so the written volumes include real File Description/IFSC
+/// packets — see [`generate_season_par2`]'s doc comment for why that matters.
+struct SeasonPar2Set {
+    recovery_slices: Vec<parmesan::encoder::RecoverySlice>,
+    par2_slice_size: usize,
+    files: Vec<SeasonFileEntry>,
+}
+
+impl SeasonPar2Set {
+    fn empty() -> Self {
+        Self {
+            recovery_slices: Vec::new(),
+            par2_slice_size: 0,
+            files: Vec::new(),
+        }
+    }
+}
+
 /// Write season PAR2 recovery volumes to disk.
 ///
-/// Takes recovery slices, serializes them into PAR2 packet format, and writes
-/// to volume files (.par2.vol0+1, .par2.vol1+2, etc.) in the output directory.
+/// Serializes `season` into PAR2 packet format and writes it to volume files
+/// (`.par2.vol0+1`, `.par2.vol1+2`, etc.) in the output directory. Every
+/// volume carries the full base packet set — Main (with every episode's real
+/// File ID), Creator, and one File Description + IFSC pair per episode — not
+/// just its own Recovery packets, so any single volume is self-describing.
 /// Returns (index_packet_bytes, volume_file_paths) for use in NZB generation.
 async fn write_season_par2_volumes(
-    recovery_slices: &[parmesan::encoder::RecoverySlice],
+    season: &SeasonPar2Set,
     release_name: &str,
     output_dir: &Path,
 ) -> Result<(Vec<u8>, Vec<PathBuf>)> {
-    if recovery_slices.is_empty() {
+    if season.recovery_slices.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
 
-    // Compute RSID from first recovery slice.
-    let main_b = packet::main_body(recovery_slices[0].data.len() as u64, &[]);
+    // Main packet lists every episode's real File ID — without this the
+    // recovery set describes no files at all (see `generate_season_par2`'s
+    // doc comment), and no PAR2 client can verify, repair, or de-obfuscate
+    // against it.
+    let file_ids: Vec<[u8; 16]> = season.files.iter().map(|f| f.file_id).collect();
+    let main_b = packet::main_body(season.par2_slice_size as u64, &file_ids);
     let rsid = packet::recovery_set_id(&main_b);
 
     // Serialize base packets (Main + Creator).
@@ -3531,12 +3579,38 @@ async fn write_season_par2_volumes(
     let mut base_packets = pkt_main;
     base_packets.extend(pkt_creator);
 
+    // File Description + IFSC packets, one pair per episode, each carrying
+    // its real (never obfuscated) file name — the same mechanism the
+    // per-file PAR2 path already uses (see the `FileMeta`-based loop above)
+    // so a downloader's PAR2-based de-obfuscation step works the same way
+    // for a season pack as it does for a single upload.
+    for file in &season.files {
+        let pkt_file_desc = packet::serialize_packet(
+            &rsid,
+            &packet::TYPE_FILE_DESC,
+            &packet::file_description_body(
+                &file.file_id,
+                &file.hashes.md5_full,
+                &file.hashes.md5_16k,
+                file.hashes.length,
+                &file.name,
+            ),
+        );
+        let pkt_ifsc = packet::serialize_packet(
+            &rsid,
+            &packet::TYPE_IFSC,
+            &packet::ifsc_body(&file.file_id, &file.slice_checksums),
+        );
+        base_packets.extend(pkt_file_desc);
+        base_packets.extend(pkt_ifsc);
+    }
+
     // Plan volume layout.
-    let volumes = layout::plan_volumes(recovery_slices.len() as u32);
+    let volumes = layout::plan_volumes(season.recovery_slices.len() as u32);
     let mut volume_paths = Vec::new();
 
     // Write each recovery slice to its volume file.
-    for slice in recovery_slices {
+    for slice in &season.recovery_slices {
         let (_vol_idx, vol) = volumes
             .iter()
             .enumerate()
@@ -3577,48 +3651,87 @@ async fn write_season_par2_volumes(
 /// Generate a global PAR2 recovery set that covers all episodes in a season.
 ///
 /// Reads the episode files once, accumulates input slices into a single PAR2
-/// encoder, and returns the recovery slices. These can then be posted separately
-/// and combined with data segments in a consolidated season NZB.
+/// encoder, and returns the recovery slices *and* per-episode File IDs/hashes
+/// needed to write real File Description + IFSC packets. These can then be
+/// posted separately and combined with data segments in a consolidated
+/// season NZB.
 ///
 /// This enables a coherent PAR2 recovery set ID (rsid) that covers the entire
-/// season, rather than multiple independent rsids for individual episodes.
-pub async fn generate_season_par2(
-    episode_paths: &[PathBuf],
-    config: &Config,
-) -> Result<Vec<parmesan::encoder::RecoverySlice>> {
+/// season, rather than multiple independent rsids for individual episodes —
+/// while still describing every episode file by name, exactly like the
+/// per-file PAR2 path does. Earlier versions of this function only produced
+/// anonymous recovery data (a Main packet with an empty File ID list, no
+/// File Description/IFSC packets at all): syntactically valid PAR2, but with
+/// no file association whatsoever, so no downloader could verify, repair, or
+/// — under `--obfuscate` — de-obfuscate a season pack's episodes against it.
+/// Per-episode PAR2 sets *did* carry the real name correctly, but got
+/// discarded once merged into the season NZB in favor of this global set.
+async fn generate_season_par2(episode_paths: &[PathBuf], config: &Config) -> Result<SeasonPar2Set> {
     if episode_paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SeasonPar2Set::empty());
     }
 
     if config.par2 == 0 {
-        return Ok(Vec::new());
+        return Ok(SeasonPar2Set::empty());
     }
 
     debug!(episodes = episode_paths.len(), "generating season PAR2");
 
+    // PAR2 numbers its input blocks by walking the recovery-set files in
+    // File-ID order (par2 spec, Main packet) — third-party tools (par2cmdline,
+    // MultiPar, SABnzbd) assume this canonical order when mapping
+    // Reed-Solomon coefficients back to input slices, regardless of the order
+    // files happen to be fed to the encoder. `episode_paths` arrives in
+    // argument/directory order, so it must be re-sorted by File ID before any
+    // slice is fed — exactly like the per-file PAR2 path above does for
+    // `metas` (see its own comment, `keyed.sort_by_key`). Skipping this once
+    // produced PAR2 volumes that verified/repaired against pesto's own
+    // encoder but failed real repair against par2cmdline, since its Main
+    // packet lists File IDs in sorted order while the recovery blocks were
+    // computed against filesystem-listing order.
+    let mut ordered: Vec<(PathBuf, String, u64)> = Vec::with_capacity(episode_paths.len());
+    for path in episode_paths {
+        let size = tokio::fs::metadata(path)
+            .await
+            .with_context(|| format!("reading metadata of episode `{}`", path.display()))?
+            .len();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        ordered.push((path.clone(), name, size));
+    }
+    if ordered.len() > 1 {
+        let mut keyed = Vec::with_capacity(ordered.len());
+        for (path, name, size) in ordered {
+            let md5_16k = file_md5_16k(&path, size).await?;
+            let file_id = packet::compute_file_id(&md5_16k, size, &name);
+            keyed.push((file_id, path, name, size));
+        }
+        keyed.sort_by_key(|(file_id, ..)| *file_id);
+        ordered = keyed
+            .into_iter()
+            .map(|(_, path, name, size)| (path, name, size))
+            .collect();
+    }
+
     let article_size = config.article_size;
-    let per_file_articles: Vec<usize> = episode_paths
+    let per_file_articles: Vec<usize> = ordered
         .iter()
-        .map(|path| {
-            let size = std::fs::metadata(path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(0);
-            if size == 0 {
+        .map(|(_, _, size)| {
+            if *size == 0 {
                 0
             } else {
-                yenc::segments(size as u64, article_size).len()
+                yenc::segments(*size, article_size).len()
             }
         })
         .collect();
 
     let (par2_slice_size, total_slices) = if let Some(size) = config.par2_slice_size {
         let s = (size / 64 * 64).max(64);
-        let n: usize = episode_paths
+        let n: usize = ordered
             .iter()
-            .map(|path| {
-                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                (size as usize).div_ceil(s)
-            })
+            .map(|(_, _, size)| (*size as usize).div_ceil(s))
             .sum();
         debug!(
             "season PAR2: using config slice_size={} (rounded from {}), total_slices={}",
@@ -3635,14 +3748,14 @@ pub async fn generate_season_par2(
     };
 
     if total_slices == 0 {
-        return Ok(Vec::new());
+        return Ok(SeasonPar2Set::empty());
     }
 
     let recovery_pct = config.par2;
     let recovery_count = (total_slices as u32 * recovery_pct as u32 / 100).min(65535) as usize;
 
     if recovery_count == 0 {
-        return Ok(Vec::new());
+        return Ok(SeasonPar2Set::empty());
     }
 
     info!(
@@ -3650,64 +3763,68 @@ pub async fn generate_season_par2(
         par2_slice_size, total_slices, recovery_count, "season PAR2 configuration"
     );
 
-    let mut encoder =
-        RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, 0, recovery_count)
-            .context("allocating season PAR2 recovery buffers")?;
+    let encoder = RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, 0, recovery_count)
+        .context("allocating season PAR2 recovery buffers")?
+        .with_checksums() // required for IFSC — see SeasonFileEntry::slice_checksums
+        .with_simd_path(config.simd);
+    let worker = Par2Worker::spawn(encoder, true, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
 
-    let mut buf = vec![0u8; par2_slice_size];
+    let mut episode_names: Vec<String> = Vec::with_capacity(ordered.len());
+    let mut slices_per_episode: Vec<usize> = Vec::with_capacity(ordered.len());
     let mut total_slices_added = 0;
 
-    for (ep_idx, episode_path) in episode_paths.iter().enumerate() {
+    for (ep_idx, (episode_path, name, file_size)) in ordered.iter().enumerate() {
+        let file_size = *file_size;
+        episode_names.push(name.clone());
+
+        // Empty episodes contribute zero PAR2 input slices — the worker's
+        // hasher never sees an `is_last_of_file` boundary for them, so they
+        // get no entry in its returned `hashes`; a placeholder is inserted
+        // for them below once `worker.finish()` returns.
+        if file_size == 0 {
+            slices_per_episode.push(0);
+            continue;
+        }
+
         let mut file = tokio::fs::File::open(episode_path)
             .await
             .with_context(|| format!("opening episode `{}`", episode_path.display()))?;
-        let file_size = file.metadata().await.ok().map(|m| m.len()).unwrap_or(0);
-        let mut slices_for_episode = 0;
-        let mut bytes_read_total = 0u64;
 
-        loop {
-            // Read a full slice_size worth of data (or less at EOF)
-            let mut buf_offset = 0;
-            loop {
-                let n = file
-                    .read(&mut buf[buf_offset..])
-                    .await
-                    .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
+        let mut accum = worker.take_buffer(par2_slice_size);
+        accum.clear();
+        let mut remaining = file_size as usize;
+        let mut slices_for_episode = 0usize;
 
-                if n == 0 {
-                    // EOF reached
-                    break;
-                }
+        while remaining > 0 {
+            let space = par2_slice_size - accum.len();
+            let to_read = space.min(remaining);
+            let base = accum.len();
+            accum.resize(base + to_read, 0);
+            file.read_exact(&mut accum[base..base + to_read])
+                .await
+                .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
+            remaining -= to_read;
 
-                buf_offset += n;
-                bytes_read_total += n as u64;
-
-                // If we've filled the slice or reached EOF, we're done reading for this slice
-                if buf_offset >= par2_slice_size {
-                    break;
-                }
+            if accum.len() >= par2_slice_size {
+                let is_last = remaining == 0;
+                feed_par2_slice(&mut accum, par2_slice_size, &worker, is_last)?;
+                slices_for_episode += 1;
             }
-
-            if buf_offset == 0 {
-                // No more data to read
-                break;
-            }
-
-            // Pad to slice_size with zeros (standard PAR2 behavior) if needed
-            if buf_offset < par2_slice_size {
-                buf[buf_offset..par2_slice_size].fill(0);
-            }
-
-            encoder.add_slice(buf.clone());
+        }
+        // Flush the final partial slice for this episode (zero-padded inside
+        // feed_par2_slice), when the file size wasn't an exact multiple of
+        // par2_slice_size.
+        if !accum.is_empty() {
+            feed_par2_slice(&mut accum, par2_slice_size, &worker, true)?;
             slices_for_episode += 1;
         }
 
         total_slices_added += slices_for_episode;
+        slices_per_episode.push(slices_for_episode);
         debug!(
             episode_idx = ep_idx + 1,
-            total_episodes = episode_paths.len(),
+            total_episodes = ordered.len(),
             file_size,
-            bytes_read_total,
             slices_for_episode,
             expected_slices = (file_size as usize).div_ceil(par2_slice_size),
             "finished reading episode"
@@ -3720,18 +3837,55 @@ pub async fn generate_season_par2(
         "season PAR2 slice count mismatch"
     );
 
-    let (recovery_slices, _checksums) = encoder.finish();
+    let (recovery_slices, slice_checksums, hashes) = worker.finish();
     info!(
         recovery_slices = recovery_slices.len(),
         "season PAR2 generation complete"
     );
-    Ok(recovery_slices)
+
+    // Reassemble the per-episode File ID/hash/checksum data the caller needs
+    // to write real File Description + IFSC packets — mirroring exactly how
+    // the per-file PAR2 path (above) reconstructs `final_hashes`/`file_ids`
+    // from the worker's flat output, including the same empty-file handling.
+    let md5_empty: [u8; 16] = packet::md5(b"");
+    let mut hashes_iter = hashes.into_iter();
+    let mut checksums_cursor = 0usize;
+    let mut files = Vec::with_capacity(episode_names.len());
+    for (name, slice_count) in episode_names.into_iter().zip(slices_per_episode) {
+        let fh = if slice_count == 0 {
+            FileHashes {
+                md5_full: md5_empty,
+                md5_16k: md5_empty,
+                length: 0,
+            }
+        } else {
+            hashes_iter
+                .next()
+                .expect("par2 worker returned fewer hashes than non-empty episodes")
+        };
+        let file_checksums =
+            slice_checksums[checksums_cursor..checksums_cursor + slice_count].to_vec();
+        checksums_cursor += slice_count;
+        let file_id = packet::compute_file_id(&fh.md5_16k, fh.length, &name);
+        files.push(SeasonFileEntry {
+            file_id,
+            name,
+            hashes: fh,
+            slice_checksums: file_checksums,
+        });
+    }
+
+    Ok(SeasonPar2Set {
+        recovery_slices,
+        par2_slice_size,
+        files,
+    })
 }
 
 /// Generate and write global PAR2 volumes for season consolidation.
 ///
 /// High-level wrapper that:
-/// 1. Generates recovery slices covering all episodes
+/// 1. Generates recovery slices (and per-episode File ID/hash data) covering all episodes
 /// 2. Writes volumes to output directory
 /// 3. Returns path to output directory
 ///
@@ -3749,19 +3903,19 @@ pub async fn generate_and_write_season_par2(
 
     debug!(episodes = episode_paths.len(), "generating season PAR2");
 
-    let recovery_slices = generate_season_par2(episode_paths, config).await?;
+    let season = generate_season_par2(episode_paths, config).await?;
 
-    if recovery_slices.is_empty() {
+    if season.recovery_slices.is_empty() {
         return Ok(output_dir.to_path_buf());
     }
 
     info!(
-        recovery_slices = recovery_slices.len(),
+        recovery_slices = season.recovery_slices.len(),
         output_dir = %output_dir.display(),
         "writing season PAR2 volumes"
     );
 
-    write_season_par2_volumes(&recovery_slices, release_name, output_dir)
+    write_season_par2_volumes(&season, release_name, output_dir)
         .await
         .map(|(_, _)| output_dir.to_path_buf())
 }

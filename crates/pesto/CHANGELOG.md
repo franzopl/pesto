@@ -12,6 +12,56 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+This cycle overhauls how `--obfuscate` interacts with the generated `.nzb`: the `.nzb` itself must always be
+recoverable to the real release (it's already private to whoever holds it), while the actual NNTP article — Subject
+header and yEnc body — is what obfuscation is supposed to scramble. Several rounds of fixes below converge on that
+one rule and close the gaps where the two got mixed up.
+
+### Added
+- **Obfuscation mode tags in NZB metadata.** `--obfuscate full` / `paranoid` / `full-shared` now adds a matching
+  `<meta type="tag">obfuscated:<mode></meta>` to the generated `.nzb` (Nyuu's `metaData` convention, standard NZB
+  1.1), so an indexer can tell an obfuscated release apart from a plain one without inspecting article headers —
+  without weakening privacy: wire subjects stay obfuscated, only the *mode* is disclosed.
+- **`PESTO_WIRE_SUBJECT` post-hook variable and a `wire_subjects` array in `history.jsonl`.** Surfaces the actual
+  `Subject:` header sent to the NNTP server — distinct from the real filename that `.nzb`/`history.jsonl`'s
+  `subject` field always carries under obfuscation. Previously there was no way to learn what an obfuscated post's
+  wire identity actually was after the run finished, short of a manual NNTP `HEAD` against a segment's Message-ID.
+  `PESTO_WIRE_SUBJECT` reflects the first posted file (same single-value scope as `PESTO_NAME`); `wire_subjects`
+  in the history record covers every file in the release, since `full`/`paranoid` draw an independent wire
+  identity per file.
+
+### Fixed
+- **NZB `<file subject="...">` now always carries the real filename — on every code path, never the obfuscated
+  wire subject.** `PostedSegment.subject_name` used to capture whichever string was actually put on the wire (a
+  random hash under `full`/`paranoid`), which then leaked into the generated `.nzb` and caused downloaded files to
+  land named after garbage hashes instead of their real names — including in the consolidated `--season` NZB,
+  where it affected every episode at once. Fixed across the initial post, resume, dry-run, retry, and
+  season-consolidation paths alike; obfuscation now only ever changes what gets posted to the NNTP server, never
+  what the `.nzb` itself records.
+- **Removed the non-standard `<file name="...">` NZB attribute.** It was never part of the real NZB 1.1 DTD and
+  duplicated the real name already carried in `subject`'s quoted string. `--nzb-name` now emits the standard,
+  SABnzbd-documented `<meta type="title">` (a brief regression to the also-non-standard `<meta type="name">` is
+  fully resolved).
+- **`Full`/`Paranoid` obfuscation now draws independent Subject and yEnc `name=` tokens**, instead of reusing the
+  same random string for both. An exact match between the NNTP header and the yEnc body fingerprinted pesto as the
+  specific posting tool, undermining part of what obfuscation is for. `FullShared` keeps its shared subject prefix
+  (indexers key "same release" grouping off of it) but randomizes the yEnc name independently, since the body
+  carries no grouping role.
+- **`--check`'s STAT-miss repost no longer leaks the real filename onto the wire for obfuscated releases.** The
+  repost path (including the automatic recovery pass) was rebuilding the reposted article's Subject/yEnc name from
+  the segment's real filename instead of the identity actually used the first time — any article needing a repost
+  after a STAT miss silently undid `--obfuscate` for that one article.
+- **`--season` batches now force every episode onto the same newsgroup(s).** Each episode used to call its own
+  internal `pick_post_group` independently, so a multi-group config could scatter a season's episodes across
+  different newsgroups — the merged season NZB's `<groups>` list was just the union of whatever each episode
+  randomly landed on. `run_batch` now resolves the target once, up front, exactly like it already does for
+  `season_password`, and forces it onto every episode's `Config`.
+- **Season-wide global PAR2 (`--season`, Phase 47) now carries real File Description/IFSC packets.** The global
+  recovery set introduced in Phase 47a was parity data only — its Main packet listed zero File IDs and no File
+  Description/IFSC packets were ever written, so no PAR2 client (par2cmdline, MultiPar, SABnzbd) could verify,
+  repair, or — under `--obfuscate` — de-obfuscate a season pack's episodes against it. See `ROADMAP.md`'s Phase 47c
+  for the full writeup; verified end-to-end against the real `par2cmdline` binary in `tests/season_par2_file_desc.rs`.
+
 ## [0.5.10] — 2026-08-06
 
 ### Added

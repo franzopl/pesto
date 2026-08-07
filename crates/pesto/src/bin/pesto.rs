@@ -980,6 +980,7 @@ mod cleanup_tests {
     }
 }
 
+#[derive(Clone)]
 struct UploadParams {
     config: Arc<Config>,
     /// The raw `--password` flag value (used to detect "was it auto-generated?").
@@ -2087,6 +2088,35 @@ fn derive_season_nzb_path(
     }
 }
 
+/// For a `--season` batch, force every episode's `Config::groups` onto the
+/// same pre-picked single-entry target, so they all land on the same
+/// newsgroup(s) instead of each episode's own internal `pick_post_group`
+/// call (inside `poster::post_files`) re-rolling independently — which used
+/// to leave the merged season NZB's `<groups>` list as just the union of
+/// whatever each episode randomly landed on, rather than one group (or
+/// cross-post set) every episode actually shares.
+///
+/// Resolved once here, exactly like `season_password` in `run_batch`, then
+/// forced onto `Config::groups` as a single already-picked entry: with only
+/// one configured entry, `pick_post_group`'s own call inside `post_files`
+/// has nothing left to randomize, so every episode deterministically
+/// reproduces this same pick. A no-op (returns `params` unchanged) outside
+/// `--season`, or when there are no configured groups to pick from.
+fn force_season_group(params: Arc<UploadParams>, is_season: bool) -> Arc<UploadParams> {
+    if !is_season {
+        return params;
+    }
+    let forced_target = pesto::poster::pick_post_group(&params.config.groups);
+    if forced_target.is_empty() {
+        return params;
+    }
+    let mut forced_config = (*params.config).clone();
+    forced_config.groups = vec![forced_target.join("+")];
+    let mut forced_params = (*params).clone();
+    forced_params.config = Arc::new(forced_config);
+    Arc::new(forced_params)
+}
+
 /// Run `--each` / `--season` batch over all top-level entries of the given directories.
 ///
 /// Returns all collected segments (for season NZB consolidation) and whether
@@ -2129,6 +2159,8 @@ async fn run_batch(
             )
         })
         .flatten();
+
+    let params = force_season_group(params, season_nzb.is_some());
 
     let effective_jobs = if jobs == 0 {
         parmesan::performance_core_count()
@@ -2357,9 +2389,11 @@ async fn run_batch(
                 ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             };
-            // The union of groups actually used across every episode in the
-            // season (each picked its own at random — see `all_groups`
-            // above), not the static configured list.
+            // The group(s) actually used across every episode in the season
+            // — every episode is now forced onto the same pre-picked target
+            // (see the `pick_post_group` override above `run_batch`'s entry
+            // loop), so `all_groups` is just that one shared target rather
+            // than a union of independently-random picks.
             let season_groups_str = all_groups.join(":");
             // Same reasoning for the server(s): the union of servers that
             // actually accepted an article across every episode, derived
@@ -3893,6 +3927,96 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn test_upload_params(config: Config) -> UploadParams {
+        UploadParams {
+            config: Arc::new(config),
+            archive_password_raw: None,
+            nzb_default: None,
+            json_mode: true,
+            out: None,
+            write_history: false,
+            renderer_opts: pesto::progress::RendererOptions::default(),
+            ext_filter: Vec::new(),
+            cleanup_mode: CleanupMode::Leave,
+        }
+    }
+
+    // ── force_season_group ───────────────────────────────────────────────────
+
+    #[test]
+    fn force_season_group_is_noop_outside_season() {
+        let mut config = test_config(768_000, ObfuscateMode::None, None, 0);
+        config.groups = vec!["alt.binaries.a".into(), "alt.binaries.b".into()];
+        let params = Arc::new(test_upload_params(config));
+        let original_groups = params.config.groups.clone();
+
+        let out = force_season_group(Arc::clone(&params), false);
+
+        assert_eq!(
+            out.config.groups, original_groups,
+            "a plain --each batch must keep letting each entry pick its own group"
+        );
+    }
+
+    #[test]
+    fn force_season_group_collapses_multiple_configured_groups_to_one_target() {
+        let mut config = test_config(768_000, ObfuscateMode::None, None, 0);
+        config.groups = vec![
+            "alt.binaries.a".into(),
+            "alt.binaries.b".into(),
+            "alt.binaries.c".into(),
+        ];
+        let params = Arc::new(test_upload_params(config));
+
+        let out = force_season_group(params, true);
+
+        assert_eq!(
+            out.config.groups.len(),
+            1,
+            "must collapse to a single forced target: {:?}",
+            out.config.groups
+        );
+        assert!(["alt.binaries.a", "alt.binaries.b", "alt.binaries.c"]
+            .contains(&out.config.groups[0].as_str()));
+    }
+
+    #[test]
+    fn force_season_group_preserves_a_cross_post_target() {
+        let mut config = test_config(768_000, ObfuscateMode::None, None, 0);
+        config.groups = vec!["alt.binaries.a+alt.binaries.b".into()];
+        let params = Arc::new(test_upload_params(config));
+
+        let out = force_season_group(params, true);
+
+        assert_eq!(
+            out.config.groups,
+            vec!["alt.binaries.a+alt.binaries.b".to_string()]
+        );
+    }
+
+    #[test]
+    fn force_season_group_result_is_deterministic_for_every_episode() {
+        // Every episode in a season batch reuses the same forced `Config` —
+        // simulate each episode's own internal `pick_post_group` call
+        // (inside `poster::post_files`) and check it reproduces the exact
+        // same group every time, since the whole point is that no two
+        // episodes may land on different newsgroups.
+        let mut config = test_config(768_000, ObfuscateMode::None, None, 0);
+        config.groups = vec![
+            "alt.binaries.a".into(),
+            "alt.binaries.b".into(),
+            "alt.binaries.c".into(),
+        ];
+        let params = Arc::new(test_upload_params(config));
+
+        let forced = force_season_group(params, true);
+
+        for _ in 0..50 {
+            let picked_again = pesto::poster::pick_post_group(&forced.config.groups);
+            assert_eq!(picked_again.join("+"), forced.config.groups[0]);
+        }
     }
 
     #[test]
