@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-08-07
+
 ### Fixed
 - **`--season`'s internal PAR2-only NZB no longer leaks onto disk.** `post_season_par2_volumes` posted the
   season's global PAR2 volumes through the normal upload pipeline and wrote the resulting NZB to a
