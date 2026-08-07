@@ -2044,10 +2044,17 @@ async fn post_season_par2_volumes(
     par2_config.par2 = 0; // Disable PAR2 for PAR2 volumes themselves
     par2_config.no_hooks = true; // Disable hooks for PAR2 volumes (no NZB to upload)
 
-    // Write PAR2 NZB to a temp file (will be discarded, not sent to indexers)
-    let par2_nzb_temp =
-        tempfile::NamedTempFile::new().context("creating temp file for PAR2 NZB")?;
-    let par2_nzb_path = par2_nzb_temp.path().to_path_buf();
+    // Write the PAR2 NZB inside `par2_output_dir` rather than a lone
+    // `NamedTempFile`. `run_upload` never writes to the exact path it's
+    // given — `versioned_nzb_path` normalizes the extension and picks a
+    // fresh, non-colliding `{stem}.nzb` sibling — so a standalone
+    // `NamedTempFile` (deleted on drop) tracks a *different* path than the
+    // one actually holding the NZB content, leaking a PAR2-only NZB that
+    // nothing ever cleans up (it was found and mistakenly submitted to an
+    // indexer ahead of the real season NZB). Placing it in `par2_output_dir`
+    // guarantees whatever path is actually chosen is removed when that
+    // `TempDir` drops at the end of this function.
+    let par2_nzb_path = par2_dir_path.join("season-par2.nzb");
 
     let outcome = pesto::upload::run_upload(
         &par2_config,
