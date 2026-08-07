@@ -26,6 +26,10 @@ const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 struct GhRelease {
     tag_name: String,
     assets: Vec<GhAsset>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,20 +91,29 @@ async fn fetch_latest_release(client: &reqwest::Client) -> Result<(GhRelease, se
         .await
         .context("parsing GitHub release list")?;
 
-    // GitHub lists releases newest-first, and pesto is tagged/released
-    // independently of parmesan/penne (see RELEASING.md) — the first
-    // `pesto-v*` tag encountered here is the latest pesto release.
-    let latest = releases
+    select_latest_release(releases)
+}
+
+/// Pick the highest-semver `pesto-v*` release out of `releases`.
+///
+/// The GitHub releases list is NOT reliably sorted newest-first (observed in
+/// practice: a release can appear before a later one it was published
+/// after). pesto is tagged/released independently of parmesan/penne (see
+/// RELEASING.md), so this scans every `pesto-v*`, non-draft, non-prerelease
+/// tag and keeps the one with the highest semver version rather than
+/// trusting list order.
+fn select_latest_release(releases: Vec<GhRelease>) -> Result<(GhRelease, semver::Version)> {
+    let candidates = releases
         .into_iter()
-        .find(|r| r.tag_name.starts_with("pesto-v"))
-        .context("no pesto-v* release found on GitHub")?;
+        .filter(|r| !r.draft && !r.prerelease && r.tag_name.starts_with("pesto-v"))
+        .filter_map(|r| {
+            let version: semver::Version = r.tag_name.trim_start_matches("pesto-v").parse().ok()?;
+            Some((r, version))
+        });
 
-    let latest_version_str = latest.tag_name.trim_start_matches("pesto-v");
-    let latest_version: semver::Version = latest_version_str
-        .parse()
-        .with_context(|| format!("release tag `{}` is not valid semver", latest.tag_name))?;
-
-    Ok((latest, latest_version))
+    candidates
+        .max_by(|(_, a), (_, b)| a.cmp(b))
+        .context("no pesto-v* release with a valid semver tag found on GitHub")
 }
 
 fn current_version() -> Result<semver::Version> {
@@ -286,6 +299,59 @@ pub async fn check_notice() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gh_release(tag: &str, draft: bool, prerelease: bool) -> GhRelease {
+        GhRelease {
+            tag_name: tag.to_string(),
+            assets: Vec::new(),
+            draft,
+            prerelease,
+        }
+    }
+
+    #[test]
+    fn select_latest_release_ignores_list_order() {
+        // Reproduces the actual GitHub API response order observed for this
+        // repo: pesto-v0.5.9 (created earlier) listed before pesto-v0.5.10
+        // (created later), with an unrelated tag interleaved.
+        let releases = vec![
+            gh_release("pesto-v0.5.9", false, false),
+            gh_release("pesto-v0.5.10", false, false),
+            gh_release("parmesan-v0.4.1", false, false),
+            gh_release("pesto-v0.5.8", false, false),
+        ];
+        let (latest, version) = select_latest_release(releases).unwrap();
+        assert_eq!(latest.tag_name, "pesto-v0.5.10");
+        assert_eq!(version, semver::Version::parse("0.5.10").unwrap());
+    }
+
+    #[test]
+    fn select_latest_release_skips_drafts_and_prereleases() {
+        let releases = vec![
+            gh_release("pesto-v0.6.0", true, false),
+            gh_release("pesto-v0.5.9-rc1", false, true),
+            gh_release("pesto-v0.5.8", false, false),
+        ];
+        let (latest, _) = select_latest_release(releases).unwrap();
+        assert_eq!(latest.tag_name, "pesto-v0.5.8");
+    }
+
+    #[test]
+    fn select_latest_release_skips_non_semver_and_non_pesto_tags() {
+        let releases = vec![
+            gh_release("v0.3.62", false, false),
+            gh_release("pesto-vNOTSEMVER", false, false),
+            gh_release("pesto-v0.5.8", false, false),
+        ];
+        let (latest, _) = select_latest_release(releases).unwrap();
+        assert_eq!(latest.tag_name, "pesto-v0.5.8");
+    }
+
+    #[test]
+    fn select_latest_release_errors_when_nothing_matches() {
+        let releases = vec![gh_release("parmesan-v0.4.1", false, false)];
+        assert!(select_latest_release(releases).is_err());
+    }
 
     #[test]
     fn asset_name_is_one_of_the_release_pesto_workflow_assets() {
