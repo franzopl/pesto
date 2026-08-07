@@ -1006,6 +1006,17 @@ struct UploadResult {
     had_failures: bool,
     total_bytes: u64,
     nzb_path: Option<PathBuf>,
+    /// The files actually posted for this entry — post-compression when
+    /// `--compress`/`--password` replaced the original input with an
+    /// archive. A `--season` batch needs these (not the original episode
+    /// paths) to compute a global PAR2 set that matches what's really on
+    /// the wire; see `keep_compress_temp` on [`run_single_upload`].
+    posted_paths: Vec<PathBuf>,
+    /// Set when `keep_compress_temp` was requested and this entry actually
+    /// compressed its input: the temp dir holding `posted_paths`, left on
+    /// disk (instead of being cleaned up inline) for the caller to remove
+    /// once it's done reading those files.
+    compress_temp_dir: Option<PathBuf>,
 }
 
 /// Per-phase wall-clock timing accumulated during a single upload (26g).
@@ -1047,12 +1058,24 @@ fn resolve_entry_password(
 /// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
 ///
 /// Returns the posted segments so the caller can build a consolidated season NZB.
+///
+/// `keep_compress_temp`: when this entry compresses its input, the archive
+/// normally lives only in a per-entry temp dir that's deleted before this
+/// function returns — fine for a standalone upload, since nothing needs the
+/// archive bytes afterward. A `--season` batch does: `post_season_par2_volumes`
+/// runs after every episode has posted, and must compute the season's global
+/// PAR2 over the *actual posted bytes* (the archive), not the original
+/// episode file, or the resulting PAR2 set describes data that was never put
+/// on the wire. Setting this to `true` skips that inline cleanup and reports
+/// the temp dir back via `UploadResult::compress_temp_dir` instead, so the
+/// caller can defer deletion until after it's done reading `posted_paths`.
 async fn run_single_upload(
     params: &UploadParams,
     entry_paths: &[PathBuf],
     entry_label: &str,
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     forced_password: Option<&str>,
+    keep_compress_temp: bool,
 ) -> Result<UploadResult> {
     let config = &params.config;
     // Resolved once, used for the pre-upload summary, the archive itself,
@@ -1400,6 +1423,11 @@ async fn run_single_upload(
         compress_temp_dir = None;
     }
     // ─────────────────────────────────────────────────────────────────────────
+
+    // Captured now, after `inputs` has taken its final (possibly compressed)
+    // form and before posting: the exact set of files that are about to be
+    // put on the wire, for a `--season` batch's later global PAR2 step.
+    let posted_paths: Vec<PathBuf> = inputs.iter().map(|f| f.path.clone()).collect();
 
     let t_post = std::time::Instant::now();
     let outcome = pesto::poster::post_files_with_progress_and_cancel(
@@ -1839,10 +1867,18 @@ async fn run_single_upload(
         run_all_hooks(config, &hook_env);
     }
 
-    // Cleanup temp dirs.
-    if let Some(dir) = compress_temp_dir {
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    // Cleanup temp dirs. When `keep_compress_temp` is set, the caller still
+    // needs `posted_paths` on disk (a `--season` batch's global PAR2 step
+    // reads them after every episode has finished) — leave the archive in
+    // place and let the caller remove it once done.
+    let compress_temp_dir = if keep_compress_temp {
+        compress_temp_dir
+    } else {
+        if let Some(dir) = &compress_temp_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        None
+    };
     // Only now — after the --check repost pass and the end-of-run failed-task
     // retry above have both had every chance to re-read a PAR2 file's bytes —
     // is it safe to remove the PAR2 temp dir. See `par2_temp_dir`'s doc
@@ -1890,6 +1926,8 @@ async fn run_single_upload(
             || has_unrecoverable_failures,
         total_bytes,
         nzb_path: nzb_reported_path,
+        posted_paths,
+        compress_temp_dir,
     })
 }
 
@@ -2042,7 +2080,27 @@ async fn post_season_par2_volumes(
     // Create a config copy with PAR2 disabled to prevent recursive PAR2 generation.
     let mut par2_config = (*params.config).clone();
     par2_config.par2 = 0; // Disable PAR2 for PAR2 volumes themselves
-    par2_config.no_hooks = true; // Disable hooks for PAR2 volumes (no NZB to upload)
+
+    // Disable compression too. `run_upload` (the library pipeline this call
+    // goes through) re-derives `compress_format_str` from `compress_password`
+    // independently of anything the caller already did — so leaving a
+    // `--compress`/`--password` season config in place here would wrap each
+    // *already-generated* `.par2` volume in its own password-protected
+    // archive before posting it. The result is a season "PAR2" set that's
+    // really an encrypted blob no downloader can read as PAR2 at all,
+    // defeating the entire point of posting recovery data.
+    par2_config.compress_format = None;
+    par2_config.compress_password = None;
+    par2_config.compress_volume_size = None;
+
+    // `no_hooks` only suppresses the `~/.config/pesto/hooks/` directory scan —
+    // per `hooks::run_hooks`, explicit `post_hooks` entries "still run
+    // regardless". A configured post-hook (e.g. one of the indexer-submission
+    // scripts under `examples/hooks/`) would otherwise fire against this
+    // internal, PAR2-only NZB and submit it to an indexer ahead of the real
+    // season NZB, so both hook paths must be disabled here.
+    par2_config.no_hooks = true;
+    par2_config.post_hooks = Vec::new();
 
     // Write the PAR2 NZB inside `par2_output_dir` rather than a lone
     // `NamedTempFile`. `run_upload` never writes to the exact path it's
@@ -2132,6 +2190,24 @@ fn force_season_group(params: Arc<UploadParams>, is_season: bool) -> Arc<UploadP
 ///
 /// Returns all collected segments (for season NZB consolidation) and whether
 /// any upload was cancelled or had failures.
+/// Removes every collected directory on drop.
+///
+/// A `--season` batch defers each episode's compress-temp cleanup (see
+/// `run_single_upload`'s `keep_compress_temp`) so the archive bytes are
+/// still on disk when the season's global PAR2 step reads them afterward.
+/// Wrapping the collected dirs in this guard means they're still removed —
+/// via `Drop` — even if `run_batch` returns early (e.g. the season NZB
+/// write's `?`) before reaching the end of the season-merge block.
+struct CompressTempCleanup(Vec<PathBuf>);
+
+impl Drop for CompressTempCleanup {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
 async fn run_batch(
     params: Arc<UploadParams>,
     dirs: &[PathBuf],
@@ -2173,6 +2249,15 @@ async fn run_batch(
 
     let params = force_season_group(params, season_nzb.is_some());
 
+    // Whether each episode should keep its compressed archive on disk
+    // (instead of deleting it right after posting) so the season's global
+    // PAR2 step below can compute recovery data over the *actual posted
+    // bytes* rather than the original, never-compressed episode file — see
+    // `run_single_upload`'s `keep_compress_temp` doc comment. Mirrors the
+    // exact gate `post_season_par2_volumes` is called under further down, so
+    // nothing is retained when there's no season PAR2 step to read it.
+    let keep_compress_temp = season_nzb.is_some() && params.config.par2 > 0 && entries.len() > 1;
+
     let effective_jobs = if jobs == 0 {
         parmesan::performance_core_count()
     } else {
@@ -2184,6 +2269,8 @@ async fn run_batch(
     let mut all_groups: Vec<String> = Vec::new();
     let mut any_cancelled = false;
     let mut any_failures = false;
+    let mut posted_episode_paths: Vec<PathBuf> = Vec::new();
+    let mut compress_temp_cleanup = CompressTempCleanup(Vec::new());
 
     let total_entries = entries.len();
     let mut handles = Vec::new();
@@ -2222,6 +2309,7 @@ async fn run_batch(
                 &label,
                 Some(&task_cancel),
                 task_password.as_deref(),
+                keep_compress_temp,
             )
             .await
         });
@@ -2242,6 +2330,10 @@ async fn run_batch(
                 }
                 if result.had_failures {
                     any_failures = true;
+                }
+                posted_episode_paths.extend(result.posted_paths);
+                if let Some(dir) = result.compress_temp_dir {
+                    compress_temp_cleanup.0.push(dir);
                 }
             }
             Ok(Err(e)) => {
@@ -2273,10 +2365,19 @@ async fn run_batch(
             // Generate and post global PAR2 for the entire season (Phase 47b).
             // This produces a single, coherent recovery set covering all episodes
             // instead of multiple independent rsids for each episode.
+            //
+            // Uses `posted_episode_paths` — the files each episode actually put
+            // on the wire (an archive, under `--compress`/`--password`) — not
+            // the original `entries`. The two can differ in content, name, and
+            // even count (one archive can split into several `--compress-
+            // volume-size` volumes); computing recovery data against the
+            // original, never-posted file would produce a PAR2 set that
+            // doesn't describe anything actually on Usenet (`keep_compress_temp`
+            // above is what keeps these archives alive long enough to read here).
             let mut season_par2_segments = Vec::new();
-            if config.par2 > 0 && entries.len() > 1 {
+            if config.par2 > 0 && posted_episode_paths.len() > 1 {
                 match post_season_par2_volumes(
-                    &entries,
+                    &posted_episode_paths,
                     &season_name.clone().unwrap_or_else(|| "season".to_string()),
                     &params,
                     &cancel,
@@ -2734,6 +2835,7 @@ async fn run_watch(
                                 &label,
                                 Some(&task_cancel),
                                 None,
+                                false,
                             )
                             .await
                             {
@@ -3368,7 +3470,7 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
             }
         })
         .unwrap_or_else(|| format!("{}", std::process::id()));
-    let result = run_single_upload(&params, &cli.files, &label, Some(&cancel), None).await?;
+    let result = run_single_upload(&params, &cli.files, &label, Some(&cancel), None, false).await?;
 
     if let Some(ref p) = session_log {
         write_session_summary(

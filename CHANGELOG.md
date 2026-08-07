@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Season NZB consolidation now correctly filters out per-episode PAR2 sets to avoid multiple rsids
 - PAR2 volume posting no longer generates recursive PAR2 for the volume files themselves
 - The internal PAR2-only NZB used to post the season's global PAR2 volumes no longer leaks onto disk as an orphaned temp file — it used to be written to a path distinct from the one actually cleaned up on drop, so it could persist and get submitted to an indexer ahead of the real season NZB
+- That same internal PAR2-only upload no longer runs the user's configured `post_hooks` — `no_hooks` only ever suppressed the hooks-directory scan, so a configured indexer-submission hook still fired against it
+- The season's global PAR2 now covers the files actually posted (the compressed archive, under `--compress`/`--password`) instead of the original, never-posted episode files, whose temp archive used to be deleted before the season PAR2 step could read it
+- The season's own PAR2 volumes no longer get wrapped in a password-protected archive themselves when `--compress`/`--password` is active — they're posted as raw, readable `.par2` files like any other PAR2 set
 
 ### Tested
 
