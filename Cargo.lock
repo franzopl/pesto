@@ -1605,6 +1605,7 @@ dependencies = [
  "fs4",
  "pesto-poster",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",
