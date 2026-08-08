@@ -36,9 +36,12 @@ chance to fix it.
 ```bash
 # Check if articles are present on your configured servers without downloading
 cargo run --bin penne -- check path/to/release.nzb
+
+# You can also check multiple releases at once (they will share the connection pool)
+cargo run --bin penne -- check path/to/release1.nzb path/to/release2.nzb
 ```
 
-`penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = missing, 2 = fatal error).
+`penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = missing, 2 = fatal error). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead.
 
 ## Configuration
 
