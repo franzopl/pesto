@@ -416,6 +416,8 @@ async fn drain_one_tier(
     let pipeline_depth = config.pipeline_depth.clamp(1, 256);
 
     let mut workers = JoinSet::new();
+    let breaker = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    
     for server in &tier.members {
         for _ in 0..server.connections.max(1) {
             workers.spawn(worker_loop(
@@ -427,6 +429,7 @@ async fn drain_one_tier(
                 progress.clone(),
                 is_last_tier,
                 worker_count,
+                breaker.clone(),
             ));
         }
     }
@@ -488,6 +491,7 @@ async fn worker_loop(
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
     worker_count: usize,
+    breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     match method {
         CheckMethod::Stat => {
@@ -499,11 +503,20 @@ async fn worker_loop(
                 progress,
                 is_last_server,
                 worker_count,
+                breaker,
             )
             .await
         }
         CheckMethod::Head | CheckMethod::Body => {
-            single_item_worker_loop(queue, server, method, retries, progress, is_last_server).await
+            single_item_worker_loop(
+                queue,
+                server,
+                method,
+                retries,
+                progress,
+                is_last_server,
+                breaker,
+            ).await
         }
     }
 }
@@ -517,6 +530,7 @@ async fn stat_worker_loop(
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
     worker_count: usize,
+    breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let mut client: Option<DownloadClient> = None;
     let mut found = Vec::new();
@@ -524,6 +538,9 @@ async fn stat_worker_loop(
     let mut bytes_used = 0u64;
 
     loop {
+        if breaker.load(std::sync::atomic::Ordering::Relaxed) >= 5 {
+            break;
+        }
         let batch: Vec<WorkItem> = {
             let mut q = queue.lock().expect("queue mutex poisoned");
             let fair_share = q.len().div_ceil(worker_count.max(1));
@@ -536,6 +553,7 @@ async fn stat_worker_loop(
 
         match stat_batch_with_retry(&mut client, &server, &batch, retries, &mut bytes_used).await {
             Ok(results) => {
+                breaker.store(0, std::sync::atomic::Ordering::Relaxed);
                 for (item, present) in batch.into_iter().zip(results) {
                     if present {
                         emit(&progress, true);
@@ -549,14 +567,13 @@ async fn stat_worker_loop(
                 }
             }
             Err(_) => {
-                // Exhausted retries against this server for the whole
-                // batch; the next server in priority order gets a turn.
-                for item in batch {
-                    if is_last_server {
+                breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if is_last_server {
+                    for _ in &batch {
                         emit(&progress, false);
                     }
-                    leftover.push(item);
                 }
+                leftover.extend(batch);
             }
         }
     }
@@ -585,6 +602,7 @@ async fn single_item_worker_loop(
     retries: u32,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
+    breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let mut client: Option<DownloadClient> = None;
     let mut found = Vec::new();
@@ -592,6 +610,9 @@ async fn single_item_worker_loop(
     let mut bytes_used = 0u64;
 
     loop {
+        if breaker.load(std::sync::atomic::Ordering::Relaxed) >= 5 {
+            break;
+        }
         let item = {
             let mut q = queue.lock().expect("queue mutex poisoned");
             q.pop_front()
@@ -610,10 +631,19 @@ async fn single_item_worker_loop(
 
         match present {
             Ok(true) => {
+                breaker.store(0, std::sync::atomic::Ordering::Relaxed);
                 emit(&progress, true);
                 found.push(item);
             }
-            Ok(false) | Err(_) => {
+            Ok(false) => {
+                breaker.store(0, std::sync::atomic::Ordering::Relaxed);
+                if is_last_server {
+                    emit(&progress, false);
+                }
+                leftover.push(item);
+            }
+            Err(_) => {
+                breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     emit(&progress, false);
                 }
@@ -653,7 +683,9 @@ async fn single_item_with_retry(
 
     for attempt in 0..=retries {
         if attempt > 0 {
-            tokio::time::sleep(Duration::from_secs(server.retry_delay)).await;
+            let base = server.retry_delay.max(1) as f64;
+            let backoff = base * (2.0_f64.powi(attempt as i32 - 1));
+            tokio::time::sleep(Duration::from_secs_f64(backoff.min(60.0))).await;
         }
 
         if client.is_none() {
@@ -717,7 +749,9 @@ async fn stat_batch_with_retry(
 
     for attempt in 0..=retries {
         if attempt > 0 {
-            tokio::time::sleep(Duration::from_secs(server.retry_delay)).await;
+            let base = server.retry_delay.max(1) as f64;
+            let backoff = base * (2.0_f64.powi(attempt as i32 - 1));
+            tokio::time::sleep(Duration::from_secs_f64(backoff.min(60.0))).await;
         }
 
         if client.is_none() {
