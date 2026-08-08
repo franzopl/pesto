@@ -701,46 +701,15 @@ async fn check(
         None
     };
 
-    let mut join_set = tokio::task::JoinSet::new();
 
-    for tiers_batch in tiers_to_run {
-        let server_label = if independent_servers {
-            let s = &tiers_batch[0].members[0];
-            Some(s.host.clone())
-        } else {
-            None
-        };
-
-        let qs = queues.clone();
-        let tb = tiers_batch.clone();
-        let c = check_config.clone();
-        let txc = tx.clone();
-
-        join_set.spawn(async move {
-            let outcomes = penne::check::check_nzbs(&qs, &tb, &c, Some(txc)).await;
-            (server_label, outcomes)
-        });
-    }
-
-    drop(tx);
-
-    let mut tier_outcomes = Vec::new();
-    while let Some(res) = join_set.join_next().await {
-        tier_outcomes.push(res.expect("task panicked"));
-    }
-
-    if let Some(task) = progress_task {
-        task.await.ok();
-    }
-
-    tier_outcomes.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (server_label, outcomes_res) in tier_outcomes {
-        let outcomes = outcomes_res?;
-        for (i, outcome) in outcomes.into_iter().enumerate() {
-            let nzb_name = &nzb_names[i];
-
-            if json {
+    let (outcome_tx, mut outcome_rx) = tokio::sync::mpsc::unbounded_channel::<(Option<String>, usize, penne::check::CheckOutcome)>();
+    let nzb_names_clone = nzb_names.clone();
+    let is_json = json;
+    
+    let print_task = tokio::spawn(async move {
+        if is_json {
+            while let Some((server_label, q_idx, outcome)) = outcome_rx.recv().await {
+                let nzb_name = &nzb_names_clone[q_idx];
                 let mut json_val = serde_json::json!({
                     "nzb": nzb_name,
                     "complete": outcome.is_complete(),
@@ -759,13 +728,71 @@ async fn check(
                     "articles_per_second": outcome.articles_per_second(),
                 });
                 if let Some(ref s) = server_label {
-                    json_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("server".to_string(), serde_json::Value::String(s.clone()));
+                    json_val.as_object_mut().unwrap().insert("server".to_string(), serde_json::Value::String(s.clone()));
                 }
-                println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
-            } else {
+                println!("{}", serde_json::to_string(&json_val).unwrap());
+            }
+        } else {
+            // Drain the channel so it doesn't block senders
+            while outcome_rx.recv().await.is_some() {}
+        }
+    });
+
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for tiers_batch in tiers_to_run {
+        let server_label = if independent_servers {
+            let s = &tiers_batch[0].members[0];
+            Some(s.host.clone())
+        } else {
+            None
+        };
+
+        let qs = queues.clone();
+        let tb = tiers_batch.clone();
+        let c = check_config.clone();
+        let txc = tx.clone();
+
+        let out_tx = outcome_tx.clone();
+        join_set.spawn(async move {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            
+            let forward_task = {
+                let sl = server_label.clone();
+                tokio::spawn(async move {
+                    while let Some((q_idx, outcome)) = rx.recv().await {
+                        let _ = out_tx.send((sl.clone(), q_idx, outcome));
+                    }
+                })
+            };
+
+            let outcomes = penne::check::check_nzbs(&qs, &tb, &c, Some(txc), Some(tx)).await;
+            forward_task.await.ok();
+            (server_label, outcomes)
+        });
+    }
+
+    drop(tx);
+    drop(outcome_tx);
+
+    let mut tier_outcomes = Vec::new();
+    while let Some(res) = join_set.join_next().await {
+        tier_outcomes.push(res.expect("task panicked"));
+    }
+
+    if let Some(task) = progress_task {
+        task.await.ok();
+    }
+    print_task.await.ok();
+
+    tier_outcomes.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (server_label, outcomes_res) in tier_outcomes {
+        let outcomes = outcomes_res?;
+        for (i, outcome) in outcomes.into_iter().enumerate() {
+            let nzb_name = &nzb_names[i];
+
+            if !json {
                 if queues.len() > 1 {
                     println!("\n[{}/{}] {}", i + 1, queues.len(), nzb_name);
                 }

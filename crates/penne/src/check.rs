@@ -235,6 +235,13 @@ impl Default for CheckOutcome {
     }
 }
 
+
+#[derive(Debug)]
+enum ItemResolution {
+    Found(WorkItem),
+    Missing(WorkItem),
+}
+
 /// One segment still needing to be checked.
 #[derive(Debug, Clone)]
 struct WorkItem {
@@ -262,7 +269,7 @@ pub async fn check_queue(
     config: &CheckConfig,
     progress: Option<CheckProgressSender>,
 ) -> Result<CheckOutcome> {
-    let mut outcomes = check_nzbs(&[queue.clone()], tiers, config, progress).await?;
+    let mut outcomes = check_nzbs(&[queue.clone()], tiers, config, progress, None).await?;
     Ok(outcomes.pop().unwrap())
 }
 
@@ -275,6 +282,7 @@ pub async fn check_nzbs(
     tiers: &[ServerTier],
     config: &CheckConfig,
     progress: Option<CheckProgressSender>,
+    outcome_tx: Option<tokio::sync::mpsc::UnboundedSender<(usize, CheckOutcome)>>,
 ) -> Result<Vec<CheckOutcome>> {
     anyhow::ensure!(!tiers.is_empty(), "no servers configured");
     let start = Instant::now();
@@ -301,6 +309,71 @@ pub async fn check_nzbs(
         .map(|q| q.files.iter().map(|f| f.segments.len() as u32).sum())
         .collect();
 
+    
+    let (item_tx, mut item_rx) = tokio::sync::mpsc::unbounded_channel::<ItemResolution>();
+    let item_tx_opt = if outcome_tx.is_some() { Some(item_tx) } else { None };
+
+    let tracker_task = if let Some(out_tx) = outcome_tx {
+        let qs = queues.to_vec();
+        let totals_clone = totals.clone();
+        let total_items_per_q_clone = total_items_per_q.clone();
+        let start_time = start;
+        
+        Some(tokio::spawn(async move {
+            let mut resolved = vec![0u32; qs.len()];
+            let mut present = vec![HashMap::<String, u32>::new(); qs.len()];
+            let mut missing = vec![Vec::<MissingSegment>::new(); qs.len()];
+            
+            while let Some(res) = item_rx.recv().await {
+                let q_idx = match &res {
+                    ItemResolution::Found(item) => item.queue_idx,
+                    ItemResolution::Missing(item) => item.queue_idx,
+                };
+                
+                match res {
+                    ItemResolution::Found(item) => {
+                        *present[q_idx].entry(item.file_name).or_insert(0) += 1;
+                    }
+                    ItemResolution::Missing(item) => {
+                        missing[q_idx].push(MissingSegment {
+                            file_name: item.file_name,
+                            part: item.part,
+                            message_id: item.message_id,
+                        });
+                    }
+                }
+                
+                resolved[q_idx] += 1;
+                
+                if resolved[q_idx] == total_items_per_q_clone[q_idx] {
+                    let total_items = total_items_per_q_clone[q_idx];
+                    let total_present = total_items - missing[q_idx].len() as u32;
+                    
+                    let files = qs[q_idx].files.iter().map(|f| {
+                        FileCheck {
+                            name: f.name.clone(),
+                            total_segments: *totals_clone[q_idx].get(&f.name).unwrap_or(&0),
+                            present_segments: *present[q_idx].get(&f.name).unwrap_or(&0),
+                        }
+                    }).collect();
+                    
+                    let outcome = CheckOutcome {
+                        files,
+                        missing: std::mem::take(&mut missing[q_idx]),
+                        bytes_used: 0,
+                        elapsed: start_time.elapsed(),
+                        total_checked: total_items,
+                        total_present,
+                    };
+                    
+                    let _ = out_tx.send((q_idx, outcome));
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let mut present: Vec<HashMap<String, u32>> = vec![HashMap::new(); queues.len()];
     let mut bytes_used = 0u64;
 
@@ -311,7 +384,7 @@ pub async fn check_nzbs(
         }
         let is_last_tier = idx == last_tier_idx;
         let (found, leftover, bytes) =
-            drain_one_tier(tier, pending, config, &progress, is_last_tier).await;
+            drain_one_tier(tier, pending, config, &progress, is_last_tier, item_tx_opt.clone()).await;
         bytes_used += bytes;
         for item in found {
             *present[item.queue_idx].entry(item.file_name).or_insert(0) += 1;
@@ -328,6 +401,8 @@ pub async fn check_nzbs(
         });
     }
 
+    drop(item_tx_opt);
+    if let Some(task) = tracker_task { task.await.ok(); }
     let mut outcomes = Vec::with_capacity(queues.len());
     let bytes_per_q = if queues.is_empty() {
         0
@@ -401,6 +476,7 @@ async fn drain_one_tier(
     config: &CheckConfig,
     progress: &Option<CheckProgressSender>,
     is_last_tier: bool,
+    item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
 
@@ -430,6 +506,7 @@ async fn drain_one_tier(
                 is_last_tier,
                 worker_count,
                 breaker.clone(),
+                item_tx.clone(),
             ));
         }
     }
@@ -451,6 +528,7 @@ async fn drain_one_tier(
     while let Some(item) = q.pop_front() {
         if is_last_tier {
             emit(progress, false);
+            if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
         }
         leftover.push(item);
     }
@@ -492,6 +570,7 @@ async fn worker_loop(
     is_last_server: bool,
     worker_count: usize,
     breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     match method {
         CheckMethod::Stat => {
@@ -504,6 +583,7 @@ async fn worker_loop(
                 is_last_server,
                 worker_count,
                 breaker,
+                item_tx,
             )
             .await
         }
@@ -516,6 +596,7 @@ async fn worker_loop(
                 progress,
                 is_last_server,
                 breaker,
+                item_tx,
             ).await
         }
     }
@@ -531,6 +612,7 @@ async fn stat_worker_loop(
     is_last_server: bool,
     worker_count: usize,
     breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let mut client: Option<DownloadClient> = None;
     let mut found = Vec::new();
@@ -557,10 +639,12 @@ async fn stat_worker_loop(
                 for (item, present) in batch.into_iter().zip(results) {
                     if present {
                         emit(&progress, true);
+                        if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Found(item.clone())); }
                         found.push(item);
                     } else {
                         if is_last_server {
                             emit(&progress, false);
+                            if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
                         }
                         leftover.push(item);
                     }
@@ -569,8 +653,9 @@ async fn stat_worker_loop(
             Err(_) => {
                 breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
-                    for _ in &batch {
+                    for item in &batch {
                         emit(&progress, false);
+                        if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
                     }
                 }
                 leftover.extend(batch);
@@ -603,6 +688,7 @@ async fn single_item_worker_loop(
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
     breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let mut client: Option<DownloadClient> = None;
     let mut found = Vec::new();
@@ -633,12 +719,14 @@ async fn single_item_worker_loop(
             Ok(true) => {
                 breaker.store(0, std::sync::atomic::Ordering::Relaxed);
                 emit(&progress, true);
+                if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Found(item.clone())); }
                 found.push(item);
             }
             Ok(false) => {
                 breaker.store(0, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     emit(&progress, false);
+                    if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
                 }
                 leftover.push(item);
             }
@@ -646,6 +734,7 @@ async fn single_item_worker_loop(
                 breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     emit(&progress, false);
+                    if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
                 }
                 leftover.push(item);
             }
