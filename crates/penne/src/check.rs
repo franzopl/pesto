@@ -15,7 +15,7 @@
 //! a plain "present or not" instead of a decoded article. Forcing both into
 //! one function would trade a small amount of duplication for a
 //! meaningfully more complicated one. `Stat` additionally pipelines several
-//! requests per round trip (see [`STAT_PIPELINE_DEPTH`]); `Head`/`Body`
+//! requests per round trip (see [`DEFAULT_STAT_PIPELINE_DEPTH`]); `Head`/`Body`
 //! deliberately don't — pipelining trades complexity for hiding
 //! round-trip latency, which matters enormously for `STAT`'s
 //! near-zero-payload round trips but far less once real payload (however
@@ -34,7 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -87,6 +87,53 @@ impl fmt::Display for CheckMethod {
     }
 }
 
+/// Default pipeline depth for `STAT` commands per connection. Each `STAT`
+/// is ~80 bytes on the wire, so 128 in-flight STATs buffer ~10 KB — trivial.
+/// This hides significantly more RTT latency than nzbCheck's depth of 64,
+/// roughly halving check wall-time on high-latency links.
+pub const DEFAULT_STAT_PIPELINE_DEPTH: usize = 128;
+
+/// Configuration for a `STAT`/`HEAD`/`BODY` availability check run.
+///
+/// Designed for both CLI and library callers (`sugo`, `upapasta`, or any
+/// code that embeds `penne` as a library and wants to check article
+/// availability programmatically).
+#[derive(Debug, Clone)]
+pub struct CheckConfig {
+    /// Which NNTP command to use for the existence check.
+    pub method: CheckMethod,
+    /// How many `STAT` commands to pipeline per connection per round trip.
+    /// Only used when `method` is [`CheckMethod::Stat`]; ignored for
+    /// `Head`/`Body`. Clamped to `1..=256` internally.
+    pub pipeline_depth: usize,
+    /// Retry attempts per server before failing over to the next tier.
+    pub retries: u32,
+}
+
+impl Default for CheckConfig {
+    fn default() -> Self {
+        Self {
+            method: CheckMethod::default(),
+            pipeline_depth: DEFAULT_STAT_PIPELINE_DEPTH,
+            retries: 3,
+        }
+    }
+}
+
+impl CheckConfig {
+    /// Build a [`CheckConfig`] from individual values, matching the old
+    /// `check_queue(queue, tiers, method, retries, progress)` call pattern.
+    /// Provided for ergonomic migration of callers that used the previous
+    /// four-argument form.
+    pub fn new(method: CheckMethod, retries: u32) -> Self {
+        Self {
+            method,
+            retries,
+            ..Default::default()
+        }
+    }
+}
+
 /// One segment's `STAT` just resolved, for a live progress bar —
 /// deliberately its own small type rather than reusing
 /// [`crate::progress::ProgressEvent`]: that enum's variants
@@ -106,7 +153,7 @@ pub fn channel() -> (CheckProgressSender, CheckProgressReceiver) {
 }
 
 /// A segment no configured server confirmed via `STAT`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct MissingSegment {
     pub file_name: String,
     pub part: u32,
@@ -114,7 +161,7 @@ pub struct MissingSegment {
 }
 
 /// One file's completeness: how many of its segments a server confirmed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FileCheck {
     pub name: String,
     pub total_segments: u32,
@@ -128,7 +175,7 @@ impl FileCheck {
 }
 
 /// Result of checking a [`DownloadQueue`] against a set of servers.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CheckOutcome {
     /// One entry per file, in `.nzb` queue order.
     pub files: Vec<FileCheck>,
@@ -139,11 +186,52 @@ pub struct CheckOutcome {
     /// connection opened) — the whole point of `STAT` over a real fetch is
     /// that this stays tiny even for a release with thousands of segments.
     pub bytes_used: u64,
+    /// Wall-clock duration of the check (from entering `check_queue` to
+    /// the last response being read, not including NZB parsing or queue
+    /// construction).
+    pub elapsed: Duration,
+    /// Total number of articles checked (segments in the queue).
+    pub total_checked: u32,
+    /// Articles confirmed present on at least one configured server.
+    pub total_present: u32,
 }
 
 impl CheckOutcome {
     pub fn is_complete(&self) -> bool {
         self.missing.is_empty()
+    }
+
+    /// Articles checked per second, based on wall-clock elapsed time.
+    /// Returns `0.0` when elapsed is zero (instantaneous or empty queue).
+    pub fn articles_per_second(&self) -> f64 {
+        let secs = self.elapsed.as_secs_f64();
+        if secs > 0.0 {
+            self.total_checked as f64 / secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Number of missing segments — convenience alias for
+    /// `self.missing.len()`.
+    pub fn missing_count(&self) -> usize {
+        self.missing.len()
+    }
+}
+
+/// Provide a sensible default for tests and callers that build a
+/// `CheckOutcome` directly (the `elapsed`/`total_*` fields default to
+/// zero, which is correct for an "empty queue checked" outcome).
+impl Default for CheckOutcome {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            missing: Vec::new(),
+            bytes_used: 0,
+            elapsed: Duration::ZERO,
+            total_checked: 0,
+            total_present: 0,
+        }
     }
 }
 
@@ -170,11 +258,11 @@ struct WorkItem {
 pub async fn check_queue(
     queue: &DownloadQueue,
     tiers: &[ServerTier],
-    method: CheckMethod,
-    retries: u32,
+    config: &CheckConfig,
     progress: Option<CheckProgressSender>,
 ) -> Result<CheckOutcome> {
     anyhow::ensure!(!tiers.is_empty(), "no servers configured");
+    let start = Instant::now();
 
     let mut totals: HashMap<String, u32> = HashMap::new();
     let mut pending: Vec<WorkItem> = Vec::new();
@@ -189,6 +277,7 @@ pub async fn check_queue(
         }
     }
 
+    let total_items = pending.len() as u32;
     let mut present: HashMap<String, u32> = HashMap::new();
     let mut bytes_used = 0u64;
 
@@ -199,7 +288,7 @@ pub async fn check_queue(
         }
         let is_last_tier = idx == last_tier_idx;
         let (found, leftover, bytes) =
-            drain_one_tier(tier, pending, method, retries, &progress, is_last_tier).await;
+            drain_one_tier(tier, pending, config, &progress, is_last_tier).await;
         bytes_used += bytes;
         for item in found {
             *present.entry(item.file_name).or_insert(0) += 1;
@@ -211,7 +300,7 @@ pub async fn check_queue(
     // `worker_loop` (told it was draining the last server) has already
     // emitted its "missing" progress event for each of them — this just
     // builds the report, it doesn't emit again.
-    let missing = pending
+    let missing: Vec<MissingSegment> = pending
         .into_iter()
         .map(|item| MissingSegment {
             file_name: item.file_name,
@@ -219,6 +308,8 @@ pub async fn check_queue(
             message_id: item.message_id,
         })
         .collect();
+
+    let total_present = total_items - missing.len() as u32;
 
     // Deterministic, `.nzb`-queue-order output regardless of `HashMap`
     // iteration order.
@@ -236,7 +327,29 @@ pub async fn check_queue(
         files,
         missing,
         bytes_used,
+        elapsed: start.elapsed(),
+        total_checked: total_items,
+        total_present,
     })
+}
+
+/// Check multiple NZB queues in a single run, returning one
+/// [`CheckOutcome`] per queue. Each queue is checked sequentially against
+/// the same server tiers; the shared progress channel receives events from
+/// all checks in order — the caller can track which NZB is active by
+/// observing the sequence of calls.
+pub async fn check_nzbs(
+    queues: &[&DownloadQueue],
+    tiers: &[ServerTier],
+    config: &CheckConfig,
+    progress: Option<CheckProgressSender>,
+) -> Result<Vec<CheckOutcome>> {
+    let mut outcomes = Vec::with_capacity(queues.len());
+    for queue in queues {
+        let outcome = check_queue(queue, tiers, config, progress.clone()).await?;
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
 }
 
 fn emit(progress: &Option<CheckProgressSender>, present: bool) {
@@ -275,8 +388,7 @@ fn emit(progress: &Option<CheckProgressSender>, present: bool) {
 async fn drain_one_tier(
     tier: &ServerTier,
     pending: Vec<WorkItem>,
-    method: CheckMethod,
-    retries: u32,
+    config: &CheckConfig,
     progress: &Option<CheckProgressSender>,
     is_last_tier: bool,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
@@ -289,6 +401,10 @@ async fn drain_one_tier(
     // servers used to before that fix.
     let worker_count: usize = tier.members.iter().map(|s| s.connections.max(1)).sum();
 
+    let method = config.method;
+    let retries = config.retries;
+    let pipeline_depth = config.pipeline_depth.clamp(1, 256);
+
     let mut workers = JoinSet::new();
     for server in &tier.members {
         for _ in 0..server.connections.max(1) {
@@ -297,6 +413,7 @@ async fn drain_one_tier(
                 server.clone(),
                 method,
                 retries,
+                pipeline_depth,
                 progress.clone(),
                 is_last_tier,
                 worker_count,
@@ -317,28 +434,16 @@ async fn drain_one_tier(
     (found, leftover, bytes_used)
 }
 
-/// Above this many items, a worker splits its batch into several pipelined
-/// round trips instead of one. `STAT` carries no payload — a command is a
-/// few dozen bytes, a response likewise — so unlike POST pipelining (capped
-/// low by how much article data is worth buffering ahead of encode speed,
-/// see [`pesto::config::types::MAX_AUTO_PIPELINE_DEPTH`]), there's nothing
-/// to balance a much higher depth against. This is what actually hides
-/// round-trip latency: with `server.connections` workers alone, wall time
-/// is `segments / connections * RTT`; pipelining `STAT_PIPELINE_DEPTH`
-/// commands per round trip divides that further, roughly
-/// `segments / (connections * STAT_PIPELINE_DEPTH) * RTT`.
-const STAT_PIPELINE_DEPTH: usize = 20;
-
 /// One worker's whole pass over `queue`: pop a batch, pipeline-`STAT` it
 /// against `server` in one round trip (retrying the *whole batch* per
 /// [`stat_batch_with_retry`] on a connection/transport error), repeat until
 /// the queue is empty. Keeps one connection open for the entire pass.
 ///
-/// Each pop takes at most [`STAT_PIPELINE_DEPTH`] items, *and* never more
+/// Each pop takes at most `pipeline_depth` items, *and* never more
 /// than a `worker_count`-th of whatever's left in the queue right then —
 /// without that second cap, a worker that wins the lock first could grab
 /// the entire remaining queue in one batch whenever it's no bigger than
-/// `STAT_PIPELINE_DEPTH` (always eventually true, since every queue drains
+/// `pipeline_depth` (always eventually true, since every queue drains
 /// to nothing), leaving every other worker with nothing to do and
 /// defeating `server.connections` concurrency right when it matters most:
 /// finishing the tail of a check together instead of one connection
@@ -358,6 +463,7 @@ async fn worker_loop(
     server: ServerEntry,
     method: CheckMethod,
     retries: u32,
+    pipeline_depth: usize,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
     worker_count: usize,
@@ -368,6 +474,7 @@ async fn worker_loop(
                 queue,
                 server,
                 retries,
+                pipeline_depth,
                 progress,
                 is_last_server,
                 worker_count,
@@ -380,10 +487,12 @@ async fn worker_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stat_worker_loop(
     queue: Arc<Mutex<VecDeque<WorkItem>>>,
     server: ServerEntry,
     retries: u32,
+    pipeline_depth: usize,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
     worker_count: usize,
@@ -397,7 +506,7 @@ async fn stat_worker_loop(
         let batch: Vec<WorkItem> = {
             let mut q = queue.lock().expect("queue mutex poisoned");
             let fair_share = q.len().div_ceil(worker_count.max(1));
-            let n = STAT_PIPELINE_DEPTH.min(q.len()).min(fair_share);
+            let n = pipeline_depth.min(q.len()).min(fair_share);
             q.drain(..n).collect()
         };
         if batch.is_empty() {
@@ -567,8 +676,8 @@ async fn single_item_with_retry(
 /// the wire no longer line up with the remaining expected responses), so
 /// there's no way to trust any response after that point even if earlier
 /// ones in the same batch looked fine. Retrying the whole (small, capped at
-/// [`STAT_PIPELINE_DEPTH`]) batch on a fresh connection is simpler and
-/// safer than trying to salvage a partial one — mirrors
+/// the configured pipeline depth) batch on a fresh connection is simpler
+/// and safer than trying to salvage a partial one — mirrors
 /// [`crate::download::fetch_with_retry`]'s per-item retry shape, just at
 /// batch granularity.
 ///
@@ -629,4 +738,91 @@ async fn stat_batch_once(client: &mut DownloadClient, batch: &[WorkItem]) -> Res
         results.push(client.read_stat_response().await?);
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_config_default_has_expected_values() {
+        let config = CheckConfig::default();
+        assert_eq!(config.method, CheckMethod::Stat);
+        assert_eq!(config.pipeline_depth, DEFAULT_STAT_PIPELINE_DEPTH);
+        assert_eq!(config.pipeline_depth, 128);
+        assert_eq!(config.retries, 3);
+    }
+
+    #[test]
+    fn check_config_new_uses_default_pipeline_depth() {
+        let config = CheckConfig::new(CheckMethod::Head, 5);
+        assert_eq!(config.method, CheckMethod::Head);
+        assert_eq!(config.retries, 5);
+        assert_eq!(config.pipeline_depth, DEFAULT_STAT_PIPELINE_DEPTH);
+    }
+
+    #[test]
+    fn check_outcome_articles_per_second() {
+        let outcome = CheckOutcome {
+            elapsed: Duration::from_secs(2),
+            total_checked: 1000,
+            total_present: 990,
+            ..Default::default()
+        };
+        assert!((outcome.articles_per_second() - 500.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn check_outcome_articles_per_second_zero_elapsed() {
+        let outcome = CheckOutcome {
+            elapsed: Duration::ZERO,
+            total_checked: 100,
+            ..Default::default()
+        };
+        assert_eq!(outcome.articles_per_second(), 0.0);
+    }
+
+    #[test]
+    fn check_outcome_is_complete_when_no_missing() {
+        let outcome = CheckOutcome::default();
+        assert!(outcome.is_complete());
+    }
+
+    #[test]
+    fn check_outcome_not_complete_when_missing() {
+        let outcome = CheckOutcome {
+            missing: vec![MissingSegment {
+                file_name: "test".to_string(),
+                part: 1,
+                message_id: "id@x".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(!outcome.is_complete());
+        assert_eq!(outcome.missing_count(), 1);
+    }
+
+    #[test]
+    fn file_check_is_complete_logic() {
+        let complete = FileCheck {
+            name: "a".to_string(),
+            total_segments: 5,
+            present_segments: 5,
+        };
+        assert!(complete.is_complete());
+
+        let incomplete = FileCheck {
+            name: "b".to_string(),
+            total_segments: 5,
+            present_segments: 3,
+        };
+        assert!(!incomplete.is_complete());
+
+        let empty = FileCheck {
+            name: "c".to_string(),
+            total_segments: 0,
+            present_segments: 0,
+        };
+        assert!(!empty.is_complete());
+    }
 }

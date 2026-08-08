@@ -1,14 +1,14 @@
-//! Live progress bar for `penne download --stat`.
+//! Live progress bar for `penne check` and `penne download --stat`.
 //!
-//! Much simpler than [`crate::ui::terminal`]'s download panel: a `STAT`
-//! check never fetches an article body, so there's no speed/ETA to show and
-//! no per-file breakdown worth a whole boxed panel for — just one number
-//! that matters, how many of the queue's segments have resolved so far.
-//! Still reuses [`pesto::ui::render`]'s bar/width primitives so it looks
-//! like the same program as the download panel, not a bolted-on afterthought.
+//! Simpler than [`crate::ui::terminal`]'s download panel: a `STAT`
+//! check never fetches an article body, so the only numbers that matter
+//! are how many segments have resolved so far, how fast they're resolving,
+//! and when the check will finish. Still reuses [`pesto::ui::render`]'s
+//! bar/width primitives so it looks like the same program as the download
+//! panel, not a bolted-on afterthought.
 
 use std::io::{IsTerminal, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pesto::ui::render::{render_bar, terminal_width, truncate};
 use tokio::task::JoinHandle;
@@ -67,6 +67,8 @@ struct State {
     total: u32,
     done: u32,
     missing: u32,
+    /// When the check started, for rate/ETA calculation.
+    start: Instant,
     /// Whether the single status line has been drawn once already, so a
     /// redraw knows to erase it first instead of appending a new one.
     drawn: bool,
@@ -79,6 +81,7 @@ impl State {
             total,
             done: 0,
             missing: 0,
+            start: Instant::now(),
             drawn: false,
             last_printed_pct: None,
         }
@@ -105,6 +108,24 @@ impl State {
         );
         if self.missing > 0 {
             line.push_str(&format!(" — {} missing", self.missing));
+        }
+
+        // Show articles/sec and ETA once enough time has elapsed for a
+        // stable reading (avoids noisy ∞ or wildly fluctuating numbers
+        // in the first few hundred milliseconds).
+        let elapsed = self.start.elapsed();
+        if elapsed.as_millis() > 500 && self.done > 0 {
+            let secs = elapsed.as_secs_f64();
+            let rate = self.done as f64 / secs;
+            line.push_str(&format!("  {rate:.0} art/s"));
+
+            let remaining = self.total.saturating_sub(self.done);
+            if remaining > 0 && rate > 0.0 {
+                let eta_secs = remaining as f64 / rate;
+                let eta_m = eta_secs as u64 / 60;
+                let eta_s = eta_secs as u64 % 60;
+                line.push_str(&format!("  ETA {eta_m}:{eta_s:02}"));
+            }
         }
         line
     }
@@ -171,5 +192,18 @@ mod tests {
     fn empty_queue_reports_100_percent_without_dividing_by_zero() {
         let state = State::new(0);
         assert!(state.line().contains("100%"));
+    }
+
+    #[test]
+    fn rate_and_eta_shown_after_startup_period() {
+        let mut state = State::new(100);
+        // Backdate the start time to simulate elapsed time.
+        state.start = Instant::now() - Duration::from_secs(2);
+        for _ in 0..50 {
+            state.apply(CheckProgress { present: true });
+        }
+        let line = state.line();
+        assert!(line.contains("art/s"), "expected rate in: {line}");
+        assert!(line.contains("ETA"), "expected ETA in: {line}");
     }
 }

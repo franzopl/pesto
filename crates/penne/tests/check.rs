@@ -11,7 +11,7 @@ use pesto::config::ServerEntry;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use penne::check::{channel, check_queue, CheckMethod};
+use penne::check::{channel, check_queue, CheckConfig, CheckMethod};
 use penne::config::ServerTier;
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
@@ -224,8 +224,7 @@ async fn every_segment_present_reports_complete() {
     let outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr))],
-        CheckMethod::Stat,
-        0,
+        &CheckConfig::new(CheckMethod::Stat, 0),
         None,
     )
     .await
@@ -252,8 +251,7 @@ async fn missing_segments_are_reported_per_file_and_overall() {
     let outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr))],
-        CheckMethod::Stat,
-        0,
+        &CheckConfig::new(CheckMethod::Stat, 0),
         None,
     )
     .await
@@ -283,7 +281,7 @@ async fn falls_back_to_backup_server_for_segments_the_primary_lacks() {
         ServerTier::solo(server_entry(primary)),
         ServerTier::solo(server_entry(backup)),
     ];
-    let outcome = check_queue(&queue, &servers, CheckMethod::Stat, 0, None)
+    let outcome = check_queue(&queue, &servers, &CheckConfig::new(CheckMethod::Stat, 0), None)
         .await
         .unwrap();
 
@@ -300,8 +298,7 @@ async fn bytes_used_reflects_the_exact_wire_cost_of_the_check() {
     let outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr))],
-        CheckMethod::Stat,
-        0,
+        &CheckConfig::new(CheckMethod::Stat, 0),
         None,
     )
     .await
@@ -331,8 +328,7 @@ async fn emits_one_progress_event_per_segment_with_the_right_present_flag() {
     let outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr))],
-        CheckMethod::Stat,
-        0,
+        &CheckConfig::new(CheckMethod::Stat, 0),
         Some(tx),
     )
     .await
@@ -362,7 +358,7 @@ async fn no_server_has_it_reports_missing_after_trying_every_server() {
         ServerTier::solo(server_entry(primary)),
         ServerTier::solo(server_entry(backup)),
     ];
-    let outcome = check_queue(&queue, &servers, CheckMethod::Stat, 0, None)
+    let outcome = check_queue(&queue, &servers, &CheckConfig::new(CheckMethod::Stat, 0), None)
         .await
         .unwrap();
 
@@ -415,8 +411,7 @@ async fn progress_events_arrive_while_the_check_is_still_running() {
         check_queue(
             &queue,
             &[ServerTier::solo(server)],
-            CheckMethod::Stat,
-            0,
+            &CheckConfig::new(CheckMethod::Stat, 0),
             Some(tx),
         )
         .await
@@ -487,8 +482,7 @@ async fn missing_progress_events_arrive_while_the_check_is_still_running() {
         check_queue(
             &queue,
             &[ServerTier::solo(server)],
-            CheckMethod::Stat,
-            0,
+            &CheckConfig::new(CheckMethod::Stat, 0),
             Some(tx),
         )
         .await
@@ -529,7 +523,7 @@ async fn head_method_catches_an_article_stat_lies_about() {
     let queue = queue_with(&[("movie.bin", &["a1@x"])]);
     let tier = [ServerTier::solo(server_entry(addr))];
 
-    let stat_outcome = check_queue(&queue, &tier, CheckMethod::Stat, 0, None)
+    let stat_outcome = check_queue(&queue, &tier, &CheckConfig::new(CheckMethod::Stat, 0), None)
         .await
         .unwrap();
     assert!(
@@ -537,7 +531,7 @@ async fn head_method_catches_an_article_stat_lies_about() {
         "STAT is expected to be fooled by this fixture — that's the bug being reproduced"
     );
 
-    let head_outcome = check_queue(&queue, &tier, CheckMethod::Head, 0, None)
+    let head_outcome = check_queue(&queue, &tier, &CheckConfig::new(CheckMethod::Head, 0), None)
         .await
         .unwrap();
     assert!(
@@ -563,8 +557,7 @@ async fn body_method_catches_an_article_stat_lies_about() {
     let outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr))],
-        CheckMethod::Body,
-        0,
+        &CheckConfig::new(CheckMethod::Body, 0),
         None,
     )
     .await
@@ -584,7 +577,7 @@ async fn head_and_body_methods_report_present_for_a_genuinely_available_article(
     let tier = [ServerTier::solo(server_entry(addr))];
 
     for method in [CheckMethod::Head, CheckMethod::Body] {
-        let outcome = check_queue(&queue, &tier, method, 0, None).await.unwrap();
+        let outcome = check_queue(&queue, &tier, &CheckConfig::new(method, 0), None).await.unwrap();
         assert!(
             outcome.is_complete(),
             "{method} should report this article present"
@@ -604,8 +597,7 @@ async fn body_method_bytes_used_reflects_a_real_fetch_not_a_cheap_check() {
     let stat_outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr))],
-        CheckMethod::Stat,
-        0,
+        &CheckConfig::new(CheckMethod::Stat, 0),
         None,
     )
     .await
@@ -615,8 +607,7 @@ async fn body_method_bytes_used_reflects_a_real_fetch_not_a_cheap_check() {
     let body_outcome = check_queue(
         &queue,
         &[ServerTier::solo(server_entry(addr2))],
-        CheckMethod::Body,
-        0,
+        &CheckConfig::new(CheckMethod::Body, 0),
         None,
     )
     .await

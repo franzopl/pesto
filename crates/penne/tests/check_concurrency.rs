@@ -18,7 +18,7 @@ use pesto::config::ServerEntry;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use penne::check::{check_queue, CheckMethod};
+use penne::check::{check_queue, CheckConfig, CheckMethod};
 use penne::config::ServerTier;
 use penne::queue::{DownloadQueue, QueuedFile, QueuedSegment};
 
@@ -141,8 +141,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
     let outcome = check_queue(
         &queue,
         &[ServerTier::solo(server)],
-        CheckMethod::Stat,
-        0,
+        &CheckConfig::new(CheckMethod::Stat, 0),
         None,
     )
     .await
