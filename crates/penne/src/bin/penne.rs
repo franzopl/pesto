@@ -78,15 +78,16 @@ enum Command {
         /// same segment).
         #[arg(long, value_enum, value_name = "METHOD")]
         stat: Option<Option<CheckMethod>>,
-        /// Only meaningful with `--stat`: check just the first `N`
-        /// segment(s) of each file instead of every segment in the
+        /// Only meaningful with `--stat`: check `N` segment(s) of each file,
+        /// spread evenly across it, instead of every segment in the
         /// release. Most useful with `--stat=body`, whose per-segment cost
         /// is a real article fetch — checking a whole large release that
         /// way often isn't worth it, but a small, protocol-normal sample
         /// (read to completion, connection closed cleanly — never an
         /// abandoned mid-transfer read, which real NNTP servers'
         /// anti-abuse systems tend to flag) still catches a provider whose
-        /// article storage doesn't back up what it claims. `0` is treated
+        /// article storage doesn't back up what it claims, wherever in the
+        /// file that shows up — not just at the start. `0` is treated
         /// as `1` (sampling nothing would silently skip the file
         /// entirely, never useful).
         #[arg(long)]
@@ -127,7 +128,8 @@ enum Command {
         /// `body` (full fetch, discarded — maximum certainty).
         #[arg(long, value_enum, default_value = "stat")]
         method: CheckMethod,
-        /// Check only the first N segments of each file instead of all.
+        /// Check only N segments of each file (spread evenly across it)
+        /// instead of all.
         #[arg(long)]
         sample: Option<usize>,
         /// STAT commands pipelined per connection (default: 128).

@@ -7,6 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-08
+
+### Changed
+
+- **`--sample <N>` now spreads its selection evenly across each file instead
+  of taking the first `N` segments — BREAKING (observable behavior change,
+  not just internals).** Prompted by an external caller (`curupirashare`)
+  reporting a provider whose storage degrades partway through large files:
+  a "first N" sample only ever sees the beginning, so it could pass a
+  release its downstream `--stat=body` check exists specifically to catch.
+  `penne::queue::sample` now picks indices at a fixed step (`total / N`,
+  same stratified approach `curupirashare`'s own routine-check sampling
+  already used successfully) instead of a contiguous run from the start —
+  `--sample 2` on a 10-segment file now checks segments 1 and 6, not 1 and
+  2. No change to `--sample`'s meaning as a count, its `0`→`1` clamping, or
+  its interaction with `--stat=body`'s per-segment bandwidth cost.
+
 ## [0.2.0] — 2026-08-08
 
 ### Added

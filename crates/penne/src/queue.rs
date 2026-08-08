@@ -59,15 +59,21 @@ pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
     DownloadQueue { files }
 }
 
-/// A reduced copy of `queue` keeping only the first `per_file` segment(s)
-/// (in existing part order) of each file — a representative but cheap spot
-/// check instead of verifying every segment. Most useful paired with
-/// `penne::check::CheckMethod::Body`: `BODY` reads a real article, the same
-/// cost a genuine download pays, so checking the *whole* release that way
-/// is often not worth it, but a small, honest, protocol-normal sample still
-/// catches a provider whose article storage doesn't back up what it claims
-/// (a real report: an account whose `STAT`/`HEAD` both looked fine, but
-/// every `BODY` failed).
+/// A reduced copy of `queue` keeping only `per_file` segment(s) of each
+/// file, spread evenly across it (see [`distributed_indices`]) — a
+/// representative but cheap spot check instead of verifying every segment.
+/// Most useful paired with `penne::check::CheckMethod::Body`: `BODY` reads a
+/// real article, the same cost a genuine download pays, so checking the
+/// *whole* release that way is often not worth it, but a small, honest,
+/// protocol-normal sample still catches a provider whose article storage
+/// doesn't back up what it claims (a real report: an account whose
+/// `STAT`/`HEAD` both looked fine, but every `BODY` failed).
+///
+/// Deliberately *not* the first `per_file` segments: a provider's storage
+/// can degrade partway through a large file just as easily as at the start,
+/// and a sample that only ever looks at the beginning would never catch
+/// that (another real report, this one about a provider whose degradation
+/// only showed up past the first few hundred MB of large releases).
 ///
 /// `per_file` is clamped to at least `1` — sampling zero segments from a
 /// file would silently exclude it from the check entirely, which is never
@@ -80,10 +86,28 @@ pub fn sample(queue: &DownloadQueue, per_file: usize) -> DownloadQueue {
             .iter()
             .map(|f| QueuedFile {
                 name: f.name.clone(),
-                segments: f.segments.iter().take(per_file).cloned().collect(),
+                segments: distributed_indices(f.segments.len(), per_file)
+                    .map(|i| f.segments[i].clone())
+                    .collect(),
             })
             .collect(),
     }
+}
+
+/// Indices into a slice of length `total`, spread evenly across it, capped
+/// at `count` entries — every index if `total <= count`. Same stratified
+/// approach as the sampling `curupirashare` (the site embedding `penne`)
+/// already does on its own side for its routine/suspect-stage checks
+/// (`nzb_parser.extract_segment_sample`): fixed step of `total / count`
+/// instead of a contiguous run, so a small sample still touches the whole
+/// file instead of only ever its beginning.
+fn distributed_indices(total: usize, count: usize) -> impl Iterator<Item = usize> {
+    let step = if total <= count {
+        1
+    } else {
+        (total / count).max(1)
+    };
+    (0..total).step_by(step).take(count)
 }
 
 /// Neutralize a `.nzb`-provided file name so it can never split into a
@@ -178,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_keeps_only_the_first_n_segments_per_file() {
+    fn sample_keeps_per_file_count_and_every_file_represented() {
         let groups = vec!["alt.test".to_string()];
         let segments = vec![
             seg("a.bin", 1, 3, "<a1@x>"),
@@ -194,10 +218,45 @@ mod tests {
         assert_eq!(sampled.files.len(), 2, "every file is still represented");
         assert_eq!(sampled.files[0].name, "a.bin");
         assert_eq!(sampled.files[0].segments.len(), 2);
-        assert_eq!(sampled.files[0].segments[0].message_id, "<a1@x>");
-        assert_eq!(sampled.files[0].segments[1].message_id, "<a2@x>");
         // b.bin only has one segment to begin with; sampling 2 must not panic.
         assert_eq!(sampled.files[1].segments.len(), 1);
+    }
+
+    /// The regression this exists for: a sample must cover the whole file,
+    /// not just its beginning — a provider's storage can degrade partway
+    /// through a large file, invisible to a "first N segments" sample.
+    #[test]
+    fn sample_is_spread_across_the_file_not_just_the_beginning() {
+        let groups = vec!["alt.test".to_string()];
+        let segments: Vec<_> = (1..=10)
+            .map(|i| seg("a.bin", i, 10, &format!("<a{i}@x>")))
+            .collect();
+        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let parsed = pesto::nzb::parse(&xml).unwrap();
+        let queue = build(&parsed);
+
+        let sampled = sample(&queue, 2);
+        assert_eq!(sampled.files[0].segments.len(), 2);
+        let ids: Vec<&str> = sampled.files[0]
+            .segments
+            .iter()
+            .map(|s| s.message_id.as_str())
+            .collect();
+        // "First 2" would be <a1@x>/<a2@x> — a distributed sample of 2 out
+        // of 10 must land far apart instead (step = 10 / 2 = 5).
+        assert_eq!(ids, vec!["<a1@x>", "<a6@x>"]);
+    }
+
+    #[test]
+    fn sample_smaller_than_per_file_keeps_every_segment() {
+        let groups = vec!["alt.test".to_string()];
+        let segments = vec![seg("a.bin", 1, 2, "<a1@x>"), seg("a.bin", 2, 2, "<a2@x>")];
+        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let parsed = pesto::nzb::parse(&xml).unwrap();
+        let queue = build(&parsed);
+
+        let sampled = sample(&queue, 100);
+        assert_eq!(sampled.files[0].segments.len(), 2);
     }
 
     #[test]
