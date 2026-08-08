@@ -235,7 +235,6 @@ impl Default for CheckOutcome {
     }
 }
 
-
 #[derive(Debug)]
 enum ItemResolution {
     Found(WorkItem),
@@ -269,7 +268,8 @@ pub async fn check_queue(
     config: &CheckConfig,
     progress: Option<CheckProgressSender>,
 ) -> Result<CheckOutcome> {
-    let mut outcomes = check_nzbs(&[queue.clone()], tiers, config, progress, None).await?;
+    let mut outcomes =
+        check_nzbs(std::slice::from_ref(queue), tiers, config, progress, None).await?;
     Ok(outcomes.pop().unwrap())
 }
 
@@ -309,27 +309,30 @@ pub async fn check_nzbs(
         .map(|q| q.files.iter().map(|f| f.segments.len() as u32).sum())
         .collect();
 
-    
     let (item_tx, mut item_rx) = tokio::sync::mpsc::unbounded_channel::<ItemResolution>();
-    let item_tx_opt = if outcome_tx.is_some() { Some(item_tx) } else { None };
+    let item_tx_opt = if outcome_tx.is_some() {
+        Some(item_tx)
+    } else {
+        None
+    };
 
     let tracker_task = if let Some(out_tx) = outcome_tx {
         let qs = queues.to_vec();
         let totals_clone = totals.clone();
         let total_items_per_q_clone = total_items_per_q.clone();
         let start_time = start;
-        
+
         Some(tokio::spawn(async move {
             let mut resolved = vec![0u32; qs.len()];
             let mut present = vec![HashMap::<String, u32>::new(); qs.len()];
             let mut missing = vec![Vec::<MissingSegment>::new(); qs.len()];
-            
+
             while let Some(res) = item_rx.recv().await {
                 let q_idx = match &res {
                     ItemResolution::Found(item) => item.queue_idx,
                     ItemResolution::Missing(item) => item.queue_idx,
                 };
-                
+
                 match res {
                     ItemResolution::Found(item) => {
                         *present[q_idx].entry(item.file_name).or_insert(0) += 1;
@@ -342,21 +345,23 @@ pub async fn check_nzbs(
                         });
                     }
                 }
-                
+
                 resolved[q_idx] += 1;
-                
+
                 if resolved[q_idx] == total_items_per_q_clone[q_idx] {
                     let total_items = total_items_per_q_clone[q_idx];
                     let total_present = total_items - missing[q_idx].len() as u32;
-                    
-                    let files = qs[q_idx].files.iter().map(|f| {
-                        FileCheck {
+
+                    let files = qs[q_idx]
+                        .files
+                        .iter()
+                        .map(|f| FileCheck {
                             name: f.name.clone(),
                             total_segments: *totals_clone[q_idx].get(&f.name).unwrap_or(&0),
                             present_segments: *present[q_idx].get(&f.name).unwrap_or(&0),
-                        }
-                    }).collect();
-                    
+                        })
+                        .collect();
+
                     let outcome = CheckOutcome {
                         files,
                         missing: std::mem::take(&mut missing[q_idx]),
@@ -365,7 +370,7 @@ pub async fn check_nzbs(
                         total_checked: total_items,
                         total_present,
                     };
-                    
+
                     let _ = out_tx.send((q_idx, outcome));
                 }
             }
@@ -383,8 +388,15 @@ pub async fn check_nzbs(
             break;
         }
         let is_last_tier = idx == last_tier_idx;
-        let (found, leftover, bytes) =
-            drain_one_tier(tier, pending, config, &progress, is_last_tier, item_tx_opt.clone()).await;
+        let (found, leftover, bytes) = drain_one_tier(
+            tier,
+            pending,
+            config,
+            &progress,
+            is_last_tier,
+            item_tx_opt.clone(),
+        )
+        .await;
         bytes_used += bytes;
         for item in found {
             *present[item.queue_idx].entry(item.file_name).or_insert(0) += 1;
@@ -402,7 +414,9 @@ pub async fn check_nzbs(
     }
 
     drop(item_tx_opt);
-    if let Some(task) = tracker_task { task.await.ok(); }
+    if let Some(task) = tracker_task {
+        task.await.ok();
+    }
     let mut outcomes = Vec::with_capacity(queues.len());
     let bytes_per_q = if queues.is_empty() {
         0
@@ -493,7 +507,7 @@ async fn drain_one_tier(
 
     let mut workers = JoinSet::new();
     let breaker = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    
+
     for server in &tier.members {
         for _ in 0..server.connections.max(1) {
             workers.spawn(worker_loop(
@@ -528,7 +542,9 @@ async fn drain_one_tier(
     while let Some(item) = q.pop_front() {
         if is_last_tier {
             emit(progress, false);
-            if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
+            if let Some(tx) = &item_tx {
+                let _ = tx.send(ItemResolution::Missing(item.clone()));
+            }
         }
         leftover.push(item);
     }
@@ -597,7 +613,8 @@ async fn worker_loop(
                 is_last_server,
                 breaker,
                 item_tx,
-            ).await
+            )
+            .await
         }
     }
 }
@@ -639,12 +656,16 @@ async fn stat_worker_loop(
                 for (item, present) in batch.into_iter().zip(results) {
                     if present {
                         emit(&progress, true);
-                        if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Found(item.clone())); }
+                        if let Some(tx) = &item_tx {
+                            let _ = tx.send(ItemResolution::Found(item.clone()));
+                        }
                         found.push(item);
                     } else {
                         if is_last_server {
                             emit(&progress, false);
-                            if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
+                            if let Some(tx) = &item_tx {
+                                let _ = tx.send(ItemResolution::Missing(item.clone()));
+                            }
                         }
                         leftover.push(item);
                     }
@@ -655,7 +676,9 @@ async fn stat_worker_loop(
                 if is_last_server {
                     for item in &batch {
                         emit(&progress, false);
-                        if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
+                        if let Some(tx) = &item_tx {
+                            let _ = tx.send(ItemResolution::Missing(item.clone()));
+                        }
                     }
                 }
                 leftover.extend(batch);
@@ -680,6 +703,7 @@ async fn stat_worker_loop(
 /// `Head`) payload is involved. Emits progress the same way
 /// `stat_worker_loop` does: "present" the instant an item resolves,
 /// "missing" per-item only when `is_last_server`.
+#[allow(clippy::too_many_arguments)]
 async fn single_item_worker_loop(
     queue: Arc<Mutex<VecDeque<WorkItem>>>,
     server: ServerEntry,
@@ -719,14 +743,18 @@ async fn single_item_worker_loop(
             Ok(true) => {
                 breaker.store(0, std::sync::atomic::Ordering::Relaxed);
                 emit(&progress, true);
-                if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Found(item.clone())); }
+                if let Some(tx) = &item_tx {
+                    let _ = tx.send(ItemResolution::Found(item.clone()));
+                }
                 found.push(item);
             }
             Ok(false) => {
                 breaker.store(0, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     emit(&progress, false);
-                    if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
+                    if let Some(tx) = &item_tx {
+                        let _ = tx.send(ItemResolution::Missing(item.clone()));
+                    }
                 }
                 leftover.push(item);
             }
@@ -734,7 +762,9 @@ async fn single_item_worker_loop(
                 breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     emit(&progress, false);
-                    if let Some(tx) = &item_tx { let _ = tx.send(ItemResolution::Missing(item.clone())); }
+                    if let Some(tx) = &item_tx {
+                        let _ = tx.send(ItemResolution::Missing(item.clone()));
+                    }
                 }
                 leftover.push(item);
             }

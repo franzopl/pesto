@@ -281,9 +281,14 @@ async fn falls_back_to_backup_server_for_segments_the_primary_lacks() {
         ServerTier::solo(server_entry(primary)),
         ServerTier::solo(server_entry(backup)),
     ];
-    let outcome = check_queue(&queue, &servers, &CheckConfig::new(CheckMethod::Stat, 0), None)
-        .await
-        .unwrap();
+    let outcome = check_queue(
+        &queue,
+        &servers,
+        &CheckConfig::new(CheckMethod::Stat, 0),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(outcome.is_complete());
     assert_eq!(outcome.files[0].present_segments, 1);
@@ -358,9 +363,14 @@ async fn no_server_has_it_reports_missing_after_trying_every_server() {
         ServerTier::solo(server_entry(primary)),
         ServerTier::solo(server_entry(backup)),
     ];
-    let outcome = check_queue(&queue, &servers, &CheckConfig::new(CheckMethod::Stat, 0), None)
-        .await
-        .unwrap();
+    let outcome = check_queue(
+        &queue,
+        &servers,
+        &CheckConfig::new(CheckMethod::Stat, 0),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(!outcome.is_complete());
     assert_eq!(outcome.missing.len(), 1);
@@ -577,7 +587,9 @@ async fn head_and_body_methods_report_present_for_a_genuinely_available_article(
     let tier = [ServerTier::solo(server_entry(addr))];
 
     for method in [CheckMethod::Head, CheckMethod::Body] {
-        let outcome = check_queue(&queue, &tier, &CheckConfig::new(method, 0), None).await.unwrap();
+        let outcome = check_queue(&queue, &tier, &CheckConfig::new(method, 0), None)
+            .await
+            .unwrap();
         assert!(
             outcome.is_complete(),
             "{method} should report this article present"
