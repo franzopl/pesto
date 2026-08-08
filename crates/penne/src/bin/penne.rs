@@ -139,6 +139,10 @@ enum Command {
         /// Use only the named server(s) from the config file.
         #[arg(long = "server")]
         server: Vec<String>,
+        /// Check each configured server independently instead of using them
+        /// as failover backups. Outputs a separate result for each server.
+        #[arg(long)]
+        independent_servers: bool,
     },
 }
 
@@ -184,6 +188,7 @@ async fn main() -> Result<()> {
             json,
             quiet,
             server,
+            independent_servers,
         }) => {
             let exit_code = check(
                 &nzb,
@@ -194,6 +199,7 @@ async fn main() -> Result<()> {
                 quiet,
                 cli.config.flatten(),
                 &server,
+                independent_servers,
             )
             .await
             .unwrap_or_else(|e| {
@@ -599,6 +605,7 @@ async fn check(
     quiet: bool,
     config_path: Option<PathBuf>,
     server_names: &[String],
+    independent_servers: bool,
 ) -> Result<i32> {
     let config_path = match config_path {
         Some(path) => path,
@@ -630,6 +637,13 @@ async fn check(
         retries: config.retries,
     };
 
+    let flat_servers: Vec<penne::config::ServerTier> = config
+        .server_tiers
+        .iter()
+        .flat_map(|tier| tier.members.iter().cloned())
+        .map(penne::config::ServerTier::solo)
+        .collect();
+
     let mut all_complete = true;
 
     for (i, nzb_path) in nzb_paths.iter().enumerate() {
@@ -647,118 +661,150 @@ async fn check(
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
-        if nzb_paths.len() > 1 && !json && !quiet {
-            eprintln!("\n[{}/{}] {}", i + 1, nzb_paths.len(), nzb_name);
-        }
-
-        if !json && !quiet {
-            eprintln!(
-                "checking {} segment(s) across {} file(s) via {}...",
-                total_segments,
-                queue.files.len(),
-                method
-            );
-        }
-
-        let (tx, rx) = penne::check::channel();
-        let progress_task = if !json && !quiet {
-            Some(penne::ui::check::spawn_renderer(rx, total_segments as u32))
+        let tiers_to_run: Vec<Vec<penne::config::ServerTier>> = if independent_servers {
+            flat_servers.iter().map(|t| vec![t.clone()]).collect()
         } else {
-            drop(rx);
-            None
+            vec![config.server_tiers.clone()]
         };
 
-        let outcome = penne::check::check_queue(
-            &queue,
-            &config.server_tiers,
-            &check_config,
-            Some(tx),
-        )
-        .await?;
-
-        if let Some(task) = progress_task {
-            task.await.ok();
-        }
-
-        if json {
-            let json_val = serde_json::json!({
-                "nzb": nzb_name,
-                "complete": outcome.is_complete(),
-                "total_articles": outcome.total_checked,
-                "present": outcome.total_present,
-                "missing": outcome.missing_count(),
-                "missing_pct": if outcome.total_checked > 0 {
-                    outcome.missing_count() as f64 / outcome.total_checked as f64 * 100.0
-                } else {
-                    0.0
-                },
-                "files": outcome.files,
-                "missing_articles": outcome.missing,
-                "bytes_used": outcome.bytes_used,
-                "elapsed_secs": outcome.elapsed.as_secs_f64(),
-                "articles_per_second": outcome.articles_per_second(),
-            });
-            println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
-        } else {
-            let mut incomplete_files = 0u32;
-            for f in &outcome.files {
-                if f.is_complete() {
-                    println!(
-                        "  complete: {} ({}/{} segments)",
-                        f.name, f.present_segments, f.total_segments
-                    );
-                } else {
-                    incomplete_files += 1;
-                    println!(
-                        "  INCOMPLETE: {} ({}/{} segments)",
-                        f.name, f.present_segments, f.total_segments
-                    );
-                }
-            }
-            if !quiet {
-                for seg in &outcome.missing {
-                    println!("    missing: {} part {}", seg.file_name, seg.part);
-                }
-            }
-
-            let present_pct = if outcome.total_checked > 0 {
-                outcome.total_present as f64 / outcome.total_checked as f64 * 100.0
+        for tiers_batch in tiers_to_run {
+            let server_label = if independent_servers {
+                let s = &tiers_batch[0].members[0];
+                Some(s.host.clone())
             } else {
-                100.0
+                None
             };
-            let complete_files = outcome.files.len() as u32 - incomplete_files;
 
-            println!();
-            println!("summary");
-            println!(
-                "  articles present: {}/{} ({:.1}%)",
-                outcome.total_present, outcome.total_checked, present_pct
-            );
-            println!(
-                "  files complete:   {}/{}",
-                complete_files,
-                outcome.files.len()
-            );
-            let data_used_note = match method {
-                CheckMethod::Stat => "STAT only — no article data downloaded",
-                CheckMethod::Head => "HEAD only — headers only, no article body downloaded",
-                CheckMethod::Body => {
-                    "full BODY fetch — real article data downloaded, nothing written to disk"
+            if nzb_paths.len() > 1 && !json && !quiet {
+                eprintln!("\n[{}/{}] {}", i + 1, nzb_paths.len(), nzb_name);
+            }
+
+            if !json && !quiet {
+                if let Some(ref s) = server_label {
+                    eprintln!(
+                        "checking {} segment(s) across {} file(s) via {} on server '{}'...",
+                        total_segments,
+                        queue.files.len(),
+                        method,
+                        s
+                    );
+                } else {
+                    eprintln!(
+                        "checking {} segment(s) across {} file(s) via {}...",
+                        total_segments,
+                        queue.files.len(),
+                        method
+                    );
                 }
-            };
-            println!(
-                "  data used:        {} ({data_used_note})",
-                pesto::progress::format_size(outcome.bytes_used)
-            );
-            println!(
-                "  elapsed:          {:.1}s ({:.0} articles/sec)",
-                outcome.elapsed.as_secs_f64(),
-                outcome.articles_per_second()
-            );
-        }
+            }
 
-        if !outcome.is_complete() {
-            all_complete = false;
+            let (tx, rx) = penne::check::channel();
+            let progress_task = if !json && !quiet {
+                Some(penne::ui::check::spawn_renderer(rx, total_segments as u32))
+            } else {
+                drop(rx);
+                None
+            };
+
+            let outcome = penne::check::check_queue(
+                &queue,
+                &tiers_batch,
+                &check_config,
+                Some(tx),
+            )
+            .await?;
+
+            if let Some(task) = progress_task {
+                task.await.ok();
+            }
+
+            if json {
+                let mut json_val = serde_json::json!({
+                    "nzb": nzb_name,
+                    "complete": outcome.is_complete(),
+                    "total_articles": outcome.total_checked,
+                    "present": outcome.total_present,
+                    "missing": outcome.missing_count(),
+                    "missing_pct": if outcome.total_checked > 0 {
+                        outcome.missing_count() as f64 / outcome.total_checked as f64 * 100.0
+                    } else {
+                        0.0
+                    },
+                    "files": outcome.files,
+                    "missing_articles": outcome.missing,
+                    "bytes_used": outcome.bytes_used,
+                    "elapsed_secs": outcome.elapsed.as_secs_f64(),
+                    "articles_per_second": outcome.articles_per_second(),
+                });
+                if let Some(ref s) = server_label {
+                    json_val.as_object_mut().unwrap().insert("server".to_string(), serde_json::Value::String(s.clone()));
+                }
+                println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
+            } else {
+                let mut incomplete_files = 0u32;
+                for f in &outcome.files {
+                    if f.is_complete() {
+                        println!(
+                            "  complete: {} ({}/{} segments)",
+                            f.name, f.present_segments, f.total_segments
+                        );
+                    } else {
+                        incomplete_files += 1;
+                        println!(
+                            "  INCOMPLETE: {} ({}/{} segments)",
+                            f.name, f.present_segments, f.total_segments
+                        );
+                    }
+                }
+                if !quiet {
+                    for seg in &outcome.missing {
+                        println!("    missing: {} part {}", seg.file_name, seg.part);
+                    }
+                }
+
+                let present_pct = if outcome.total_checked > 0 {
+                    outcome.total_present as f64 / outcome.total_checked as f64 * 100.0
+                } else {
+                    100.0
+                };
+                let complete_files = outcome.files.len() as u32 - incomplete_files;
+
+                println!();
+                if let Some(ref s) = server_label {
+                    println!("summary ({s})");
+                } else {
+                    println!("summary");
+                }
+                println!(
+                    "  articles present: {}/{} ({:.1}%)",
+                    outcome.total_present, outcome.total_checked, present_pct
+                );
+                println!(
+                    "  files complete:   {}/{}",
+                    complete_files,
+                    outcome.files.len()
+                );
+                let data_used_note = match method {
+                    CheckMethod::Stat => "STAT only — no article data downloaded",
+                    CheckMethod::Head => "HEAD only — headers only, no article body downloaded",
+                    CheckMethod::Body => {
+                        "full BODY fetch — real article data downloaded, nothing written to disk"
+                    }
+                };
+                println!(
+                    "  data used:        {} ({data_used_note})",
+                    pesto::progress::format_size(outcome.bytes_used)
+                );
+                println!(
+                    "  elapsed:          {:.1}s ({:.0} articles/sec)",
+                    outcome.elapsed.as_secs_f64(),
+                    outcome.articles_per_second()
+                );
+            }
+
+            if !outcome.is_complete() {
+                all_complete = false;
+            }
         }
     }
 
