@@ -50,6 +50,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--mode` still overrides it per run; omitting both falls back to
   `unpack`, unchanged from before this field existed.
 
+### Fixed
+
+- **`penne check` no longer reports a connection failure the same way it
+  reports a confirmed-missing article — BREAKING.** Prompted by an external
+  caller (a private indexer embedding `penne check` to decide whether a
+  release is still fully grabbable before declaring it dead) pointing out
+  that `CheckOutcome::missing` mixed two very different things: a segment a
+  server explicitly denied via `430`/`423`/`420`, and a segment no server
+  ever actually answered for at all (connection refused, reset mid-handshake,
+  retries exhausted). The latter used to land in `missing` regardless — a
+  provider hiccup or a firewall blip was indistinguishable from confirmed
+  data loss. `CheckOutcome` now has a separate `unreachable: Vec<
+  UnreachableSegment>` field alongside `missing: Vec<MissingSegment>`, plus
+  `CheckOutcome::is_conclusive()` (`true` only when every segment got a real
+  present/absent answer from some server). A tier's definitive `430` still
+  wins as the final verdict even if a *later* tier in the fallback chain is
+  unreachable — only a segment nobody, across every configured tier, ever
+  got a real answer for counts as `unreachable`
+  (`WorkItem::confirmed_missing`, carried across tiers). `CheckOutcome::
+  is_complete()` now also requires `unreachable` to be empty, so a check
+  that never got a conclusive answer is no longer reported as "complete"
+  just because nothing was confirmed missing. `penne check --json` gains
+  `unreachable`/`unreachable_pct`/`unreachable_articles`/`conclusive`
+  fields; the CLI gains exit code `3` ("inconclusive": no confirmed-missing
+  segment, but at least one unreachable one), alongside the existing `0`
+  (complete), `1` (confirmed missing — still wins over inconclusive when
+  both are present), and `2` (fatal error).
+
 ## [0.1.0] — 2026-07-20
 
 First tagged release. `penne` is a fast, `.nzb`-driven NZB downloader for
