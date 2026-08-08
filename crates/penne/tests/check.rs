@@ -632,3 +632,182 @@ async fn body_method_bytes_used_reflects_a_real_fetch_not_a_cheap_check() {
         stat_outcome.bytes_used
     );
 }
+
+// ── missing vs unreachable ──────────────────────────────────────────────
+//
+// A real report from a caller embedding `penne` as a library: it treats
+// `missing` as "confirmed data loss" (e.g. deciding whether to declare a
+// release dead). Before this, a connection failure — a provider timing out
+// or resetting mid-handshake — landed in `missing` exactly the same as a
+// real `430`, because nothing distinguished "no server ever answered" from
+// "a server said no". These tests reproduce that failure mode directly.
+
+/// Spawn a listener that accepts a connection and closes it immediately,
+/// without ever writing the NNTP greeting — unlike [`spawn_fake_server`],
+/// this never gets far enough to answer `STAT`/`HEAD`/`BODY` at all.
+/// `DownloadClient::connect` must fail against this the same way it would
+/// against a server that's down or resetting connections.
+fn spawn_dead_server() -> SocketAddr {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let addr = std_listener.local_addr().unwrap();
+    let listener = TcpListener::from_std(std_listener).unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            drop(stream); // closed before any greeting is written
+        }
+    });
+
+    addr
+}
+
+/// The core regression: a segment nobody ever actually answered for must
+/// never be reported the same way as one a server explicitly denied.
+#[tokio::test]
+async fn connection_failure_is_reported_as_unreachable_not_missing() {
+    let addr = spawn_dead_server();
+    let queue = queue_with(&[("movie.bin", &["a1@x"])]);
+
+    let outcome = check_queue(
+        &queue,
+        &[ServerTier::solo(server_entry(addr))],
+        &CheckConfig::new(CheckMethod::Stat, 0),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        outcome.missing.is_empty(),
+        "a connection failure must never be reported as confirmed-missing — \
+         no server ever actually answered `STAT` for this segment"
+    );
+    assert_eq!(outcome.unreachable.len(), 1);
+    assert_eq!(outcome.unreachable[0].message_id, "a1@x");
+    assert!(!outcome.is_conclusive());
+    assert!(!outcome.is_complete());
+}
+
+/// Same regression via `CheckMethod::Head`/`Body`, which run through
+/// `single_item_worker_loop` — a separate code path from `Stat`'s pipelined
+/// batches, so it needs its own coverage.
+#[tokio::test]
+async fn head_and_body_connection_failure_is_unreachable_not_missing() {
+    let queue = queue_with(&[("movie.bin", &["a1@x"])]);
+
+    for method in [CheckMethod::Head, CheckMethod::Body] {
+        let addr = spawn_dead_server();
+        let outcome = check_queue(
+            &queue,
+            &[ServerTier::solo(server_entry(addr))],
+            &CheckConfig::new(method, 0),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            outcome.missing.is_empty(),
+            "{method}: connection failure must not be reported as confirmed-missing"
+        );
+        assert_eq!(outcome.unreachable.len(), 1, "{method}");
+    }
+}
+
+/// A tier that definitively denies a segment (`430`) must have that verdict
+/// stick even when a *later* tier in the fallback chain is unreachable —
+/// otherwise a working provider's confirmed absence would be masked by an
+/// unrelated backup provider being down, hiding a segment we already know
+/// for certain is gone.
+#[tokio::test]
+async fn confirmed_missing_survives_a_later_tiers_connection_failure() {
+    let tier1_addr = spawn_fake_server(HashSet::new()); // answers, doesn't have it: 430
+    let tier2_addr = spawn_dead_server(); // never answers at all
+
+    let queue = queue_with(&[("movie.bin", &["a1@x"])]);
+    let servers = vec![
+        ServerTier::solo(server_entry(tier1_addr)),
+        ServerTier::solo(server_entry(tier2_addr)),
+    ];
+
+    let outcome = check_queue(
+        &queue,
+        &servers,
+        &CheckConfig::new(CheckMethod::Stat, 0),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        outcome.missing.len(),
+        1,
+        "tier1's definitive 430 must be the final verdict"
+    );
+    assert!(
+        outcome.unreachable.is_empty(),
+        "tier2 merely being unreachable must not downgrade tier1's confirmed \
+         absence into 'we don't know' — we DO know, tier1 said so"
+    );
+    assert!(outcome.is_conclusive());
+}
+
+/// Mirror of the above with the order reversed: an unreachable tier tried
+/// first must not stop a later tier's definitive `430` from being the final
+/// answer.
+#[tokio::test]
+async fn confirmed_missing_from_a_later_tier_after_an_earlier_unreachable_one() {
+    let tier1_addr = spawn_dead_server();
+    let tier2_addr = spawn_fake_server(HashSet::new());
+
+    let queue = queue_with(&[("movie.bin", &["a1@x"])]);
+    let servers = vec![
+        ServerTier::solo(server_entry(tier1_addr)),
+        ServerTier::solo(server_entry(tier2_addr)),
+    ];
+
+    let outcome = check_queue(
+        &queue,
+        &servers,
+        &CheckConfig::new(CheckMethod::Stat, 0),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.missing.len(), 1);
+    assert!(outcome.unreachable.is_empty());
+    assert!(outcome.is_conclusive());
+}
+
+/// When *every* configured tier is unreachable, the segment's fate really
+/// is unknown — this is the one case where `unreachable` (not `missing`)
+/// is the correct final answer.
+#[tokio::test]
+async fn every_tier_unreachable_reports_unreachable_not_missing() {
+    let tier1_addr = spawn_dead_server();
+    let tier2_addr = spawn_dead_server();
+
+    let queue = queue_with(&[("movie.bin", &["a1@x"])]);
+    let servers = vec![
+        ServerTier::solo(server_entry(tier1_addr)),
+        ServerTier::solo(server_entry(tier2_addr)),
+    ];
+
+    let outcome = check_queue(
+        &queue,
+        &servers,
+        &CheckConfig::new(CheckMethod::Stat, 0),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.missing.is_empty());
+    assert_eq!(outcome.unreachable.len(), 1);
+    assert!(!outcome.is_conclusive());
+}

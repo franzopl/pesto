@@ -152,9 +152,33 @@ pub fn channel() -> (CheckProgressSender, CheckProgressReceiver) {
     tokio::sync::mpsc::unbounded_channel()
 }
 
-/// A segment no configured server confirmed via `STAT`.
+/// A segment at least one tried server gave a definitive "not present"
+/// answer for (`430`/`423`/`420`) and no server ever confirmed present —
+/// as opposed to [`UnreachableSegment`], where nobody ever gave a real
+/// answer at all. This is the only case that should ever be treated as
+/// confirmed data loss.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct MissingSegment {
+    pub file_name: String,
+    pub part: u32,
+    pub message_id: String,
+}
+
+/// A segment whose fate was never actually resolved: every server tried
+/// for it either failed to connect or exhausted its `STAT`/`HEAD`/`BODY`
+/// retries (see [`CheckConfig::retries`]) before returning a definitive
+/// present/absent verdict. Deliberately kept out of [`CheckOutcome::missing`]
+/// — folding this in would turn a transient network hiccup (a provider
+/// timing out, a connection reset) into what looks like confirmed data
+/// loss, which is exactly the false positive a caller deciding whether to
+/// declare a release dead must not act on. A segment only ever lands here
+/// if *no* tried server, across every configured tier, ever managed to say
+/// yes or no to it — a single tier's definitive `430` for a segment still
+/// counts as [`MissingSegment`] even if another tier later failed to
+/// connect (see `WorkItem::confirmed_missing`, carried across tiers for
+/// exactly this reason).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnreachableSegment {
     pub file_name: String,
     pub part: u32,
     pub message_id: String,
@@ -179,8 +203,15 @@ impl FileCheck {
 pub struct CheckOutcome {
     /// One entry per file, in `.nzb` queue order.
     pub files: Vec<FileCheck>,
-    /// Segments no configured server confirmed present.
+    /// Segments at least one server definitively denied and none confirmed
+    /// present — the only segments that should be treated as confirmed
+    /// data loss. See [`MissingSegment`].
     pub missing: Vec<MissingSegment>,
+    /// Segments no tried server ever gave a real present/absent answer for
+    /// — connection failures and exhausted retries, never a `430`. See
+    /// [`UnreachableSegment`]; a non-empty list here means `missing` is not
+    /// yet a trustworthy final verdict for the release as a whole.
+    pub unreachable: Vec<UnreachableSegment>,
     /// Total bytes actually sent/received over the wire to perform this
     /// check (every `STAT <id>` command and its response, across every
     /// connection opened) — the whole point of `STAT` over a real fetch is
@@ -197,8 +228,19 @@ pub struct CheckOutcome {
 }
 
 impl CheckOutcome {
+    /// True only when every segment was confirmed present by some server —
+    /// `false` for both confirmed-missing segments and merely-unreachable
+    /// ones, since neither case means the release is safely grabbable.
     pub fn is_complete(&self) -> bool {
-        self.missing.is_empty()
+        self.missing.is_empty() && self.unreachable.is_empty()
+    }
+
+    /// True when every segment got a definitive answer (present or
+    /// confirmed absent) from some server. `false` means at least one
+    /// segment's fate is still unknown, so `missing` — even if empty —
+    /// cannot yet be read as "this release is fully present".
+    pub fn is_conclusive(&self) -> bool {
+        self.unreachable.is_empty()
     }
 
     /// Articles checked per second, based on wall-clock elapsed time.
@@ -212,10 +254,16 @@ impl CheckOutcome {
         }
     }
 
-    /// Number of missing segments — convenience alias for
+    /// Number of confirmed-missing segments — convenience alias for
     /// `self.missing.len()`.
     pub fn missing_count(&self) -> usize {
         self.missing.len()
+    }
+
+    /// Number of unreachable segments — convenience alias for
+    /// `self.unreachable.len()`.
+    pub fn unreachable_count(&self) -> usize {
+        self.unreachable.len()
     }
 }
 
@@ -227,6 +275,7 @@ impl Default for CheckOutcome {
         Self {
             files: Vec::new(),
             missing: Vec::new(),
+            unreachable: Vec::new(),
             bytes_used: 0,
             elapsed: Duration::ZERO,
             total_checked: 0,
@@ -239,6 +288,7 @@ impl Default for CheckOutcome {
 enum ItemResolution {
     Found(WorkItem),
     Missing(WorkItem),
+    Unreachable(WorkItem),
 }
 
 /// One segment still needing to be checked.
@@ -248,6 +298,12 @@ struct WorkItem {
     file_name: String,
     part: u32,
     message_id: String,
+    /// Set the instant any tried server gives a definitive `430`/`423`/
+    /// `420` for this item. Carried across tiers so a *later* tier's mere
+    /// connection failure never downgrades an earlier tier's conclusive
+    /// denial into [`UnreachableSegment`] — only an item nobody ever
+    /// managed to get a real answer for should end up there.
+    confirmed_missing: bool,
 }
 
 /// Check every segment in `queue` against `tiers`, tried in priority order;
@@ -299,6 +355,7 @@ pub async fn check_nzbs(
                     file_name: file.name.clone(),
                     part: seg.part,
                     message_id: seg.message_id.clone(),
+                    confirmed_missing: false,
                 });
             }
         }
@@ -326,11 +383,13 @@ pub async fn check_nzbs(
             let mut resolved = vec![0u32; qs.len()];
             let mut present = vec![HashMap::<String, u32>::new(); qs.len()];
             let mut missing = vec![Vec::<MissingSegment>::new(); qs.len()];
+            let mut unreachable = vec![Vec::<UnreachableSegment>::new(); qs.len()];
 
             while let Some(res) = item_rx.recv().await {
                 let q_idx = match &res {
                     ItemResolution::Found(item) => item.queue_idx,
                     ItemResolution::Missing(item) => item.queue_idx,
+                    ItemResolution::Unreachable(item) => item.queue_idx,
                 };
 
                 match res {
@@ -344,13 +403,21 @@ pub async fn check_nzbs(
                             message_id: item.message_id,
                         });
                     }
+                    ItemResolution::Unreachable(item) => {
+                        unreachable[q_idx].push(UnreachableSegment {
+                            file_name: item.file_name,
+                            part: item.part,
+                            message_id: item.message_id,
+                        });
+                    }
                 }
 
                 resolved[q_idx] += 1;
 
                 if resolved[q_idx] == total_items_per_q_clone[q_idx] {
                     let total_items = total_items_per_q_clone[q_idx];
-                    let total_present = total_items - missing[q_idx].len() as u32;
+                    let total_present =
+                        total_items - missing[q_idx].len() as u32 - unreachable[q_idx].len() as u32;
 
                     let files = qs[q_idx]
                         .files
@@ -365,6 +432,7 @@ pub async fn check_nzbs(
                     let outcome = CheckOutcome {
                         files,
                         missing: std::mem::take(&mut missing[q_idx]),
+                        unreachable: std::mem::take(&mut unreachable[q_idx]),
                         bytes_used: 0,
                         elapsed: start_time.elapsed(),
                         total_checked: total_items,
@@ -405,12 +473,26 @@ pub async fn check_nzbs(
     }
 
     let mut missing_per_q: Vec<Vec<MissingSegment>> = vec![Vec::new(); queues.len()];
+    let mut unreachable_per_q: Vec<Vec<UnreachableSegment>> = vec![Vec::new(); queues.len()];
     for item in pending {
-        missing_per_q[item.queue_idx].push(MissingSegment {
-            file_name: item.file_name,
-            part: item.part,
-            message_id: item.message_id,
-        });
+        // `confirmed_missing` was set the instant any tried tier returned a
+        // definitive 430/423/420 for this item (see `WorkItem`'s doc
+        // comment) — a later tier merely failing to connect never clears
+        // it, so this is a true final verdict, not just "the last tier we
+        // happened to try".
+        if item.confirmed_missing {
+            missing_per_q[item.queue_idx].push(MissingSegment {
+                file_name: item.file_name,
+                part: item.part,
+                message_id: item.message_id,
+            });
+        } else {
+            unreachable_per_q[item.queue_idx].push(UnreachableSegment {
+                file_name: item.file_name,
+                part: item.part,
+                message_id: item.message_id,
+            });
+        }
     }
 
     drop(item_tx_opt);
@@ -426,7 +508,8 @@ pub async fn check_nzbs(
 
     for (q_idx, queue) in queues.iter().enumerate() {
         let total_items = total_items_per_q[q_idx];
-        let total_present = total_items - missing_per_q[q_idx].len() as u32;
+        let total_present =
+            total_items - missing_per_q[q_idx].len() as u32 - unreachable_per_q[q_idx].len() as u32;
 
         let files = queue
             .files
@@ -441,6 +524,7 @@ pub async fn check_nzbs(
         outcomes.push(CheckOutcome {
             files,
             missing: std::mem::take(&mut missing_per_q[q_idx]),
+            unreachable: std::mem::take(&mut unreachable_per_q[q_idx]),
             bytes_used: bytes_per_q,
             elapsed: start.elapsed(),
             total_checked: total_items,
@@ -537,13 +621,20 @@ async fn drain_one_tier(
     }
 
     // Any items left in the shared queue were abandoned by workers that exited
-    // early (e.g., due to fatal connection errors). They belong in leftover.
+    // early (e.g., due to fatal connection errors) — never a definitive
+    // 430/423/420, so these are unreachable unless an earlier tier already
+    // confirmed them missing (`WorkItem::confirmed_missing`).
     let mut q = queue.lock().unwrap();
     while let Some(item) = q.pop_front() {
         if is_last_tier {
             emit(progress, false);
             if let Some(tx) = &item_tx {
-                let _ = tx.send(ItemResolution::Missing(item.clone()));
+                let resolution = if item.confirmed_missing {
+                    ItemResolution::Missing(item.clone())
+                } else {
+                    ItemResolution::Unreachable(item.clone())
+                };
+                let _ = tx.send(resolution);
             }
         }
         leftover.push(item);
@@ -653,7 +744,7 @@ async fn stat_worker_loop(
         match stat_batch_with_retry(&mut client, &server, &batch, retries, &mut bytes_used).await {
             Ok(results) => {
                 breaker.store(0, std::sync::atomic::Ordering::Relaxed);
-                for (item, present) in batch.into_iter().zip(results) {
+                for (mut item, present) in batch.into_iter().zip(results) {
                     if present {
                         emit(&progress, true);
                         if let Some(tx) = &item_tx {
@@ -661,6 +752,10 @@ async fn stat_worker_loop(
                         }
                         found.push(item);
                     } else {
+                        // A real `430`/`423`/`420` — a definitive answer,
+                        // never downgraded by a later tier's connection
+                        // failure (see `WorkItem::confirmed_missing`).
+                        item.confirmed_missing = true;
                         if is_last_server {
                             emit(&progress, false);
                             if let Some(tx) = &item_tx {
@@ -672,12 +767,20 @@ async fn stat_worker_loop(
                 }
             }
             Err(_) => {
+                // The whole batch failed to connect/transfer — no server
+                // actually answered, so this is unreachable, not missing,
+                // unless an earlier tier already confirmed it.
                 breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     for item in &batch {
                         emit(&progress, false);
                         if let Some(tx) = &item_tx {
-                            let _ = tx.send(ItemResolution::Missing(item.clone()));
+                            let resolution = if item.confirmed_missing {
+                                ItemResolution::Missing(item.clone())
+                            } else {
+                                ItemResolution::Unreachable(item.clone())
+                            };
+                            let _ = tx.send(resolution);
                         }
                     }
                 }
@@ -727,7 +830,7 @@ async fn single_item_worker_loop(
             let mut q = queue.lock().expect("queue mutex poisoned");
             q.pop_front()
         };
-        let Some(item) = item else { break };
+        let Some(mut item) = item else { break };
 
         let present = single_item_with_retry(
             &mut client,
@@ -749,7 +852,10 @@ async fn single_item_worker_loop(
                 found.push(item);
             }
             Ok(false) => {
+                // A real `423`/`430` — definitive, never downgraded by a
+                // later tier's connection failure.
                 breaker.store(0, std::sync::atomic::Ordering::Relaxed);
+                item.confirmed_missing = true;
                 if is_last_server {
                     emit(&progress, false);
                     if let Some(tx) = &item_tx {
@@ -759,11 +865,19 @@ async fn single_item_worker_loop(
                 leftover.push(item);
             }
             Err(_) => {
+                // Connection/transport failure after exhausting retries —
+                // nobody actually answered, so unreachable, not missing,
+                // unless an earlier tier already confirmed it.
                 breaker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if is_last_server {
                     emit(&progress, false);
                     if let Some(tx) = &item_tx {
-                        let _ = tx.send(ItemResolution::Missing(item.clone()));
+                        let resolution = if item.confirmed_missing {
+                            ItemResolution::Missing(item.clone())
+                        } else {
+                            ItemResolution::Unreachable(item.clone())
+                        };
+                        let _ = tx.send(resolution);
                     }
                 }
                 leftover.push(item);

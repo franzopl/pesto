@@ -41,7 +41,9 @@ cargo run --bin penne -- check path/to/release.nzb
 cargo run --bin penne -- check path/to/release1.nzb path/to/release2.nzb
 ```
 
-`penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = missing, 2 = fatal error). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead.
+`penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = confirmed missing, 2 = fatal error, 3 = inconclusive). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead.
+
+A confirmed-missing article (a server returned a definitive `430`/`423`/`420`) is reported separately from an unreachable one (every tried server failed to connect or timed out before ever answering) — `missing` vs `unreachable` in the JSON output, `conclusive: false` when any segment falls in the latter bucket. This distinction matters for callers that act on a check's result (e.g. deciding whether to declare a release dead): a transient network hiccup must never be read as confirmed data loss.
 
 ## Configuration
 

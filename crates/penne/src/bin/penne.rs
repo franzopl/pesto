@@ -114,7 +114,10 @@ enum Command {
     },
     /// Check article availability across one or more `.nzb` files without
     /// downloading. Exits 0 if all articles are present, 1 if any are
-    /// missing, 2 on fatal error.
+    /// confirmed missing (a server returned a definitive "not present"),
+    /// 2 on fatal error, 3 if inconclusive (no confirmed-missing article,
+    /// but at least one segment never got a real answer from any
+    /// configured server — a connection failure, not a `430`).
     Check {
         /// One or more `.nzb` files to check.
         #[arg(required = true)]
@@ -550,6 +553,12 @@ async fn check_availability(
     for seg in &outcome.missing {
         println!("    missing: {} part {}", seg.file_name, seg.part);
     }
+    for seg in &outcome.unreachable {
+        println!(
+            "    unreachable: {} part {} (no server gave a definitive answer)",
+            seg.file_name, seg.part
+        );
+    }
 
     let present_pct = if outcome.total_checked > 0 {
         outcome.total_present as f64 / outcome.total_checked as f64 * 100.0
@@ -587,14 +596,19 @@ async fn check_availability(
 
     anyhow::ensure!(
         outcome.is_complete(),
-        "{incomplete_files} file(s) have missing segments"
+        "{incomplete_files} file(s) incomplete: {} confirmed-missing segment(s), \
+         {} unreachable segment(s) (no server gave a definitive answer)",
+        outcome.missing.len(),
+        outcome.unreachable.len()
     );
     Ok(())
 }
 
 /// `penne check`: first-class article availability checker with JSON output,
-/// exit codes (0=all present, 1=missing, 2=fatal error), multi-NZB support,
-/// configurable pipeline depth, and quiet mode.
+/// exit codes (0=all present, 1=confirmed missing, 2=fatal error,
+/// 3=inconclusive — no confirmed-missing segment, but at least one
+/// unreachable), multi-NZB support, configurable pipeline depth, and quiet
+/// mode.
 #[allow(clippy::too_many_arguments)]
 async fn check(
     nzb_paths: &[PathBuf],
@@ -644,7 +658,8 @@ async fn check(
         .map(penne::config::ServerTier::solo)
         .collect();
 
-    let mut all_complete = true;
+    let mut any_missing = false;
+    let mut any_unreachable = false;
 
     let mut queues = Vec::new();
     let mut nzb_names = Vec::new();
@@ -715,7 +730,15 @@ async fn check(
                 let nzb_name = &nzb_names_clone[q_idx];
                 let mut json_val = serde_json::json!({
                     "nzb": nzb_name,
+                    // `complete` requires every segment be confirmed present —
+                    // false if any is confirmed missing OR merely unreachable.
+                    // Check `conclusive` before trusting `missing`/`missing_pct`
+                    // as a final verdict: if `conclusive` is false, at least one
+                    // segment never got a real answer from any server, and
+                    // treating that as confirmed absence is the false positive
+                    // this field split exists to prevent.
                     "complete": outcome.is_complete(),
+                    "conclusive": outcome.is_conclusive(),
                     "total_articles": outcome.total_checked,
                     "present": outcome.total_present,
                     "missing": outcome.missing_count(),
@@ -724,8 +747,15 @@ async fn check(
                     } else {
                         0.0
                     },
+                    "unreachable": outcome.unreachable_count(),
+                    "unreachable_pct": if outcome.total_checked > 0 {
+                        outcome.unreachable_count() as f64 / outcome.total_checked as f64 * 100.0
+                    } else {
+                        0.0
+                    },
                     "files": outcome.files,
                     "missing_articles": outcome.missing,
+                    "unreachable_articles": outcome.unreachable,
                     "bytes_used": outcome.bytes_used,
                     "elapsed_secs": outcome.elapsed.as_secs_f64(),
                     "articles_per_second": outcome.articles_per_second(),
@@ -822,6 +852,12 @@ async fn check(
                     for seg in &outcome.missing {
                         println!("    missing: {} part {}", seg.file_name, seg.part);
                     }
+                    for seg in &outcome.unreachable {
+                        println!(
+                            "    unreachable: {} part {} (no server gave a definitive answer)",
+                            seg.file_name, seg.part
+                        );
+                    }
                 }
 
                 let present_pct = if outcome.total_checked > 0 {
@@ -841,6 +877,17 @@ async fn check(
                     "  articles present: {}/{} ({:.1}%)",
                     outcome.total_present, outcome.total_checked, present_pct
                 );
+                if !outcome.unreachable.is_empty() {
+                    let unreachable_pct = outcome.unreachable.len() as f64
+                        / outcome.total_checked.max(1) as f64
+                        * 100.0;
+                    println!(
+                        "  unreachable:       {} ({:.1}%) — no server gave a definitive answer; \
+                         not counted as missing, but this check is inconclusive",
+                        outcome.unreachable.len(),
+                        unreachable_pct
+                    );
+                }
                 println!(
                     "  files complete:   {}/{}",
                     complete_files,
@@ -864,11 +911,23 @@ async fn check(
                 );
             }
 
-            if !outcome.is_complete() {
-                all_complete = false;
+            if !outcome.missing.is_empty() {
+                any_missing = true;
+            }
+            if !outcome.unreachable.is_empty() {
+                any_unreachable = true;
             }
         }
     }
 
-    Ok(if all_complete { 0 } else { 1 })
+    // A confirmed-missing article always wins over "merely inconclusive" —
+    // once we know for certain the release is broken, that's more
+    // actionable than "we couldn't fully confirm it".
+    Ok(if any_missing {
+        1
+    } else if any_unreachable {
+        3
+    } else {
+        0
+    })
 }
