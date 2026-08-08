@@ -667,6 +667,40 @@ async fn check(
             vec![config.server_tiers.clone()]
         };
 
+        if nzb_paths.len() > 1 && !json && !quiet {
+            eprintln!("\n[{}/{}] {}", i + 1, nzb_paths.len(), nzb_name);
+        }
+
+        if !json && !quiet {
+            if independent_servers {
+                eprintln!(
+                    "checking {} segment(s) across {} file(s) via {} on {} server(s) concurrently...",
+                    total_segments,
+                    queue.files.len(),
+                    method,
+                    flat_servers.len()
+                );
+            } else {
+                eprintln!(
+                    "checking {} segment(s) across {} file(s) via {}...",
+                    total_segments,
+                    queue.files.len(),
+                    method
+                );
+            }
+        }
+
+        let total_work = total_segments * tiers_to_run.len();
+        let (tx, rx) = penne::check::channel();
+        let progress_task = if !json && !quiet {
+            Some(penne::ui::check::spawn_renderer(rx, total_work as u32))
+        } else {
+            drop(rx);
+            None
+        };
+
+        let mut join_set = tokio::task::JoinSet::new();
+
         for tiers_batch in tiers_to_run {
             let server_label = if independent_servers {
                 let s = &tiers_batch[0].members[0];
@@ -675,48 +709,33 @@ async fn check(
                 None
             };
 
-            if nzb_paths.len() > 1 && !json && !quiet {
-                eprintln!("\n[{}/{}] {}", i + 1, nzb_paths.len(), nzb_name);
-            }
+            let q = queue.clone();
+            let tb = tiers_batch.clone();
+            let c = check_config.clone();
+            let txc = tx.clone();
 
-            if !json && !quiet {
-                if let Some(ref s) = server_label {
-                    eprintln!(
-                        "checking {} segment(s) across {} file(s) via {} on server '{}'...",
-                        total_segments,
-                        queue.files.len(),
-                        method,
-                        s
-                    );
-                } else {
-                    eprintln!(
-                        "checking {} segment(s) across {} file(s) via {}...",
-                        total_segments,
-                        queue.files.len(),
-                        method
-                    );
-                }
-            }
+            join_set.spawn(async move {
+                let outcome = penne::check::check_queue(&q, &tb, &c, Some(txc)).await;
+                (server_label, outcome)
+            });
+        }
+        
+        drop(tx);
 
-            let (tx, rx) = penne::check::channel();
-            let progress_task = if !json && !quiet {
-                Some(penne::ui::check::spawn_renderer(rx, total_segments as u32))
-            } else {
-                drop(rx);
-                None
-            };
+        let mut outcomes = Vec::new();
+        while let Some(res) = join_set.join_next().await {
+            outcomes.push(res.expect("task panicked"));
+        }
 
-            let outcome = penne::check::check_queue(
-                &queue,
-                &tiers_batch,
-                &check_config,
-                Some(tx),
-            )
-            .await?;
+        if let Some(task) = progress_task {
+            task.await.ok();
+        }
 
-            if let Some(task) = progress_task {
-                task.await.ok();
-            }
+        // Sort by server label for deterministic output order
+        outcomes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (server_label, outcome_res) in outcomes {
+            let outcome = outcome_res?;
 
             if json {
                 let mut json_val = serde_json::json!({
