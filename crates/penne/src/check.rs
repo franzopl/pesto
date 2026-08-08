@@ -431,6 +431,17 @@ async fn drain_one_tier(
             bytes_used += b;
         }
     }
+
+    // Any items left in the shared queue were abandoned by workers that exited
+    // early (e.g., due to fatal connection errors). They belong in leftover.
+    let mut q = queue.lock().unwrap();
+    while let Some(item) = q.pop_front() {
+        if is_last_tier {
+            emit(progress, false);
+        }
+        leftover.push(item);
+    }
+
     (found, leftover, bytes_used)
 }
 
