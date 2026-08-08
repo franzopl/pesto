@@ -238,6 +238,7 @@ impl Default for CheckOutcome {
 /// One segment still needing to be checked.
 #[derive(Debug, Clone)]
 struct WorkItem {
+    queue_idx: usize,
     file_name: String,
     part: u32,
     message_id: String,
@@ -261,24 +262,46 @@ pub async fn check_queue(
     config: &CheckConfig,
     progress: Option<CheckProgressSender>,
 ) -> Result<CheckOutcome> {
+    let mut outcomes = check_nzbs(&[queue.clone()], tiers, config, progress).await?;
+    Ok(outcomes.pop().unwrap())
+}
+
+/// Check multiple NZB queues in a single run, returning one
+/// [`CheckOutcome`] per queue. This uses a single set of connections to
+/// process all queues as one massive batch, avoiding the overhead of
+/// tearing down and re-establishing TCP/TLS connections between NZBs.
+pub async fn check_nzbs(
+    queues: &[DownloadQueue],
+    tiers: &[ServerTier],
+    config: &CheckConfig,
+    progress: Option<CheckProgressSender>,
+) -> Result<Vec<CheckOutcome>> {
     anyhow::ensure!(!tiers.is_empty(), "no servers configured");
     let start = Instant::now();
 
-    let mut totals: HashMap<String, u32> = HashMap::new();
+    let mut totals: Vec<HashMap<String, u32>> = vec![HashMap::new(); queues.len()];
     let mut pending: Vec<WorkItem> = Vec::new();
-    for file in &queue.files {
-        totals.insert(file.name.clone(), file.segments.len() as u32);
-        for seg in &file.segments {
-            pending.push(WorkItem {
-                file_name: file.name.clone(),
-                part: seg.part,
-                message_id: seg.message_id.clone(),
-            });
+
+    for (q_idx, queue) in queues.iter().enumerate() {
+        for file in &queue.files {
+            totals[q_idx].insert(file.name.clone(), file.segments.len() as u32);
+            for seg in &file.segments {
+                pending.push(WorkItem {
+                    queue_idx: q_idx,
+                    file_name: file.name.clone(),
+                    part: seg.part,
+                    message_id: seg.message_id.clone(),
+                });
+            }
         }
     }
 
-    let total_items = pending.len() as u32;
-    let mut present: HashMap<String, u32> = HashMap::new();
+    let total_items_per_q: Vec<u32> = queues
+        .iter()
+        .map(|q| q.files.iter().map(|f| f.segments.len() as u32).sum())
+        .collect();
+
+    let mut present: Vec<HashMap<String, u32>> = vec![HashMap::new(); queues.len()];
     let mut bytes_used = 0u64;
 
     let last_tier_idx = tiers.len() - 1;
@@ -291,64 +314,51 @@ pub async fn check_queue(
             drain_one_tier(tier, pending, config, &progress, is_last_tier).await;
         bytes_used += bytes;
         for item in found {
-            *present.entry(item.file_name).or_insert(0) += 1;
+            *present[item.queue_idx].entry(item.file_name).or_insert(0) += 1;
         }
         pending = leftover;
     }
 
-    // Every item still here failed even the last configured server, so
-    // `worker_loop` (told it was draining the last server) has already
-    // emitted its "missing" progress event for each of them — this just
-    // builds the report, it doesn't emit again.
-    let missing: Vec<MissingSegment> = pending
-        .into_iter()
-        .map(|item| MissingSegment {
+    let mut missing_per_q: Vec<Vec<MissingSegment>> = vec![Vec::new(); queues.len()];
+    for item in pending {
+        missing_per_q[item.queue_idx].push(MissingSegment {
             file_name: item.file_name,
             part: item.part,
             message_id: item.message_id,
-        })
-        .collect();
-
-    let total_present = total_items - missing.len() as u32;
-
-    // Deterministic, `.nzb`-queue-order output regardless of `HashMap`
-    // iteration order.
-    let files = queue
-        .files
-        .iter()
-        .map(|f| FileCheck {
-            name: f.name.clone(),
-            total_segments: *totals.get(&f.name).unwrap_or(&0),
-            present_segments: *present.get(&f.name).unwrap_or(&0),
-        })
-        .collect();
-
-    Ok(CheckOutcome {
-        files,
-        missing,
-        bytes_used,
-        elapsed: start.elapsed(),
-        total_checked: total_items,
-        total_present,
-    })
-}
-
-/// Check multiple NZB queues in a single run, returning one
-/// [`CheckOutcome`] per queue. Each queue is checked sequentially against
-/// the same server tiers; the shared progress channel receives events from
-/// all checks in order — the caller can track which NZB is active by
-/// observing the sequence of calls.
-pub async fn check_nzbs(
-    queues: &[&DownloadQueue],
-    tiers: &[ServerTier],
-    config: &CheckConfig,
-    progress: Option<CheckProgressSender>,
-) -> Result<Vec<CheckOutcome>> {
-    let mut outcomes = Vec::with_capacity(queues.len());
-    for queue in queues {
-        let outcome = check_queue(queue, tiers, config, progress.clone()).await?;
-        outcomes.push(outcome);
+        });
     }
+
+    let mut outcomes = Vec::with_capacity(queues.len());
+    let bytes_per_q = if queues.is_empty() {
+        0
+    } else {
+        bytes_used / queues.len() as u64
+    };
+
+    for (q_idx, queue) in queues.iter().enumerate() {
+        let total_items = total_items_per_q[q_idx];
+        let total_present = total_items - missing_per_q[q_idx].len() as u32;
+
+        let files = queue
+            .files
+            .iter()
+            .map(|f| FileCheck {
+                name: f.name.clone(),
+                total_segments: *totals[q_idx].get(&f.name).unwrap_or(&0),
+                present_segments: *present[q_idx].get(&f.name).unwrap_or(&0),
+            })
+            .collect();
+
+        outcomes.push(CheckOutcome {
+            files,
+            missing: std::mem::take(&mut missing_per_q[q_idx]),
+            bytes_used: bytes_per_q,
+            elapsed: start.elapsed(),
+            total_checked: total_items,
+            total_present,
+        });
+    }
+
     Ok(outcomes)
 }
 

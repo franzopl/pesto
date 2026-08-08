@@ -646,96 +646,99 @@ async fn check(
 
     let mut all_complete = true;
 
-    for (i, nzb_path) in nzb_paths.iter().enumerate() {
+    let mut queues = Vec::new();
+    let mut nzb_names = Vec::new();
+    let mut total_segments = 0;
+
+    for nzb_path in nzb_paths {
         let parsed = penne::nzb::load(nzb_path)?;
-        let queue = penne::queue::build(&parsed);
-        let queue = if let Some(per_file) = sample {
-            penne::queue::sample(&queue, per_file)
-        } else {
-            queue
-        };
-
-        let total_segments: usize = queue.files.iter().map(|f| f.segments.len()).sum();
-        let nzb_name = nzb_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-
-        let tiers_to_run: Vec<Vec<penne::config::ServerTier>> = if independent_servers {
-            flat_servers.iter().map(|t| vec![t.clone()]).collect()
-        } else {
-            vec![config.server_tiers.clone()]
-        };
-
-        if nzb_paths.len() > 1 && !json && !quiet {
-            eprintln!("\n[{}/{}] {}", i + 1, nzb_paths.len(), nzb_name);
+        let mut queue = penne::queue::build(&parsed);
+        if let Some(per_file) = sample {
+            queue = penne::queue::sample(&queue, per_file);
         }
+        total_segments += queue.files.iter().map(|f| f.segments.len()).sum::<usize>();
+        queues.push(queue);
+        nzb_names.push(
+            nzb_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+        );
+    }
 
-        if !json && !quiet {
-            if independent_servers {
-                eprintln!(
-                    "checking {} segment(s) across {} file(s) via {} on {} server(s) concurrently...",
-                    total_segments,
-                    queue.files.len(),
-                    method,
-                    flat_servers.len()
-                );
-            } else {
-                eprintln!(
-                    "checking {} segment(s) across {} file(s) via {}...",
-                    total_segments,
-                    queue.files.len(),
-                    method
-                );
-            }
-        }
+    let tiers_to_run: Vec<Vec<penne::config::ServerTier>> = if independent_servers {
+        flat_servers.iter().map(|t| vec![t.clone()]).collect()
+    } else {
+        vec![config.server_tiers.clone()]
+    };
 
-        let total_work = total_segments * tiers_to_run.len();
-        let (tx, rx) = penne::check::channel();
-        let progress_task = if !json && !quiet {
-            Some(penne::ui::check::spawn_renderer(rx, total_work as u32))
+    if !json && !quiet {
+        if independent_servers {
+            eprintln!(
+                "checking {} segment(s) across {} NZB(s) via {} on {} server(s) concurrently...",
+                total_segments,
+                queues.len(),
+                method,
+                flat_servers.len()
+            );
         } else {
-            drop(rx);
+            eprintln!(
+                "checking {} segment(s) across {} NZB(s) via {}...",
+                total_segments,
+                queues.len(),
+                method
+            );
+        }
+    }
+
+    let total_work = total_segments * tiers_to_run.len();
+    let (tx, rx) = penne::check::channel();
+    let progress_task = if !json && !quiet {
+        Some(penne::ui::check::spawn_renderer(rx, total_work as u32))
+    } else {
+        drop(rx);
+        None
+    };
+
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for tiers_batch in tiers_to_run {
+        let server_label = if independent_servers {
+            let s = &tiers_batch[0].members[0];
+            Some(s.host.clone())
+        } else {
             None
         };
 
-        let mut join_set = tokio::task::JoinSet::new();
+        let qs = queues.clone();
+        let tb = tiers_batch.clone();
+        let c = check_config.clone();
+        let txc = tx.clone();
 
-        for tiers_batch in tiers_to_run {
-            let server_label = if independent_servers {
-                let s = &tiers_batch[0].members[0];
-                Some(s.host.clone())
-            } else {
-                None
-            };
+        join_set.spawn(async move {
+            let outcomes = penne::check::check_nzbs(&qs, &tb, &c, Some(txc)).await;
+            (server_label, outcomes)
+        });
+    }
 
-            let q = queue.clone();
-            let tb = tiers_batch.clone();
-            let c = check_config.clone();
-            let txc = tx.clone();
+    drop(tx);
 
-            join_set.spawn(async move {
-                let outcome = penne::check::check_queue(&q, &tb, &c, Some(txc)).await;
-                (server_label, outcome)
-            });
-        }
-        
-        drop(tx);
+    let mut tier_outcomes = Vec::new();
+    while let Some(res) = join_set.join_next().await {
+        tier_outcomes.push(res.expect("task panicked"));
+    }
 
-        let mut outcomes = Vec::new();
-        while let Some(res) = join_set.join_next().await {
-            outcomes.push(res.expect("task panicked"));
-        }
+    if let Some(task) = progress_task {
+        task.await.ok();
+    }
 
-        if let Some(task) = progress_task {
-            task.await.ok();
-        }
+    tier_outcomes.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Sort by server label for deterministic output order
-        outcomes.sort_by(|a, b| a.0.cmp(&b.0));
-
-        for (server_label, outcome_res) in outcomes {
-            let outcome = outcome_res?;
+    for (server_label, outcomes_res) in tier_outcomes {
+        let outcomes = outcomes_res?;
+        for (i, outcome) in outcomes.into_iter().enumerate() {
+            let nzb_name = &nzb_names[i];
 
             if json {
                 let mut json_val = serde_json::json!({
@@ -756,10 +759,17 @@ async fn check(
                     "articles_per_second": outcome.articles_per_second(),
                 });
                 if let Some(ref s) = server_label {
-                    json_val.as_object_mut().unwrap().insert("server".to_string(), serde_json::Value::String(s.clone()));
+                    json_val
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("server".to_string(), serde_json::Value::String(s.clone()));
                 }
                 println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
             } else {
+                if queues.len() > 1 {
+                    println!("\n[{}/{}] {}", i + 1, queues.len(), nzb_name);
+                }
+
                 let mut incomplete_files = 0u32;
                 for f in &outcome.files {
                     if f.is_complete() {
