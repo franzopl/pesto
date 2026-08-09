@@ -333,8 +333,8 @@ cheapest-but-least-trustworthy to most expensive-but-certain:
 #### `--sample <N>`: check a subset instead of every segment
 
 Only meaningful alongside `--stat` (errors otherwise — a real download
-always fetches every segment). Limits the check to the first `N` segment(s)
-of *each file* instead of the whole release — most valuable with
+always fetches every segment). Limits the check to `N` segment(s) of *each
+file*, spread evenly across it, instead of the whole release — most valuable with
 `--stat=body`, whose per-segment cost is a real article fetch, so checking
 a large release that way in full often isn't worth it. `--sample 1` (one
 segment per file) is usually enough to catch a systemic problem — a
