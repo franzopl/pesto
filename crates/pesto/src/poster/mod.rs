@@ -2785,7 +2785,7 @@ async fn worker(
                     from: task.from.clone(),
                     newsgroups: shared.post_group.clone(),
                     subject: default_subject(
-                        &task.meta.subject_name,
+                        &task.subject_name,
                         task.part,
                         task.total,
                         (shared.total_files > 0)

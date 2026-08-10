@@ -21,6 +21,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   scripts have no way to observe a deprecation warning) and will be removed in a future release.
 
 ### Fixed
+- **`--obfuscate=paranoid` posted every segment of a multi-segment file under the same Subject when using more
+  than one connection.** The connection-pool `worker()` built the outgoing `Subject:` header from
+  `task.meta.subject_name` (the file-level identity, fixed once per file — correct for `full`/`full-shared`)
+  instead of `task.subject_name`, the per-article field `make_task` already randomises fresh for paranoid. The
+  bug happened to be invisible with a single connection, which isn't the mode's default or realistic use, so it
+  went unnoticed: every segment of the same file shared one Subject (only the `(part/total)` suffix varied),
+  defeating paranoid's whole point of making segments ungroupable by wire metadata. `From` and `Date` were not
+  affected — they already read from the per-article field correctly.
 - **PAR2 index/volumes for a `--compress-volume-size` archive no longer borrow one volume's name.** The PAR2
   set's local/NZB name was built from `metas[0].real_name` verbatim — for a volume-split archive that's one
   specific `.partNN.rar`/`.NNN` file, so the set showed up as e.g. `archive.part04.rar.par2` even though the
