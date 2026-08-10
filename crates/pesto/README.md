@@ -250,7 +250,7 @@ from cataloguing plain posts; obfuscation hides the content from them.
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, 10–30 chars, unique per file | random, unique per file | random per file | yes |
-| `full-shared` | shared prefix + real extension, same across the release | random, independent per file | random, shared across the release | yes |
+| `full-shared` | shared prefix + real extension, same across the release | shared prefix + random suffix, per file | random, shared across the release | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
@@ -280,11 +280,14 @@ up unindexed or split apart (see [issue #58]).
 `--obfuscate=full-shared` fixes that by generating one random *prefix* per run
 and reusing it — with the real extension (or archive volume suffix) kept — as
 the **Subject** of every file: the archive (or loose input files) and every
-PAR2 index/volume. Only the subject prefix is shared; the yEnc body `name=`
-stays independently random per file (reusing it too would leave an exact
-subject/body match across every article in the release — the same
-fingerprint plain `full` avoids by keeping Subject and yEnc name independent).
-The real names still never touch the wire; only the *grouping* changes.
+PAR2 index/volume. The yEnc body `name=` carries that same prefix too, each
+with its own random suffix (`{prefix}-{random}`) rather than repeating the
+subject verbatim — an indexer that can only see the yEnc body (not the
+Subject) still recognises every article as part of the release, while the
+random suffix keeps the Subject and yEnc name from ever matching exactly
+(the fingerprint plain `full` avoids by keeping them fully independent — see
+[issue #106]). The real names still never touch the wire; only the
+*grouping* changes.
 
 ```bash
 pesto --obfuscate=full-shared movie.mkv
@@ -297,6 +300,7 @@ indexer compatibility matters more than resistance to wire-metadata
 correlation.
 
 [issue #58]: https://github.com/franzopl/pesto/issues/58
+[issue #106]: https://github.com/franzopl/pesto/issues/106
 
 ### Paranoid mode (experimental)
 

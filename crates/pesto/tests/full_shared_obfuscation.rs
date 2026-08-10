@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 
 use pesto::config::{Config, ObfuscateMode};
 use pesto::poster::post_files;
@@ -264,21 +265,26 @@ async fn full_shared_obfuscation_preserves_rar_volume_suffix() {
 // ── the same wire prefix, which is the exact grouping problem issue #58 ──
 // ── reports against plain `full`. ──────────────────────────────────────────
 
-fn spawn_accept_all_server() -> SocketAddr {
+type CapturedArticles = Arc<Mutex<Vec<Vec<u8>>>>;
+
+fn spawn_accept_all_server() -> (SocketAddr, CapturedArticles) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let articles: CapturedArticles = Arc::new(Mutex::new(Vec::new()));
+    let articles_clone = Arc::clone(&articles);
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            std::thread::spawn(move || handle_connection(stream));
+            let articles = Arc::clone(&articles_clone);
+            std::thread::spawn(move || handle_connection(stream, articles));
         }
     });
 
-    addr
+    (addr, articles)
 }
 
-fn handle_connection(stream: TcpStream) {
+fn handle_connection(stream: TcpStream, articles: CapturedArticles) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -301,9 +307,9 @@ fn handle_connection(stream: TcpStream) {
             if writer.write_all(b"340 send article\r\n").is_err() {
                 return;
             }
-            let mut raw = Vec::new();
+            let mut article = Vec::new();
             loop {
-                raw.clear();
+                let mut raw = Vec::new();
                 match reader.read_until(b'\n', &mut raw) {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {}
@@ -311,7 +317,9 @@ fn handle_connection(stream: TcpStream) {
                 if raw == b".\r\n" {
                     break;
                 }
+                article.extend_from_slice(&raw);
             }
+            articles.lock().unwrap().push(article);
             if writer.write_all(b"240 article received\r\n").is_err() {
                 return;
             }
@@ -342,7 +350,7 @@ fn content(seed: u8, len: usize) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
-    let addr = spawn_accept_all_server();
+    let (addr, articles) = spawn_accept_all_server();
     let dir = std::env::temp_dir().join(format!("pesto_full_shared_par2_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -468,6 +476,65 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
             seg.subject_name
         );
     }
+
+    // Issue #106: an indexer that only inspects the yEnc body (not the
+    // Subject) must still recognise a PAR2 article as part of the release —
+    // so the yEnc `name=` must also carry the shared prefix, for the PAR2
+    // index/volumes exactly like it already does for the content file. Note
+    // this is the *wire* prefix (parsed from the raw Subject header below),
+    // not `content_segment.subject_name` above — that field is always the
+    // real filename for NZB purposes, regardless of obfuscation, so it isn't
+    // a reliable stand-in for what's actually on the wire.
+    let captured = articles.lock().unwrap();
+    assert!(!captured.is_empty(), "no articles were captured");
+
+    fn quoted_name(subject: &str) -> &str {
+        subject
+            .split_once('"')
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(name, _)| name)
+            .unwrap_or(subject)
+    }
+
+    let mut wire_prefix: Option<String> = None;
+    let mut checked_par2 = 0;
+    for article in captured.iter() {
+        let text = String::from_utf8_lossy(article);
+        let subject = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Subject: "))
+            .expect("article must have a Subject header")
+            .trim_end_matches('\r');
+        let name = quoted_name(subject);
+        let prefix = shared_prefix(name).to_string();
+        let prefix = wire_prefix.get_or_insert(prefix);
+        assert_eq!(
+            shared_prefix(name),
+            prefix,
+            "article subject `{subject}` doesn't share the release's wire prefix `{prefix}`"
+        );
+
+        if !subject.contains(".par2") {
+            continue;
+        }
+        let ybegin = text
+            .lines()
+            .find(|l| l.starts_with("=ybegin "))
+            .expect("article must have a =ybegin line");
+        let yenc_name = ybegin
+            .split("name=")
+            .nth(1)
+            .expect("=ybegin must carry name=")
+            .trim_end_matches('\r');
+        assert!(
+            yenc_name.starts_with(&format!("{prefix}-")),
+            "PAR2 article's yEnc name= `{yenc_name}` (subject `{subject}`) \
+             doesn't start with the shared wire prefix `{prefix}-`"
+        );
+        checked_par2 += 1;
+    }
+    assert!(checked_par2 > 0, "no PAR2 articles were captured to check");
+    drop(captured);
 
     let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
     let _ = std::fs::remove_dir_all(&dir);

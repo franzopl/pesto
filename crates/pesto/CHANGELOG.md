@@ -12,6 +12,17 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **`--obfuscate=full-shared`'s yEnc `name=` now keeps the release's shared prefix.** `bb9e3b2` (0.6.1) made the
+  Subject and yEnc `name=` independently random for every obfuscated article, closing an exact-match
+  fingerprint — correct for `full`/`paranoid`, but for `full-shared` it also stripped the shared prefix from the
+  yEnc body, which is what a decoding client (and an indexer's own file-listing logic) actually uses to name a
+  file, not the Subject. Losing it there defeated the grouping `full-shared` exists to provide (issue #58),
+  causing indexers to mismatch PAR2 volumes against the wrong archive file when reconstructing a release
+  (issue #106). The yEnc name now carries the same shared prefix plus its own random suffix
+  (`{prefix}-{random}`), so an indexer can still recognise every article as part of the release from the yEnc
+  body alone, without an exact Subject/yEnc match.
+
 ## [0.6.1] — 2026-08-07
 
 ### Fixed

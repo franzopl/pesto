@@ -157,6 +157,19 @@ pub fn obfuscated_name() -> String {
     random_alnum(len)
 }
 
+/// Generate an obfuscated name that starts with `prefix` followed by a random
+/// alphanumeric suffix, e.g. `obfuscated_name_with_prefix("aB3xY9")` ->
+/// `"aB3xY9-k2Qmz8Fh"`. Used by `ObfuscateMode::FullShared`'s yEnc `name=` so
+/// an indexer can still recognise every article of a release as belonging
+/// together by the shared leading token, without the exact Subject/yEnc match
+/// that `obfuscated_name()` alone avoids (see pesto issue #106 — a plain
+/// independent yEnc name left indexers with no wire-visible signal at all to
+/// group the release by, once the Subject/yEnc match was removed).
+pub fn obfuscated_name_with_prefix(prefix: &str) -> String {
+    let len = 8 + (rand_u64() as usize % 15); // 8..=22 chars
+    format!("{prefix}-{}", random_alnum(len))
+}
+
 /// A fresh source of randomness. `RandomState` is seeded by the OS on every
 /// construction, so each call yields an unrelated 64-bit value — the same
 /// trick used for `Message-ID`s, which keeps `pesto` free of an RNG crate.

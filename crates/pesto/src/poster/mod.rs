@@ -18,8 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use crate::article::{
-    default_subject, format_rfc2822, generate_message_id, obfuscated_name, rand_u64, random_from,
-    Article,
+    default_subject, format_rfc2822, generate_message_id, obfuscated_name,
+    obfuscated_name_with_prefix, rand_u64, random_from, Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
@@ -723,11 +723,13 @@ pub async fn post_files_with_progress_and_cancel(
                     // The shared prefix stays on the subject — that's what
                     // indexers actually key "same release" grouping off of
                     // (issue #58/#68, both subject-based). The yEnc body
-                    // name= has no grouping role, so it's independently
-                    // random instead of repeating the same prefixed name,
-                    // which would otherwise leave an exact-match signature
-                    // across every file's body in the release.
-                    (name, obfuscated_name(), from)
+                    // name= also starts with that same prefix (plus its own
+                    // random suffix) instead of an entirely independent
+                    // string: an indexer that can only see the yEnc body
+                    // (not the Subject) still recognises the article as part
+                    // of the release, while the random suffix still avoids
+                    // an exact Subject/yEnc match (issue #106).
+                    (name, obfuscated_name_with_prefix(prefix), from)
                 }
             }
         };
@@ -2450,12 +2452,14 @@ async fn push_par2_file(
 
     let (subject_name, yenc_name, from) = if let Some(name) = wire_override {
         // `name` carries the release's shared prefix (FullShared) — keep it
-        // on the subject for indexer grouping, but give the yEnc body an
-        // independently-random name instead of repeating it (see the main
-        // FullShared branch above for why).
+        // on the subject for indexer grouping, and give the yEnc body a name
+        // that also starts with that same prefix (plus its own random
+        // suffix) instead of an entirely independent string — see the main
+        // FullShared branch above for why (issue #106).
+        let prefix = shared.release_prefix.as_deref().unwrap_or_default();
         (
             name,
-            obfuscated_name(),
+            obfuscated_name_with_prefix(prefix),
             shared.release_from.clone().unwrap_or_default(),
         )
     } else {

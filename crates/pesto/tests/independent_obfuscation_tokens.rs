@@ -1,10 +1,16 @@
 //! Under `--obfuscate=full` and `--obfuscate=full-shared`, the wire
-//! `Subject:` header and the yEnc body's `=ybegin ... name=` value must be
-//! independently random, not the same string reused. Reusing the same
-//! string leaves an exact-match signature (header == body name) across
-//! every posted article that fingerprints this specific posting tool,
-//! undermining part of what obfuscation is for — see `poster/mod.rs`'s
+//! `Subject:` header and the yEnc body's `=ybegin ... name=` value must
+//! never match exactly. Reusing the same string leaves an exact-match
+//! signature (header == body name) across every posted article that
+//! fingerprints this specific posting tool, undermining part of what
+//! obfuscation is for — see `poster/mod.rs`'s
 //! `ObfuscateMode::Full | ObfuscateMode::Paranoid` and `FullShared` arms.
+//!
+//! `full-shared` is a partial exception: since issue #106, its yEnc name
+//! deliberately keeps the release's shared prefix (with its own random
+//! suffix) so an indexer reading only the yEnc body can still recognise the
+//! article as part of the release — it just avoids repeating the *whole*
+//! subject string verbatim.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -168,7 +174,7 @@ fn full_obfuscation_uses_independent_subject_and_yenc_name() {
 }
 
 #[test]
-fn full_shared_obfuscation_keeps_prefix_on_subject_but_randomises_yenc_name() {
+fn full_shared_obfuscation_keeps_prefix_on_subject_and_yenc_name_but_avoids_exact_match() {
     let (addr, articles) = spawn_capturing_server();
     let dir = tempfile::tempdir().unwrap();
     let xdg_home = tempfile::tempdir().unwrap();
@@ -204,18 +210,30 @@ fn full_shared_obfuscation_keeps_prefix_on_subject_but_randomises_yenc_name() {
         "full-shared must keep one shared prefix across every file's subject"
     );
 
-    // But the yEnc body name= is independently random per file, and must
-    // not equal that file's own subject name either.
+    // The yEnc body name= carries that same prefix too (issue #106) — an
+    // indexer that only inspects the yEnc body must still be able to
+    // recognise the article as part of the release.
+    assert!(
+        yenc_a.starts_with(&format!("{prefix_a}-")),
+        "yEnc name= `{yenc_a}` must start with the shared prefix `{prefix_a}-`"
+    );
+    assert!(
+        yenc_b.starts_with(&format!("{prefix_a}-")),
+        "yEnc name= `{yenc_b}` must start with the shared prefix `{prefix_a}-`"
+    );
+
+    // But the per-file random suffix still keeps the two yEnc names — and
+    // each yEnc name from its own file's subject — from matching exactly.
     assert_ne!(
         yenc_a, yenc_b,
-        "yEnc name= must be independently random per file under full-shared"
+        "yEnc name= suffix must be independently random per file under full-shared"
     );
     assert_ne!(
         name_a, yenc_a,
-        "file a's subject and yEnc name= must differ under full-shared"
+        "file a's subject and yEnc name= must not match exactly under full-shared"
     );
     assert_ne!(
         name_b, yenc_b,
-        "file b's subject and yEnc name= must differ under full-shared"
+        "file b's subject and yEnc name= must not match exactly under full-shared"
     );
 }
