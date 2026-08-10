@@ -306,8 +306,14 @@ struct Cli {
     archive_password: Option<String>,
 
     /// Friendly display name emitted as `<meta type="title">` in the `.nzb`
-    /// (shown by NZBGet / SABnzbd) [config: output.nzb_name].
+    /// (shown by NZBGet / SABnzbd) [config: output.nzb_title].
     #[arg(long, value_name = "NAME")]
+    nzb_title: Option<String>,
+
+    /// Deprecated alias of `--nzb-title`; still works, but prefer
+    /// `--nzb-title` in new scripts. Will stop being accepted in a future
+    /// release.
+    #[arg(long, value_name = "NAME", hide = true)]
     nzb_name: Option<String>,
 
     /// Extraction password written to `<meta type="password">` in the `.nzb`;
@@ -423,7 +429,7 @@ struct Cli {
     /// `PESTO_NZB` and `PESTO_NFO` (which don't exist yet at this point):
     /// `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`,
     /// `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_SERVER`, `PESTO_SERVERS`,
-    /// `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
+    /// `PESTO_CATEGORY`, `PESTO_NZB_TITLE`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
     /// `PESTO_TAGS`
     /// Can be specified multiple times. [config: output.pre_hooks].
     #[arg(long, value_name = "CMD", action = clap::ArgAction::Append)]
@@ -433,7 +439,7 @@ struct Cli {
     /// receives upload details via environment variables:
     /// `PESTO_NZB`, `PESTO_NFO`, `PESTO_NAME`, `PESTO_BYTES`,
     /// `PESTO_INPUT_PATHS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`,
-    /// `PESTO_SERVER`, `PESTO_SERVERS`, `PESTO_CATEGORY`, `PESTO_NZB_NAME`,
+    /// `PESTO_SERVER`, `PESTO_SERVERS`, `PESTO_CATEGORY`, `PESTO_NZB_TITLE`,
     /// `PESTO_OBFUSCATE`, `PESTO_PAR2`, `PESTO_TAGS`
     /// Can be specified multiple times. [config: output.post_hooks].
     #[arg(long, value_name = "CMD", action = clap::ArgAction::Append)]
@@ -618,7 +624,7 @@ struct Cli {
     /// Merge all per-episode NZBs in DIR into one combined season NZB and exit.
     /// No server connection is required. NZBs are grouped by their season
     /// identifier (e.g. `S02`); each group produces one output NZB written
-    /// beside the source files. Use `--nzb-name` to override the display name
+    /// beside the source files. Use `--nzb-title` to override the display name
     /// in the NZB `<head>`.
     #[arg(long, value_name = "DIR", conflicts_with = "files")]
     merge_season: Option<PathBuf>,
@@ -700,7 +706,14 @@ impl Cli {
                 .archive_password
                 .as_deref()
                 .and_then(|pw| (!pw.is_empty()).then(|| pw.to_string())),
-            nzb_name: self.nzb_name.clone(),
+            nzb_title: self.nzb_title.clone().or_else(|| {
+                self.nzb_name.clone().inspect(|_| {
+                    eprintln!(
+                        "warning: --nzb-name is deprecated, use --nzb-title instead; \
+                         --nzb-name will stop being accepted in a future release"
+                    );
+                })
+            }),
             nzb_password: self.nzb_password.clone(),
             nzb_category: self.nzb_category.clone(),
             nzb_tags: self.nzb_tag.clone(),
@@ -1138,7 +1151,7 @@ async fn run_single_upload(
             server: pre_servers_str.split(':').next().unwrap_or(&config.host),
             servers: &pre_servers_str,
             category: config.nzb_category.as_deref(),
-            nzb_name: config.nzb_name.as_deref(),
+            nzb_title: config.nzb_title.as_deref(),
             obfuscate: pre_obfuscate,
             par2: config.par2,
             tags: &pre_tags_str,
@@ -1633,7 +1646,7 @@ async fn run_single_upload(
                 let mut nzb_tags = config.nzb_tags.clone();
                 add_obfuscation_tag(&mut nzb_tags, &config.obfuscate);
                 let nzb_meta = NzbMeta {
-                    name: config.nzb_name.clone(),
+                    name: config.nzb_title.clone(),
                     password: config
                         .nzb_password
                         .clone()
@@ -1712,7 +1725,7 @@ async fn run_single_upload(
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
                             nzb_path: Some(&reported.display().to_string()),
-                            subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                            subject: config.nzb_title.as_deref().or(Some(entry_label)),
                             wire_subjects: &wire_subjects_vec,
                         },
                         config.history_dir.as_deref(),
@@ -1854,7 +1867,7 @@ async fn run_single_upload(
             server: post_servers_str.split(':').next().unwrap_or(&config.host),
             servers: &post_servers_str,
             category: config.nzb_category.as_deref(),
-            nzb_name: config.nzb_name.as_deref(),
+            nzb_title: config.nzb_title.as_deref(),
             obfuscate: post_obfuscate,
             par2: config.par2,
             tags: &post_tags_str,
@@ -2356,7 +2369,7 @@ async fn run_batch(
         } else if !all_segments.is_empty() {
             info!(entries = total_entries, path = %season_path.display(), "season merge starting");
             let config = &params.config;
-            let season_name = config.nzb_name.clone().or_else(|| {
+            let season_name = config.nzb_title.clone().or_else(|| {
                 season_path
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
@@ -2534,7 +2547,7 @@ async fn run_batch(
                 server: season_servers_str.split(':').next().unwrap_or(&config.host),
                 servers: &season_servers_str,
                 category: config.nzb_category.as_deref(),
-                nzb_name: config.nzb_name.as_deref(),
+                nzb_title: config.nzb_title.as_deref(),
                 obfuscate: season_obfuscate,
                 par2: config.par2,
                 tags: &season_tags_str,
@@ -3246,7 +3259,15 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
             };
             fc.map(|c| c.output.nzb_tags).unwrap_or_default()
         };
-        return run_merge_season(dir, cli.nzb_name.as_deref(), nzb_tags);
+        let nzb_title = cli.nzb_title.as_deref().or_else(|| {
+            cli.nzb_name.as_deref().inspect(|_| {
+                eprintln!(
+                    "warning: --nzb-name is deprecated, use --nzb-title instead; \
+                     --nzb-name will stop being accepted in a future release"
+                );
+            })
+        });
+        return run_merge_season(dir, nzb_title, nzb_tags);
     }
 
     // `pesto` with nothing to post and no --watch: show the orientation screen.
@@ -3703,7 +3724,7 @@ struct HookEnv<'a> {
     /// one of several equally-configured servers a given run landed on.
     servers: &'a str,
     category: Option<&'a str>,
-    nzb_name: Option<&'a str>,
+    nzb_title: Option<&'a str>,
     obfuscate: &'a str,
     par2: u8,
     /// Space-separated list of NZB tags (empty string when none).
@@ -3728,7 +3749,11 @@ fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
     child.env("PESTO_GROUPS", env.groups);
     child.env("PESTO_PASSWORD", env.password.unwrap_or(""));
     child.env("PESTO_CATEGORY", env.category.unwrap_or(""));
-    child.env("PESTO_NZB_NAME", env.nzb_name.unwrap_or(""));
+    child.env("PESTO_NZB_TITLE", env.nzb_title.unwrap_or(""));
+    // Deprecated alias of PESTO_NZB_TITLE, same value — kept so existing
+    // hook scripts written before the --nzb-name -> --nzb-title rename keep
+    // working. Will stop being set in a future release.
+    child.env("PESTO_NZB_NAME", env.nzb_title.unwrap_or(""));
     child.env("PESTO_OBFUSCATE", env.obfuscate);
     child.env("PESTO_PAR2", env.par2.to_string());
     child.env("PESTO_TAGS", env.tags);

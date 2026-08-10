@@ -43,7 +43,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         compress_format: None,
         compress_password: None,
         compress_volume_size: None,
-        nzb_name: None,
+        nzb_title: None,
         nzb_password: None,
         nzb_category: None,
         nzb_tags: vec![],

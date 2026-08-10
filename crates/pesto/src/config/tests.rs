@@ -292,7 +292,7 @@ fn optional_string_fields_default_to_none() {
     assert!(cfg.password.is_none());
     assert!(cfg.compress_format.is_none());
     assert!(cfg.compress_password.is_none());
-    assert!(cfg.nzb_name.is_none());
+    assert!(cfg.nzb_title.is_none());
     assert!(cfg.nzb_password.is_none());
     assert!(cfg.nzb_category.is_none());
     assert!(cfg.nzb_tags.is_empty());
@@ -421,7 +421,7 @@ fn toml_output_section_sets_fields() {
         [posting]
         groups = ["alt.test"]
         [output]
-        nzb_name = "My Release"
+        nzb_title = "My Release"
         nzb_category = "TV > HD"
         nzb_tags = ["hd", "2024", "dts"]
         nzb_dir = "/tmp/nzb"
@@ -434,7 +434,7 @@ fn toml_output_section_sets_fields() {
     )
     .unwrap();
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
-    assert_eq!(cfg.nzb_name.as_deref(), Some("My Release"));
+    assert_eq!(cfg.nzb_title.as_deref(), Some("My Release"));
     assert_eq!(cfg.nzb_category.as_deref(), Some("TV > HD"));
     assert_eq!(cfg.nzb_tags, vec!["hd", "2024", "dts"]);
     assert_eq!(cfg.nzb_dir.as_deref(), Some("/tmp/nzb"));
@@ -443,6 +443,65 @@ fn toml_output_section_sets_fields() {
     assert_eq!(cfg.post_hooks, vec!["notify.sh"]);
     assert!(cfg.nfo);
     assert!(cfg.no_hooks, "output.no_hooks = true should be honored");
+}
+
+#[test]
+fn toml_deprecated_nzb_name_still_works() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [output]
+        nzb_name = "My Release"
+        "#,
+    )
+    .unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert_eq!(cfg.nzb_title.as_deref(), Some("My Release"));
+}
+
+#[test]
+fn toml_nzb_title_takes_precedence_over_deprecated_nzb_name() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [output]
+        nzb_title = "New Name"
+        nzb_name = "Old Name"
+        "#,
+    )
+    .unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert_eq!(cfg.nzb_title.as_deref(), Some("New Name"));
+}
+
+#[test]
+fn cli_nzb_title_takes_precedence_over_toml_deprecated_nzb_name() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [output]
+        nzb_name = "From File"
+        "#,
+    )
+    .unwrap();
+    let cfg = Config::resolve(
+        file,
+        Overrides {
+            nzb_title: Some("From CLI".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.nzb_title.as_deref(), Some("From CLI"));
 }
 
 #[test]
@@ -819,7 +878,7 @@ fn cli_overrides_nzb_metadata() {
     let cfg = Config::resolve(
         minimal_file(),
         Overrides {
-            nzb_name: Some("My Show S01".into()),
+            nzb_title: Some("My Show S01".into()),
             nzb_password: Some("abc".into()),
             nzb_category: Some("TV".into()),
             nzb_tags: vec!["hd".into(), "2024".into()],
@@ -828,7 +887,7 @@ fn cli_overrides_nzb_metadata() {
         },
     )
     .unwrap();
-    assert_eq!(cfg.nzb_name.as_deref(), Some("My Show S01"));
+    assert_eq!(cfg.nzb_title.as_deref(), Some("My Show S01"));
     assert_eq!(cfg.nzb_password.as_deref(), Some("abc"));
     assert_eq!(cfg.nzb_category.as_deref(), Some("TV"));
     assert_eq!(cfg.nzb_tags, vec!["hd", "2024"]);

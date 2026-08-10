@@ -53,7 +53,8 @@ const FIELD_SECTIONS: &[(&str, &str)] = &[
     ("session_log", "[output]"),
     ("nzb", "[output]"),
     ("nzb_dir", "[output]"),
-    ("nzb_name", "[output]"),
+    ("nzb_title", "[output]"),
+    ("nzb_name", "[output]"), // deprecated alias of nzb_title
     ("nzb_password", "[output]"),
     ("nzb_category", "[output]"),
     ("nzb_tags", "[output]"),
@@ -346,7 +347,17 @@ impl Config {
                 }),
             compress_password: cli.compress_password,
             compress_volume_size: cli.compress_volume_size.or(file.compression.volume_size),
-            nzb_name: cli.nzb_name.or(file.output.nzb_name),
+            nzb_title: cli.nzb_title.or_else(|| {
+                file.output.nzb_title.or_else(|| {
+                    file.output.nzb_name.inspect(|_| {
+                        eprintln!(
+                            "warning: config.toml's [output] nzb_name is deprecated, use \
+                             nzb_title instead; nzb_name will stop being accepted in a \
+                             future release"
+                        );
+                    })
+                })
+            }),
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: {
                 let explicit = cli.nzb_category.or(file.output.nzb_category);

@@ -11,8 +11,10 @@
 //! Each hook receives the same environment variables:
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
 //! `PESTO_SERVERS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`,
-//! `PESTO_CATEGORY`, `PESTO_NZB_NAME`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
-//! `PESTO_TAGS`, `PESTO_WIRE_SUBJECT`.
+//! `PESTO_CATEGORY`, `PESTO_NZB_TITLE`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
+//! `PESTO_TAGS`, `PESTO_WIRE_SUBJECT`. `PESTO_NZB_NAME` is also set, as a
+//! deprecated alias of `PESTO_NZB_TITLE` with the same value — see
+//! [`HookContext::nzb_title`].
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,7 +44,8 @@ pub struct HookContext {
     pub groups: String,
     pub password: String,
     pub category: String,
-    pub nzb_name: String,
+    /// `<meta type="title">` value (`--nzb-title` / `output.nzb_title`).
+    pub nzb_title: String,
     pub obfuscate: String,
     pub par2: u8,
     pub tags: String,
@@ -239,7 +242,11 @@ fn apply_env(cmd: &mut Command, ctx: &HookContext) {
         .env("PESTO_GROUPS", &ctx.groups)
         .env("PESTO_PASSWORD", &ctx.password)
         .env("PESTO_CATEGORY", &ctx.category)
-        .env("PESTO_NZB_NAME", &ctx.nzb_name)
+        .env("PESTO_NZB_TITLE", &ctx.nzb_title)
+        // Deprecated alias of PESTO_NZB_TITLE, same value — kept so existing
+        // hook scripts written before the --nzb-name -> --nzb-title rename
+        // keep working. Will stop being set in a future release.
+        .env("PESTO_NZB_NAME", &ctx.nzb_title)
         .env("PESTO_OBFUSCATE", &ctx.obfuscate)
         .env("PESTO_PAR2", ctx.par2.to_string())
         .env("PESTO_TAGS", &ctx.tags)

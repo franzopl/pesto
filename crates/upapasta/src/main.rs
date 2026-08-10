@@ -1031,7 +1031,7 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 .unwrap_or("")
                 .to_string(),
             category: cfg.nzb_category.clone().unwrap_or_default(),
-            nzb_name: cfg.nzb_name.clone().unwrap_or_default(),
+            nzb_title: cfg.nzb_title.clone().unwrap_or_default(),
             obfuscate: match cfg.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
@@ -1725,7 +1725,7 @@ fn build_dry_run_config() -> Config {
         compress_format: None,
         compress_password: None,
         compress_volume_size: None,
-        nzb_name: None,
+        nzb_title: None,
         nzb_password: None,
         nzb_category: None,
         nzb_tags: Vec::new(),
@@ -1837,7 +1837,7 @@ async fn run_season_hooks(
             .unwrap_or("")
             .to_string(),
         category: config.nzb_category.clone().unwrap_or_default(),
-        nzb_name: config.nzb_name.clone().unwrap_or_default(),
+        nzb_title: config.nzb_title.clone().unwrap_or_default(),
         obfuscate: match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",

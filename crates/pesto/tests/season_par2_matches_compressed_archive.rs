@@ -172,7 +172,7 @@ fn season_par2_describes_the_posted_archive_not_the_original_episode() {
         // literal in source for secret scanners to (rightly, in general)
         // flag.
         .arg("--password")
-        .args(["--nzb-name", "Season01"])
+        .args(["--nzb-title", "Season01"])
         .args(["--nzb-dir", nzb_dir.to_str().unwrap()])
         .output()
         .expect("failed to run pesto");

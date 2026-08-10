@@ -12,6 +12,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Changed
+- **`--nzb-name` renamed to `--nzb-title`** (`output.nzb_name` → `output.nzb_title` in `config.toml`,
+  `PESTO_NZB_NAME` → `PESTO_NZB_TITLE` for hooks) — the flag only ever set `<meta type="title">` in the
+  `.nzb`, never the `.nzb` file's own name (that's `--out`/`--nzb-dir`), so `nzb-name` was misleading.
+  `--nzb-name`, `output.nzb_name`, and `PESTO_NZB_NAME` still work as deprecated aliases (a warning is
+  printed for the CLI flag and the config key; the env var is set silently alongside the new one, since hook
+  scripts have no way to observe a deprecation warning) and will be removed in a future release.
+
 ### Fixed
 - **`--obfuscate=full-shared`'s yEnc `name=` now keeps the release's shared prefix.** `bb9e3b2` (0.6.1) made the
   Subject and yEnc `name=` independently random for every obfuscated article, closing an exact-match

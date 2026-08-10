@@ -533,7 +533,7 @@ the fact, use `--merge-season`. No server connection is required.
 pesto --merge-season ./nzb/uploaded/
 
 # Override the display name in the NZB <head>
-pesto --merge-season ./nzb/uploaded/ --nzb-name "Batwheels Season 2"
+pesto --merge-season ./nzb/uploaded/ --nzb-title "Batwheels Season 2"
 ```
 
 Files are grouped by their season identifier (`S01`, `S02`, …). Each group
@@ -709,7 +709,7 @@ pesto --dry-run --par2 15 ./MyShow.S01/
 
 ```bash
 # Set the display name shown in NZBGet / SABnzbd
-pesto --nzb-name "My Movie (2024)" movie.mkv
+pesto --nzb-title "My Movie (2024)" movie.mkv
 
 # Set a category and extraction password
 pesto --nzb-category "Movies" --nzb-password "archive_pass" movie.mkv
@@ -729,8 +729,9 @@ These values are written as `<meta>` elements in the `.nzb`:
 <meta type="tag">dts</meta>
 ```
 
-`--nzb-name` maps to `<meta type="title">` — SABnzbd's documented meta type for a
+`--nzb-title` maps to `<meta type="title">` — SABnzbd's documented meta type for a
 human-readable NZB name; plain `<meta type="name">` isn't part of the NZB 1.1 spec.
+`--nzb-name` is a deprecated alias, still accepted with a warning.
 
 `--nzb-tag` can be repeated; each occurrence produces one `<meta type="tag">`.
 If `--nzb-tag` is used on the command line, it replaces any `nzb_tags` set in
@@ -824,7 +825,8 @@ Environment variables available to the pre-hook:
 | `PESTO_GROUP` | First configured newsgroup |
 | `PESTO_GROUPS` | Colon-separated list of all configured newsgroups |
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
-| `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
+| `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
+| `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
 | `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
@@ -855,7 +857,8 @@ following environment variables:
 | `PESTO_GROUPS` | Colon-separated list of all configured newsgroups |
 | `PESTO_PASSWORD` | Archive password (empty when none) |
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
-| `PESTO_NZB_NAME` | Value of `--nzb-name` (empty when not set) |
+| `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
+| `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
 | `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
@@ -992,7 +995,8 @@ picked up automatically — no config change needed.
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |
-| `--nzb-name <NAME>` | `output.nzb_name` | — | `<meta type="title">` in the `.nzb` |
+| `--nzb-title <NAME>` | `output.nzb_title` | — | `<meta type="title">` in the `.nzb` |
+| `--nzb-name <NAME>` (deprecated) | `output.nzb_name` | — | Alias of `--nzb-title`; prints a deprecation warning |
 | `--nzb-password <PASS>` | `output.nzb_password` | — | `<meta type="password">` in the `.nzb` |
 | `--nzb-category <CAT>` | `output.nzb_category` | — | `<meta type="category">` in the `.nzb` |
 | `--nzb-tag <TAG>` | `output.nzb_tags` | — | `<meta type="tag">` in the `.nzb`; repeatable. Replaces config `nzb_tags` when used. |

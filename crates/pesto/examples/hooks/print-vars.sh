@@ -25,7 +25,8 @@
 #   PESTO_GROUPS      — colon-separated list of all newsgroups
 #   PESTO_PASSWORD    — archive password (empty when none)
 #   PESTO_CATEGORY    — NZB category (empty when none)
-#   PESTO_NZB_NAME    — value of --nzb-name, emitted as <meta type="name"> in the .nzb (empty when not set)
+#   PESTO_NZB_TITLE   — value of --nzb-title, emitted as <meta type="title"> in the .nzb (empty when not set)
+#   PESTO_NZB_NAME    — deprecated alias of PESTO_NZB_TITLE, same value (kept for old hook scripts)
 #   PESTO_OBFUSCATE   — obfuscation mode in use
 #   PESTO_PAR2        — PAR2 redundancy percentage (e.g. 10)
 #   PESTO_TAGS        — space-separated list of NZB tags (empty when none)
@@ -47,7 +48,8 @@ echo "  PESTO_GROUP       = $PESTO_GROUP"
 echo "  PESTO_GROUPS      = $PESTO_GROUPS"
 echo "  PESTO_PASSWORD    = $PESTO_PASSWORD"
 echo "  PESTO_CATEGORY    = $PESTO_CATEGORY"
-echo "  PESTO_NZB_NAME    = $PESTO_NZB_NAME"
+echo "  PESTO_NZB_TITLE   = $PESTO_NZB_TITLE"
+echo "  PESTO_NZB_NAME    = $PESTO_NZB_NAME (deprecated alias)"
 echo "  PESTO_OBFUSCATE   = $PESTO_OBFUSCATE"
 echo "  PESTO_PAR2        = $PESTO_PAR2"
 echo "  PESTO_TAGS        = $PESTO_TAGS"

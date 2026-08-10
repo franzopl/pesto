@@ -278,7 +278,7 @@ pub async fn run_upload(
     } else if let Some(base) = nzb_base {
         let out = versioned_nzb_path(&base).await;
         let nzb_meta = crate::nzb::NzbMeta {
-            name: config.nzb_name.clone().or_else(|| {
+            name: config.nzb_title.clone().or_else(|| {
                 entry_paths
                     .first()
                     .and_then(|p| p.file_name())
@@ -334,7 +334,7 @@ pub async fn run_upload(
                             par2_redundancy: par2_pct,
                             duration_secs: upload_start.elapsed().as_secs_f64(),
                             nzb_path: Some(&out.display().to_string()),
-                            subject: config.nzb_name.as_deref().or(Some(entry_label)),
+                            subject: config.nzb_title.as_deref().or(Some(entry_label)),
                             wire_subjects: &wire_subjects_vec,
                         },
                         config.history_dir.as_deref(),
@@ -434,7 +434,7 @@ pub async fn run_upload(
                 .unwrap_or("")
                 .to_string(),
             category: config.nzb_category.clone().unwrap_or_default(),
-            nzb_name: config.nzb_name.clone().unwrap_or_default(),
+            nzb_title: config.nzb_title.clone().unwrap_or_default(),
             obfuscate: match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",

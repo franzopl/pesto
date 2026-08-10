@@ -189,7 +189,7 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
         compress_format: None,
         compress_password: None,
         compress_volume_size: None,
-        nzb_name: None,
+        nzb_title: None,
         nzb_password: None,
         nzb_category: None,
         nzb_tags: vec![],

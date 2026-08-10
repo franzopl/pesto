@@ -248,6 +248,9 @@ pub struct OutputSection {
     /// Directory where `.nzb` files are written by default.
     pub nzb_dir: Option<String>,
     /// Friendly name emitted as `<meta type="title">` in the `.nzb`.
+    pub nzb_title: Option<String>,
+    /// Deprecated alias of [`Self::nzb_title`]; still accepted, with a
+    /// warning, but `nzb_title` takes precedence when both are set.
     pub nzb_name: Option<String>,
     /// Extraction password emitted as `<meta type="password">` in the `.nzb`.
     pub nzb_password: Option<String>,
@@ -376,7 +379,7 @@ pub struct Overrides {
     pub compress_temp_dir: Option<String>,
     pub compress_password: Option<String>,
     pub compress_volume_size: Option<String>,
-    pub nzb_name: Option<String>,
+    pub nzb_title: Option<String>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_tags: Vec<String>,
@@ -466,7 +469,7 @@ pub struct Config {
     pub compress_temp_dir: Option<PathBuf>,
     pub compress_password: Option<String>,
     pub compress_volume_size: Option<String>,
-    pub nzb_name: Option<String>,
+    pub nzb_title: Option<String>,
     pub nzb_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_tags: Vec<String>,

@@ -148,7 +148,7 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
         compress_format: None,
         compress_password: None,
         compress_volume_size: None,
-        nzb_name: None,
+        nzb_title: None,
         nzb_password: None,
         nzb_category: None,
         nzb_tags: vec![],

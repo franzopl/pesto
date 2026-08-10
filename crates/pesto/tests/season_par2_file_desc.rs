@@ -72,7 +72,7 @@ fn season_config(par2_slice_size: usize) -> Config {
         compress_format: None,
         compress_password: None,
         compress_volume_size: None,
-        nzb_name: None,
+        nzb_title: None,
         nzb_password: None,
         nzb_category: None,
         nzb_tags: vec![],
