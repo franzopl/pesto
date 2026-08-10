@@ -894,23 +894,29 @@ pesto --dry-run --nfo movie.mkv   # generate NFO without touching the network
 The [`examples/hooks/`](examples/hooks/) directory contains ready-to-use hook
 scripts:
 
-| Script | Platform | Description |
-|--------|----------|-------------|
-| [`print-vars.sh`](examples/hooks/print-vars.sh) | Unix | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
-| [`curupira.sh`](examples/hooks/curupira.sh) | Unix | Uploads the `.nzb` (and optional `.nfo`) to [Curupira.cc](https://curupira.cc) via its REST API |
-| [`generic-indexer.sh`](examples/hooks/generic-indexer.sh) | Unix | Sends the NZB (and optional NFO) to any Newznab-compatible indexer via its REST API |
-| [`generic-indexer.bat`](examples/hooks/generic-indexer.bat) | Windows | Same as above — `.bat` version for `cmd.exe` |
-| [`generic-indexer.ps1`](examples/hooks/generic-indexer.ps1) | Windows | Same as above — PowerShell version with native JSON parsing (recommended on Windows) |
-| [`different-indexer.sh`](examples/hooks/different-indexer.sh) | Unix | Sends the NZB (and optional NFO) to an indexer that takes the API key as a query parameter and replies with a JSON `guid` |
-| [`different-indexer.ps1`](examples/hooks/different-indexer.ps1) | Windows | Same as above — PowerShell version |
+| Script | Type | Platform | Description |
+|--------|------|----------|-------------|
+| [`print-vars.sh`](examples/hooks/print-vars.sh) | Post-upload | Unix | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
+| [`generic-indexer.sh`](examples/hooks/generic-indexer.sh) | Post-upload | Unix | Sends the NZB (and optional NFO) to any Newznab-compatible indexer via its REST API |
+| [`generic-indexer.bat`](examples/hooks/generic-indexer.bat) | Post-upload | Windows | Same as above — `.bat` version for `cmd.exe` |
+| [`generic-indexer.ps1`](examples/hooks/generic-indexer.ps1) | Post-upload | Windows | Same as above — PowerShell version with native JSON parsing (recommended on Windows) |
+| [`different-indexer.sh`](examples/hooks/different-indexer.sh) | Post-upload | Unix | Sends the NZB (and optional NFO) to an indexer that takes the API key as a query parameter and replies with a JSON `guid` |
+| [`different-indexer.ps1`](examples/hooks/different-indexer.ps1) | Post-upload | Windows | Same as above — PowerShell version |
+| [`newznab-dedup.sh`](examples/hooks/newznab-dedup.sh) | Pre-upload | Unix | Aborts the upload if a release with the same name already exists on a Newznab indexer (fail-open on network errors) |
+| [`newznab-dedup.ps1`](examples/hooks/newznab-dedup.ps1) | Pre-upload | Windows | Same as above — PowerShell version |
 
-To install a hook on Unix:
+To install a **post-upload** hook on Unix:
 
 ```bash
-cp examples/hooks/curupira.sh ~/.config/pesto/hooks/
-chmod +x ~/.config/pesto/hooks/curupira.sh
+cp examples/hooks/generic-indexer.sh ~/.config/pesto/hooks/
+chmod +x ~/.config/pesto/hooks/generic-indexer.sh
 # edit API_KEY inside the file
 ```
+
+`newznab-dedup.sh`/`.ps1` are **pre-upload** hooks instead — install them to
+`~/.config/pesto/pre-hooks/` (Unix) or `%APPDATA%\pesto\pre-hooks\` (Windows),
+not the `hooks/` directory above. See [Pre-upload hook](#pre-upload-hook) for
+details.
 
 To install a hook on Windows, copy the `.bat` or `.ps1` file to `%APPDATA%\pesto\hooks\` and edit the variables at the top of the file. For the PowerShell version, set `post_hook` in `config.toml`:
 
