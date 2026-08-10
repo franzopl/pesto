@@ -342,6 +342,20 @@ pesto --compress=zip movie.mkv
 pesto --compress=rar movie.mkv
 ```
 
+### Volume-split archive
+
+```bash
+# Split into 1 GB volumes: stem.part01.rar, stem.part02.rar, ...
+pesto --compress=rar --compress-volume-size=1g movie.mkv
+
+# 7z volumes: stem.7z.001, stem.7z.002, ...
+pesto --compress=7z --compress-volume-size=1g movie.mkv
+```
+
+`--compress-volume-size` takes a number with an optional unit (`b`/`k`/`m`/`g`/`t`),
+e.g. `500m` or `4g`. Supported with `--compress=rar` and `--compress=7z`; rejected
+with `--compress=zip` (7z's zip backend has no volume support).
+
 ### Password-protected archive
 
 ```bash
@@ -991,6 +1005,7 @@ picked up automatically — no config change needed.
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
+| `--compress-volume-size <SIZE>` | `compression.volume_size` | off | Split the archive into volumes (e.g. `500m`, `4g`); `rar`/`7z` only, rejected with `--compress=zip` |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
