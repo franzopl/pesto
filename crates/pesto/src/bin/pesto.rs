@@ -2033,9 +2033,7 @@ fn top_level_entries(dir: &Path, ext_filter: &[String]) -> Result<Vec<PathBuf>> 
         .filter(|p| !is_artifact_entry(p))
         .filter(|p| p.is_dir() || matches_ext_filter(p, ext_filter))
         .collect();
-    entries.sort_by(|a, b| {
-        lexical_sort::natural_lexical_cmp(&a.to_string_lossy(), &b.to_string_lossy())
-    });
+    entries.sort_by(|a, b| pesto::walk::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
     Ok(entries)
 }
 

@@ -29,6 +29,12 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   by natural name order (digit runs compared numerically, so `part2.rar` precedes `part10.rar` even when `rar`
   leaves the volume number unpadded) while `metas` keeps its File-ID order for the encoder; the PAR2 index and
   volumes still close out the release. The `.nzb`'s own file list is sorted by the same natural order.
+- **Every stage that orders a release's files now uses one natural-order comparator** (`walk::natural_cmp`,
+  the same `lexical_sort` ordering `--each`/`--season` already sorted their entries with). Two places sorted
+  byte-wise and could disagree with the file counter above: `expand_inputs` (which is also what numbers
+  `--obfuscate=full-shared`'s `{prefix}-NN` wire names, so a release of `ep1/ep2/ep10` got `-01` on `ep10`
+  while the counter called it `[3/3]`), and `--compress-volume-size`'s volume listing (`rar` pads `.partNN`
+  only to the digit count the volume total needs, so an unpadded set was collected `part1, part10, part2`).
 - **`--obfuscate=paranoid` posted every segment of a multi-segment file under the same Subject when using more
   than one connection.** The connection-pool `worker()` built the outgoing `Subject:` header from
   `task.meta.subject_name` (the file-level identity, fixed once per file — correct for `full`/`full-shared`)

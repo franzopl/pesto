@@ -536,6 +536,21 @@ field, so that listed the release scrambled. The two orders are now decoupled: `
 the encoder, only `file_index` follows volume order. The PAR2 index and volumes keep their positions at the end
 of the release, and the final `.nzb` file list is sorted by the same natural order.
 
+**One comparator for the whole release.** `walk::natural_cmp` is now the single definition of that order,
+delegating to `lexical_sort::natural_lexical_cmp` — the ordering `--each`/`--season` already sorted their entries
+with, so a batch's entry order and a release's internal file order can't disagree. Every stage that puts files in
+order goes through it: `expand_inputs` (which also fixes `--obfuscate=full-shared`'s `{prefix}-NN` wire names,
+numbered by input position — a release of `ep1`/`ep2`/`ep10` used to label `ep10` as `-01` while the counter
+called it `[3/3]`), `--compress-volume-size`'s volume listing (`rar` pads `.partNN` only as far as the volume
+total needs, so an unpadded set was collected `part1, part10, part2`), the `file_index` ranking, and the final
+`.nzb` file list.
+
+**What is deliberately *not* in that order:** the order articles actually reach the server. With `--par2 > 0` and
+more than one file, `metas` — and therefore the posting sequence — stays in File-ID order, because the producer
+streams slices to the Reed-Solomon encoder in exactly that sequence and the par2 spec requires it. Posting order
+is invisible to indexers (they group and sort by Subject; a release's articles all carry near-identical `Date`
+headers anyway), so decoupling it would cost a second read pass over every file for no user-visible gain.
+
 **Why the default is split by obfuscation mode:** `full` and `paranoid` exist specifically to prevent an
 observer from correlating files/segments by wire metadata (independently-random names/`From` per file, or per
 article for `paranoid`) — a stable, sequential `[filenum/total]` shared across the whole release is exactly the

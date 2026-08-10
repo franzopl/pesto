@@ -38,12 +38,30 @@ pub struct InputFile {
     pub name: String,
 }
 
+/// Compare two published names in "natural" order: runs of digits compare by
+/// numeric value, so `part2.rar` sorts before `part10.rar` — plain
+/// lexicographic order gets that backwards whenever the volume number is
+/// unpadded (`rar` only pads to the digit count the volume total needs, so a
+/// 9-volume set is `part1..part9`).
+///
+/// This is the release's canonical order: what [`expand_inputs`] sorts by,
+/// what `--obfuscate=full-shared`'s `{prefix}-NN` wire names are numbered by,
+/// what `--file-counter`'s `[N/M]` counts in, and the order the `.nzb`'s file
+/// list is written in. It is the same comparator `--each`/`--season` order
+/// their entries with, so a release's internal order and a batch's entry order
+/// never disagree.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    lexical_sort::natural_lexical_cmp(a, b)
+}
+
 /// Expand the CLI `paths` into a sorted, de-duplicated list of files.
 ///
 /// Plain files are kept as-is; directories are walked recursively. The result
-/// is sorted by `name` so a run — and the PAR2 set derived from it — is
-/// reproducible. Returns an error when `paths` resolves to no files or when
-/// two inputs would be published under the same name.
+/// is sorted by `name` ([`natural_cmp`]) so a run — and the PAR2 set derived
+/// from it — is reproducible, and so every stage that walks this list in order
+/// (notably `--obfuscate=full-shared`'s `{prefix}-NN` wire names) numbers the
+/// release the way a human reads it. Returns an error when `paths` resolves to
+/// no files or when two inputs would be published under the same name.
 pub fn expand_inputs(paths: &[PathBuf]) -> Result<Vec<InputFile>> {
     if paths.is_empty() {
         bail!("no files or directories given");
@@ -74,7 +92,7 @@ pub fn expand_inputs(paths: &[PathBuf]) -> Result<Vec<InputFile>> {
         bail!("no files to post: the given directories were empty or held only skipped entries");
     }
 
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort_by(|a, b| natural_cmp(&a.name, &b.name));
     for pair in out.windows(2) {
         if pair[0].name == pair[1].name {
             bail!(
@@ -302,5 +320,107 @@ mod tests {
         assert_eq!(names, ["a.bin", "m.bin", "z.bin"]);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn output_is_sorted_naturally_not_lexicographically() {
+        let dir = temp_dir();
+        for n in ["1", "2", "10", "12"] {
+            touch(&dir.join(format!("ep{n}.mkv")));
+        }
+
+        let out = expand_inputs(std::slice::from_ref(&dir)).unwrap();
+        let names: Vec<&str> = out.iter().map(|f| f.name.as_str()).collect();
+        let root = dir.file_name().unwrap().to_string_lossy();
+        assert_eq!(
+            names,
+            [
+                format!("{root}/ep1.mkv"),
+                format!("{root}/ep2.mkv"),
+                format!("{root}/ep10.mkv"),
+                format!("{root}/ep12.mkv"),
+            ]
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── natural_cmp ──────────────────────────────────────────────────────────
+
+    fn natural_sorted(names: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        v.sort_by(|a, b| natural_cmp(a, b));
+        v
+    }
+
+    #[test]
+    fn natural_cmp_orders_unpadded_volume_numbers_numerically() {
+        assert_eq!(
+            natural_sorted(&[
+                "release.part10.rar",
+                "release.part2.rar",
+                "release.part1.rar",
+                "release.part12.rar",
+            ]),
+            vec![
+                "release.part1.rar",
+                "release.part2.rar",
+                "release.part10.rar",
+                "release.part12.rar",
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_orders_padded_and_7z_volume_numbers() {
+        assert_eq!(
+            natural_sorted(&["a.7z.010", "a.7z.002", "a.7z.001"]),
+            vec!["a.7z.001", "a.7z.002", "a.7z.010"]
+        );
+        assert_eq!(
+            natural_sorted(&["r.part003.rar", "r.part001.rar", "r.part002.rar"]),
+            vec!["r.part001.rar", "r.part002.rar", "r.part003.rar"]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_falls_back_to_byte_order_outside_digit_runs() {
+        assert_eq!(
+            natural_sorted(&["s01/ep10.mkv", "s01/ep2.mkv", "s01/ep1.mkv", "s01/a.nfo"]),
+            vec!["s01/a.nfo", "s01/ep1.mkv", "s01/ep2.mkv", "s01/ep10.mkv"]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_is_a_total_order_across_equal_valued_padding() {
+        // Same numeric value, different padding: whichever way the tie breaks,
+        // it must break — two distinct names comparing Equal would make the
+        // sort order depend on directory-listing order, and with it the PAR2
+        // set and every wire name derived from the file's position.
+        assert_eq!(natural_cmp("p1.rar", "p1.rar"), std::cmp::Ordering::Equal);
+        assert_ne!(
+            natural_cmp("p01.rar", "p1.rar"),
+            std::cmp::Ordering::Equal,
+            "distinct names must never compare Equal"
+        );
+        assert_eq!(
+            natural_cmp("p01.rar", "p1.rar").reverse(),
+            natural_cmp("p1.rar", "p01.rar"),
+            "the comparator must be antisymmetric"
+        );
+    }
+
+    #[test]
+    fn natural_cmp_matches_the_comparator_each_orders_entries_with() {
+        // `top_level_entries` (`--each`/`--season`) sorts with this same
+        // function; if the two ever diverged, a season's entry order and a
+        // release's internal file order would disagree.
+        for (a, b) in [
+            ("ep1.mkv", "ep10.mkv"),
+            ("B.txt", "b.txt"),
+            ("Show/ep2.bin", "Show/ep11.bin"),
+        ] {
+            assert_eq!(natural_cmp(a, b), lexical_sort::natural_lexical_cmp(a, b));
+        }
     }
 }

@@ -186,6 +186,60 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// `full-shared` replaces every real name with `{prefix}-NN{ext}`, so that
+/// `NN` and the `--file-counter` `[N/M]` prefix are the release's only visible
+/// ordering. They must agree, and both must follow the order a human reads —
+/// `ep2` before `ep10`, which plain lexicographic sorting gets backwards.
+#[tokio::test]
+async fn full_shared_multi_file_suffix_matches_the_file_counter() {
+    let root =
+        std::env::temp_dir().join(format!("pesto_full_shared_counter_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // Unpadded episode numbers, created out of order.
+    let order = ["ep10.bin", "ep1.bin", "ep2.bin"];
+    for (i, name) in order.iter().enumerate() {
+        std::fs::write(root.join(name), vec![0x5Au8; 10_000 + i]).unwrap();
+    }
+
+    let mut config = dry_run_config(ObfuscateMode::FullShared);
+    config.file_counter = true;
+    let args: Vec<std::path::PathBuf> = order.iter().map(|n| root.join(n)).collect();
+    let inputs = expand_inputs(&args).unwrap();
+    let outcome = post_files(&config, &inputs).await.unwrap();
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
+
+    for seg in &outcome.segments {
+        // `subject_name` is the real name (the NZB identity); `wire_name` is
+        // what actually went out as `{prefix}-NN.bin`.
+        let expected_index = match seg.subject_name.as_ref() {
+            "ep1.bin" => 1,
+            "ep2.bin" => 2,
+            "ep10.bin" => 3,
+            other => panic!("unexpected file `{other}`"),
+        };
+        assert_eq!(
+            seg.file_index, expected_index,
+            "`{}` should be file [{expected_index}/3]",
+            seg.subject_name
+        );
+        assert!(
+            seg.wire_name
+                .ends_with(&format!("-{expected_index:02}.bin")),
+            "wire name `{}` for `{}` should carry suffix -{expected_index:02}, matching its \
+             file counter",
+            seg.wire_name,
+            seg.subject_name
+        );
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
 #[tokio::test]
 async fn full_shared_obfuscation_single_file_has_no_suffix() {
     let root =

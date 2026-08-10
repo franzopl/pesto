@@ -154,8 +154,11 @@ fn validate_volume_size(size: &str) -> Result<()> {
 }
 
 /// Find the volume files `rar -v` produced for `archive_stem`, e.g.
-/// `stem.part01.rar`, `stem.part02.rar`, ... sorted in volume order (the
-/// zero-padded numbering rar generates sorts correctly as plain strings).
+/// `stem.part01.rar`, `stem.part02.rar`, ... sorted in volume order.
+///
+/// `rar` pads `.partNN` only to the digit count the volume total needs — a
+/// 6-volume set really is `part1..part6` — so the sort is natural, not plain
+/// byte order (see [`list_matching`]).
 ///
 /// When the requested volume size is larger than the whole archive, rar
 /// decides a single volume is enough and falls back to writing the plain
@@ -226,7 +229,15 @@ fn collect_7z_volumes(dest_dir: &Path, archive_name: &str) -> Result<Vec<PathBuf
     Ok(volumes)
 }
 
-/// List and sort files in `dest_dir` whose file name matches `predicate`.
+/// List files in `dest_dir` whose file name matches `predicate`, in volume
+/// order.
+///
+/// Sorted with [`crate::walk::natural_cmp`] rather than plain byte order: the
+/// caller treats the first entry as the archive's *first* volume and posts the
+/// rest in this order, and `rar` only pads `.partNN` to the digit count the
+/// volume total needs — a set that came out unpadded would otherwise order
+/// `part10` before `part2`. 7z's `.NNN` is always 3-digit padded, so this is a
+/// no-op there.
 fn list_matching(dest_dir: &Path, predicate: impl Fn(&str) -> bool) -> Result<Vec<PathBuf>> {
     let mut matches: Vec<PathBuf> = std::fs::read_dir(dest_dir)
         .with_context(|| format!("reading temp dir `{}`", dest_dir.display()))?
@@ -238,7 +249,7 @@ fn list_matching(dest_dir: &Path, predicate: impl Fn(&str) -> bool) -> Result<Ve
                 .is_some_and(&predicate)
         })
         .collect();
-    matches.sort();
+    matches.sort_by(|a, b| crate::walk::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
     Ok(matches)
 }
 
@@ -434,6 +445,38 @@ mod tests {
         let a = random_password();
         let b = random_password();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn list_matching_returns_unpadded_rar_volumes_in_volume_order() {
+        let dir = std::env::temp_dir().join(format!("pesto_list_matching_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in [1, 2, 3, 10, 11, 12] {
+            std::fs::write(dir.join(format!("stem.part{n}.rar")), b"x").unwrap();
+        }
+
+        let found = list_matching(&dir, |name| {
+            name.starts_with("stem.part") && name.ends_with(".rar")
+        })
+        .unwrap();
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "stem.part1.rar",
+                "stem.part2.rar",
+                "stem.part3.rar",
+                "stem.part10.rar",
+                "stem.part11.rar",
+                "stem.part12.rar",
+            ]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
