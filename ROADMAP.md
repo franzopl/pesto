@@ -519,12 +519,22 @@ the first file is ever posted — no two-pass encode needed.
 
 **Implementation:** `--file-counter` computes `total_files = data_files + 1 (PAR2 index) + plan_volumes(recovery_count).len()`
 once, before any worker spawns (`post_files_with_progress_and_cancel`), and assigns each file a stable
-`file_index` (1-based release position: data files in final posting order, then the PAR2 index, then the
+`file_index` (1-based release position: data files in natural name order, then the PAR2 index, then the
 volumes in `plan_volumes` order). Both values are denormalized onto `FileMeta`, `PostedSegment` and `FailedTask`
 so every place that rebuilds a subject — the main post path, `--check` reposts, the end-of-run retry pass, and
 `.nzb` generation — produces the identical `[filenum/total]` prefix. Toggling it (explicitly or via a changed
 `--obfuscate` mode) between runs of the same `--resume` state invalidates the state (`resume::RunFingerprint`),
 the same way `--obfuscate`/`--par2` changes already do, since it changes every subject in the release.
+
+**Numbering order (fixed after a live upload):** the counter is assigned by *natural* order of each file's
+published name — digit runs compared numerically, so `part2.rar` precedes `part10.rar` even when `rar` leaves the
+volume number unpadded — and not by `metas`' posting order. `metas` is sorted by PAR2 File ID (an MD5-derived
+key the par2 spec requires the encoder to slice in), which shuffles a release's volumes with respect to their
+volume numbers; a live `--obfuscate=full-shared` release came out numbered `[5] part1.rar, [3] part2.rar,
+[4] part3.rar, [1] part4.rar, …`. Indexers sort a collection by Subject and the counter is the Subject's leading
+field, so that listed the release scrambled. The two orders are now decoupled: `metas` stays in File-ID order for
+the encoder, only `file_index` follows volume order. The PAR2 index and volumes keep their positions at the end
+of the release, and the final `.nzb` file list is sorted by the same natural order.
 
 **Why the default is split by obfuscation mode:** `full` and `paranoid` exist specifically to prevent an
 observer from correlating files/segments by wire metadata (independently-random names/`From` per file, or per

@@ -766,16 +766,31 @@ pub async fn post_files_with_progress_and_cancel(
         metas = keyed.into_iter().map(|(_, meta)| meta).collect();
     }
 
-    // `--file-counter`'s `[filenum/total]` numbers every file by its position
-    // in the release, so it must be assigned only now that `metas`' final
-    // posting order (post File-ID sort) is settled — not at push time above.
+    // `--file-counter`'s `[filenum/total]` numbers every file in the release,
+    // so it can only be assigned now that the full file list is settled — not
+    // at push time above.
+    //
+    // The number must follow the release's own order (`part1.rar` is `[1/N]`,
+    // the PAR2 set closes it out), *not* `metas`' order: the File-ID sort
+    // above keys on an MD5, i.e. it shuffles the volumes with respect to their
+    // volume numbers. Indexers sort a collection by Subject and the counter is
+    // the Subject's leading field, so inheriting that order listed the release
+    // scrambled — a real upload came out with `part4.rar` as `[1/14]`.
+    // `metas` itself stays in File-ID order, since the producer feeds PAR2
+    // slices in that order and the par2 spec requires it (see the sort above).
     if config.file_counter {
+        let mut order: Vec<usize> = (0..metas.len()).collect();
+        order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
+        let mut rank = vec![0u32; metas.len()];
+        for (pos, &idx) in order.iter().enumerate() {
+            rank[idx] = pos as u32 + 1;
+        }
         metas = metas
             .into_iter()
-            .enumerate()
-            .map(|(i, m)| {
+            .zip(rank)
+            .map(|(m, file_index)| {
                 Arc::new(FileMeta {
-                    file_index: i as u32 + 1,
+                    file_index,
                     ..(*m).clone()
                 })
             })
@@ -1264,7 +1279,9 @@ pub async fn post_files_with_progress_and_cancel(
     shared.emit(ProgressEvent::Finished);
 
     let mut segments = std::mem::take(&mut *shared.results.lock().unwrap());
-    segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
+    // Natural (not lexicographic) by name, so the NZB lists `part2.rar` before
+    // `part10.rar` — the same volume order `--file-counter` numbers by.
+    segments.sort_by(|a, b| natural_cmp(&a.file_name, &b.file_name).then(a.part.cmp(&b.part)));
 
     // 26d/26g — network performance summary + post phase timing
     let total_retries = shared.total_retries.load(Ordering::Relaxed);
@@ -1553,6 +1570,51 @@ fn wire_name(name: &str) -> &str {
         Some(pos) => &name[pos + 1..],
         None => name,
     }
+}
+
+/// Compare two published names in "natural" order: runs of ASCII digits
+/// compare by numeric value, everything else byte by byte.
+///
+/// `--file-counter` numbers files with this, so `part2.rar` must sort before
+/// `part10.rar` — plain lexicographic order gets that backwards whenever the
+/// volume number is unpadded (`rar` only pads to the digit count the volume
+/// total needs, so a 9-volume set is `part1..part9`).
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < ab.len() && j < bb.len() {
+        if ab[i].is_ascii_digit() && bb[j].is_ascii_digit() {
+            let (si, sj) = (i, j);
+            while i < ab.len() && ab[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < bb.len() && bb[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Numeric value, without materialising an integer (a digit run can
+            // be longer than u64): drop leading zeros, then the longer run is
+            // the larger number, then compare digit by digit.
+            let na = &ab[si..i];
+            let nb = &bb[sj..j];
+            let ta = &na[na.iter().take_while(|c| **c == b'0').count()..];
+            let tb = &nb[nb.iter().take_while(|c| **c == b'0').count()..];
+            let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            // Equal value, possibly different padding (`part01` vs `part1`):
+            // keep going, and let the byte-wise tie-break below settle it.
+        } else {
+            let ord = ab[i].cmp(&bb[j]);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (ab.len() - i).cmp(&(bb.len() - j)).then_with(|| ab.cmp(bb))
 }
 
 /// MD5 of a file's first 16 KiB — the PAR2 "16k hash" half of a File ID.
@@ -3957,6 +4019,68 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.contains('@'));
         assert!(!a.contains("blocknews") && !a.contains("pesto"));
+    }
+
+    // ── natural_cmp ──────────────────────────────────────────────────────────
+
+    fn natural_sorted(names: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        v.sort_by(|a, b| natural_cmp(a, b));
+        v
+    }
+
+    #[test]
+    fn natural_cmp_orders_unpadded_volume_numbers_numerically() {
+        assert_eq!(
+            natural_sorted(&[
+                "release.part10.rar",
+                "release.part2.rar",
+                "release.part1.rar",
+                "release.part12.rar",
+            ]),
+            vec![
+                "release.part1.rar",
+                "release.part2.rar",
+                "release.part10.rar",
+                "release.part12.rar",
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_orders_padded_and_7z_volume_numbers() {
+        assert_eq!(
+            natural_sorted(&["a.7z.010", "a.7z.002", "a.7z.001"]),
+            vec!["a.7z.001", "a.7z.002", "a.7z.010"]
+        );
+        assert_eq!(
+            natural_sorted(&["r.part003.rar", "r.part001.rar", "r.part002.rar"]),
+            vec!["r.part001.rar", "r.part002.rar", "r.part003.rar"]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_falls_back_to_byte_order_outside_digit_runs() {
+        assert_eq!(
+            natural_sorted(&["s01/ep10.mkv", "s01/ep2.mkv", "s01/ep1.mkv", "s01/a.nfo"]),
+            vec!["s01/a.nfo", "s01/ep1.mkv", "s01/ep2.mkv", "s01/ep10.mkv"]
+        );
+    }
+
+    #[test]
+    fn natural_cmp_is_a_total_order_across_equal_valued_padding() {
+        // Same numeric value, different padding: must still be a strict,
+        // deterministic order (a sort would otherwise be unstable-ish).
+        assert_eq!(natural_cmp("p1.rar", "p1.rar"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            natural_cmp("p01.rar", "p1.rar"),
+            std::cmp::Ordering::Less,
+            "ties must break consistently, and byte order puts '0' first"
+        );
+        assert_eq!(
+            natural_cmp("p1.rar", "p01.rar"),
+            std::cmp::Ordering::Greater
+        );
     }
 
     // ── address_space_limit / connection_overhead_reserve ────────────────────

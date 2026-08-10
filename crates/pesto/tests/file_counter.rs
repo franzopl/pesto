@@ -107,6 +107,80 @@ fn build_two_files(tag: &str) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
     (root, vec![a, b])
 }
 
+/// A `--compress-volume-size` style release: unpadded `.partN.rar` volumes,
+/// created in an order unrelated to their volume number.
+fn build_volumes(tag: &str, count: u32) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "pesto_file_counter_{tag}_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut paths = Vec::new();
+    for n in 1..=count {
+        let path = root.join(format!("release.part{n}.rar"));
+        std::fs::write(&path, vec![n as u8; 50_000 + n as usize]).unwrap();
+        paths.push(path);
+    }
+    (root, paths)
+}
+
+/// The counter must follow the release's own volume order — `part1.rar` is
+/// `[1/N]` — and not the File-ID (MD5-keyed) order `metas` is sorted into for
+/// PAR2. A real `--obfuscate=full-shared` upload came out with `part4.rar`
+/// numbered `[1/14]`, which lists the release scrambled on indexers that sort
+/// a collection by Subject.
+#[tokio::test(flavor = "multi_thread")]
+async fn file_counter_follows_volume_order_not_file_id_order() {
+    // 12 volumes: enough that unpadded names (`part2` vs `part12`) would also
+    // come out wrong under plain lexicographic order.
+    let volumes = 12u32;
+    let (root, files) = build_volumes("volorder", volumes);
+    let recovery_count = 7u32;
+    let expected_total = volumes + 1 + plan_volumes(recovery_count).len() as u32;
+    let config = dry_run_config(true, Some(recovery_count as usize));
+    let inputs = expand_inputs(&files).unwrap();
+    let outcome = post_files(&config, &inputs).await.unwrap();
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
+
+    for seg in &outcome.segments {
+        assert_eq!(seg.total_files, expected_total);
+        let name = seg.subject_name.as_ref();
+        if let Some(n) = name
+            .strip_prefix("release.part")
+            .and_then(|rest| rest.strip_suffix(".rar"))
+            .and_then(|digits| digits.parse::<u32>().ok())
+        {
+            assert_eq!(
+                seg.file_index, n,
+                "`{name}` should be [{n}/{expected_total}], got [{}/{expected_total}]",
+                seg.file_index
+            );
+        } else {
+            // Everything else in the release is PAR2, which closes it out.
+            assert!(
+                name.ends_with(".par2"),
+                "unexpected non-PAR2 file in the release: `{name}`"
+            );
+            assert!(
+                seg.file_index > volumes,
+                "PAR2 file `{name}` must be numbered after every data file, got {}",
+                seg.file_index
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn file_counter_off_emits_no_prefix() {
     let (root, files) = build_two_files("off");

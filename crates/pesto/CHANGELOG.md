@@ -21,6 +21,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   scripts have no way to observe a deprecation warning) and will be removed in a future release.
 
 ### Fixed
+- **`--file-counter`'s `[N/M]` now follows the release's volume order.** The counter was assigned from `metas`'
+  order, which is sorted by PAR2 File ID (an MD5-derived key the par2 spec requires the encoder to slice in) and
+  therefore bears no relation to volume numbers: a live `--obfuscate=full-shared` release came out as
+  `[5] part1.rar, [3] part2.rar, [4] part3.rar, [1] part4.rar, …`. Since indexers sort a collection by Subject
+  and the counter is the Subject's leading field, that listed the release scrambled. `file_index` is now assigned
+  by natural name order (digit runs compared numerically, so `part2.rar` precedes `part10.rar` even when `rar`
+  leaves the volume number unpadded) while `metas` keeps its File-ID order for the encoder; the PAR2 index and
+  volumes still close out the release. The `.nzb`'s own file list is sorted by the same natural order.
 - **`--obfuscate=paranoid` posted every segment of a multi-segment file under the same Subject when using more
   than one connection.** The connection-pool `worker()` built the outgoing `Subject:` header from
   `task.meta.subject_name` (the file-level identity, fixed once per file — correct for `full`/`full-shared`)
