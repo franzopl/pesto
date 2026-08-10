@@ -21,6 +21,13 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   scripts have no way to observe a deprecation warning) and will be removed in a future release.
 
 ### Fixed
+- **PAR2 index/volumes for a `--compress-volume-size` archive no longer borrow one volume's name.** The PAR2
+  set's local/NZB name was built from `metas[0].real_name` verbatim — for a volume-split archive that's one
+  specific `.partNN.rar`/`.NNN` file, so the set showed up as e.g. `archive.part04.rar.par2` even though the
+  recovery data covers every volume together. Misleading on its own, and for `--obfuscate none`/`full` (where
+  the real name *is* the wire name) it put a single volume's name on every PAR2 article's Subject too. The
+  base name is now stripped of its volume suffix first, so the whole set is named after the shared archive stem
+  (`archive.par2`, `archive.vol000+001.par2`, ...) regardless of which volume happens to be `metas[0]`.
 - **`--obfuscate=full-shared`'s yEnc `name=` now keeps the release's shared prefix.** `bb9e3b2` (0.6.1) made the
   Subject and yEnc `name=` independently random for every obfuscated article, closing an exact-match
   fingerprint — correct for `full`/`paranoid`, but for `full-shared` it also stripped the shared prefix from the

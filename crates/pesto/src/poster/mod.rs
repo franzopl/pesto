@@ -1518,6 +1518,25 @@ fn par2_base(name: &str) -> &str {
     name.split('/').next().unwrap_or(name)
 }
 
+/// Base name for the PAR2 index/volumes: [`par2_base`], but first strips a
+/// `--compress-volume-size` volume suffix (`.partNN.rar`, `.NNN` after
+/// `.7z`/`.zip`) if present.
+///
+/// Without this, a volume-split archive's PAR2 set borrowed whichever file
+/// happened to be `metas[0]` verbatim — e.g. `archive.part04.rar.par2` — even
+/// though the recovery set actually covers every volume together. That's
+/// misleading (it reads as if only `part04` were protected) and, for
+/// `--obfuscate none`/`full` where the real name *is* the wire name, it also
+/// put a single volume's name on every PAR2 article's Subject instead of a
+/// name shared by the whole release.
+fn par2_release_base(name: &str) -> &str {
+    let trimmed = match crate::compress::volume_suffix(name) {
+        Some(suffix) => &name[..name.len() - suffix.len()],
+        None => name,
+    };
+    par2_base(trimmed)
+}
+
 /// Strip the first path component (the release/top-level directory name).
 ///
 /// The first component of a directory upload's `real_name` is the release
@@ -2213,7 +2232,7 @@ async fn producer(
                     tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
                 }
 
-                let index_name = layout::index_name(par2_base(&metas[0].real_name));
+                let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
                 if let Some(tx) = &tx_opt {
@@ -2244,7 +2263,7 @@ async fn producer(
                     .enumerate()
                     .find(|(_, v)| slice.exponent >= v.first && slice.exponent < v.first + v.count)
                     .unwrap();
-                let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
+                let vol_name = layout::volume_name(par2_release_base(&metas[0].real_name), *vol);
                 let vol_path = par2_dir.as_ref().unwrap().join(&vol_name);
 
                 let mut file = tokio::fs::OpenOptions::new()
@@ -2312,7 +2331,7 @@ async fn post_pregenerated_release(
     }
     post_data_files(metas, tx, shared).await?;
 
-    let index_name = layout::index_name(par2_base(&metas[0].real_name));
+    let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
     let index_path = par2_dir.join(&index_name);
     let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
     let file_index = metas.len() as u32 + 1;
@@ -2328,7 +2347,7 @@ async fn post_pregenerated_release(
 
     let volumes = layout::plan_volumes(recovery_count as u32);
     for (vol_idx, vol) in volumes.iter().enumerate() {
-        let vol_name = layout::volume_name(par2_base(&metas[0].real_name), *vol);
+        let vol_name = layout::volume_name(par2_release_base(&metas[0].real_name), *vol);
         let vol_path = par2_dir.join(&vol_name);
         let wire_override = shared
             .release_prefix
@@ -4132,6 +4151,36 @@ mod tests {
     fn par2_base_empty_string() {
         // Should not panic; returns the whole (empty) string.
         assert_eq!(par2_base(""), "");
+    }
+
+    // ── par2_release_base ────────────────────────────────────────────────────
+
+    #[test]
+    fn par2_release_base_strips_rar_volume_suffix() {
+        assert_eq!(
+            par2_release_base("archive.part01.rar"),
+            "archive",
+            "PAR2 set for a volume-split rar archive must not be named after \
+             one specific volume"
+        );
+        assert_eq!(par2_release_base("archive.part1.rar"), "archive");
+    }
+
+    #[test]
+    fn par2_release_base_strips_sevenzip_volume_suffix() {
+        assert_eq!(par2_release_base("archive.7z.001"), "archive");
+    }
+
+    #[test]
+    fn par2_release_base_leaves_non_volume_names_untouched() {
+        assert_eq!(par2_release_base("movie.mkv"), "movie.mkv");
+        assert_eq!(par2_release_base("archive.rar"), "archive.rar");
+        assert_eq!(par2_release_base("archive.7z"), "archive.7z");
+    }
+
+    #[test]
+    fn par2_release_base_still_roots_season_packs_at_the_folder() {
+        assert_eq!(par2_release_base("Season01/ep01.mkv"), "Season01");
     }
 
     // ── optimal_par2_slice_size ───────────────────────────────────────────────
