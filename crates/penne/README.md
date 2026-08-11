@@ -41,7 +41,7 @@ cargo run --bin penne -- check path/to/release.nzb
 cargo run --bin penne -- check path/to/release1.nzb path/to/release2.nzb
 ```
 
-`penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = confirmed missing, 2 = fatal error, 3 = inconclusive). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead.
+`penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = confirmed missing, 2 = fatal error, 3 = inconclusive). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead. See [`check`: dedicated availability-check subcommand](#check-dedicated-availability-check-subcommand) below for every flag and the full `--json` schema.
 
 A confirmed-missing article (a server returned a definitive `430`/`423`/`420`) is reported separately from an unreachable one (every tried server failed to connect or timed out before ever answering) — `missing` vs `unreachable` in the JSON output, `conclusive: false` when any segment falls in the latter bucket. This distinction matters for callers that act on a check's result (e.g. deciding whether to declare a release dead): a transient network hiccup must never be read as confirmed data loss.
 
@@ -369,6 +369,116 @@ summary
   files complete:   24/24
   data used:        218.7 KiB (STAT only — no article data downloaded)
 ```
+
+### `check`: dedicated availability-check subcommand
+
+`download --stat` (above) checks a single `.nzb` inline before deciding
+whether to download it. `penne check <nzb>...` is the standalone equivalent
+for scripting: it checks one or more `.nzb` files against your configured
+servers — same three methods (`stat`/`head`/`body`), same `--sample` — but
+additionally supports **multiple `.nzb` files in one run** (sharing the same
+connection pool, so no per-file reconnect cost), **structured JSON output**,
+**meaningful exit codes**, and checking each configured server
+**independently** instead of only as failover backups.
+
+```bash
+penne check path/to/release.nzb
+penne check release1.nzb release2.nzb --method head
+penne check release.nzb --json --quiet > result.jsonl
+```
+
+Flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--method <stat\|head\|body>` | `stat` | Which NNTP command to check with — see the method descriptions under `--stat` above; same trade-offs apply here. |
+| `--sample <N>` | off (check every segment) | Check only `N` segment(s) per file, spread evenly — same semantics as `download --stat`'s `--sample`. |
+| `--pipeline-depth <N>` | `128` | How many `STAT` commands are pipelined per connection per round trip. Only affects `--method stat`; ignored for `head`/`body`, which don't pipeline (see `--stat` above for why). |
+| `--json` | off | Emit one JSON object per line (NDJSON) instead of the human-readable summary — see schema below. |
+| `-q`, `--quiet` | off | Suppress the live progress bar and per-segment `missing`/`unreachable` lines; only the final summary (or, with `--json`, the JSON lines themselves) is printed. |
+| `--server <NAME>` | every configured server | Use only the named `[[servers]]` entry (repeatable) — same as `download`'s `--server`. |
+| `--independent-servers` | off | Check each configured server **on its own**, instead of combining them into one pass where later servers only get asked about segments earlier ones didn't have. Produces one result per server per `.nzb` — useful to compare providers' actual availability rather than a single failover-combined verdict. |
+
+**Exit codes:** `0` — every article present on at least one server; `1` — at
+least one article confirmed missing (some server returned a definitive
+`430`/`423`/`420` and none had it); `2` — fatal error (bad config, unreadable
+`.nzb`, no servers configured); `3` — inconclusive: no article was confirmed
+missing, but at least one was unreachable (no configured server ever gave a
+real answer for it). A confirmed miss always outranks "merely inconclusive"
+when both occur in the same run, since it's the more actionable of the two.
+
+#### Human-readable output (default)
+
+```
+checking 6968 segment(s) across 2 NZB(s) via STAT...
+
+[1/2] release1.nzb
+  complete: movie.mkv (200/200 segments)
+  ...
+
+summary
+  articles present: 6968/6968 (100.0%)
+  files complete:   24/24
+  data used:        218.7 KiB (STAT only — no article data downloaded)
+  elapsed:          1.3s (5360 articles/sec)
+```
+
+With `--independent-servers`, each server's summary is labeled
+(`summary (news.example.com)`) and printed once per `.nzb` per server.
+
+#### `--json` output
+
+One JSON object **per line** (NDJSON, not a single array) — one line per
+`.nzb`, or one line per `.nzb` per server when `--independent-servers` is
+given:
+
+```json
+{
+  "nzb": "release.name.nzb",
+  "checked_at": "2026-08-11T18:04:22.910348Z",
+  "method": "stat",
+  "retries": 3,
+  "servers": ["news.example.com", "backup.example.com"],
+  "complete": true,
+  "conclusive": true,
+  "total_articles": 6968,
+  "present": 6968,
+  "missing": 0,
+  "missing_pct": 0.0,
+  "unreachable": 0,
+  "unreachable_pct": 0.0,
+  "files": [
+    { "name": "movie.mkv", "total_segments": 200, "present_segments": 200 }
+  ],
+  "missing_articles": [],
+  "unreachable_articles": [],
+  "bytes_used": 223948,
+  "elapsed_secs": 1.301,
+  "articles_per_second": 5355.9
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `nzb` | Basename of the `.nzb` file this line reports on. |
+| `checked_at` | RFC3339 UTC timestamp taken when *this* outcome was resolved — not a single run-start stamp, since NZBs/servers can finish at different times. |
+| `method` | The `--method` used for this check. |
+| `retries` | Retry attempts per segment per server, from the config file's `retries`. |
+| `servers` | Hostnames tried, in tier priority order. Only present in the combined (non-`--independent-servers`) case. |
+| `server` | The single hostname this line's result came from. Only present with `--independent-servers`, in place of `servers`. |
+| `complete` | `true` only if every segment was confirmed present — `false` for both confirmed-missing and merely-unreachable segments. |
+| `conclusive` | `true` if every segment got a definitive present/absent answer from some server. **Check this before trusting `missing`/`missing_pct` as a final verdict** — if `false`, at least one segment's fate is unknown, and `missing` alone isn't enough to declare the release dead. |
+| `total_articles` | Total segments checked. |
+| `present` | Segments confirmed present on at least one server. |
+| `missing` / `missing_pct` | Segments at least one server definitively denied (`430`/`423`/`420`) and none confirmed present — the only case that should be treated as confirmed data loss. |
+| `unreachable` / `unreachable_pct` | Segments no tried server ever gave a real answer for (connection failure, exhausted retries) — deliberately kept separate from `missing` so a transient network hiccup is never read as confirmed absence. |
+| `files` | Per-file breakdown, `.nzb` order: `name`, `total_segments`, `present_segments`. |
+| `missing_articles` | `{ file_name, part, message_id }` for each confirmed-missing segment. |
+| `unreachable_articles` | Same shape, for unreachable segments. |
+| `sample_size` | Only present when `--sample <N>` was used — flags the result as partial coverage, not a full check. |
+| `bytes_used` | Bytes actually sent/received over the wire to perform the check (e.g. every `STAT` command and response). |
+| `elapsed_secs` | Wall-clock duration of the check (not including `.nzb` parsing). |
+| `articles_per_second` | Throughput, based on `elapsed_secs`. |
 
 ### Progress
 
