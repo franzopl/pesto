@@ -30,6 +30,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unavailable path already had). The three silent-drain arms are now hard failures carrying the invariant
   they broke, so a future regression cannot go quiet again.
 
+### Added
+- **`encoder::altmap_kernel_available()` / `encoder::shuffle2x_kernel_available()`** — whether this CPU has the
+  kernel behind each specialized buffer layout, i.e. whether `new_altmap`/`new_shuffle2x` will keep the layout
+  or fall back to the portable one. Only the encoder knows the exact condition (ALTMAP needs AVX2 *without*
+  GFNI; Shuffle2x runs on GFNI hardware too), and callers that want to *measure* a specific kernel need to know
+  before they time it.
+
 ### Changed
 - `new_altmap_produces_correct_recovery_data` no longer skips GFNI hardware — that skip was hiding the bug
   above. Added `layout_constructors_agree_with_the_portable_encoder` and

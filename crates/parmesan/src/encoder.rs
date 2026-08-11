@@ -170,6 +170,44 @@ pub fn shuffle2x_buffer_size(slice_words: usize) -> usize {
     super::shuffle2x::shuffle2x_buffer_size(slice_words)
 }
 
+/// Whether this CPU has the `flush_avx2_altmap` kernel, i.e. whether
+/// [`RecoveryEncoder::new_altmap`] will actually keep the ALTMAP layout.
+///
+/// It needs AVX2 *and* the absence of GFNI: GFNI machines run a different
+/// kernel and `build_dep_tables` returns `None` there, so `new_altmap` falls
+/// back to the portable layout. The recovery data is the same either way — this
+/// only tells a caller that wants to *measure* the ALTMAP kernel (a benchmark)
+/// whether it would be measuring something else.
+///
+/// Advisory, not a guarantee: the constructor can still fall back if its 2 MiB
+/// dependency table fails to allocate.
+pub fn altmap_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && !std::is_x86_feature_detected!("gfni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether this CPU has the `flush_avx2_shuffle2x` kernel, i.e. whether
+/// [`RecoveryEncoder::new_shuffle2x`] will actually keep the Shuffle2x layout.
+///
+/// Unlike [`altmap_kernel_available`], this needs only AVX2 — the Shuffle2x
+/// kernel runs on GFNI hardware too.
+pub fn shuffle2x_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// One finished recovery slice.
 #[derive(Debug, Clone)]
 pub struct RecoverySlice {
@@ -4532,6 +4570,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `altmap_kernel_available` / `shuffle2x_kernel_available` exist so a
+    /// benchmark can tell whether measuring `new_altmap`/`new_shuffle2x` on this
+    /// machine measures the specialized kernel or the portable fallback. They
+    /// duplicate the constructors' feature checks, so pin them to the layout the
+    /// constructors actually pick — a drift here makes a bench row silently
+    /// mislabel which kernel produced its number.
+    #[test]
+    fn kernel_availability_predicates_match_the_layout_constructors() {
+        let (slice_size, total_slices, recovery_count) = (512usize, 3usize, 2usize);
+
+        let altmap = RecoveryEncoder::new_altmap(slice_size, total_slices, 0, recovery_count);
+        assert_eq!(
+            matches!(altmap.buffers, RecoveryBufferSet::Altmap(_)),
+            altmap_kernel_available(),
+            "altmap_kernel_available disagrees with the layout new_altmap chose"
+        );
+
+        let shuffle2x = RecoveryEncoder::new_shuffle2x(slice_size, total_slices, 0, recovery_count);
+        assert_eq!(
+            matches!(shuffle2x.buffers, RecoveryBufferSet::Shuffle2x(_)),
+            shuffle2x_kernel_available(),
+            "shuffle2x_kernel_available disagrees with the layout new_shuffle2x chose"
+        );
     }
 
     /// A manual `--simd` override must never be applied to a specialized buffer

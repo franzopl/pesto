@@ -789,10 +789,20 @@ the queued input slices, drop them unprocessed, and continue:
 **Not affected:** normal posting. `try_new_smart()` never selects ALTMAP, and with `--simd auto` the Shuffle2x
 encoder it does select on AVX2-without-GFNI always reaches its own kernel.
 
-**Note on the benchmark:** `benches/par2_encoder.rs`'s `measure_altmap` row was measuring the no-op drain on
-GFNI hardware — 1696 MiB/s against a zeroed output, versus 2555 (shuffle2x) and 3612 (smart) doing real work.
-With the fallback it now measures the portable kernel on those machines, so the row reflects real GF(2¹⁶)
-throughput but no longer isolates ALTMAP there.
+**The benchmark:** `benches/par2_encoder.rs`'s `measure_altmap` row was measuring the no-op drain on GFNI
+hardware — 1696 MiB/s against a zeroed output, versus 2555 (shuffle2x) and 3612 (smart) doing real work. The
+fallback fixes the zeros but not the mislabelling: the row would then time the *portable* kernel under an
+ALTMAP heading. So the table now asks the encoder which kernels are live and prints `—` for the rest:
+
+- [x] `parmesan::encoder::{altmap_kernel_available, shuffle2x_kernel_available}` — public predicates next to
+  the layout constructors, since only the encoder knows the exact condition (ALTMAP needs AVX2 *without*
+  GFNI; Shuffle2x runs on GFNI hardware too). `kernel_availability_predicates_match_the_layout_constructors`
+  asserts each one against the layout its constructor actually picked, so the copy can't drift.
+- [x] The bench derives its header, its rows and its speedup section from one `Column` list. Two bugs fell
+  out of the old hand-rolled version: on GFNI machines it printed six values under a seven-column header
+  (every number shifted one heading left), and it suppressed the Shuffle2x column there even though that
+  kernel runs fine on GFNI — Shuffle2x now measures 2.21× scalar and 1.24× plain AVX2 on the dev machine,
+  numbers the table simply wasn't showing before.
 
 ---
 

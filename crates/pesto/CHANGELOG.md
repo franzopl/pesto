@@ -13,6 +13,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 ## [Unreleased]
 
 ### Changed
+- **`benches/par2_encoder.rs` only times kernels this CPU actually runs**, printing `—` for the rest. The
+  ALTMAP and Shuffle2x columns call their layout constructors rather than forcing a path, and those fall back
+  to the portable layout when their kernel is absent — so the ALTMAP row on a GFNI machine was reporting the
+  portable kernel's throughput under an ALTMAP heading (and, before the parmesan fix that landed alongside
+  this, a no-op drain's). Availability now comes from `parmesan::encoder::{altmap,shuffle2x}_kernel_available`.
+  Header, rows and the speedup section are driven from one column list, which fixes two further bugs: on GFNI
+  hardware the table printed six values under a seven-column header, shifting every number one heading to the
+  left, and it hid the Shuffle2x column there even though that kernel runs on GFNI (it measures 2.21× scalar
+  and 1.24× plain AVX2 on the dev machine).
 - **`--nzb-name` renamed to `--nzb-title`** (`output.nzb_name` → `output.nzb_title` in `config.toml`,
   `PESTO_NZB_NAME` → `PESTO_NZB_TITLE` for hooks) — the flag only ever set `<meta type="title">` in the
   `.nzb`, never the `.nzb` file's own name (that's `--out`/`--nzb-dir`), so `nzb-name` was misleading.
