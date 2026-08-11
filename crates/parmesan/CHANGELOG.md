@@ -7,6 +7,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`RecoveryEncoder` could silently return all-zero recovery blocks.** Three code paths reacted to a
+  buffer layout whose SIMD kernel was unavailable by draining the queued input slices *without processing
+  them* and carrying on, so `finish()` handed back parity that no PAR2 client can repair with — no error,
+  no warning, no panic. Reproduced end to end: `par2cmdline` reports "Repair is possible" and then
+  "Repair Failed", because the recovery data it was given is zeros.
+  - `new_altmap()`/`try_new_altmap()` on any GFNI-capable CPU. `build_dep_tables()` returns `None` there
+    (GFNI uses a different kernel), which left the ALTMAP flush path inactive. This is what
+    `pesto`'s `altmap_path_generates_valid_par2_repaired_by_par2cmdline` had been failing on.
+  - `new_shuffle2x()`/`try_new_shuffle2x()` on x86_64 without AVX2, and both constructors on any
+    non-x86_64 target, where neither kernel is compiled in at all.
+  - A manual `SimdPath` override (`pesto --simd …`) applied to a specialized layout. This one was
+    reachable in production: `try_new_smart()` builds a Shuffle2x encoder on AVX2-without-GFNI hardware
+    (Haswell through Comet Lake — most pre-Ice-Lake Intel), so `--simd scalar` ran a Normal-layout kernel
+    against Shuffle2x buffers and wrote corrupt parity. `--simd ssse3`/`avx2`/`gfni` panicked instead of
+    corrupting, since those kernels assert the layout. `--simd auto`, the default, was never affected.
+
+  Layout-specific constructors now fall back to the portable layout when their kernel is absent — the
+  recovery data is identical either way, only throughput differs — and `flush()` only honours a manual
+  `SimdPath` for Normal-layout buffers, falling through to auto-detection otherwise (the same behaviour an
+  unavailable path already had). The three silent-drain arms are now hard failures carrying the invariant
+  they broke, so a future regression cannot go quiet again.
+
+### Changed
+- `new_altmap_produces_correct_recovery_data` no longer skips GFNI hardware — that skip was hiding the bug
+  above. Added `layout_constructors_agree_with_the_portable_encoder` and
+  `manual_simd_path_never_corrupts_a_specialized_layout`, which assert every constructor × every
+  `SimdPath` matches the portable encoder byte for byte on whatever CPU the tests run on.
+
 ## [0.4.1] — 2026-08-05
 
 ### Added

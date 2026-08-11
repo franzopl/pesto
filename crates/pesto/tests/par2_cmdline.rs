@@ -155,22 +155,23 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Same end-to-end repair test as above, but uses the ALTMAP encoder path
-/// (Phase 27e/27f).  Verifies that the ALTMAP XOR bit-dependency kernel
-/// produces recovery data that par2cmdline can use to repair a corrupted file.
+/// Same end-to-end repair test as above, but built through `new_altmap`
+/// (Phase 27e/27f). On hardware with the ALTMAP kernel this checks that the XOR
+/// bit-dependency path produces recovery data par2cmdline can repair with;
+/// elsewhere — no AVX2, or a GFNI CPU, where `build_dep_tables` returns `None`
+/// — it checks the constructor's fallback to the portable layout.
+///
+/// It deliberately does not skip on either: this test failed for a long time on
+/// GFNI machines precisely because `new_altmap` was returning all-zero recovery
+/// blocks there, and skipping would have hidden that instead of catching it.
+/// par2cmdline reported "Repair is possible" and then "Repair Failed", since
+/// the parity it was handed was zeros.
 #[test]
 fn altmap_path_generates_valid_par2_repaired_by_par2cmdline() {
     // slice_size must be a multiple of 32 (= 16 u16 words) for ALTMAP.
     let slice_size = 512;
     let total_slices = 3;
     let recovery_count = 2;
-
-    // Only meaningful on AVX2 hardware; skip otherwise to avoid the no-op drain path.
-    #[cfg(target_arch = "x86_64")]
-    if !std::is_x86_feature_detected!("avx2") {
-        println!("AVX2 not available — skipping ALTMAP par2cmdline test");
-        return;
-    }
 
     let dir = std::env::temp_dir().join(format!("parmesan_altmap_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

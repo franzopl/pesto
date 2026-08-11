@@ -749,6 +749,53 @@ See also the `Subject file counter [N/M]` entry above for why the counter is off
 
 ---
 
+## Phase 49 — Encoder Buffer Layouts: No Silent Zero Parity ✅
+
+**Problem Statement:** `crates/pesto/tests/par2_cmdline.rs`'s
+`altmap_path_generates_valid_par2_repaired_by_par2cmdline` had been failing on the dev machine — `par2cmdline`
+reported "Repair is possible" and then "Repair Failed". The cause was not the test: `RecoveryEncoder::new_altmap()`
+was returning recovery blocks that were **entirely zeros**, with no error, warning, or panic. Verified by
+comparing against the portable encoder on identical input (`altmap all-zero=true`, `normal all-zero=false`).
+
+**Root cause:** three places treated "this buffer layout's SIMD kernel isn't available here" as a reason to take
+the queued input slices, drop them unprocessed, and continue:
+
+- `flush()`'s ALTMAP arm, when `build_dep_tables()` returns `None` — which it does on *every GFNI-capable CPU*,
+  since GFNI uses a different kernel. `dfe1c74` introduced this arm to stop a panic on that hardware, trading a
+  loud failure for a silent wrong answer; its commit message also says the test must skip on GFNI, but the diff
+  only patched parmesan's own unit test, leaving the integration test to keep failing (correctly).
+- `flush()`'s Shuffle2x arm, on x86_64 without AVX2.
+- `flush_scalar()`, for any non-Normal layout. This one was **reachable in production**: `try_new_smart()` builds
+  a Shuffle2x encoder on AVX2-without-GFNI hardware (Haswell → Comet Lake, i.e. most pre-Ice-Lake Intel), and a
+  manual `--simd scalar` then routed it here. `--simd ssse3`/`avx2`/`gfni` panicked instead of corrupting
+  (those kernels assert the layout); `--simd auto`, the default, was never affected.
+
+**Fix:**
+
+- [x] `try_new_altmap` / `try_new_shuffle2x` fall back to `try_new`'s portable layout when their kernel is
+  absent (no AVX2, a GFNI CPU, a non-x86_64 target, or a failed dep-table allocation). The layout is a pure
+  performance detail — recovery data is identical either way — so a request for it can always be honoured
+  approximately, but must never be honoured with zeros. The `slice_size % 32` assertion still runs first, so a
+  bad argument is rejected identically on every machine.
+- [x] `flush()` honours a manual `SimdPath` only for Normal-layout buffers, falling through to auto-detection
+  otherwise — exactly what it already did for a path the CPU doesn't support.
+- [x] All three silent-drain arms replaced by hard failures naming the invariant they broke.
+- [x] `new_altmap_produces_correct_recovery_data` no longer skips GFNI (the skip was hiding the bug) and now
+  also asserts the output isn't all zeros. New `layout_constructors_agree_with_the_portable_encoder` and
+  `manual_simd_path_never_corrupts_a_specialized_layout` check every constructor × every `SimdPath` against the
+  portable encoder byte for byte, on whatever CPU the suite runs on. Both were confirmed to fail against the
+  pre-fix code.
+
+**Not affected:** normal posting. `try_new_smart()` never selects ALTMAP, and with `--simd auto` the Shuffle2x
+encoder it does select on AVX2-without-GFNI always reaches its own kernel.
+
+**Note on the benchmark:** `benches/par2_encoder.rs`'s `measure_altmap` row was measuring the no-op drain on
+GFNI hardware — 1696 MiB/s against a zeroed output, versus 2555 (shuffle2x) and 3612 (smart) doing real work.
+With the fallback it now measures the portable kernel on those machines, so the row reflects real GF(2¹⁶)
+throughput but no longer isolates ALTMAP there.
+
+---
+
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>

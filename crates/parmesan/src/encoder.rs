@@ -422,10 +422,21 @@ impl RecoveryEncoder {
     ///
     /// Returns `TryReserveError` if buffer allocation fails.
     ///
+    /// The ALTMAP layout is only requested, never guaranteed: when this CPU has
+    /// no kernel that can consume it — no AVX2, a GFNI machine (where
+    /// [`Self::build_dep_tables`] returns `None`), a non-x86_64 target, or a
+    /// failed table allocation — the encoder falls back to the portable layout
+    /// of [`Self::try_new`]. The recovery data is identical either way; only
+    /// throughput differs. Without the fallback `flush` would hit its
+    /// "unsupported layout" arm, drop every queued slice unprocessed, and
+    /// `finish` would hand back all-zero recovery blocks: parity that no PAR2
+    /// client can repair with, produced without an error or a warning.
+    ///
     /// # Panics
     ///
     /// Panics if `slice_size` is not a positive multiple of 32 bytes (= 16
-    /// u16 words, the ALTMAP group size).
+    /// u16 words, the ALTMAP group size). Checked before the fallback above, so
+    /// a caller gets the same rejection on every machine.
     pub fn try_new_altmap(
         slice_size: usize,
         total_input_slices: usize,
@@ -436,26 +447,53 @@ impl RecoveryEncoder {
             slice_size > 0 && slice_size.is_multiple_of(32),
             "ALTMAP encoder requires slice_size to be a positive multiple of 32 bytes, got {slice_size}"
         );
-        let slice_words = slice_size / 2;
-        let buf_bytes = altmap_buffer_size(slice_words);
-        Ok(Self {
-            gf: Gf16::new(),
-            slice_words,
-            logbases: input_logbases(total_input_slices),
+
+        #[cfg(not(target_arch = "x86_64"))]
+        return Self::try_new(
+            slice_size,
+            total_input_slices,
             exponent_start,
-            buffers: RecoveryBufferSet::Altmap(try_zeroed_buffers(0u8, buf_bytes, recovery_count)?),
-            next_index: 0,
-            queued_slices: Vec::with_capacity(64),
-            free_buffers: Vec::new(),
-            flush_limit_bytes: 256 * 1024 * 1024,
-            compute_checksums: false,
-            pending_checksums: Vec::new(),
-            simd_path: SimdPath::Auto,
-            #[cfg(feature = "bench-internals")]
-            forced_path: None,
-            #[cfg(target_arch = "x86_64")]
-            dep_tables: Self::build_dep_tables(),
-        })
+            recovery_count,
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let dep_tables = match Self::build_dep_tables() {
+                Some(tables) => tables,
+                // No `flush_avx2_altmap` on this CPU — see the note above.
+                None => {
+                    return Self::try_new(
+                        slice_size,
+                        total_input_slices,
+                        exponent_start,
+                        recovery_count,
+                    )
+                }
+            };
+            let slice_words = slice_size / 2;
+            let buf_bytes = altmap_buffer_size(slice_words);
+            Ok(Self {
+                gf: Gf16::new(),
+                slice_words,
+                logbases: input_logbases(total_input_slices),
+                exponent_start,
+                buffers: RecoveryBufferSet::Altmap(try_zeroed_buffers(
+                    0u8,
+                    buf_bytes,
+                    recovery_count,
+                )?),
+                next_index: 0,
+                queued_slices: Vec::with_capacity(64),
+                free_buffers: Vec::new(),
+                flush_limit_bytes: 256 * 1024 * 1024,
+                compute_checksums: false,
+                pending_checksums: Vec::new(),
+                simd_path: SimdPath::Auto,
+                #[cfg(feature = "bench-internals")]
+                forced_path: None,
+                dep_tables: Some(dep_tables),
+            })
+        }
     }
 
     /// Create an encoder that stores recovery buffers in ALTMAP bit-plane format.
@@ -501,9 +539,15 @@ impl RecoveryEncoder {
     ///
     /// Returns `TryReserveError` if buffer allocation fails.
     ///
+    /// Like [`Self::try_new_altmap`], the layout is a request, not a guarantee:
+    /// without AVX2 to run `flush_avx2_shuffle2x` (or off x86_64 entirely) the
+    /// encoder falls back to the portable layout of [`Self::try_new`] rather
+    /// than dropping every slice unprocessed and returning all-zero parity.
+    ///
     /// # Panics
     ///
-    /// Panics if `slice_size` is not a positive multiple of 32 bytes.
+    /// Panics if `slice_size` is not a positive multiple of 32 bytes. Checked
+    /// before the fallback, so the rejection is the same on every machine.
     pub fn try_new_shuffle2x(
         slice_size: usize,
         total_input_slices: usize,
@@ -514,31 +558,51 @@ impl RecoveryEncoder {
             slice_size > 0 && slice_size.is_multiple_of(32),
             "Shuffle2x encoder requires slice_size to be a positive multiple of 32 bytes, got {slice_size}"
         );
-        let slice_words = slice_size / 2;
-        let buf_bytes = shuffle2x_buffer_size(slice_words);
-        Ok(Self {
-            gf: Gf16::new(),
-            slice_words,
-            logbases: input_logbases(total_input_slices),
+
+        #[cfg(not(target_arch = "x86_64"))]
+        return Self::try_new(
+            slice_size,
+            total_input_slices,
             exponent_start,
-            buffers: RecoveryBufferSet::Shuffle2x(try_zeroed_buffers(
-                0u8,
-                buf_bytes,
-                recovery_count,
-            )?),
-            next_index: 0,
-            queued_slices: Vec::with_capacity(64),
-            free_buffers: Vec::new(),
-            flush_limit_bytes: 256 * 1024 * 1024,
-            compute_checksums: false,
-            pending_checksums: Vec::new(),
-            simd_path: SimdPath::Auto,
-            #[cfg(feature = "bench-internals")]
-            forced_path: None,
-            // Shuffle2x never uses dep_tables (those are only for the ALTMAP path).
-            #[cfg(target_arch = "x86_64")]
-            dep_tables: None,
-        })
+            recovery_count,
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            // No `flush_avx2_shuffle2x` on this CPU — see the note above.
+            if !std::is_x86_feature_detected!("avx2") {
+                return Self::try_new(
+                    slice_size,
+                    total_input_slices,
+                    exponent_start,
+                    recovery_count,
+                );
+            }
+            let slice_words = slice_size / 2;
+            let buf_bytes = shuffle2x_buffer_size(slice_words);
+            Ok(Self {
+                gf: Gf16::new(),
+                slice_words,
+                logbases: input_logbases(total_input_slices),
+                exponent_start,
+                buffers: RecoveryBufferSet::Shuffle2x(try_zeroed_buffers(
+                    0u8,
+                    buf_bytes,
+                    recovery_count,
+                )?),
+                next_index: 0,
+                queued_slices: Vec::with_capacity(64),
+                free_buffers: Vec::new(),
+                flush_limit_bytes: 256 * 1024 * 1024,
+                compute_checksums: false,
+                pending_checksums: Vec::new(),
+                simd_path: SimdPath::Auto,
+                #[cfg(feature = "bench-internals")]
+                forced_path: None,
+                // Shuffle2x never uses dep_tables (those are only for ALTMAP).
+                dep_tables: None,
+            })
+        }
     }
 
     /// Create an encoder that stores recovery buffers in Shuffle2x layout.
@@ -694,8 +758,21 @@ impl RecoveryEncoder {
         }
 
         // ── Manual Override (SimdPath) ───────────────────────────────────────
+        //
+        // Only honoured for Normal-layout buffers. Every kernel below reads and
+        // writes recovery buffers as plain `u16` slices; pointing one at
+        // ALTMAP or Shuffle2x buffers means it either panics on
+        // `as_normal_mut` (SSSE3/AVX2/GFNI) or, worse, silently produces
+        // parity that `finish` then runs through a layout conversion that was
+        // never applied (scalar) — `--simd scalar` on an AVX2-without-GFNI CPU
+        // did exactly that, since `try_new_smart` builds a Shuffle2x encoder
+        // there. A specialized layout already implies its own kernel is
+        // present (the constructors fall back otherwise), so fall through to
+        // auto-detection instead, the same way an unavailable path does.
+        let layout_is_normal = matches!(self.buffers, RecoveryBufferSet::Normal(_));
         match self.simd_path {
-            SimdPath::Auto => {} // proceed to auto-detection
+            _ if !layout_is_normal => {} // specialized layout: auto-detect below
+            SimdPath::Auto => {}         // proceed to auto-detection
             SimdPath::Scalar => {
                 self.flush_scalar();
                 return;
@@ -736,8 +813,6 @@ impl RecoveryEncoder {
         }
 
         // ALTMAP path: AVX2 XOR bit-dependency kernel (Phase 27e).
-        // dep_tables is None on GFNI-capable CPUs (build_dep_tables skips them);
-        // fall through to Shuffle2x on those machines.
         #[cfg(target_arch = "x86_64")]
         if matches!(self.buffers, RecoveryBufferSet::Altmap(_)) {
             if std::is_x86_feature_detected!("avx2") && self.dep_tables.is_some() {
@@ -746,11 +821,15 @@ impl RecoveryEncoder {
                 }
                 return;
             }
-            // No AVX2: ALTMAP path is unsupported; drain without processing.
-            let queued = std::mem::take(&mut self.queued_slices);
-            self.next_index += queued.len();
-            self.recycle_queue(queued);
-            return;
+            // `try_new_altmap` only builds ALTMAP buffers once it has confirmed
+            // this kernel is available, so reaching here means that invariant
+            // broke. This used to drain the queue unprocessed, which turned a
+            // broken invariant into all-zero recovery blocks handed back as if
+            // they were real parity.
+            unreachable!(
+                "ALTMAP buffers without the ALTMAP kernel — try_new_altmap must \
+                 fall back to the portable layout when AVX2/dep_tables are absent"
+            );
         }
 
         // Shuffle2x path: AVX2 nibble-shuffle kernel with Shuffle2x buffer layout (Phase 28b).
@@ -760,11 +839,11 @@ impl RecoveryEncoder {
                 unsafe { self.flush_avx2_shuffle2x() };
                 return;
             }
-            // No AVX2: Shuffle2x path is unsupported; drain without processing.
-            let queued = std::mem::take(&mut self.queued_slices);
-            self.next_index += queued.len();
-            self.recycle_queue(queued);
-            return;
+            // Same invariant as the ALTMAP arm above.
+            unreachable!(
+                "Shuffle2x buffers without AVX2 — try_new_shuffle2x must fall \
+                 back to the portable layout"
+            );
         }
 
         // When bench-internals is active a forced path overrides auto-detection.
@@ -3750,13 +3829,17 @@ impl RecoveryEncoder {
 
     #[allow(dead_code)]
     fn flush_scalar(&mut self) {
-        // Altmap and Shuffle2x paths are x86_64-only; on other arches drain without processing.
-        if !matches!(self.buffers, RecoveryBufferSet::Normal(_)) {
-            let queued = std::mem::take(&mut self.queued_slices);
-            self.next_index += queued.len();
-            self.recycle_queue(queued);
-            return;
-        }
+        // This kernel works on Normal-layout buffers only. `flush` no longer
+        // routes a specialized layout here (its manual-`SimdPath` override is
+        // gated on the layout, and the auto path has a dedicated kernel per
+        // layout), so reaching this with ALTMAP/Shuffle2x buffers is a broken
+        // invariant. It used to drain the queue unprocessed instead, which is
+        // how `--simd scalar` on a Shuffle2x encoder returned zeroed parity
+        // with no error.
+        assert!(
+            matches!(self.buffers, RecoveryBufferSet::Normal(_)),
+            "flush_scalar requires Normal recovery buffers"
+        );
 
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
@@ -4323,12 +4406,12 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn new_altmap_produces_correct_recovery_data() {
         // Verify that new_altmap() produces byte-identical recovery data to new().
-        // Only meaningful on AVX2-without-GFNI hardware: dep_tables are not built
-        // on GFNI CPUs (build_dep_tables returns None), so the ALTMAP flush path
-        // is inactive and the test would compare zeros against real output.
-        if !std::is_x86_feature_detected!("avx2") || std::is_x86_feature_detected!("gfni") {
-            return;
-        }
+        // Runs on every CPU: where the ALTMAP kernel exists this exercises it,
+        // and where it doesn't (no AVX2, or a GFNI machine, where
+        // build_dep_tables returns None) it exercises the constructor's
+        // fallback to the portable layout. This test used to skip GFNI
+        // hardware, which is exactly where the encoder was silently returning
+        // all-zero recovery blocks.
 
         // slice_size must be a multiple of 32 bytes (16 u16 words) for ALTMAP.
         let slice_size = 64usize; // 32 u16 words
@@ -4372,6 +4455,152 @@ mod tests {
                 a.data, n.data,
                 "ALTMAP recovery slice {i} differs from normal encoder output"
             );
+            assert!(
+                a.data.iter().any(|b| *b != 0),
+                "ALTMAP recovery slice {i} is all zeros — the kernel never ran"
+            );
+        }
+    }
+
+    /// Every layout-specific constructor must produce the same recovery data as
+    /// the portable one, on whatever CPU the tests happen to run on. A layout
+    /// whose kernel is unavailable has to fall back, not silently return an
+    /// unprocessed (all-zero) buffer.
+    #[test]
+    fn layout_constructors_agree_with_the_portable_encoder() {
+        let (slice_size, total_slices, recovery_count) = (512usize, 5usize, 3usize);
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 131 + i * 7 + 11) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let encode = |mut enc: RecoveryEncoder| {
+            for s in &slices {
+                enc.add_slice(s.clone());
+            }
+            enc.finish().0
+        };
+
+        let reference = encode(RecoveryEncoder::new(
+            slice_size,
+            total_slices,
+            0,
+            recovery_count,
+        ));
+        assert!(
+            reference.iter().any(|r| r.data.iter().any(|b| *b != 0)),
+            "reference encoder produced nothing to compare against"
+        );
+
+        for (name, built) in [
+            (
+                "altmap",
+                encode(RecoveryEncoder::new_altmap(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+            (
+                "shuffle2x",
+                encode(RecoveryEncoder::new_shuffle2x(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+            (
+                "smart",
+                encode(RecoveryEncoder::new_smart(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+        ] {
+            assert_eq!(built.len(), reference.len(), "{name}: block count mismatch");
+            for (i, (got, want)) in built.iter().zip(reference.iter()).enumerate() {
+                assert_eq!(
+                    got.data, want.data,
+                    "{name}: recovery block {i} differs from the portable encoder"
+                );
+            }
+        }
+    }
+
+    /// A manual `--simd` override must never be applied to a specialized buffer
+    /// layout. `try_new_smart` builds a Shuffle2x encoder on AVX2-without-GFNI
+    /// hardware, so `--simd scalar` there used to run a Normal-layout kernel
+    /// against Shuffle2x buffers: no panic, no warning, just wrong parity.
+    #[test]
+    fn manual_simd_path_never_corrupts_a_specialized_layout() {
+        let (slice_size, total_slices, recovery_count) = (512usize, 4usize, 2usize);
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 97 + i * 13 + 5) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let encode = |mut enc: RecoveryEncoder| {
+            for s in &slices {
+                enc.add_slice(s.clone());
+            }
+            enc.finish().0
+        };
+
+        let reference = encode(RecoveryEncoder::new(
+            slice_size,
+            total_slices,
+            0,
+            recovery_count,
+        ));
+
+        let paths = [
+            SimdPath::Auto,
+            SimdPath::Scalar,
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Ssse3,
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx2,
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx2Gfni,
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx512Gfni,
+            #[cfg(target_arch = "aarch64")]
+            SimdPath::Neon,
+        ];
+
+        for path in paths {
+            for (name, enc) in [
+                (
+                    "altmap",
+                    RecoveryEncoder::new_altmap(slice_size, total_slices, 0, recovery_count),
+                ),
+                (
+                    "shuffle2x",
+                    RecoveryEncoder::new_shuffle2x(slice_size, total_slices, 0, recovery_count),
+                ),
+                (
+                    "smart",
+                    RecoveryEncoder::new_smart(slice_size, total_slices, 0, recovery_count),
+                ),
+            ] {
+                let got = encode(enc.with_simd_path(path));
+                for (i, (g, want)) in got.iter().zip(reference.iter()).enumerate() {
+                    assert_eq!(
+                        g.data, want.data,
+                        "{name} encoder with --simd {path:?}: recovery block {i} is wrong"
+                    );
+                }
+            }
         }
     }
 
