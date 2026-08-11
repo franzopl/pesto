@@ -33,8 +33,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
   - [Upload resume](#upload-resume)
-  - [Inline verify](#inline-verify---verify)
-  - [Post-upload check](#post-upload-check---check----check-delay)
+  - [Post-verification via STAT](#post-verification-via-stat---check)
   - [Rate limiting](#rate-limiting)
   - [Dry run](#dry-run)
 - [NZB metadata](#nzb-metadata)
@@ -393,6 +392,38 @@ pesto --obfuscate=paranoid movie.mkv
 > Use it only if you understand the implications — the NZB file is the only way
 > to reassemble the download.
 
+### Choosing a mode
+
+`--obfuscate` and `--password` protect two different things and don't affect
+each other's behavior at all: `--obfuscate` controls what's visible on the
+wire (Subject, yEnc `name=`, `From`) so header-scraping and search-by-title
+can't identify the release; `--password` (see
+[Compression and passwords](#compression-and-passwords) below) encrypts the
+archive's actual content, so downloading the raw articles without your `.nzb`
+doesn't get anyone a readable file. Combine them for both protections at
+once — neither weakens the other, and `--password` behaves identically
+regardless of which `--obfuscate` mode is active.
+
+| Mode | Subject | yEnc `name=` | `From` | Real name in `.nzb` | Indexer grouping | Tool fingerprint avoided | + `--password` |
+|------|---------|---------------|--------|----------------------|-------------------|--------------------------|-----------------|
+| `none` | real name | real name | config value | yes (trivially) | yes, by real name | n/a — nothing hidden | archive content encrypted; release still searchable by real name |
+| `full` | random, per file | random, per file (≠ Subject) | random, per file | yes | no — each file is its own unrelated identity | yes | archive content also encrypted; still only the `.nzb`/PAR2 recover it |
+| `full-shared` | shared prefix, whole release | shared prefix + own random suffix (≠ Subject) | shared, whole release | yes | yes, by shared prefix | yes | same, plus content encrypted |
+| `light` | shared prefix, whole release | **identical to Subject** | shared, whole release | **no — mirrors the wire subject** (issue #106) | yes, strongest signal (exact Subject/yEnc match) | **no** — that exact match is the point | same, plus content encrypted |
+| `paranoid` *(experimental)* | random, per **article** | random, per file (≠ Subject, fixed across that file's segments) | random, per article | yes | none — not even one file's own segments group by wire metadata | yes | same, plus content encrypted; `.nzb` is the only way to reassemble either way |
+
+Quick guidance:
+- **Public, no privacy need** → `none`.
+- **Maximum privacy, don't care about indexer grouping** → `full` (add
+  `--password` to also hide the content from anyone who somehow gets the raw
+  articles).
+- **Want obfuscation but need an indexer to recognise/repair the release as
+  one unit** → `full-shared` (the default recommendation) or `light` if your
+  indexer specifically needs an exact Subject/yEnc `name=` match to group
+  correctly (confirm empirically — `full-shared` is right for most).
+- **Maximum resistance to wire-metadata correlation, willing to depend
+  entirely on the `.nzb`** → `paranoid` (experimental).
+
 ---
 
 ## Compression and passwords
@@ -682,65 +713,69 @@ Disable the saved log per-run with `--no-session-log`, or permanently:
 session_log = false
 ```
 
-### Post-verification via STAT
+### Post-verification via STAT (`--check`)
 
-pesto has two independent verification modes:
+pesto verifies every posted article with a streaming `STAT` check, **on by
+default**. Each article that gets a clean `240` from its `POST` is queued for
+a `STAT` confirmation `--check-delay` seconds later (default **5**), using a
+small pool of connections dedicated to checking — carved out of
+`--connections`, not opened on top of it, so the total connection count never
+changes. This runs concurrently with the upload rather than as a separate
+pass afterward, so by the time the last file finishes posting most of the
+run's articles are typically already confirmed.
 
-#### Inline verify (`--verify`)
+A miss is retried up to `--check-retries` times (default **3**, **20 s**
+apart). If it's still missing, pesto reposts it under a fresh `Message-ID`
+(so the `.nzb` stays valid) and queues the new copy for another round of
+checks. `--check-post-retries` (default **1**) caps how many times a single
+article can be reposted before it's given up on as permanently missing.
 
-Confirms each article immediately after posting via a `STAT` command. Failed
-checks trigger an automatic repost. Off by default because it adds one
-round-trip per article and is incompatible with pipelining.
-
-```bash
-pesto --verify movie.mkv
-```
-
-#### Post-upload check (`--check` / `--check-delay`)
-
-After the entire upload is complete, waits a configurable number of seconds
-for the server to propagate the articles, then runs a parallel `STAT` pass
-over every article using the same number of connections as the upload.
-Any article not found is automatically reposted with its original `Message-ID`
-so the `.nzb` remains valid, followed by a second STAT pass to confirm.
-
-Passing `--check-delay` alone is enough to activate the check — `--check` is
-implied automatically.
+Disable the whole thing with `--no-check` if you'd rather skip verification
+entirely — faster, but you won't find out about missing articles until
+something tries to download the release.
 
 ```bash
-# Wait 30 s then verify all articles (default delay)
-pesto --check movie.mkv
+# Default: the streaming check runs automatically
+pesto movie.mkv
 
-# Wait 60 s before verifying (recommended for servers with slow propagation)
+# Disable it
+pesto --no-check movie.mkv
+
+# Wait longer before the first STAT attempt (servers with slow propagation)
 pesto --check-delay 60 movie.mkv
 
-# Explicit: wait 120 s, up to 5 STAT attempts per article (20 s apart)
-pesto --check --check-delay 120 --check-retries 5 movie.mkv
+# More patience per article: 5 attempts, 20 s apart
+pesto --check-retries 5 movie.mkv
 
-# Limit check to 8 parallel connections regardless of upload connections
-pesto --check --check-connections 8 movie.mkv
+# Cap the dedicated check pool at 8 connections
+pesto --check-connections 8 movie.mkv
 ```
 
-The terminal shows a live countdown during the propagation wait, then a
-progress bar during the STAT pass — green on success, red on missing articles:
+The terminal shows check progress as a trailing band on the upload bar, plus
+a live tally of verified/pending/missing/reposted articles in its own box:
 
 ```
-▸ check  waiting for propagation · 28s remaining
-
-▸ check  [██████████████████████████] 4281/4281 · all verified · elapsed 0:08
+┌─ upload ────────────────────────────────────────┐
+│ [████████████████░░░░░░░░] 68%  2912/4281 seg    │
+│ 1.9 GiB/2.8 GiB · 42 MiB/s                        │
+│ ETA 0:21                                          │
+└────────────────────────────────────────────────┘
+┌─ check ─────────────────────────────────────────┐
+│ 2601 verified · 311 pending                       │
+│ elapsed 0:14                                      │
+└────────────────────────────────────────────────┘
 ```
 
-When an article is not found, pesto retries up to `--check-retries` times
-(default **3**) with **20 seconds** between each attempt, then reposts it
-automatically if still missing.
+When articles are missing or get reposted, the check box's first line switches
+to `<verified> · <pending> · N missing` and appends `· N reposted`.
 
 | Flag | Config key | Default | Description |
 |------|-----------|---------|-------------|
-| `--check` | `posting.check` | off | Run a STAT pass after upload |
-| `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass (implies `--check`) |
-| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article; 20 s between each |
-| `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for the STAT pass |
-| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost-then-verify rounds for articles still missing after `--check` |
+| `--check` / `--no-check` | `posting.check` | **on** | Run the streaming STAT check; `--no-check` disables it |
+| `--check-delay <SECS>` | `posting.check_delay` | `5` | Seconds to wait after an article posts before its first STAT check |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per posted copy; 20 s between each |
+| `--check-connections <N>` | `posting.check_connections` | auto (~8% of total, capped at 4) | Dedicated connections for the check queue, carved out of `--connections` |
+| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost attempts per article once its STAT retries are exhausted |
 | `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` anyway if articles are still confirmed missing after `--check-post-retries` |
 | `--check-recover-percent <N>` | `posting.check_recover_percent` | `15` | Skip the automatic final recovery pass below if still-missing articles exceed this percent of the release |
 | `--check-recover-max <N>` | `posting.check_recover_max` | `50` | After `--check-post-retries` is exhausted, automatically retry once more if at most this many articles (and within `--check-recover-percent`) are still missing; `0` disables |
@@ -1030,11 +1065,14 @@ picked up automatically — no config change needed.
 | `--memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers |
 | `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
 | `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
-| `--verify` | `posting.verify` | off | Confirm each article inline with STAT (one round-trip per article) |
-| `--check` | `posting.check` | off | Run a STAT pass over all articles after the upload completes |
-| `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before the STAT pass; implies `--check` |
-| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article during the check pass; 20 s between each |
-| `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for the STAT pass |
+| `--check` / `--no-check` | `posting.check` | **on** | Streaming STAT check, concurrent with the upload; `--no-check` disables it |
+| `--check-delay <SECS>` | `posting.check_delay` | `5` | Seconds to wait after an article posts before its first STAT check |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per posted copy; 20 s between each |
+| `--check-connections <N>` | `posting.check_connections` | auto (~8% of total, capped at 4) | Dedicated connections for the check queue, carved out of `--connections` |
+| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost attempts per article once its STAT retries are exhausted |
+| `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` anyway if articles are still confirmed missing after `--check-post-retries` |
+| `--check-recover-percent <N>` | `posting.check_recover_percent` | `15` | Skip the automatic final recovery pass if still-missing articles exceed this percent of the release |
+| `--check-recover-max <N>` | `posting.check_recover_max` | `50` | One extra repost-and-verify attempt after `--check-post-retries` is exhausted, if at most this many articles are still missing; `0` disables |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
