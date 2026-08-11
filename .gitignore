@@ -29,3 +29,7 @@ bench_*.bin
 IMG_20260610_072418_602.jpg
 IMG_20260610_072425_741.jpg
 pesto (1).txt
+
+# Claude Code local settings (machine-specific, never shared)
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*
