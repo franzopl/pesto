@@ -526,30 +526,10 @@ so every place that rebuilds a subject — the main post path, `--check` reposts
 `--obfuscate` mode) between runs of the same `--resume` state invalidates the state (`resume::RunFingerprint`),
 the same way `--obfuscate`/`--par2` changes already do, since it changes every subject in the release.
 
-**Numbering order (fixed after a live upload):** the counter is assigned by *natural* order of each file's
-published name — digit runs compared numerically, so `part2.rar` precedes `part10.rar` even when `rar` leaves the
-volume number unpadded — and not by `metas`' posting order. `metas` is sorted by PAR2 File ID (an MD5-derived
-key the par2 spec requires the encoder to slice in), which shuffles a release's volumes with respect to their
-volume numbers; a live `--obfuscate=full-shared` release came out numbered `[5] part1.rar, [3] part2.rar,
-[4] part3.rar, [1] part4.rar, …`. Indexers sort a collection by Subject and the counter is the Subject's leading
-field, so that listed the release scrambled. The two orders are now decoupled: `metas` stays in File-ID order for
-the encoder, only `file_index` follows volume order. The PAR2 index and volumes keep their positions at the end
-of the release, and the final `.nzb` file list is sorted by the same natural order.
-
-**One comparator for the whole release.** `walk::natural_cmp` is now the single definition of that order,
-delegating to `lexical_sort::natural_lexical_cmp` — the ordering `--each`/`--season` already sorted their entries
-with, so a batch's entry order and a release's internal file order can't disagree. Every stage that puts files in
-order goes through it: `expand_inputs` (which also fixes `--obfuscate=full-shared`'s `{prefix}-NN` wire names,
-numbered by input position — a release of `ep1`/`ep2`/`ep10` used to label `ep10` as `-01` while the counter
-called it `[3/3]`), `--compress-volume-size`'s volume listing (`rar` pads `.partNN` only as far as the volume
-total needs, so an unpadded set was collected `part1, part10, part2`), the `file_index` ranking, and the final
-`.nzb` file list.
-
-**What is deliberately *not* in that order:** the order articles actually reach the server. With `--par2 > 0` and
-more than one file, `metas` — and therefore the posting sequence — stays in File-ID order, because the producer
-streams slices to the Reed-Solomon encoder in exactly that sequence and the par2 spec requires it. Posting order
-is invisible to indexers (they group and sort by Subject; a release's articles all carry near-identical `Date`
-headers anyway), so decoupling it would cost a second read pass over every file for no user-visible gain.
+**Numbering order:** `filenum` follows the release's own order (`part1.rar` is `[1/N]`), not `metas`' posting
+order — a live upload came out numbered `[5] part1.rar, [3] part2.rar, [4] part3.rar, [1] part4.rar, …` because
+`metas` is sorted by PAR2 File ID. See **Phase 48 — Release File Ordering** for the fix and for the one
+comparator every ordering stage now shares.
 
 **Why the default is split by obfuscation mode:** `full` and `paranoid` exist specifically to prevent an
 observer from correlating files/segments by wire metadata (independently-random names/`From` per file, or per
@@ -714,6 +694,58 @@ path at all: articles decode under their random yEnc name and nothing ever renam
 **Result:** A `--season --obfuscate=full` pack's global PAR2 set is now a fully spec-compliant recovery set that
 verifies and repairs against real third-party PAR2 tools, and correctly renames de-obfuscated episodes back to
 their real names — exactly like a single-file `--obfuscate=full` upload already did.
+
+---
+
+## Phase 48 — Release File Ordering ✅
+
+**Problem Statement:** A live `--obfuscate=full-shared --file-counter` upload of a 6-volume rar set landed on
+nzbindex numbered `[5] part1.rar, [3] part2.rar, [4] part3.rar, [1] part4.rar, [6] part5.rar, [2] part6.rar`
+(PAR2 correctly last, `[7..14]`). Indexers sort a collection by Subject and `--file-counter`'s `[N/M]` is the
+Subject's leading field, so the release listed scrambled — the file a user is told is "part 1 of 14" is not the
+first volume.
+
+**Root cause:** `file_index` was assigned from each file's position in `metas`, and `metas` is sorted by PAR2
+File ID — an MD5-derived key, so effectively random with respect to volume numbers. That sort is *required*:
+the par2 spec numbers input blocks in File-ID order (Main packet) and the producer streams slices to the encoder
+in `metas` order, so dropping it produces recovery data that verifies against pesto's own encoder but fails real
+repair against par2cmdline (the same trap Phase 47c hit).
+
+**Solution:** decouple the encoder's order from the release's order. `metas` keeps its File-ID order; the counter
+is ranked separately, by natural order of each file's published name.
+
+- [x] `walk::natural_cmp` — the single definition of "natural order" for a release, delegating to
+  `lexical_sort::natural_lexical_cmp` (already a dependency, and already what `--each`/`--season` sorted their
+  entries with, so a batch's entry order and a release's internal file order can't diverge). Digit runs compare
+  numerically: `part2.rar` precedes `part10.rar` even when `rar` leaves the volume number unpadded, which it does
+  whenever the volume total needs fewer digits — a 6-volume set really is `part1..part6`.
+- [x] `file_index` ranked by `natural_cmp` over `real_name`, applied after the File-ID sort so the two orders
+  stay independent. The PAR2 index and volumes keep their positions at the end of the release
+  (`metas.len() + 1..`, volumes in `plan_volumes` order).
+- [x] `expand_inputs` sorts with the same comparator. It was byte-wise, and that list is *also* what numbers
+  `--obfuscate=full-shared`'s `{prefix}-NN` wire names for a non-volume multi-file release — so `ep1`/`ep2`/`ep10`
+  labelled `ep10` as `-01` while the counter called it `[3/3]`, the release's two only visible ordering signals
+  contradicting each other.
+- [x] `--compress-volume-size`'s volume listing (`compress::list_matching`) sorts naturally too. It sorted
+  `PathBuf`s plainly, so an unpadded rar set was collected `part1, part10, part2, ...` — and the caller treats
+  the first entry as the archive's *first* volume.
+- [x] The final `.nzb` file list is sorted by the same comparator.
+- [x] Tests: `file_counter_follows_volume_order_not_file_id_order` (12 unpadded volumes end to end, verified to
+  fail without the fix), `full_shared_multi_file_suffix_matches_the_file_counter`,
+  `output_is_sorted_naturally_not_lexicographically`, `list_matching_returns_unpadded_rar_volumes_in_volume_order`,
+  plus unit coverage of the comparator itself (unpadded/padded/7z numbering, antisymmetry, agreement with the
+  `--each` ordering).
+
+**Deliberately unchanged — the order articles reach the server.** With `--par2 > 0` and more than one file, the
+posting sequence stays in File-ID order for the reason above. It is invisible to indexers (they group and sort by
+Subject, and a release's articles all carry near-identical `Date` headers), so decoupling it would cost a second
+full read pass over every file for no user-visible gain.
+
+**Side effect:** the ordering is now case-insensitive, matching what other posters do — a release's `.nfo` sorts
+by its letters rather than landing after every uppercase-initial file the way byte order put it.
+
+See also the `Subject file counter [N/M]` entry above for why the counter is off by default under
+`--obfuscate=full`/`paranoid`.
 
 ---
 
