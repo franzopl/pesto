@@ -87,9 +87,23 @@ pub enum ObfuscateMode {
     /// PAR2 set and the content as one release, which plain `full` prevents
     /// (see GitHub issue #58). This trades away resistance to correlation by
     /// wire metadata for indexer compatibility — the opposite trade `paranoid`
-    /// makes — so it is a distinct mode rather than a `full` variant.
+    /// makes — so it is a distinct mode rather than a `full` variant. The yEnc
+    /// `name=` starts with that same shared prefix but adds its own random
+    /// suffix rather than repeating the Subject verbatim (see `light` below
+    /// for the variant that does repeat it).
     #[serde(rename = "full-shared")]
     FullShared,
+    /// Like `full-shared` — one shared random prefix across every file in the
+    /// release — but the yEnc `name=` is that prefixed string verbatim, the
+    /// same as the Subject, instead of adding its own random suffix. This is
+    /// `full-shared`'s behavior prior to `v0.6.1` (commit `bb9e3b2`), which
+    /// decoupled Subject and yEnc name everywhere to close an exact-match
+    /// fingerprint (Subject header == yEnc body name=) that identified posts
+    /// made by this tool. Some indexers key their own grouping off that exact
+    /// match, though (reportedly including NZBIndex), so `light` restores it
+    /// for anyone who needs that over avoiding the fingerprint (see GitHub
+    /// issue #106).
+    Light,
     /// Like `full` but each individual article gets a unique subject and From
     /// header, making segment grouping by wire metadata impossible.
     /// Experimental — requires the NZB to download.

@@ -154,6 +154,7 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
+        config.obfuscate,
     );
     for rel in &expected {
         assert!(
@@ -202,6 +203,7 @@ async fn full_obfuscation_nzb_reflects_random_dates() {
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
+        config.obfuscate,
     );
 
     // Collect all date="..." values from the NZB.

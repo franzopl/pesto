@@ -301,7 +301,13 @@ mod tests {
             file_index: 0,
             total_files: 0,
         }];
-        pesto::nzb::generate(&groups, &segments, &pesto::nzb::NzbMeta::default()).into_bytes()
+        pesto::nzb::generate(
+            &groups,
+            &segments,
+            &pesto::nzb::NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        )
+        .into_bytes()
     }
 
     #[tokio::test]

@@ -177,7 +177,12 @@ mod tests {
             seg("a.bin", 2, 2, "<a2@x>"),
             seg("b.bin", 1, 1, "<b1@x>"),
         ];
-        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
         let parsed = pesto::nzb::parse(&xml).unwrap();
 
         let queue = build(&parsed);
@@ -192,7 +197,12 @@ mod tests {
     fn a_slash_in_the_file_name_is_flattened_not_left_to_split_into_a_directory() {
         let groups = vec!["alt.test".to_string()];
         let segments = vec![seg("[01/14] - \"real.mkv\"", 1, 1, "<a1@x>")];
-        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
         let parsed = pesto::nzb::parse(&xml).unwrap();
 
         let queue = build(&parsed);
@@ -210,7 +220,12 @@ mod tests {
             seg("a.bin", 3, 3, "<a3@x>"),
             seg("b.bin", 1, 1, "<b1@x>"),
         ];
-        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -231,7 +246,12 @@ mod tests {
         let segments: Vec<_> = (1..=10)
             .map(|i| seg("a.bin", i, 10, &format!("<a{i}@x>")))
             .collect();
-        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -251,7 +271,12 @@ mod tests {
     fn sample_smaller_than_per_file_keeps_every_segment() {
         let groups = vec!["alt.test".to_string()];
         let segments = vec![seg("a.bin", 1, 2, "<a1@x>"), seg("a.bin", 2, 2, "<a2@x>")];
-        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -263,7 +288,12 @@ mod tests {
     fn sample_of_zero_is_clamped_to_one_segment_per_file() {
         let groups = vec!["alt.test".to_string()];
         let segments = vec![seg("a.bin", 1, 2, "<a1@x>"), seg("a.bin", 2, 2, "<a2@x>")];
-        let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 

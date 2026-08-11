@@ -3,6 +3,12 @@
 //! prefix, so Usenet indexers can still group the release together (see
 //! GitHub issue #58). Plain `full` obfuscation gives each file an
 //! independently-random name, which is the bug this mode fixes.
+//!
+//! `ObfuscateMode::Light` shares that same prefix (issue #106's "option 1"),
+//! but goes one step further: the yEnc `name=` is the shared subject string
+//! verbatim rather than the prefix plus its own random suffix — see the
+//! `light_obfuscation_*` tests below for the exact-match assertions
+//! `full_shared_obfuscation_par2_set_shares_prefix_with_content` doesn't make.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -175,6 +181,7 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
+        config.obfuscate,
     );
     for rel in &expected {
         assert!(
@@ -186,7 +193,7 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
     std::fs::remove_dir_all(&root).ok();
 }
 
-/// `full-shared` replaces every real name with `{prefix}-NN{ext}`, so that
+/// `full-shared` replaces every real name with `{prefix}.partNN{ext}`, so that
 /// `NN` and the `--file-counter` `[N/M]` prefix are the release's only visible
 /// ordering. They must agree, and both must follow the order a human reads —
 /// `ep2` before `ep10`, which plain lexicographic sorting gets backwards.
@@ -215,7 +222,7 @@ async fn full_shared_multi_file_suffix_matches_the_file_counter() {
 
     for seg in &outcome.segments {
         // `subject_name` is the real name (the NZB identity); `wire_name` is
-        // what actually went out as `{prefix}-NN.bin`.
+        // what actually went out as `{prefix}.partNN.bin`.
         let expected_index = match seg.subject_name.as_ref() {
             "ep1.bin" => 1,
             "ep2.bin" => 2,
@@ -229,8 +236,8 @@ async fn full_shared_multi_file_suffix_matches_the_file_counter() {
         );
         assert!(
             seg.wire_name
-                .ends_with(&format!("-{expected_index:02}.bin")),
-            "wire name `{}` for `{}` should carry suffix -{expected_index:02}, matching its \
+                .ends_with(&format!(".part{expected_index:02}.bin")),
+            "wire name `{}` for `{}` should carry suffix .part{expected_index:02}, matching its \
              file counter",
             seg.wire_name,
             seg.subject_name
@@ -268,8 +275,9 @@ async fn full_shared_obfuscation_preserves_rar_volume_suffix() {
     // Regression test for issue #68: `--compress-volume-size` splits an
     // archive into `stem.partNN.rar` volumes, which indexers key their
     // "same release" grouping off of. Full-shared naming must preserve that
-    // exact suffix on the wire instead of collapsing it to a generic `-NN`
-    // suffix, or the release fails to group.
+    // exact suffix on the wire instead of collapsing it to the generic
+    // `.partNN{ext}` fallback, or the release fails to group (the real
+    // `.rar` extension matters here, not just the `.partNN` marker).
     let root =
         std::env::temp_dir().join(format!("pesto_full_shared_rar_vol_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -592,4 +600,215 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
 
     let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `ObfuscateMode::Light` (issue #106's "option 1"): like `full-shared` above
+/// — the content file and every PAR2 file share one wire prefix — but the
+/// yEnc `name=` is that exact subject string, not a prefix-plus-random-suffix
+/// derivative. Mirrors `full_shared_obfuscation_par2_set_shares_prefix_with_content`
+/// except for that last assertion.
+#[tokio::test(flavor = "multi_thread")]
+async fn light_obfuscation_par2_set_shares_prefix_and_matches_subject_exactly() {
+    let (addr, articles) = spawn_accept_all_server();
+    let dir = std::env::temp_dir().join(format!("pesto_light_par2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = dir.join("movie.bin");
+
+    const ARTICLE_SIZE: usize = 65536;
+    const ARTICLES: usize = 10;
+    std::fs::write(&input, content(0, ARTICLE_SIZE * ARTICLES)).unwrap();
+
+    let config = Config {
+        host: "127.0.0.1".to_string(),
+        port: addr.port(),
+        ssl: false,
+        connections: 1,
+        username: None,
+        password: None,
+        from: "tester <t@pesto.test>".to_string(),
+        groups: vec!["alt.binaries.test".to_string()],
+        article_size: ARTICLE_SIZE,
+        line_length: 128,
+        retries: 1,
+        retry_delay: 1,
+        timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        obfuscate: ObfuscateMode::Light,
+        dry_run: false,
+        par2: 10,
+        par2_slice_size: Some(ARTICLE_SIZE),
+        par2_slice_count: None,
+        par2_recovery_count: None,
+        par2_memory_limit: Some(1_000_000_000),
+        memory_limit: None,
+        par2_temp_dir: None,
+        compress_temp_dir: None,
+        par2_only: false,
+        par2_before_upload: false,
+        threads: 0,
+        simd: pesto::par2::SimdPath::Auto,
+        extra_servers: vec![],
+        resume: false,
+        upload_rate: 0,
+        compress_format: None,
+        compress_password: None,
+        compress_volume_size: None,
+        nzb_title: None,
+        nzb_password: None,
+        nzb_category: None,
+        nzb_tags: vec![],
+        tmdb_id: None,
+        tmdb_kind: None,
+        imdb_id: None,
+        tvdb_id: None,
+        mal_id: None,
+        indexer_url: None,
+        indexer_api_key: None,
+        notify_webhook: None,
+        notify_ntfy: None,
+        notify: None,
+        history: true,
+        history_dir: None,
+        nzb_dir: None,
+        date: None,
+        no_archive: false,
+        file_counter: false,
+        message_id_domain: None,
+        pre_hooks: vec![],
+        post_hooks: vec![],
+        no_hooks: false,
+        nfo: false,
+        nzb_conflict: pesto::config::NzbConflict::Overwrite,
+        quiet: false,
+        bell: false,
+        check: false,
+        check_delay_secs: 5,
+        check_retries: 2,
+        check_connections: 1,
+        check_post_retries: 1,
+        allow_incomplete_nzb: false,
+        check_recover_percent: 15,
+        check_recover_max: 0,
+        pipeline_depth: 1,
+        keepalive_interval: 0,
+    };
+
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let outcome = post_files(&config, &inputs).await.unwrap();
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
+
+    let captured = articles.lock().unwrap();
+    assert!(!captured.is_empty(), "no articles were captured");
+
+    fn quoted_name(subject: &str) -> &str {
+        subject
+            .split_once('"')
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(name, _)| name)
+            .unwrap_or(subject)
+    }
+
+    let mut wire_prefix: Option<String> = None;
+    let mut checked_par2 = 0;
+    for article in captured.iter() {
+        let text = String::from_utf8_lossy(article);
+        let subject = text
+            .lines()
+            .find_map(|l| l.strip_prefix("Subject: "))
+            .expect("article must have a Subject header")
+            .trim_end_matches('\r');
+        let name = quoted_name(subject);
+        let prefix = shared_prefix(name).to_string();
+        let prefix = wire_prefix.get_or_insert(prefix);
+        assert_eq!(
+            shared_prefix(name),
+            prefix,
+            "article subject `{subject}` doesn't share the release's wire prefix `{prefix}`"
+        );
+
+        let ybegin = text
+            .lines()
+            .find(|l| l.starts_with("=ybegin "))
+            .expect("article must have a =ybegin line");
+        let yenc_name = ybegin
+            .split("name=")
+            .nth(1)
+            .expect("=ybegin must carry name=")
+            .trim_end_matches('\r');
+        // The whole point of `light` vs `full-shared`: no independent random
+        // suffix, the yEnc name= is the subject's quoted name verbatim.
+        assert_eq!(
+            yenc_name, name,
+            "article's yEnc name= `{yenc_name}` doesn't match its subject `{name}` exactly under light"
+        );
+        if subject.contains(".par2") {
+            checked_par2 += 1;
+        }
+    }
+    assert!(checked_par2 > 0, "no PAR2 articles were captured to check");
+    drop(captured);
+
+    let _ = std::fs::remove_dir_all(&outcome.par2_temp_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Under every other `--obfuscate` mode, the generated `.nzb` carries the
+/// real filename regardless of what went out on the wire (see
+/// `nzb::generate`'s doc comment) — that's deliberate, so the file you keep
+/// privately is readable without needing the indexer or PAR2 recovery.
+/// `light` exists specifically so the release can be found/repaired through
+/// an indexer using nothing but what's visible on the wire (issue #106), so
+/// its own `.nzb` must mirror that same wire subject instead — otherwise the
+/// file pesto writes for you wouldn't match what's actually searchable/
+/// verifiable out there.
+#[tokio::test]
+async fn light_obfuscation_nzb_subject_mirrors_the_wire_subject() {
+    let root = std::env::temp_dir().join(format!("pesto_light_nzb_subject_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("movie.mkv");
+    std::fs::write(&file, vec![0x5Au8; 10_000]).unwrap();
+
+    let config = dry_run_config(ObfuscateMode::Light);
+    let inputs = expand_inputs(std::slice::from_ref(&file)).unwrap();
+    let outcome = post_files(&config, &inputs).await.unwrap();
+    assert!(
+        outcome.failures.is_empty(),
+        "failures: {:?}",
+        outcome.failures
+    );
+
+    let seg = &outcome.segments[0];
+    assert_eq!(
+        seg.subject_name.as_ref(),
+        "movie.mkv",
+        "PostedSegment::subject_name (the internal real-name field) is unaffected"
+    );
+    assert_ne!(
+        seg.wire_name.as_ref(),
+        "movie.mkv",
+        "wire_name should be the obfuscated wire identity, not the real name"
+    );
+
+    let nzb = pesto::nzb::generate(
+        &config.groups,
+        &outcome.segments,
+        &pesto::nzb::NzbMeta::default(),
+        config.obfuscate,
+    );
+    assert!(
+        !nzb.contains("movie.mkv"),
+        "the real filename must not appear anywhere in a light .nzb"
+    );
+    assert!(
+        nzb.contains(seg.wire_name.as_ref()),
+        "the .nzb subject should carry the wire name `{}`",
+        seg.wire_name
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }

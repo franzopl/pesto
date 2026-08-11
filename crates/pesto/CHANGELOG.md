@@ -12,7 +12,25 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **`--obfuscate=light`**: like `full-shared` — one shared random prefix across every file in the release — but
+  the yEnc `name=` is that prefixed string verbatim, the same as the Subject, instead of adding its own random
+  suffix. This is `full-shared`'s behavior prior to `v0.6.1`, which added the random suffix to close an
+  exact-match fingerprint (Subject header == yEnc body name=); some indexers key their own grouping off that
+  exact match (reportedly including NZBIndex), so `light` restores it for anyone who needs that over avoiding
+  the fingerprint (issue #106). Its generated `.nzb` mirrors the actual wire subject instead of the real
+  filename — every other mode preserves the real name there — so the file you keep locally matches what's
+  findable/verifiable through the indexer; the real name is still recoverable via PAR2 File Description packets,
+  same as under any other obfuscated mode.
+
 ### Changed
+- **`full-shared`/`light`'s loose (non-archive-volume) multi-file fallback suffix changed from `{prefix}-NN{ext}`
+  to `{prefix}.partNN{ext}`.** Empirically, Usenet indexer subject-cleaning regexes (e.g. nZEDb's
+  `CollectionsCleaning::generic()`) strip a `\.part\d*(\.rar)?` marker together with the trailing extension as
+  one unit — the same way they already strip `.volNNN+NNN.par2` — collapsing every file back to the same
+  collection key. A bare `-NN` ahead of the extension isn't part of that pattern and survived cleaning, giving
+  each loose file its own key and defeating the grouping these modes exist for (confirmed against a real
+  upload: the PAR2 set grouped on binsearch, the loose `-NN.mkv` files did not).
 - **`benches/par2_encoder.rs` only times kernels this CPU actually runs**, printing `—` for the rest. The
   ALTMAP and Shuffle2x columns call their layout constructors rather than forcing a path, and those fall back
   to the portable layout when their kernel is absent — so the ALTMAP row on a GFNI machine was reporting the

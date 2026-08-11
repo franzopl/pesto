@@ -4,13 +4,21 @@
 //! signature (header == body name) across every posted article that
 //! fingerprints this specific posting tool, undermining part of what
 //! obfuscation is for — see `poster/mod.rs`'s
-//! `ObfuscateMode::Full | ObfuscateMode::Paranoid` and `FullShared` arms.
+//! `ObfuscateMode::Full | ObfuscateMode::Paranoid` and
+//! `Light | ObfuscateMode::FullShared` arms.
 //!
 //! `full-shared` is a partial exception: since issue #106, its yEnc name
 //! deliberately keeps the release's shared prefix (with its own random
 //! suffix) so an indexer reading only the yEnc body can still recognise the
 //! article as part of the release — it just avoids repeating the *whole*
 //! subject string verbatim.
+//!
+//! `light` is the deliberate opposite of this file's rule: like `full-shared`,
+//! every file in the release shares one random prefix, but its whole point
+//! (issue #106) is to restore `full-shared`'s pre-`v0.6.1` behaviour of
+//! reusing that exact same string for the yEnc name too — for indexers that
+//! key grouping off an exact Subject/yEnc-name match, at the cost of the
+//! fingerprint this file otherwise guards against.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -170,6 +178,55 @@ fn full_obfuscation_uses_independent_subject_and_yenc_name() {
     assert_ne!(
         subject_name, yenc_name,
         "subject and yEnc name= must be independently random under --obfuscate=full"
+    );
+}
+
+#[test]
+fn light_obfuscation_shares_prefix_across_files_with_exact_subject_yenc_match() {
+    let (addr, articles) = spawn_capturing_server();
+    let dir = tempfile::tempdir().unwrap();
+    let xdg_home = tempfile::tempdir().unwrap();
+    let input_a = dir.path().join("a.bin");
+    let input_b = dir.path().join("b.bin");
+    std::fs::write(&input_a, vec![0xABu8; 64]).unwrap();
+    std::fs::write(&input_b, vec![0xCDu8; 64]).unwrap();
+    let out = dir.path().join("out.nzb");
+
+    run_pesto(
+        addr,
+        xdg_home.path(),
+        "--obfuscate=light",
+        &[&input_a, &input_b],
+        &out,
+    );
+
+    let articles = articles.lock().unwrap();
+    assert_eq!(articles.len(), 2);
+
+    let (subject_a, yenc_a) = subject_and_yenc_name(&articles[0]);
+    let (subject_b, yenc_b) = subject_and_yenc_name(&articles[1]);
+    let name_a = quoted_name(&subject_a);
+    let name_b = quoted_name(&subject_b);
+
+    // Like `full-shared` (issue #58): every file in the release shares one
+    // random prefix on the Subject, so indexers can group them.
+    let prefix_a = name_a.split('.').next().unwrap().split('-').next().unwrap();
+    let prefix_b = name_b.split('.').next().unwrap().split('-').next().unwrap();
+    assert_eq!(
+        prefix_a, prefix_b,
+        "light must keep one shared prefix across every file's subject"
+    );
+
+    // Unlike `full-shared`, the yEnc body name= is that exact subject string —
+    // no independent random suffix — restoring full-shared's pre-`v0.6.1`
+    // behavior for indexers that key grouping off that exact match (issue #106).
+    assert_eq!(
+        name_a, yenc_a,
+        "file a's subject and yEnc name= must match exactly under light"
+    );
+    assert_eq!(
+        name_b, yenc_b,
+        "file b's subject and yEnc name= must match exactly under light"
     );
 }
 

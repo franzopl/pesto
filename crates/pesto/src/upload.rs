@@ -296,7 +296,12 @@ pub async fn run_upload(
             tags: config.nzb_tags.clone(),
         };
         crate::memory::set_phase(crate::memory::Phase::Nzb);
-        let xml = crate::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
+        let xml = crate::nzb::generate(
+            &outcome.groups,
+            &outcome.segments,
+            &nzb_meta,
+            config.obfuscate,
+        );
         match tokio::fs::write(&out, &xml).await {
             Ok(()) => {
                 emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
@@ -438,6 +443,7 @@ pub async fn run_upload(
             obfuscate: match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             }

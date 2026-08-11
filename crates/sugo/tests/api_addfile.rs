@@ -27,7 +27,13 @@ fn minimal_nzb_bytes() -> Vec<u8> {
         file_index: 0,
         total_files: 0,
     }];
-    pesto::nzb::generate(&groups, &segments, &pesto::nzb::NzbMeta::default()).into_bytes()
+    pesto::nzb::generate(
+        &groups,
+        &segments,
+        &pesto::nzb::NzbMeta::default(),
+        pesto::config::ObfuscateMode::None,
+    )
+    .into_bytes()
 }
 
 fn multipart_body(filename: &str, content: &[u8]) -> (String, Vec<u8>) {

@@ -84,7 +84,12 @@ mod tests {
                 total_files: 0,
             },
         ];
-        let xml = pesto::nzb::generate(&groups, &segments, &pesto::nzb::NzbMeta::default());
+        let xml = pesto::nzb::generate(
+            &groups,
+            &segments,
+            &pesto::nzb::NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        );
 
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(xml.as_bytes()).unwrap();

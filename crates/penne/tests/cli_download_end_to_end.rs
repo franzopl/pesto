@@ -124,7 +124,12 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
 
 fn write_nzb(dir: &Path, segments: Vec<PostedSegment>) -> std::path::PathBuf {
     let groups = vec!["alt.binaries.test".to_string()];
-    let xml = pesto::nzb::generate(&groups, &segments, &NzbMeta::default());
+    let xml = pesto::nzb::generate(
+        &groups,
+        &segments,
+        &NzbMeta::default(),
+        pesto::config::ObfuscateMode::None,
+    );
     let nzb_path = dir.join("test.nzb");
     std::fs::write(&nzb_path, xml).unwrap();
     nzb_path

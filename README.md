@@ -280,11 +280,25 @@ from cataloguing plain posts; obfuscation hides the content from them.
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, 10–30 chars, independent per file | random, 10–30 chars, independent per file | random per file | yes |
+| `full-shared` | one shared random prefix for the whole release | shared prefix + own random suffix per file | shared for the whole release | yes |
+| `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | **no** — see below |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
 random TLD. The real file names are only in the `.nzb` you keep, or recoverable
 through the PAR2 set.
+
+Every mode above writes the real filename into the `.nzb` it generates,
+regardless of what went out on the wire — obfuscation only scrambles the
+actual NNTP article, and the `.nzb` is already a private file you hold
+through your own channel, so there's no reason to hide the name from
+yourself. `light` is the one exception: since its whole point is letting an
+indexer recognise and repair the release from the wire alone (issue #106),
+its `.nzb` mirrors that same wire subject instead of the real name, so the
+file you keep locally matches what's actually findable/verifiable through
+the indexer. The real filename is still recoverable — PAR2 File Description
+packets always embed it, independent of `--obfuscate` — so a download client
+that processes PAR2 still restores it, just not straight from the `.nzb`.
 
 When obfuscation is active, pesto also randomises the `Date:` header of each
 article to a time within the last 2 hours. This prevents articles in the same
@@ -311,9 +325,11 @@ pesto --obfuscate --password movie.mkv
 
 `--obfuscate=full-shared` obfuscates filenames like `full` mode, but reuses a single
 random *Subject* prefix (real extension, or archive volume suffix, kept) across the
-entire release — all data files, PAR2 index, and recovery volumes. Only the Subject
-is shared; the yEnc body `name=` stays independently random per file, same as `full`,
-since reusing it too would leave an exact subject/body match across every article.
+entire release — all data files, PAR2 index, and recovery volumes. The yEnc body
+`name=` also carries that same shared prefix, plus its own random suffix, so an
+indexer reading only the yEnc body (not the Subject) can still recognise every
+article as part of the release — but the random suffix keeps the Subject and yEnc
+name from ever matching exactly (issue #106).
 This preserves the ability for Usenet indexers to group files together, while still
 keeping the release hidden from casual observation.
 
@@ -331,10 +347,35 @@ pesto --obfuscate=full-shared --par2=5 --compress movie.mkv
 pesto --obfuscate=full-shared --par2=5 --file-counter ./MyShow.S01/
 ```
 
+### Light mode (exact Subject/yEnc name match)
+
+`--obfuscate=light` is `full-shared` taken one step further: it shares the same
+random prefix across the whole release, but the yEnc body `name=` is that shared
+subject string *verbatim* — no independent random suffix. This was `full-shared`'s
+own behavior before `v0.6.1`; that release added the random suffix to close an
+exact-match fingerprint (Subject header == yEnc body name=) that identified posts
+made by this tool. Some indexers key their own release grouping off that exact
+match, though (reportedly including NZBIndex), so `light` restores it for anyone
+who needs that over avoiding the fingerprint (issue #106).
+
+Unlike every other mode, `light`'s generated `.nzb` carries the *wire* subject
+in its `<file subject="...">` attribute instead of the real filename — see the
+"Real path in `.nzb`" note in the table above. Opening it directly in a
+download client shows the random name until PAR2 verify/repair restores the
+real one from the recovery set's File Description packets.
+
+```bash
+pesto --obfuscate=light movie.mkv
+
+# Typical use: multi-episode season with file numbering
+pesto --obfuscate=light --par2=5 --file-counter ./MyShow.S01/
+```
+
 | Mode | Wire names | Indexer grouping | Privacy |
 |------|-----------|------------------|---------|
 | `none` | Real filenames | ✓ Good | None |
 | `full-shared` | Shared random name | ✓ Good | Moderate |
+| `light` | Shared random name, Subject = yEnc name exactly | ✓ Good (strongest signal) | Moderate |
 | `full` | Per-file random names | ✗ Poor | High |
 | `paranoid` | Per-article random names | ✗ None | Maximum |
 
@@ -848,7 +889,7 @@ Environment variables available to the pre-hook:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, `light`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 
@@ -876,7 +917,7 @@ following environment variables:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, `light`, or `paranoid` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
@@ -971,7 +1012,7 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `full`, `full-shared`; bare flag = `full` (`paranoid` experimental) |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `full`, `full-shared`, `light`; bare flag = `full` (`paranoid` experimental) |
 | `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random` (last 24 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |

@@ -1035,6 +1035,7 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             obfuscate: match cfg.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             }
@@ -1628,7 +1629,12 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                         mal_id: config.mal_id.clone(),
                         tags: config.nzb_tags.clone(),
                     };
-                    let xml = pesto::nzb::generate(&config.groups, &all_segments, &meta);
+                    let xml = pesto::nzb::generate(
+                        &config.groups,
+                        &all_segments,
+                        &meta,
+                        config.obfuscate,
+                    );
                     match std::fs::write(&out, xml) {
                         Ok(()) => {
                             let _ = tx.send(AppEvent::Progress(format!(
@@ -1841,6 +1847,7 @@ async fn run_season_hooks(
         obfuscate: match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",
+            ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
             ObfuscateMode::Paranoid => "paranoid",
         }

@@ -772,6 +772,7 @@ fn file_counter_defaults_on_for_none_and_full_shared_off_for_full_and_paranoid()
     for (mode, expected) in [
         (ObfuscateMode::None, true),
         (ObfuscateMode::FullShared, true),
+        (ObfuscateMode::Light, true),
         (ObfuscateMode::Full, false),
         (ObfuscateMode::Paranoid, false),
     ] {

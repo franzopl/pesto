@@ -195,6 +195,7 @@ async fn file_counter_off_emits_no_prefix() {
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
+        ObfuscateMode::None,
     );
     assert!(
         !xml.contains('['),
@@ -247,6 +248,7 @@ async fn file_counter_numbers_data_files_index_and_every_volume() {
         &config.groups,
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
+        ObfuscateMode::None,
     );
     for i in 1..=expected_total {
         assert!(

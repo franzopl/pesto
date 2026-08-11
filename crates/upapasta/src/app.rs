@@ -113,6 +113,7 @@ pub fn obf_label(mode: ObfuscateMode) -> &'static str {
         ObfuscateMode::None => "None",
         ObfuscateMode::Full => "Full",
         ObfuscateMode::FullShared => "Full (shared)",
+        ObfuscateMode::Light => "Light (shared, matching)",
         ObfuscateMode::Paranoid => "Paranoid",
     }
 }
@@ -1953,7 +1954,8 @@ impl App {
         self.config_state.overrides.obfuscate = Some(match current {
             None => Full,
             Full => FullShared,
-            FullShared => None,
+            FullShared => Light,
+            Light => None,
             Paranoid => None,
         });
         self.status_bar.set("Obfuscate mode changed");
@@ -2191,7 +2193,8 @@ impl App {
         let next = match self.obf_effective() {
             ObfuscateMode::None => ObfuscateMode::Full,
             ObfuscateMode::Full => ObfuscateMode::FullShared,
-            ObfuscateMode::FullShared => ObfuscateMode::None,
+            ObfuscateMode::FullShared => ObfuscateMode::Light,
+            ObfuscateMode::Light => ObfuscateMode::None,
             ObfuscateMode::Paranoid => ObfuscateMode::None,
         };
         self.config_state.overrides.obfuscate = Some(next);
@@ -2389,6 +2392,9 @@ impl App {
             ObfuscateMode::Full => "Full: random subject + poster + filenames",
             ObfuscateMode::FullShared => {
                 "Full (shared): one random name for the whole release, so indexers can still group it"
+            }
+            ObfuscateMode::Light => {
+                "Light: like Full (shared), but subject and yEnc name match exactly"
             }
             ObfuscateMode::Paranoid => {
                 "Paranoid: unique subject + poster per article (experimental)"

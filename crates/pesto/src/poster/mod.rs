@@ -591,15 +591,18 @@ pub async fn post_files_with_progress_and_cancel(
     }
 
     // Generated once per run (not per file) so every file posted under
-    // `FullShared` — archive parts and PAR2 volumes alike — shares the same
-    // wire name prefix and sender identity. See `ObfuscateMode::FullShared`.
-    // Randomly generated fresh by default, which would otherwise make a
-    // `--resume` run's segments unmatchable against a prior run's (its
-    // wire identity, though not the resume key itself, would differ) — a
-    // compatible prior state (see `validate_run` above) reuses the same
-    // identity instead of generating a new one; see issue #18's resume
-    // follow-up discussion.
-    let (release_prefix, release_from) = if config.obfuscate == ObfuscateMode::FullShared {
+    // `FullShared`/`Light` — archive parts and PAR2 volumes alike — shares
+    // the same wire name prefix and sender identity. See
+    // `ObfuscateMode::FullShared` and `ObfuscateMode::Light`. Randomly
+    // generated fresh by default, which would otherwise make a `--resume`
+    // run's segments unmatchable against a prior run's (its wire identity,
+    // though not the resume key itself, would differ) — a compatible prior
+    // state (see `validate_run` above) reuses the same identity instead of
+    // generating a new one; see issue #18's resume follow-up discussion.
+    let (release_prefix, release_from) = if matches!(
+        config.obfuscate,
+        ObfuscateMode::FullShared | ObfuscateMode::Light
+    ) {
         let reused = resume_arc.as_ref().and_then(|r| {
             r.lock()
                 .unwrap()
@@ -689,7 +692,7 @@ pub async fn post_files_with_progress_and_cancel(
                     (obfuscated_name(), obfuscated_name(), random_from())
                 }
             }
-            ObfuscateMode::FullShared => {
+            ObfuscateMode::Light | ObfuscateMode::FullShared => {
                 let from = release_from.clone().unwrap_or_default();
                 if size == 0 {
                     let wn = wire_name(&real_name).to_string();
@@ -700,7 +703,7 @@ pub async fn post_files_with_progress_and_cancel(
                     // volume suffix (`.partNN.rar`, `.7z.NNN`) that indexers
                     // key their "same release" grouping off of — preserve it
                     // verbatim instead of the generic numbered suffix below,
-                    // or the release fails to group under full-shared
+                    // or the release fails to group under full-shared/light
                     // obfuscation (issue #68).
                     let name = if let Some(suffix) = crate::compress::volume_suffix(&real_name) {
                         format!("{prefix}{suffix}")
@@ -711,25 +714,44 @@ pub async fn post_files_with_progress_and_cancel(
                             .unwrap_or_default();
                         // A single-file release (the common case: one archive,
                         // or one loose file) keeps a bare `prefix.ext`;
-                        // multiple unrelated files get a sequential suffix so
-                        // they stay distinct while still grouping under the
-                        // same prefix.
+                        // multiple unrelated files use a `.partNN` marker
+                        // ahead of the extension instead of a bare `-NN`
+                        // suffix. Indexer subject-cleaning regexes (e.g.
+                        // nZEDb's `CollectionsCleaning::generic()`) strip a
+                        // known `\.part\d*(\.rar)?` prefix together with the
+                        // trailing extension as one unit — the same way they
+                        // already strip `.volNNN+NNN.par2` — so every file
+                        // collapses back to the same collection key. A bare
+                        // `-NN` before the extension isn't part of that
+                        // pattern and survives cleaning, giving each file its
+                        // own key and defeating the grouping `full-shared`/
+                        // `light` exist for (confirmed empirically: real
+                        // upload's `.par2`/`.volNNN+NNN.par2` set grouped on
+                        // binsearch, its loose `-NN.mkv` files did not).
                         if files.len() == 1 {
                             format!("{prefix}{ext}")
                         } else {
-                            format!("{prefix}-{:02}{ext}", idx + 1)
+                            format!("{prefix}.part{:02}{ext}", idx + 1)
                         }
                     };
                     // The shared prefix stays on the subject — that's what
                     // indexers actually key "same release" grouping off of
-                    // (issue #58/#68, both subject-based). The yEnc body
-                    // name= also starts with that same prefix (plus its own
-                    // random suffix) instead of an entirely independent
-                    // string: an indexer that can only see the yEnc body
-                    // (not the Subject) still recognises the article as part
-                    // of the release, while the random suffix still avoids
-                    // an exact Subject/yEnc match (issue #106).
-                    (name, obfuscated_name_with_prefix(prefix), from)
+                    // (issue #58/#68, both subject-based). Under `light`,
+                    // the yEnc body name= is that same string verbatim
+                    // (issue #106's "option 1" — restores full-shared's
+                    // pre-0.6.1 behavior for indexers that key grouping off
+                    // an exact Subject/yEnc-name match). Under `full-shared`,
+                    // the yEnc name= starts with that same prefix but adds
+                    // its own random suffix instead: an indexer that can
+                    // only see the yEnc body still recognises the article as
+                    // part of the release, while the random suffix avoids
+                    // an exact Subject/yEnc match.
+                    let yenc_name = if config.obfuscate == ObfuscateMode::Light {
+                        name.clone()
+                    } else {
+                        obfuscated_name_with_prefix(prefix)
+                    };
+                    (name, yenc_name, from)
                 }
             }
         };
@@ -2487,17 +2509,19 @@ async fn push_par2_file(
     });
 
     let (subject_name, yenc_name, from) = if let Some(name) = wire_override {
-        // `name` carries the release's shared prefix (FullShared) — keep it
-        // on the subject for indexer grouping, and give the yEnc body a name
-        // that also starts with that same prefix (plus its own random
-        // suffix) instead of an entirely independent string — see the main
-        // FullShared branch above for why (issue #106).
+        // `name` carries the release's shared prefix (FullShared/Light) —
+        // keep it on the subject for indexer grouping. Under `light`, the
+        // yEnc body name= is that same string verbatim; under `full-shared`
+        // it starts with that same prefix but adds its own random suffix
+        // instead — see the main FullShared/Light branch above for why
+        // (issue #106).
         let prefix = shared.release_prefix.as_deref().unwrap_or_default();
-        (
-            name,
-            obfuscated_name_with_prefix(prefix),
-            shared.release_from.clone().unwrap_or_default(),
-        )
+        let yenc = if shared.config.obfuscate == ObfuscateMode::Light {
+            name.clone()
+        } else {
+            obfuscated_name_with_prefix(prefix)
+        };
+        (name, yenc, shared.release_from.clone().unwrap_or_default())
     } else {
         match shared.config.obfuscate {
             ObfuscateMode::None => {
@@ -2506,6 +2530,10 @@ async fn push_par2_file(
             }
             ObfuscateMode::Full | ObfuscateMode::Paranoid | ObfuscateMode::FullShared => {
                 (obfuscated_name(), obfuscated_name(), random_from())
+            }
+            ObfuscateMode::Light => {
+                let name = obfuscated_name();
+                (name.clone(), name, random_from())
             }
         }
     };

@@ -59,7 +59,13 @@ async fn a_staged_job_downloads_and_lands_in_history() {
         file_index: 0,
         total_files: 0,
     }];
-    let nzb_bytes = pesto::nzb::generate(&groups, &segments, &NzbMeta::default()).into_bytes();
+    let nzb_bytes = pesto::nzb::generate(
+        &groups,
+        &segments,
+        &NzbMeta::default(),
+        pesto::config::ObfuscateMode::None,
+    )
+    .into_bytes();
 
     let job = sugo::job::stage_and_create(&state, "greeting.nzb", None, nzb_bytes)
         .await

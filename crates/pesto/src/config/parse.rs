@@ -411,14 +411,17 @@ impl Config {
                     None => {
                         let obfuscate =
                             cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default();
-                        // `None` and `FullShared` already accept cross-file
-                        // correlation by wire metadata (bare filename, or a
-                        // shared prefix/From) as part of their own design, so
-                        // the counter adds no new correlation vector there —
-                        // unlike `Full`/`Paranoid`, whose whole point is
-                        // preventing exactly that. See ROADMAP.md "Subject
-                        // file counter".
-                        matches!(obfuscate, ObfuscateMode::None | ObfuscateMode::FullShared)
+                        // `None`, `FullShared` and `Light` already accept
+                        // cross-file correlation by wire metadata (bare
+                        // filename, or a shared prefix/From) as part of their
+                        // own design, so the counter adds no new correlation
+                        // vector there — unlike `Full`/`Paranoid`, whose whole
+                        // point is preventing exactly that. See ROADMAP.md
+                        // "Subject file counter".
+                        matches!(
+                            obfuscate,
+                            ObfuscateMode::None | ObfuscateMode::FullShared | ObfuscateMode::Light
+                        )
                     }
                 }
             },

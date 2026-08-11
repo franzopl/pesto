@@ -164,10 +164,13 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     nzb_dir: Option<PathBuf>,
 
-    /// Obfuscation mode: `none`, `full`, `full-shared`. A bare `--obfuscate`
-    /// means `full`. `full-shared` is like `full` but reuses one random name
-    /// across every file in the release (archive + PAR2 volumes) so indexers
-    /// can still group them [config: posting.obfuscate, default none].
+    /// Obfuscation mode: `none`, `full`, `full-shared`, `light`. A bare
+    /// `--obfuscate` means `full`. `full-shared` reuses one random name
+    /// across every file in the release (archive + PAR2 volumes) so
+    /// indexers can still group them; `light` is the same, but the yEnc
+    /// `name=` matches the Subject exactly instead of adding its own random
+    /// suffix, for indexers that key grouping off that exact match
+    /// [config: posting.obfuscate, default none].
     #[arg(long, value_name = "MODE", value_enum, num_args = 0..=1,
           default_missing_value = "full", require_equals = true)]
     obfuscate: Option<ObfuscateMode>,
@@ -379,12 +382,12 @@ struct Cli {
     /// in the release (data files plus the PAR2 index and volumes). Some
     /// posting tools (e.g. nyuu) emit this by default and some indexers may
     /// key their grouping heuristics off it. On by default for `--obfuscate
-    /// none` and `full-shared`, which already accept cross-file correlation
-    /// by wire metadata as part of their own design (bare filename, or a
-    /// shared prefix/From); off by default for `full`/`paranoid`, whose
-    /// whole point is preventing exactly that. Pass --no-file-counter to
-    /// force it off regardless of mode. See `ROADMAP.md` "Subject file
-    /// counter" [config: posting.file_counter].
+    /// none`, `full-shared` and `light`, which already accept cross-file
+    /// correlation by wire metadata as part of their own design (bare
+    /// filename, or a shared prefix/From); off by default for
+    /// `full`/`paranoid`, whose whole point is preventing exactly that. Pass
+    /// --no-file-counter to force it off regardless of mode. See
+    /// `ROADMAP.md` "Subject file counter" [config: posting.file_counter].
     #[arg(long)]
     file_counter: bool,
 
@@ -1124,6 +1127,7 @@ async fn run_single_upload(
         let pre_obfuscate = match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",
+            ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
             ObfuscateMode::Paranoid => "paranoid",
         };
@@ -1187,6 +1191,7 @@ async fn run_single_upload(
             obfuscate: match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             },
@@ -1658,7 +1663,12 @@ async fn run_single_upload(
                     mal_id: config.mal_id.clone(),
                     tags: nzb_tags,
                 };
-                let xml = pesto::nzb::generate(&outcome.groups, &outcome.segments, &nzb_meta);
+                let xml = pesto::nzb::generate(
+                    &outcome.groups,
+                    &outcome.segments,
+                    &nzb_meta,
+                    config.obfuscate,
+                );
                 tokio::fs::write(out, &xml)
                     .await
                     .with_context(|| format!("writing nzb file `{}`", out.display()))?;
@@ -1842,6 +1852,7 @@ async fn run_single_upload(
         let post_obfuscate = match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",
+            ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
             ObfuscateMode::Paranoid => "paranoid",
         };
@@ -2458,7 +2469,8 @@ async fn run_batch(
                 mal_id: config.mal_id.clone(),
                 tags: nzb_tags,
             };
-            let xml = pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta);
+            let xml =
+                pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta, config.obfuscate);
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
@@ -2509,6 +2521,7 @@ async fn run_batch(
             let season_obfuscate = match config.obfuscate {
                 ObfuscateMode::None => "none",
                 ObfuscateMode::Full => "full",
+                ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
                 ObfuscateMode::Paranoid => "paranoid",
             };
@@ -2900,6 +2913,9 @@ fn add_obfuscation_tag(tags: &mut Vec<String>, obfuscate: &ObfuscateMode) {
         ObfuscateMode::Full => {
             tags.push("obfuscated:full".to_string());
         }
+        ObfuscateMode::Light => {
+            tags.push("obfuscated:light".to_string());
+        }
         ObfuscateMode::Paranoid => {
             tags.push("obfuscated:paranoid".to_string());
         }
@@ -3022,7 +3038,17 @@ fn run_merge_season(dir: &Path, display_name: Option<&str>, nzb_tags: Vec<String
             mal_id: None,
             tags: nzb_tags.clone(),
         };
-        let xml = pesto::nzb::generate(&all_groups, &combined_segments, &meta);
+        // Segments here come from `nzb::parse`, which always leaves
+        // `wire_name` empty (see its doc comment) — there is no live wire
+        // identity to mirror when merging already-generated `.nzb` files,
+        // so the obfuscate mode passed here is moot; `None` just keeps this
+        // call explicit about that.
+        let xml = pesto::nzb::generate(
+            &all_groups,
+            &combined_segments,
+            &meta,
+            pesto::config::ObfuscateMode::None,
+        );
 
         std::fs::write(&output_path, &xml)
             .with_context(|| format!("writing {}", output_path.display()))?;
@@ -3611,6 +3637,7 @@ fn resume_flags_string(config: &Config) -> String {
     let obfuscate = match config.obfuscate {
         ObfuscateMode::None => "none",
         ObfuscateMode::Full => "full",
+        ObfuscateMode::Light => "light",
         ObfuscateMode::FullShared => "full-shared",
         ObfuscateMode::Paranoid => "paranoid",
     };
