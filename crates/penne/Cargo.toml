@@ -20,7 +20,7 @@ name = "penne"
 path = "src/bin/penne.rs"
 
 [dependencies]
-pesto = { package = "pesto-poster", path = "../pesto", version = "0.6.1" }
+pesto = { package = "pesto-poster", path = "../pesto", version = "0.7.0" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

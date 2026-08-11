@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-11
+
 ### Added
 - **`--obfuscate=light`**: like `full-shared` — one shared random prefix across every file in the release — but
   the yEnc `name=` is that prefixed string verbatim, the same as the Subject, instead of adding its own random

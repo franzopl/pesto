@@ -45,9 +45,10 @@ even for path dependencies within a workspace. Check:
 grep -rn 'pesto-poster' --include=Cargo.toml crates/
 ```
 
-As of this writing, `crates/penne/Cargo.toml`, `crates/sugo/Cargo.toml` and
-`crates/upapasta/Cargo.toml` all depend on it path-only (no version
-requirement), so none of them need updating when `pesto`'s version bumps.
+As of this writing, `crates/penne/Cargo.toml` pins a version requirement
+alongside the `path` and must be bumped every release. `crates/sugo/Cargo.toml`
+and `crates/upapasta/Cargo.toml` depend on it path-only (no version
+requirement), so they don't need updating.
 
 ### 4. Update `crates/pesto/CHANGELOG.md`
 

@@ -51,7 +51,7 @@
 //! reduction, before a single PAR2 slice is accounted for.
 //!
 //! Note that the tokio blocking-pool cap is a bound on the tail rather than a
-//! saving; see [`DEFAULT_MAX_BLOCKING_THREADS`].
+//! saving; see `DEFAULT_MAX_BLOCKING_THREADS`.
 
 pub mod alloc;
 pub mod budget;
