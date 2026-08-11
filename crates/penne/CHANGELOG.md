@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-11
+
+### Added
+
+- **`penne check --json` now includes `checked_at`, `method`, `retries`,
+  `sample_size` and `servers`/`server`.** `checked_at` is an RFC3339 UTC
+  timestamp taken when each outcome line is emitted (not a single run-start
+  stamp, since NZBs/servers can finish at different times). `method` and
+  `retries` echo the check configuration back so a consumer doesn't have to
+  track the CLI invocation alongside the JSON output. `sample_size` only
+  appears when `--sample <N>` was used, to flag the result as partial
+  coverage rather than a full check. `servers` lists the hostnames tried, in
+  tier priority order, for the combined-server case; `--independent-servers`
+  keeps its existing per-line `server` field instead.
+
 ## [0.3.0] — 2026-08-08
 
 ### Changed

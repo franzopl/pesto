@@ -725,6 +725,16 @@ async fn check(
     )>();
     let nzb_names_clone = nzb_names.clone();
     let is_json = json;
+    let method_str = method.to_string();
+    let retries = check_config.retries;
+    // Hostnames tried, in priority order, when servers are combined into a
+    // single check rather than run `--independent-servers` (which already
+    // reports its own server per line via `server_label`).
+    let aggregated_servers: Vec<String> = config
+        .server_tiers
+        .iter()
+        .flat_map(|tier| tier.members.iter().map(|m| m.host.clone()))
+        .collect();
 
     let print_task = tokio::spawn(async move {
         if is_json {
@@ -732,6 +742,13 @@ async fn check(
                 let nzb_name = &nzb_names_clone[q_idx];
                 let mut json_val = serde_json::json!({
                     "nzb": nzb_name,
+                    // Wall-clock time this outcome was resolved, not when the
+                    // check started — with multiple NZBs/servers finishing at
+                    // different times, a single run-start timestamp would be
+                    // misleading for the later lines.
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                    "method": method_str,
+                    "retries": retries,
                     // `complete` requires every segment be confirmed present —
                     // false if any is confirmed missing OR merely unreachable.
                     // Check `conclusive` before trusting `missing`/`missing_pct`
@@ -762,11 +779,17 @@ async fn check(
                     "elapsed_secs": outcome.elapsed.as_secs_f64(),
                     "articles_per_second": outcome.articles_per_second(),
                 });
+                let obj = json_val.as_object_mut().unwrap();
                 if let Some(ref s) = server_label {
-                    json_val
-                        .as_object_mut()
-                        .unwrap()
-                        .insert("server".to_string(), serde_json::Value::String(s.clone()));
+                    obj.insert("server".to_string(), serde_json::Value::String(s.clone()));
+                } else {
+                    obj.insert(
+                        "servers".to_string(),
+                        serde_json::to_value(&aggregated_servers).unwrap(),
+                    );
+                }
+                if let Some(n) = sample {
+                    obj.insert("sample_size".to_string(), serde_json::Value::from(n));
                 }
                 println!("{}", serde_json::to_string(&json_val).unwrap());
             }
