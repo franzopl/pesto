@@ -156,7 +156,17 @@ impl Connection {
     ///
     /// `timeout_secs` bounds how long any later `read_response` call waits for a
     /// server reply before failing, so a silently dead socket cannot hang a
-    /// worker indefinitely.
+    /// worker indefinitely — and, since #107, it *also* bounds the TCP
+    /// connect and TLS handshake below, for the same reason. Before that
+    /// fix, a peer that accepted the TCP connection (so it never looked
+    /// "down" to anything watching the socket) but stalled mid-TLS-handshake
+    /// hung this function forever: `read_timeout` didn't exist yet at that
+    /// point, so nothing here was ever bounded by it. Observed in practice
+    /// against a real provider that silently drops a long-lived connection
+    /// mid-batch and then stalls the automatic reconnect's TLS handshake —
+    /// every worker that hit it sat there indefinitely, at ~0% CPU, with the
+    /// socket sitting `ESTABLISHED` the whole time (so nothing at the TCP
+    /// layer ever signaled failure either).
     pub async fn connect(
         host: &str,
         port: u16,
@@ -164,28 +174,17 @@ impl Connection {
         timeout_secs: u64,
     ) -> Result<Connection> {
         debug!(host = "<redacted>", port, tls, "connecting");
-        let tcp = TcpStream::connect((host, port))
-            .await
-            .with_context(|| format!("connecting to {host}:{port}"))?;
-        tcp.set_nodelay(true).ok();
+        let read_timeout = Duration::from_secs(timeout_secs);
 
-        let stream: Box<dyn Stream> = if tls {
-            let connector = TlsConnector::from(tls_config());
-            let server_name = ServerName::try_from(host.to_string())
-                .with_context(|| format!("invalid TLS server name `{host}`"))?;
-            let tls_stream = connector
-                .connect(server_name, tcp)
-                .await
-                .context("TLS handshake failed")?;
-            debug!(host = "<redacted>", "TLS handshake complete");
-            Box::new(tls_stream)
-        } else {
-            Box::new(tcp)
-        };
+        let stream = tokio::time::timeout(read_timeout, Self::connect_stream(host, port, tls))
+            .await
+            .with_context(|| {
+                format!("connecting to {host}:{port} timed out after {timeout_secs}s")
+            })??;
 
         let mut conn = Connection {
             stream: BufReader::new(BufWriter::new(stream)),
-            read_timeout: Duration::from_secs(timeout_secs),
+            read_timeout,
             bytes_written: 0,
             bytes_read: 0,
         };
@@ -201,6 +200,32 @@ impl Connection {
         }
         debug!(code = greeting.code, text = "<redacted>", "server greeting");
         Ok(conn)
+    }
+
+    /// The TCP connect + (optional) TLS handshake piece of [`Self::connect`],
+    /// factored out so the caller can wrap the whole thing in one
+    /// `tokio::time::timeout` — seeing this file take an `&str`/`u16`/`bool`
+    /// rather than borrowing straight from `connect`'s own params is just
+    /// that split, not a change in what gets connected to.
+    async fn connect_stream(host: &str, port: u16, tls: bool) -> Result<Box<dyn Stream>> {
+        let tcp = TcpStream::connect((host, port))
+            .await
+            .with_context(|| format!("connecting to {host}:{port}"))?;
+        tcp.set_nodelay(true).ok();
+
+        if tls {
+            let connector = TlsConnector::from(tls_config());
+            let server_name = ServerName::try_from(host.to_string())
+                .with_context(|| format!("invalid TLS server name `{host}`"))?;
+            let tls_stream = connector
+                .connect(server_name, tcp)
+                .await
+                .context("TLS handshake failed")?;
+            debug!(host = "<redacted>", "TLS handshake complete");
+            Ok(Box::new(tls_stream))
+        } else {
+            Ok(Box::new(tcp))
+        }
     }
 
     /// Authenticate with `AUTHINFO USER` / `AUTHINFO PASS`.
@@ -1332,6 +1357,48 @@ mod tests {
             format!("{err:#}").contains("timed out"),
             "expected timeout error, got: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_times_out_when_tls_handshake_stalls() {
+        // Regression test for #107: a peer that accepts the TCP connection
+        // but never even starts (let alone completes) the TLS handshake
+        // must not hang `Connection::connect` forever. Before the fix,
+        // `read_timeout` didn't exist yet at this point in `connect` — it's
+        // only set on the `Connection` *after* the handshake — so nothing
+        // bounded this wait. `mock_conn`'s in-memory duplex stream can't
+        // reproduce this: it bypasses `TcpStream::connect`/the TLS layer
+        // entirely, so a real listener is needed here.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accept the connection and then simply never speak TLS — held open
+        // for as long as the accept task lives (dropped when the test ends)
+        // so the client doesn't fail early on an EOF/RST for the wrong
+        // reason; the point is a peer that looks alive but never answers.
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+
+        let started = Instant::now();
+        let result = Connection::connect(&addr.ip().to_string(), addr.port(), true, 1).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect() took {elapsed:?} to fail — should be bounded by the 1s timeout, not hang"
+        );
+        // `Connection` isn't `Debug` (holds a `Box<dyn Stream>`), so match
+        // manually instead of `unwrap_err`/`expect_err`.
+        match result {
+            Ok(_) => panic!("expected a timeout error, got Ok"),
+            Err(e) => assert!(
+                format!("{e:#}").contains("timed out"),
+                "expected a 'timed out' error, got: {e:#}"
+            ),
+        }
     }
 
     #[tokio::test]
