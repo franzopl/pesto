@@ -690,7 +690,12 @@ async fn check(
         vec![config.server_tiers.clone()]
     };
 
-    if !json && !quiet {
+    // Gated on `!quiet` only, not `!json`: the live bar and this banner both
+    // write to stderr (see ui/check.rs), never stdout, so they don't corrupt
+    // `--json`'s NDJSON output on stdout — a caller piping stdout to a file
+    // (e.g. curupira's remote-check.sh) still gets to watch progress on the
+    // terminal instead of sitting with zero feedback through a long batch.
+    if !quiet {
         if independent_servers {
             eprintln!(
                 "checking {} segment(s) across {} NZB(s) via {} on {} server(s) concurrently...",
@@ -711,7 +716,7 @@ async fn check(
 
     let total_work = total_segments * tiers_to_run.len();
     let (tx, rx) = penne::check::channel();
-    let progress_task = if !json && !quiet {
+    let progress_task = if !quiet {
         Some(penne::ui::check::spawn_renderer(rx, total_work as u32))
     } else {
         drop(rx);

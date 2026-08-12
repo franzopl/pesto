@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-08-12
+
+### Fixed
+
+- **`penne check`'s live progress bar and startup banner now work with
+  `--json`.** They were unconditionally gated on `!json`, even though both
+  write to stderr only — `--json`'s NDJSON output lives entirely on stdout,
+  so there was never a real conflict. A caller piping stdout to a file (e.g.
+  `curupirashare`'s `remote-check.sh`, checking 20-100 releases per batch)
+  had no feedback at all for however long the run took. Gating is now just
+  `!quiet`, matching what `--quiet`'s own description always said it did.
+
 ## [0.4.0] — 2026-08-11
 
 ### Added
