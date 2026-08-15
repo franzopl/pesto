@@ -159,7 +159,7 @@ fn verify_and_repair_blocking(
         return Ok(RepairOutcome::NoRecoveryData);
     };
 
-    let set = RecoverySet::load(&index)
+    let mut set = RecoverySet::load_metadata(&index)
         .with_context(|| format!("loading PAR2 recovery set from {}", index.display()))?;
 
     if quick_check_all(&set, assembled) {
@@ -183,6 +183,9 @@ fn verify_and_repair_blocking(
     if !report.is_repairable() {
         return Ok(RepairOutcome::NotRepairable(report));
     }
+
+    set.load_recovery_blocks(Some(report.total_bad_slices()))
+        .context("loading recovery blocks for repair")?;
 
     let plan = par2_repair(&set, &report, dir, &RepairOptions::default())
         .with_context(|| format!("repairing files under {}", dir.display()))?;

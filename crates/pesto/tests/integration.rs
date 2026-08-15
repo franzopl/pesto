@@ -593,6 +593,12 @@ async fn resume_with_different_article_size_discards_stale_state_instead_of_corr
         compress_format: None,
         par2_percent: 0,
         file_counter: false,
+        par2_slice_size: None,
+        par2_slice_count: None,
+        par2_recovery_count: None,
+        compress_volume_size: None,
+        compress_password: None,
+        line_length: 128,
     });
     stale.record("resize.bin", 1, "stale-part1@x", 100);
     stale.record("resize.bin", 2, "stale-part2@x", 100);
@@ -677,6 +683,12 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
         compress_format: None,
         par2_percent: 0,
         file_counter: false,
+        par2_slice_size: None,
+        par2_slice_count: None,
+        par2_recovery_count: None,
+        compress_volume_size: None,
+        compress_password: None,
+        line_length: config.line_length,
     });
     prior.record_file(
         "a.bin",

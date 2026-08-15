@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use parmesan::SimdPath;
-use pesto::compress::{compress, random_password, ArchiveFormat};
+use pesto::compress::{compress, existing_archive, random_password, ArchiveFormat};
 use pesto::config::{
     self, parse_memory_limit_spec, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides,
 };
@@ -1362,11 +1362,19 @@ async fn run_single_upload(
             .compress_temp_dir
             .clone()
             .unwrap_or_else(std::env::temp_dir);
-        let tmp_dir = tmp_base.join(format!(
-            "pesto_compress_{}_{}",
-            std::process::id(),
-            entry_label
-        ));
+        // A pid-keyed directory is gone on the next process, so `--resume`
+        // can never see the archive it recorded. When resuming, key the
+        // scratch dir by the (stable) archive stem so an interrupted run
+        // finds the same files and can skip recompression.
+        let tmp_dir = if config.resume {
+            tmp_base.join(format!("pesto_compress_{archive_stem}"))
+        } else {
+            tmp_base.join(format!(
+                "pesto_compress_{}_{}",
+                std::process::id(),
+                entry_label
+            ))
+        };
         compress_temp_dir = Some(tmp_dir.clone());
 
         let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
@@ -1400,18 +1408,36 @@ async fn run_single_upload(
         let compress_dest = tmp_dir.clone();
         let compress_pass = effective_password.clone();
         let compress_volume_size = config.compress_volume_size.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            compress(
-                &compress_inputs,
-                &compress_stem,
-                &compress_dest,
+        let result = if config.resume {
+            existing_archive(
+                &tmp_dir,
+                &archive_stem,
                 format,
-                compress_pass.as_deref(),
                 compress_volume_size.as_deref(),
             )
-        })
-        .await
-        .context("compressor task panicked")??;
+        } else {
+            None
+        };
+        let result = if let Some(reused) = result {
+            eprintln!(
+                "resume: reusing existing archive `{}`",
+                reused.path.display()
+            );
+            reused
+        } else {
+            tokio::task::spawn_blocking(move || {
+                compress(
+                    &compress_inputs,
+                    &compress_stem,
+                    &compress_dest,
+                    format,
+                    compress_pass.as_deref(),
+                    compress_volume_size.as_deref(),
+                )
+            })
+            .await
+            .context("compressor task panicked")??
+        };
 
         poll_handle.abort();
         let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
@@ -3604,13 +3630,7 @@ fn reuse_or_generate_archive_stem(resume_path: Option<&Path>, config: &Config) -
     let Some(rp) = resume_path else {
         return pesto::article::obfuscated_name();
     };
-    let fingerprint = pesto::resume::RunFingerprint {
-        article_size: config.article_size as u64,
-        obfuscate: config.obfuscate,
-        compress_format: config.compress_format.clone(),
-        par2_percent: config.par2,
-        file_counter: config.file_counter,
-    };
+    let fingerprint = pesto::resume::RunFingerprint::from_config(config);
     let mut state = pesto::resume::ResumeState::load(rp).unwrap_or_default();
     // Normalizes the loaded state first: a fingerprint mismatch clears any
     // stale archive_stem (and segments/files) before we look at it, so an
@@ -3650,6 +3670,21 @@ fn resume_flags_string(config: &Config) -> String {
     }
     if config.file_counter {
         flags.push_str(" --file-counter");
+    }
+    if let Some(n) = config.par2_slice_size {
+        flags.push_str(&format!(" --par2-slice-size {n}"));
+    }
+    if let Some(n) = config.par2_slice_count {
+        flags.push_str(&format!(" --par2-slice-count {n}"));
+    }
+    if let Some(n) = config.par2_recovery_count {
+        flags.push_str(&format!(" --par2-recovery-count {n}"));
+    }
+    if let Some(v) = &config.compress_volume_size {
+        flags.push_str(&format!(" --compress-volume-size {v}"));
+    }
+    if config.line_length != pesto::yenc::DEFAULT_LINE_LENGTH {
+        flags.push_str(&format!(" --line-length {}", config.line_length));
     }
     flags
 }

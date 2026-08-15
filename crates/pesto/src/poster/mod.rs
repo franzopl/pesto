@@ -121,26 +121,34 @@ fn optimal_par2_slice_size(
 /// progress total. Mirrors the geometry logic in `producer` exactly; keep
 /// the two in sync.
 fn par2_geometry(metas: &[Arc<FileMeta>], config: &Config) -> (usize, usize, usize) {
+    let sizes: Vec<u64> = metas.iter().map(|m| m.size).collect();
+    par2_geometry_from_sizes(&sizes, config)
+}
+
+/// Shared PAR2 geometry for the per-file path and the season path so
+/// `--par2-slice-size` / `--par2-slice-count` / `--par2-recovery-count`
+/// cannot drift between them.
+fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize, usize, usize) {
     let article_size = config.article_size;
-    let per_file_articles: Vec<usize> = metas
+    let per_file_articles: Vec<usize> = sizes
         .iter()
-        .map(|m| {
-            if m.size == 0 {
+        .map(|&size| {
+            if size == 0 {
                 0
             } else {
-                yenc::segments(m.size, article_size).len()
+                yenc::segments(size, article_size).len()
             }
         })
         .collect();
 
     let (par2_slice_size, total_slices) = if let Some(size) = config.par2_slice_size {
         let s = (size / 64 * 64).max(64);
-        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
+        let n: usize = sizes.iter().map(|sz| (*sz as usize).div_ceil(s)).sum();
         (s, n)
     } else if let Some(count) = config.par2_slice_count {
-        let total_bytes: u64 = metas.iter().map(|m| m.size).sum();
+        let total_bytes: u64 = sizes.iter().sum();
         let s = ((total_bytes as usize).div_ceil(count.max(1)) / 64 * 64).max(64);
-        let n: usize = metas.iter().map(|m| (m.size as usize).div_ceil(s)).sum();
+        let n: usize = sizes.iter().map(|sz| (*sz as usize).div_ceil(s)).sum();
         (s, n)
     } else {
         optimal_par2_slice_size(&per_file_articles, article_size, config.par2)
@@ -566,13 +574,7 @@ pub async fn post_files_with_progress_and_cancel(
     // recorded Message-ID could reference the wrong byte range, so the
     // *entire* state is discarded rather than trusted partially — see
     // `resume::RunFingerprint` and GitHub issue #18.
-    let run_fingerprint = crate::resume::RunFingerprint {
-        article_size: config.article_size as u64,
-        obfuscate: config.obfuscate,
-        compress_format: config.compress_format.clone(),
-        par2_percent: config.par2,
-        file_counter: config.file_counter,
-    };
+    let run_fingerprint = crate::resume::RunFingerprint::from_config(config);
     if let Some(resume) = &resume_arc {
         let mut state = resume.lock().unwrap();
         let had_segments = !state.is_empty();
@@ -1740,6 +1742,92 @@ fn address_space_budget(reserve: u64, slice_size: usize, recovery_count: usize) 
     Some((headroom / (PASS_WORKING_SET_FACTOR * (1.0 + CROSS_PASS_RETENTION))) as u64)
 }
 
+/// Shared PAR2 memory budget + pass list used by the per-file producer and
+/// the season path so `--memory-limit` cannot drift between them.
+fn par2_memory_plan(
+    config: &Config,
+    par2_slice_size: usize,
+    recovery_count: usize,
+    active_connections: usize,
+) -> Result<(usize, Vec<(u32, usize)>)> {
+    let reserve_threads = if config.threads > 0 {
+        config.threads
+    } else {
+        parmesan::performance_core_count()
+    };
+    let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
+    let as_budget = address_space_budget(overhead_reserve, par2_slice_size, recovery_count);
+    if as_budget == Some(0) && recovery_count > 0 {
+        anyhow::bail!(
+            "not enough address space to generate PAR2: this session's limit \
+             (RLIMIT_AS = {}) is already exceeded by the ~{} reserved for {} \
+             connections and {} PAR2 threads. Lower --connections/--threads, \
+             disable PAR2 with --par2 0, or raise `ulimit -v` for this session.",
+            crate::progress::format_size(address_space_limit().unwrap_or_default()),
+            crate::progress::format_size(overhead_reserve),
+            active_connections,
+            reserve_threads,
+        );
+    }
+    let ceiling = crate::memory::Ceiling::discover(config.memory_limit);
+    let non_as_par2_share = crate::memory::budget::share_of(
+        ceiling.effective_excluding_address_space(),
+        crate::memory::budget::Stage::Par2,
+    );
+    let binding_budget = as_budget.map_or(non_as_par2_share, |b| b.min(non_as_par2_share));
+
+    let memory_limit = match config.par2_memory_limit {
+        Some(limit) => {
+            if limit as u64 > binding_budget {
+                let bound_by_as = as_budget.is_some_and(|b| b <= non_as_par2_share);
+                anyhow::bail!(
+                    "--par2-memory-limit {} won't fit safely: {} leaves a safe budget of \
+                     only {} once ~{} is reserved for {} connections and {} PAR2 threads. \
+                     Lower --par2-memory-limit (or --memory-limit / --connections/--threads), \
+                     or {}.",
+                    crate::progress::format_size(limit as u64),
+                    if bound_by_as {
+                        format!(
+                            "this session's address-space limit (RLIMIT_AS = {})",
+                            crate::progress::format_size(address_space_limit().unwrap_or_default())
+                        )
+                    } else {
+                        format!(
+                            "the global --memory-limit budget (effective ceiling {})",
+                            crate::progress::format_size(ceiling.effective)
+                        )
+                    },
+                    crate::progress::format_size(binding_budget),
+                    crate::progress::format_size(overhead_reserve),
+                    active_connections,
+                    reserve_threads,
+                    if bound_by_as {
+                        "raise `ulimit -v` for this session"
+                    } else {
+                        "raise --memory-limit"
+                    },
+                );
+            }
+            limit
+        }
+        None => (binding_budget as usize).max(256 * 1024 * 1024),
+    };
+
+    let slices_per_pass = (memory_limit / par2_slice_size.max(1)).max(1);
+    let mut passes = Vec::new();
+    if recovery_count > 0 {
+        let mut start = 0;
+        while start < recovery_count {
+            let count = (recovery_count - start).min(slices_per_pass);
+            passes.push((start as u32, count));
+            start += count;
+        }
+    } else {
+        passes.push((0, 0));
+    }
+    Ok((memory_limit, passes))
+}
+
 async fn producer(
     metas: Vec<Arc<FileMeta>>,
     tx_opt: Option<tokio::sync::mpsc::Sender<PostTask>>,
@@ -1809,99 +1897,13 @@ async fn producer(
         parmesan::performance_core_count()
     };
     let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
-    // `par2_slice_size`/`recovery_count` come from `par2_geometry` above, so the
-    // budget can tell a single-pass run (no cross-pass retention to pay for)
-    // from a multi-pass one before the pass list is built below.
-    let as_budget = address_space_budget(overhead_reserve, par2_slice_size, recovery_count);
-    // A zero budget means the reserve alone already exceeds the safe share of
-    // the ceiling. Falling through would clamp to the 256 MiB floor below and
-    // silently produce hundreds of passes (each a full re-read of the input);
-    // failing here with the actual numbers is far more useful.
-    if as_budget == Some(0) && recovery_count > 0 {
-        anyhow::bail!(
-            "not enough address space to generate PAR2: this session's limit \
-             (RLIMIT_AS = {}) is already exceeded by the ~{} reserved for {} \
-             connections and {} PAR2 threads. Lower --connections/--threads, \
-             disable PAR2 with --par2 0, or raise `ulimit -v` for this session.",
-            crate::progress::format_size(address_space_limit().unwrap_or_default()),
-            crate::progress::format_size(overhead_reserve),
-            active_connections,
-            reserve_threads,
-        );
-    }
-    // The global `--memory-limit` ceiling (RLIMIT_AS/cgroup/host/explicit,
-    // each haircut for its own failure mode — see `crate::memory::Ceiling`),
-    // minus the RLIMIT_AS term: PAR2's pass sizing already has its own
-    // RLIMIT_AS-specific model just below (`as_budget`, validated against a
-    // live 83.4 GiB run — see `docs/memory-management.md` §9), tuned more
-    // precisely than `Ceiling`'s flat haircut. Taking PAR2's share of the
-    // *full* `Ceiling::effective` and combining it with `as_budget` via
-    // `min()` would haircut RLIMIT_AS twice — once inside `Ceiling`, again as
-    // the 60% share — silently starving PAR2 far below either model alone.
-    // `effective_excluding_address_space` is exactly the fix: it folds in
-    // cgroup/host/explicit as additional caps without re-litigating RLIMIT_AS.
     let ceiling = crate::memory::Ceiling::discover(shared.config.memory_limit);
-    let non_as_par2_share = crate::memory::budget::share_of(
-        ceiling.effective_excluding_address_space(),
-        crate::memory::budget::Stage::Par2,
-    );
-    // The binding constraint is whichever of the two independent models is
-    // tighter for this run.
-    let binding_budget = as_budget.map_or(non_as_par2_share, |b| b.min(non_as_par2_share));
-
-    let memory_limit = match shared.config.par2_memory_limit {
-        Some(limit) => {
-            if limit as u64 > binding_budget {
-                // Name whichever source actually bound the budget instead of
-                // always blaming RLIMIT_AS, now that there are two candidates.
-                let bound_by_as = as_budget.is_some_and(|b| b <= non_as_par2_share);
-                anyhow::bail!(
-                    "--par2-memory-limit {} won't fit safely: {} leaves a safe budget of \
-                     only {} once ~{} is reserved for {} connections and {} PAR2 threads. \
-                     Lower --par2-memory-limit (or --memory-limit / --connections/--threads), \
-                     or {}.",
-                    crate::progress::format_size(limit as u64),
-                    if bound_by_as {
-                        format!(
-                            "this session's address-space limit (RLIMIT_AS = {})",
-                            crate::progress::format_size(address_space_limit().unwrap_or_default())
-                        )
-                    } else {
-                        format!(
-                            "the global --memory-limit budget (effective ceiling {})",
-                            crate::progress::format_size(ceiling.effective)
-                        )
-                    },
-                    crate::progress::format_size(binding_budget),
-                    crate::progress::format_size(overhead_reserve),
-                    active_connections,
-                    reserve_threads,
-                    if bound_by_as {
-                        "raise `ulimit -v` for this session"
-                    } else {
-                        "raise --memory-limit"
-                    },
-                );
-            }
-            limit
-        }
-        // At least 256MB as a bare minimum fallback.
-        None => (binding_budget as usize).max(256 * 1024 * 1024),
-    };
-
-    let slices_per_pass = (memory_limit / par2_slice_size).max(1);
-
-    let mut passes = Vec::new();
-    if recovery_count > 0 {
-        let mut start = 0;
-        while start < recovery_count {
-            let count = (recovery_count - start).min(slices_per_pass);
-            passes.push((start as u32, count));
-            start += count;
-        }
-    } else {
-        passes.push((0, 0));
-    }
+    let (memory_limit, passes) = par2_memory_plan(
+        &shared.config,
+        par2_slice_size,
+        recovery_count,
+        active_connections,
+    )?;
 
     if recovery_count > 0 {
         // A single combined status line (not gated on -v): the numbers
@@ -3618,11 +3620,12 @@ impl SeasonPar2Set {
 /// Write season PAR2 recovery volumes to disk.
 ///
 /// Serializes `season` into PAR2 packet format and writes it to volume files
-/// (`.par2.vol0+1`, `.par2.vol1+2`, etc.) in the output directory. Every
-/// volume carries the full base packet set — Main (with every episode's real
-/// File ID), Creator, and one File Description + IFSC pair per episode — not
-/// just its own Recovery packets, so any single volume is self-describing.
-/// Returns (index_packet_bytes, volume_file_paths) for use in NZB generation.
+/// (`{name}.vol000+001.par2`, `{name}.vol001+002.par2`, …) in the output
+/// directory. Every volume carries the full base packet set — Main (with
+/// every episode's real File ID), Creator, and one File Description + IFSC
+/// pair per episode — not just its own Recovery packets, so any single
+/// volume is self-describing. Returns (index_packet_bytes, volume_file_paths)
+/// for use in NZB generation.
 async fn write_season_par2_volumes(
     season: &SeasonPar2Set,
     release_name: &str,
@@ -3677,43 +3680,116 @@ async fn write_season_par2_volumes(
     let volumes = layout::plan_volumes(season.recovery_slices.len() as u32);
     let mut volume_paths = Vec::new();
 
-    // Write each recovery slice to its volume file.
-    for slice in &season.recovery_slices {
-        let (_vol_idx, vol) = volumes
+    // `plan_volumes` keys "write the base packets now" off the first
+    // exponent of each volume. The worker normally emits slices in
+    // ascending exponent order; sort so a future change cannot produce a
+    // volume with no Main packet.
+    let mut slices: Vec<_> = season.recovery_slices.iter().collect();
+    slices.sort_by_key(|s| s.exponent);
+
+    let mut open: Option<(PathBuf, tokio::fs::File)> = None;
+
+    for slice in slices {
+        let vol = volumes
             .iter()
-            .enumerate()
-            .find(|(_, v)| slice.exponent >= v.first && slice.exponent < v.first + v.count)
+            .find(|v| slice.exponent >= v.first && slice.exponent < v.first + v.count)
             .ok_or_else(|| anyhow::anyhow!("recovery slice exponent out of range"))?;
 
         let vol_name = layout::volume_name(release_name, *vol);
         let vol_path = output_dir.join(&vol_name);
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&vol_path)
-            .await?;
-
-        // Write base packets on first slice of volume.
-        if slice.exponent == vol.first {
+        let need_new = open.as_ref().is_none_or(|(p, _)| p != &vol_path);
+        if need_new {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&vol_path)
+                .await?;
             file.write_all(&base_packets).await?;
+            volume_paths.push(vol_path.clone());
+            open = Some((vol_path, file));
         }
 
-        // Serialize and write recovery packet.
         let pkt = packet::serialize_packet(
             &rsid,
             &packet::TYPE_RECOVERY,
             &packet::recovery_body(slice.exponent, &slice.data),
         );
-        file.write_all(&pkt).await?;
-
-        // Track volume path (add once).
-        if slice.exponent == vol.first {
-            volume_paths.push(vol_path);
-        }
+        open.as_mut()
+            .expect("volume file opened above")
+            .1
+            .write_all(&pkt)
+            .await?;
     }
 
     Ok((base_packets, volume_paths))
+}
+
+/// Read every episode into `worker` as PAR2 input slices. Empty files
+/// contribute no slices (the hasher never sees an `is_last_of_file` for
+/// them). Returns `(names, slices_per_episode, total_slices_added)`.
+async fn feed_season_episodes(
+    ordered: &[(PathBuf, String, u64)],
+    worker: &Par2Worker,
+    par2_slice_size: usize,
+) -> Result<(Vec<String>, Vec<usize>, usize)> {
+    let mut episode_names = Vec::with_capacity(ordered.len());
+    let mut slices_per_episode = Vec::with_capacity(ordered.len());
+    let mut total_slices_added = 0;
+
+    for (ep_idx, (episode_path, name, file_size)) in ordered.iter().enumerate() {
+        let file_size = *file_size;
+        episode_names.push(name.clone());
+
+        if file_size == 0 {
+            slices_per_episode.push(0);
+            continue;
+        }
+
+        let mut file = tokio::fs::File::open(episode_path)
+            .await
+            .with_context(|| format!("opening episode `{}`", episode_path.display()))?;
+
+        let mut accum = worker.take_buffer(par2_slice_size);
+        accum.clear();
+        let mut remaining = file_size as usize;
+        let mut slices_for_episode = 0usize;
+
+        while remaining > 0 {
+            let space = par2_slice_size - accum.len();
+            let to_read = space.min(remaining);
+            let base = accum.len();
+            accum.resize(base + to_read, 0);
+            file.read_exact(&mut accum[base..base + to_read])
+                .await
+                .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
+            remaining -= to_read;
+
+            if accum.len() >= par2_slice_size {
+                let is_last = remaining == 0;
+                feed_par2_slice(&mut accum, par2_slice_size, worker, is_last)?;
+                slices_for_episode += 1;
+            }
+        }
+        if !accum.is_empty() {
+            feed_par2_slice(&mut accum, par2_slice_size, worker, true)?;
+            slices_for_episode += 1;
+        }
+
+        total_slices_added += slices_for_episode;
+        slices_per_episode.push(slices_for_episode);
+        debug!(
+            episode_idx = ep_idx + 1,
+            total_episodes = ordered.len(),
+            file_size,
+            slices_for_episode,
+            expected_slices = (file_size as usize).div_ceil(par2_slice_size),
+            "finished reading episode"
+        );
+    }
+
+    Ok((episode_names, slices_per_episode, total_slices_added))
 }
 
 /// Generate a global PAR2 recovery set that covers all episodes in a season.
@@ -3783,44 +3859,16 @@ async fn generate_season_par2(episode_paths: &[PathBuf], config: &Config) -> Res
             .collect();
     }
 
-    let article_size = config.article_size;
-    let per_file_articles: Vec<usize> = ordered
-        .iter()
-        .map(|(_, _, size)| {
-            if *size == 0 {
-                0
-            } else {
-                yenc::segments(*size, article_size).len()
-            }
-        })
-        .collect();
-
-    let (par2_slice_size, total_slices) = if let Some(size) = config.par2_slice_size {
-        let s = (size / 64 * 64).max(64);
-        let n: usize = ordered
-            .iter()
-            .map(|(_, _, size)| (*size as usize).div_ceil(s))
-            .sum();
-        debug!(
-            "season PAR2: using config slice_size={} (rounded from {}), total_slices={}",
-            s, size, n
-        );
-        (s, n)
-    } else {
-        let (s, n) = optimal_par2_slice_size(&per_file_articles, article_size, config.par2);
-        debug!(
-            "season PAR2: using optimal slice_size={}, total_slices={}",
-            s, n
-        );
-        (s, n)
-    };
+    let sizes: Vec<u64> = ordered.iter().map(|(_, _, size)| *size).collect();
+    let (par2_slice_size, total_slices, recovery_count) = par2_geometry_from_sizes(&sizes, config);
+    debug!(
+        par2_slice_size,
+        total_slices, recovery_count, "season PAR2 geometry"
+    );
 
     if total_slices == 0 {
         return Ok(SeasonPar2Set::empty());
     }
-
-    let recovery_pct = config.par2;
-    let recovery_count = (total_slices as u32 * recovery_pct as u32 / 100).min(65535) as usize;
 
     if recovery_count == 0 {
         return Ok(SeasonPar2Set::empty());
@@ -3831,81 +3879,57 @@ async fn generate_season_par2(episode_paths: &[PathBuf], config: &Config) -> Res
         par2_slice_size, total_slices, recovery_count, "season PAR2 configuration"
     );
 
-    let encoder = RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, 0, recovery_count)
-        .context("allocating season PAR2 recovery buffers")?
-        .with_checksums() // required for IFSC — see SeasonFileEntry::slice_checksums
-        .with_simd_path(config.simd);
-    let worker = Par2Worker::spawn(encoder, true, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
-
-    let mut episode_names: Vec<String> = Vec::with_capacity(ordered.len());
-    let mut slices_per_episode: Vec<usize> = Vec::with_capacity(ordered.len());
-    let mut total_slices_added = 0;
-
-    for (ep_idx, (episode_path, name, file_size)) in ordered.iter().enumerate() {
-        let file_size = *file_size;
-        episode_names.push(name.clone());
-
-        // Empty episodes contribute zero PAR2 input slices — the worker's
-        // hasher never sees an `is_last_of_file` boundary for them, so they
-        // get no entry in its returned `hashes`; a placeholder is inserted
-        // for them below once `worker.finish()` returns.
-        if file_size == 0 {
-            slices_per_episode.push(0);
-            continue;
-        }
-
-        let mut file = tokio::fs::File::open(episode_path)
-            .await
-            .with_context(|| format!("opening episode `{}`", episode_path.display()))?;
-
-        let mut accum = worker.take_buffer(par2_slice_size);
-        accum.clear();
-        let mut remaining = file_size as usize;
-        let mut slices_for_episode = 0usize;
-
-        while remaining > 0 {
-            let space = par2_slice_size - accum.len();
-            let to_read = space.min(remaining);
-            let base = accum.len();
-            accum.resize(base + to_read, 0);
-            file.read_exact(&mut accum[base..base + to_read])
-                .await
-                .with_context(|| format!("reading episode `{}`", episode_path.display()))?;
-            remaining -= to_read;
-
-            if accum.len() >= par2_slice_size {
-                let is_last = remaining == 0;
-                feed_par2_slice(&mut accum, par2_slice_size, &worker, is_last)?;
-                slices_for_episode += 1;
-            }
-        }
-        // Flush the final partial slice for this episode (zero-padded inside
-        // feed_par2_slice), when the file size wasn't an exact multiple of
-        // par2_slice_size.
-        if !accum.is_empty() {
-            feed_par2_slice(&mut accum, par2_slice_size, &worker, true)?;
-            slices_for_episode += 1;
-        }
-
-        total_slices_added += slices_for_episode;
-        slices_per_episode.push(slices_for_episode);
-        debug!(
-            episode_idx = ep_idx + 1,
-            total_episodes = ordered.len(),
-            file_size,
-            slices_for_episode,
-            expected_slices = (file_size as usize).div_ceil(par2_slice_size),
-            "finished reading episode"
-        );
-    }
-
-    debug!(
-        calculated_total_slices = total_slices,
-        actual_slices_added = total_slices_added,
-        "season PAR2 slice count mismatch"
+    // Same budget/pass split as the per-file producer. Connection reserve
+    // is 0: season generation runs before (or without) the NNTP pool, like
+    // `--par2-before-upload`.
+    let (memory_limit, passes) = par2_memory_plan(config, par2_slice_size, recovery_count, 0)?;
+    info!(
+        memory_limit,
+        passes = passes.len(),
+        "season PAR2 memory plan"
     );
 
-    let (recovery_slices, slice_checksums, hashes) = worker.finish();
+    let mut all_recovery_slices = Vec::new();
+    let mut episode_names = Vec::new();
+    let mut slices_per_episode = Vec::new();
+    let mut slice_checksums = Vec::new();
+    let mut hashes = Vec::new();
+
+    for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
+        if rec_count == 0 {
+            continue;
+        }
+        let mut enc =
+            RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, exp_start, rec_count)
+                .context("allocating season PAR2 recovery buffers")?
+                .with_simd_path(config.simd);
+        if pass_idx == 0 {
+            enc = enc.with_checksums();
+        }
+        let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+        let enc = enc.with_flush_limit(queue_limit);
+        let worker = Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
+
+        let (names, slices, added) =
+            feed_season_episodes(&ordered, &worker, par2_slice_size).await?;
+        debug!(
+            pass = pass_idx,
+            calculated_total_slices = total_slices,
+            actual_slices_added = added,
+            "season PAR2 pass fed"
+        );
+
+        let (recovery, checksums, pass_hashes) = worker.finish();
+        all_recovery_slices.extend(recovery);
+        if pass_idx == 0 {
+            episode_names = names;
+            slices_per_episode = slices;
+            slice_checksums = checksums;
+            hashes = pass_hashes;
+        }
+    }
+
+    let recovery_slices = all_recovery_slices;
     info!(
         recovery_slices = recovery_slices.len(),
         "season PAR2 generation complete"

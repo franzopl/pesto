@@ -367,7 +367,7 @@ pub fn encoded_size(data: &[u8], line_len: usize) -> usize {
 
     #[cfg(target_arch = "aarch64")]
     {
-        unsafe { aarch64::encoded_size_neon(data, line_len) }
+        aarch64::encoded_size_neon(data, line_len)
     }
 
     #[cfg(not(target_arch = "aarch64"))]

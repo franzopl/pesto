@@ -31,6 +31,16 @@ pub struct RawPacket {
 /// of input content — every position is inspected at most once, so a file
 /// full of near-miss magic sequences cannot force quadratic behaviour.
 pub fn read_packets(data: &[u8]) -> Vec<RawPacket> {
+    read_packets_with_offsets(data)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// Same as [`read_packets`], but each packet is paired with its byte offset
+/// in `data` (start of the 64-byte header). Used by [`crate::recovery_set`]
+/// to index recovery blocks without retaining their bodies.
+pub fn read_packets_with_offsets(data: &[u8]) -> Vec<(RawPacket, usize)> {
     let mut packets = Vec::new();
     let mut pos = 0usize;
 
@@ -41,7 +51,7 @@ pub fn read_packets(data: &[u8]) -> Vec<RawPacket> {
         }
         match try_parse_one(&data[pos..]) {
             Some((raw, consumed)) => {
-                packets.push(raw);
+                packets.push((raw, pos));
                 pos += consumed;
             }
             None => pos += 1,

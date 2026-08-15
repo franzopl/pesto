@@ -560,7 +560,11 @@ The budget model itself was re-derived ahead of this phase — see
 3. ✅ PAR2 sizing (`producer`, `poster/mod.rs`) now folds the global ceiling
    in as an *additional* cap on top of the existing RLIMIT_AS-specific
    `address_space_budget` model (§9) — not a replacement for it. That model
-   is validated against a live 83.4 GiB run and stayed untouched.
+   is validated against a live 83.4 GiB run and stayed untouched. The
+   season-mode global PAR2 path (`generate_season_par2`) uses the same
+   `par2_memory_plan` helper, with a connection reserve of 0 (no NNTP pool
+   is open during generation), so `--memory-limit` splits the season
+   encoder into the same multi-pass schedule as a per-file run.
 4. ⚠️ **The one correctness trap found while implementing this**:
    `Ceiling::effective` already haircuts RLIMIT_AS (`× 0.60`); naively taking
    `share_of(ceiling.effective, Par2)` and combining it with

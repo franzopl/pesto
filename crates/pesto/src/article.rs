@@ -110,20 +110,36 @@ pub struct Article {
     pub no_archive: bool,
 }
 
+/// Neutralize CR/LF (and other C0) in a header value so a file name cannot
+/// inject extra header lines. Space is the replacement so the line stays one
+/// token-ish field rather than vanishing.
+fn sanitize_header_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c == '\r' || c == '\n' || c == '\0' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 impl Article {
     /// Build the RFC 2822 header block (including the trailing blank line).
     /// The returned bytes are ready to be written directly to the NNTP stream.
     pub fn build_headers(&self) -> Vec<u8> {
         let mut h = format!(
             "From: {}\r\nNewsgroups: {}\r\nSubject: {}\r\nMessage-ID: {}\r\n",
-            self.from,
-            self.newsgroups.join(","),
-            self.subject,
-            self.message_id,
+            sanitize_header_value(&self.from),
+            sanitize_header_value(&self.newsgroups.join(",")),
+            sanitize_header_value(&self.subject),
+            sanitize_header_value(&self.message_id),
         );
         if let Some(date) = &self.date {
             h.push_str("Date: ");
-            h.push_str(date);
+            h.push_str(&sanitize_header_value(date));
             h.push_str("\r\n");
         }
         if self.no_archive {
@@ -261,6 +277,7 @@ pub fn default_subject(
     total: u32,
     file_counter: Option<(u32, u32)>,
 ) -> String {
+    let name = name.replace('"', "'");
     let base = format!("\"{name}\" yEnc ({part}/{total})");
     match file_counter {
         Some((filenum, total_files)) => format!("[{filenum}/{total_files}] - {base}"),
@@ -459,6 +476,29 @@ mod tests {
         // it with the rest — confirmed live against Binsearch.
         let s = default_subject("movie.mkv", 1, 1, None);
         assert_eq!(s, "\"movie.mkv\" yEnc (1/1)");
+    }
+
+    #[test]
+    fn default_subject_replaces_embedded_quotes() {
+        assert_eq!(
+            default_subject("say \"hi\".bin", 1, 1, None),
+            "\"say 'hi'.bin\" yEnc (1/1)"
+        );
+    }
+
+    #[test]
+    fn build_headers_neutralizes_crlf_in_subject() {
+        let article = Article {
+            message_id: "<id@pesto>".into(),
+            from: "p <p@x.com>".into(),
+            newsgroups: vec!["a.b.test".into()],
+            subject: "ok\r\nX-Injected: yes".into(),
+            date: None,
+            no_archive: false,
+        };
+        let headers = String::from_utf8(article.build_headers()).unwrap();
+        assert!(!headers.lines().any(|l| l.starts_with("X-Injected")));
+        assert!(headers.contains("Subject: ok  X-Injected: yes\r\n"));
     }
 
     #[test]

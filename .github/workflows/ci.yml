@@ -39,3 +39,23 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all
+
+  # Phase 1b: NEON yEnc encoder + aarch64 unit tests never run on x86-64.
+  test-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --component rustfmt --component clippy
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-arm-cargo-${{ hashFiles('**/Cargo.toml') }}
+      - name: Clippy (pesto + parmesan)
+        run: cargo clippy -p pesto-poster -p parmesan-par2 --all-targets -- -D warnings
+      - name: Test (pesto + parmesan)
+        run: cargo test -p pesto-poster -p parmesan-par2 --lib

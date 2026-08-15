@@ -586,6 +586,165 @@ fn dispatcher_matches_scalar_large_payload() {
     assert_eq!(a, b);
 }
 
+// --- 26b/c (aarch64): NEON path produces identical output to scalar ---
+
+#[cfg(target_arch = "aarch64")]
+fn encode_neon_vec(data: &[u8], line_len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_neon(&mut out, data, line_len);
+    out
+}
+
+#[allow(unused_macros)]
+macro_rules! assert_neon_eq {
+    ($data:expr, $line_len:expr) => {{
+        #[cfg(target_arch = "aarch64")]
+        {
+            let scalar = encode_s($data, $line_len);
+            let simd = encode_neon_vec($data, $line_len);
+            assert_eq!(
+                simd, scalar,
+                "NEON diverges from scalar (line_len={})",
+                $line_len
+            );
+            assert_eq!(
+                crate::yenc::aarch64::encoded_size_neon($data, $line_len),
+                simd.len(),
+                "encoded_size_neon != encode_neon length (line_len={})",
+                $line_len
+            );
+        }
+    }};
+}
+
+#[test]
+fn neon_matches_scalar_all_256_byte_values() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let data: Vec<u8> = (0u8..=255).collect();
+        assert_neon_eq!(&data, 128);
+    }
+}
+
+#[test]
+fn neon_matches_scalar_all_critical_bytes() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
+            .iter()
+            .cycle()
+            .copied()
+            .take(512)
+            .collect();
+        assert_neon_eq!(&data, 128);
+    }
+}
+
+#[test]
+fn neon_matches_scalar_positional_bytes_at_boundaries() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
+            .iter()
+            .cycle()
+            .copied()
+            .take(256)
+            .collect();
+        assert_neon_eq!(&data, 4);
+    }
+}
+
+#[test]
+fn neon_matches_scalar_large_random_like_payload() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let data: Vec<u8> = (0u8..=255)
+            .cycle()
+            .enumerate()
+            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+            .take(750 * 1024)
+            .collect();
+        assert_neon_eq!(&data, 128);
+    }
+}
+
+#[test]
+fn neon_matches_scalar_empty() {
+    #[cfg(target_arch = "aarch64")]
+    assert_neon_eq!(&[], 128);
+}
+
+#[test]
+fn neon_matches_scalar_single_byte() {
+    #[cfg(target_arch = "aarch64")]
+    for b in 0u8..=255 {
+        let data = [b];
+        assert_neon_eq!(&data, 128);
+    }
+}
+
+#[test]
+fn neon_matches_scalar_short_line_len() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
+        for ll in [1, 2, 3, 4, 7, 16, 17] {
+            assert_neon_eq!(&data, ll);
+        }
+    }
+}
+
+#[test]
+fn neon_round_trip() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
+        let mut encoded = Vec::new();
+        encode_neon(&mut encoded, &data, 128);
+        assert_eq!(decode(&encoded), data);
+    }
+}
+
+/// Every compiled backend must match `encode_scalar` for arbitrary
+/// `(data, line_len)`. This is the architecture-independent property that
+/// replaces per-backend vector lists.
+#[test]
+fn available_backends_match_scalar_on_varied_inputs() {
+    let payloads: &[&[u8]] = &[
+        &[],
+        &[0x00],
+        &[0x04], // becomes '.'
+        &[0xD6], // becomes NUL
+        &(0u8..=255).collect::<Vec<_>>(),
+    ];
+    let extra: Vec<u8> = (0u8..=255)
+        .cycle()
+        .enumerate()
+        .map(|(i, b)| b.wrapping_add((i * 3) as u8))
+        .take(8192)
+        .collect();
+    for data in payloads
+        .iter()
+        .copied()
+        .chain(std::iter::once(extra.as_slice()))
+    {
+        for line_len in [1usize, 2, 3, 4, 7, 16, 17, 32, 128] {
+            let scalar = encode_s(data, line_len);
+            let mut dispatched = Vec::new();
+            super::encode(&mut dispatched, data, line_len);
+            assert_eq!(
+                dispatched, scalar,
+                "dispatcher vs scalar line_len={line_len}"
+            );
+            assert_eq!(encoded_size(data, line_len), scalar.len());
+            assert!(
+                !crate::nntp::yenc_body_has_leading_dot(&scalar),
+                "scalar produced a leading-dot line at line_len={line_len}"
+            );
+        }
+    }
+}
+
 // --- 26d: encoded_size matches actual output length ---
 
 fn check_encoded_size(data: &[u8], line_len: usize) {

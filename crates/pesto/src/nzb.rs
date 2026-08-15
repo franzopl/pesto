@@ -573,6 +573,8 @@ fn escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            // XML 1.0 forbids C0 controls other than tab / LF / CR.
+            c if c.is_control() && !matches!(c, '\t' | '\n' | '\r') => {}
             _ => out.push(c),
         }
     }
@@ -855,6 +857,12 @@ mod tests {
             ObfuscateMode::None,
         );
         assert!(xml.contains("subject=\"&quot;file.bin&quot; yEnc (1/1)\""));
+    }
+
+    #[test]
+    fn escape_drops_xml_illegal_controls() {
+        assert_eq!(escape("ok\u{0001}name"), "okname");
+        assert_eq!(escape("keep\ttab"), "keep\ttab");
     }
 
     #[test]
