@@ -72,17 +72,28 @@ enum Command {
         /// Path to the `.nzb` file.
         nzb: PathBuf,
     },
-    /// Download and assemble the contents of a `.nzb`. Exits 0 if every file
-    /// ended up complete with no repair needed, 1 if PAR2 repaired something
-    /// but the end result is complete, 2 if data is still missing or damaged
-    /// (PAR2 couldn't fix it, no recovery data was available, or repair was
-    /// skipped via `--mode download`), 3 on a fatal error (config, network,
-    /// I/O). `--stat`'s own pass/fail (see below) surfaces as a fatal error
-    /// too, since it never reaches the download/repair pipeline these codes
-    /// describe.
+    /// Download and assemble the contents of one or more `.nzb` files. Exits
+    /// 0 if every file ended up complete with no repair needed, 1 if PAR2
+    /// repaired something but the end result is complete, 2 if data is still
+    /// missing or damaged (PAR2 couldn't fix it, no recovery data was
+    /// available, or repair was skipped via `--mode download`), 3 on a fatal
+    /// error (config, network, I/O). `--stat`'s own pass/fail (see below)
+    /// surfaces as a fatal error too, since it never reaches the
+    /// download/repair pipeline these codes describe.
+    ///
+    /// Multiple `.nzb` files download sequentially, sharing one `--config`/
+    /// `--out-dir`/`--mode`/etc. for the whole batch; the overall exit code
+    /// is the worst (highest) of any individual file's own code — one
+    /// incomplete release in a batch of ten still needs to fail the run.
+    /// Each release beyond the first downloads into its own subdirectory
+    /// (named after its `.nzb` file's stem) under the shared destination, so
+    /// same-named files across releases can never collide; a single `.nzb`
+    /// keeps downloading straight into the destination, unchanged from
+    /// before this flag accepted more than one path.
     Download {
-        /// Path to the `.nzb` file.
-        nzb: PathBuf,
+        /// Path(s) to the `.nzb` file(s).
+        #[arg(required = true)]
+        nzb: Vec<PathBuf>,
         /// Destination directory for completed files. Defaults to the
         /// config file's `download_dir`, or the current directory.
         #[arg(long)]
@@ -207,23 +218,43 @@ async fn main() -> Result<()> {
             mode,
             quiet,
         }) => {
-            let exit_code = download(
-                &nzb,
-                out_dir,
-                cli.config.flatten(),
-                password,
-                stat.map(|inner| inner.unwrap_or_default()),
-                sample,
-                &server,
-                mode,
-                quiet,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("error: {e:#}");
-                EXIT_FATAL
-            });
-            process::exit(exit_code);
+            let stat = stat.map(|inner| inner.unwrap_or_default());
+            let multi = nzb.len() > 1;
+            let mut worst_exit_code = EXIT_COMPLETE;
+            for (i, path) in nzb.iter().enumerate() {
+                if multi {
+                    println!("=== [{}/{}] {} ===", i + 1, nzb.len(), path.display());
+                }
+                // Beyond the first release, each gets its own subdirectory
+                // (named after its .nzb's stem) under the shared destination
+                // so same-named files across releases can never collide. A
+                // single .nzb keeps the old flat destination unchanged.
+                let subdir = multi.then(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("release")
+                        .to_string()
+                });
+                let exit_code = download(
+                    path,
+                    out_dir.clone(),
+                    cli.config.clone().flatten(),
+                    password.clone(),
+                    stat,
+                    sample,
+                    &server,
+                    mode,
+                    quiet,
+                    subdir.as_deref(),
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e:#}");
+                    EXIT_FATAL
+                });
+                worst_exit_code = worst_exit_code.max(exit_code);
+            }
+            process::exit(worst_exit_code);
         }
         Some(Command::Check {
             nzb,
@@ -286,6 +317,7 @@ async fn download(
     server_names: &[String],
     cli_mode: Option<ProcessingMode>,
     quiet: bool,
+    subdir: Option<&str>,
 ) -> Result<i32> {
     anyhow::ensure!(
         stat.is_some() || sample.is_none(),
@@ -344,6 +376,10 @@ async fn download(
     }
 
     let dest_dir = out_dir.unwrap_or(config.download_dir);
+    let dest_dir = match subdir {
+        Some(name) => dest_dir.join(name),
+        None => dest_dir,
+    };
 
     let required = penne::diskspace::required_bytes(&queue);
     let space = penne::diskspace::check(&dest_dir, required)?;

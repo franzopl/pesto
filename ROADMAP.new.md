@@ -235,7 +235,13 @@ The remaining gap against the legacy Python version.
 
 `penne` first — `sugo` builds on it.
 
-- [ ] Multi-`.nzb` batch input (a queue of queues).
+- [x] **Multi-`.nzb` batch input (a queue of queues).** `penne download`
+      takes one or more `.nzb` paths, looping the existing single-item
+      pipeline unchanged; each release beyond the first gets its own
+      subdirectory (named after its `.nzb`'s stem) to avoid collisions
+      between same-named files across releases, and the overall exit code
+      is the worst of any individual release's. See `crates/penne/ROADMAP.md`
+      Phase 1.
 - [x] **Exit codes distinguishing "fully complete", "complete after repair"
       and "incomplete"; `--verbose`/`--quiet` matching `pesto`'s conventions.**
       `penne download` now returns a real exit code (0/1/2/3) instead of a

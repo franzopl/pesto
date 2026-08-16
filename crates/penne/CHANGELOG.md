@@ -26,6 +26,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`penne download -q`/`--quiet`**, matching `pesto`'s `--quiet`: suppresses
   the live progress panel, leaving only the status/result lines. `penne
   check` already had its own `--quiet`; `download` didn't.
+- **`penne download` accepts multiple `.nzb` paths** (a queue of queues),
+  downloading each sequentially through the same single-item pipeline as
+  before. Every release beyond the first gets its own subdirectory (named
+  after its `.nzb`'s stem) under the shared destination, so same-named
+  files across releases (a `readme.txt`, a generically-named `.par2` set)
+  can't collide; a single `.nzb` keeps downloading straight into the
+  destination, unchanged from before this flag accepted more than one
+  path. The overall exit code is the worst of any individual release's own
+  code.
 
 ## [0.4.1] — 2026-08-12
 
