@@ -78,6 +78,10 @@ fn mac_scalar(gf: &Gf16, dst: &mut [u8], src: &[u8], coeff: u16) {
 /// `tl_*`/`th_*` come from the low byte's two nibbles (weights 1 and 16);
 /// `hl_*`/`hh_*` come from the high byte's two nibbles (weights 256 and
 /// 4096); `_l`/`_h` suffixes select the low/high output byte.
+///
+/// Only ever built by `mac_ssse3`/`mac_avx2` below, both x86_64-only —
+/// gated the same way so it isn't flagged as dead code on other targets.
+#[cfg(target_arch = "x86_64")]
 struct NibbleTables {
     tl_l: [u8; 16],
     tl_h: [u8; 16],
@@ -94,6 +98,7 @@ struct NibbleTables {
     byte_high: [u16; 256],
 }
 
+#[cfg(target_arch = "x86_64")]
 impl NibbleTables {
     fn build(gf: &Gf16, coeff: u16) -> Self {
         let mut t = NibbleTables {

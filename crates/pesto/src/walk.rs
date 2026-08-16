@@ -92,6 +92,10 @@ pub fn expand_inputs(paths: &[PathBuf]) -> Result<Vec<InputFile>> {
         bail!("no files to post: the given directories were empty or held only skipped entries");
     }
 
+    for file in &mut out {
+        file.name = sanitize_published_name(&file.name)?;
+    }
+
     out.sort_by(|a, b| natural_cmp(&a.name, &b.name));
     for pair in out.windows(2) {
         if pair[0].name == pair[1].name {
@@ -157,6 +161,20 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<InputFile>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Replace CR, LF, NUL and other C0 controls in a published name so it can
+/// never become an NNTP header, a `=ybegin name=` line or raw NZB text.
+/// Rejects a name that would be empty after sanitization.
+pub fn sanitize_published_name(name: &str) -> Result<String> {
+    let out: String = name
+        .chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect();
+    if out.is_empty() {
+        bail!("published file name is empty after sanitizing control characters");
+    }
+    Ok(out)
 }
 
 /// The final path component of `path` as a UTF-8 string.
@@ -300,6 +318,16 @@ mod tests {
         assert_eq!(out[0].name, "show/ep01.mkv");
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn published_names_replace_control_characters() {
+        assert_eq!(
+            sanitize_published_name("ok\r\nfile.bin").unwrap(),
+            "ok__file.bin"
+        );
+        assert_eq!(sanitize_published_name("a\0b").unwrap(), "a_b");
+        assert!(sanitize_published_name("").is_err());
     }
 
     #[test]

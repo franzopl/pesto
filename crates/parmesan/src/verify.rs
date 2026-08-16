@@ -114,7 +114,7 @@ pub fn verify_with_progress(
     let mut files = Vec::with_capacity(set.files.len());
 
     for entry in &set.files {
-        let path = base_dir.join(&entry.name);
+        let path = crate::recovery_set::contained_path(base_dir, &entry.name)?;
         let total_file_slices = entry.slice_checksums.len();
 
         if !path.is_file() {
@@ -137,6 +137,9 @@ pub fn verify_with_progress(
         let mut file = File::open(&path)
             .with_context(|| format!("opening `{}` for verification", path.display()))?;
 
+        let on_disk_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let length_mismatch = on_disk_len != entry.length;
+
         let mut bad_slice_indices = Vec::new();
         let mut buf = vec![0u8; slice_size];
         for (i, expected) in entry.slice_checksums.iter().enumerate() {
@@ -155,7 +158,7 @@ pub fn verify_with_progress(
 
         files.push(FileReport {
             name: entry.name.clone(),
-            status: if bad_slice_indices.is_empty() {
+            status: if bad_slice_indices.is_empty() && !length_mismatch {
                 FileStatus::Ok
             } else {
                 FileStatus::Damaged
@@ -168,7 +171,7 @@ pub fn verify_with_progress(
 
     Ok(VerifyReport {
         files,
-        available_recovery_blocks: set.recovery_blocks.len(),
+        available_recovery_blocks: set.available_recovery_blocks(),
     })
 }
 
@@ -222,6 +225,31 @@ mod tests {
         assert_eq!(report.exit_code(), 0);
         assert_eq!(report.total_bad_slices(), 0);
         assert!(report.files.iter().all(|f| f.status == FileStatus::Ok));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trailing_bytes_past_recorded_length_are_damaged() {
+        let (dir, index) = build_fixture_set(
+            "verify-trailing",
+            &[FixtureFile {
+                name: "a.bin",
+                data: vec![1u8; 300],
+            }],
+            128,
+            2,
+        );
+
+        let path = dir.join("a.bin");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"TRAILINGJUNK");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let set = RecoverySet::load(&index).unwrap();
+        let report = verify(&set, &dir).unwrap();
+        assert_eq!(report.files[0].status, FileStatus::Damaged);
+        assert!(!report.is_ok());
 
         std::fs::remove_dir_all(&dir).ok();
     }

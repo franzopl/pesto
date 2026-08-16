@@ -137,6 +137,39 @@ pub fn compress(
     }
 }
 
+/// If `dest_dir` already holds a complete archive for `archive_stem`,
+/// return it so a `--resume` run can skip recompression (and keep the
+/// recorded `{size, mtime}` fingerprints valid).
+pub fn existing_archive(
+    dest_dir: &Path,
+    archive_stem: &str,
+    format: ArchiveFormat,
+    volume_size: Option<&str>,
+) -> Option<CompressResult> {
+    if !dest_dir.is_dir() {
+        return None;
+    }
+    let archive_name = format!("{}.{}", archive_stem, format.extension());
+    let archive_path = dest_dir.join(&archive_name);
+    let mut paths = match (format, volume_size) {
+        (ArchiveFormat::Rar, Some(_)) => collect_rar_volumes(dest_dir, archive_stem).ok()?,
+        (ArchiveFormat::SevenZip | ArchiveFormat::Zip, Some(_)) => {
+            collect_7z_volumes(dest_dir, &archive_name).ok()?
+        }
+        (_, None) if archive_path.is_file() => vec![archive_path],
+        _ => return None,
+    };
+    if paths.is_empty() || !paths.iter().all(|p| p.is_file()) {
+        return None;
+    }
+    let path = paths.remove(0);
+    Some(CompressResult {
+        path,
+        extra_paths: paths,
+        format,
+    })
+}
+
 /// Validate a `-v<size>[u]` value shared by the `rar` and `7z` CLIs: digits
 /// followed by an optional single unit character from `bBkKmMgGtT`.
 fn validate_volume_size(size: &str) -> Result<()> {

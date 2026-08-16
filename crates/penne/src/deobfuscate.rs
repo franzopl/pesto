@@ -150,7 +150,7 @@ fn run_blocking(
     let (par2_paths, mut rest) = tag_par2_content(dest_dir, candidates, &mut report);
 
     let recovery_files: Vec<FileEntry> = match par2_paths.first() {
-        Some(index) => match RecoverySet::load(index) {
+        Some(index) => match RecoverySet::load_metadata(index) {
             Ok(set) => set.files,
             Err(e) => {
                 warn!(
@@ -222,7 +222,9 @@ fn match_against_recovery_set(
     report: &mut RenameReport,
 ) {
     for entry in recovery_files {
-        let target = dest_dir.join(&entry.name);
+        let Ok(target) = pesto::par2::recovery_set::contained_path(dest_dir, &entry.name) else {
+            continue;
+        };
         if target.exists() {
             // Already correctly named, or a genuine name collision either
             // way — never overwrite.

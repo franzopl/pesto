@@ -318,8 +318,14 @@ impl Connection {
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
 
-        // Write body directly; the BufWriter coalesces this with the headers
-        // before the TLS flush.
+        // Body is *not* dot-stuffed. yEnc already escapes a '.' that would
+        // start a line (draft v1.3 §4 / `=ybegin` line wrap), so stuffing
+        // here would be a second pass over every article on the hot path.
+        debug_assert!(
+            !yenc_body_has_leading_dot(body),
+            "yEnc body must not contain a line starting with '.'; \
+             NNTP would treat it as end-of-article"
+        );
         self.write_all_timeout(body).await?;
         if !body.ends_with(b"\r\n") {
             self.write_all_timeout(b"\r\n").await?;
@@ -352,6 +358,11 @@ impl Connection {
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
+        debug_assert!(
+            !yenc_body_has_leading_dot(body),
+            "yEnc body must not contain a line starting with '.'; \
+             NNTP would treat it as end-of-article"
+        );
         self.write_all_timeout(body).await?;
         if !body.ends_with(b"\r\n") {
             self.write_all_timeout(b"\r\n").await?;
@@ -732,6 +743,15 @@ fn is_dot_terminator(line: &[u8]) -> bool {
     trimmed == b"."
 }
 
+/// True when any line of a yEnc body starts with `.`.
+///
+/// The poster relies on the encoder never producing that (see
+/// [`post_parts_inner`] / [`NntpConnection::enqueue_post`]); this is the
+/// predicate those `debug_assert!`s use.
+pub(crate) fn yenc_body_has_leading_dot(body: &[u8]) -> bool {
+    body.starts_with(b".") || body.windows(3).any(|w| w == b"\r\n.")
+}
+
 /// Apply NNTP dot-stuffing: any line that begins with `.` gets an extra `.`
 /// prepended, so it cannot be mistaken for the end-of-data marker.
 fn dot_stuff(input: &[u8], out: &mut Vec<u8>) {
@@ -944,6 +964,29 @@ mod tests {
     }
 
     // ── dot_stuff ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn yenc_body_has_leading_dot_detects_first_and_later_lines() {
+        assert!(yenc_body_has_leading_dot(b".hidden\r\n"));
+        assert!(yenc_body_has_leading_dot(b"ok\r\n.bad\r\n"));
+        assert!(!yenc_body_has_leading_dot(b"ok\r\na.b\r\n"));
+        assert!(!yenc_body_has_leading_dot(b""));
+    }
+
+    #[test]
+    fn yenc_encoder_never_starts_a_body_line_with_dot() {
+        // Raw 0x04 + 42 == 0x2E ('.'). At line start the encoder must escape it.
+        let mut crafted = vec![0x04u8; 512];
+        crafted.extend((0u8..=255).cycle().take(1024));
+        for line_len in [1usize, 2, 4, 16, 128] {
+            let mut body = Vec::new();
+            crate::yenc::encode(&mut body, &crafted, line_len);
+            assert!(
+                !yenc_body_has_leading_dot(&body),
+                "encoder produced a leading-dot line at line_len={line_len}"
+            );
+        }
+    }
 
     #[test]
     fn dot_stuffs_lines_starting_with_dot() {

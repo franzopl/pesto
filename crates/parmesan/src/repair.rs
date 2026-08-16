@@ -7,12 +7,12 @@
 //! Reconstruction assumes the global order of input slices matches the
 //! order [`RecoverySet::files`] presents them in — ascending File ID, per
 //! spec (see that module's docs). `parmesan create` has fed slices to the
-//! encoder in that order since the fix noted in `ROADMAP.md` Phase 22;
-//! multi-file `.par2` sets created by older `parmesan` builds do not
-//! satisfy this and **will silently reconstruct incorrect bytes** if
-//! repaired here, because the wrong Reed-Solomon coefficients get applied
-//! to the wrong slices. There is no way to detect this after the fact from
-//! the PAR2 data alone — the per-slice checksum re-verification this module
+//! encoder in that order (see `ops::sort_files_by_file_id`). Multi-file
+//! `.par2` sets created by older `parmesan` builds may not satisfy this
+//! and **will silently reconstruct incorrect bytes** if repaired here,
+//! because the wrong Reed-Solomon coefficients get applied to the wrong
+//! slices. There is no way to detect this after the fact from the PAR2
+//! data alone — the per-slice checksum re-verification this module
 //! performs before writing anything is the safety net: a mismatch there
 //! aborts the repair for that file instead of writing corrupted data.
 //! Single-file recovery sets are never affected by the ordering issue.
@@ -160,7 +160,7 @@ pub fn repair(
         }
 
         let dest_dir = options.out_dir.as_deref().unwrap_or(base_dir);
-        let dest_path = dest_dir.join(&entry.name);
+        let dest_path = crate::recovery_set::contained_path(dest_dir, &entry.name)?;
 
         if !options.dry_run {
             write_repaired_file(entry, status, base_dir, &dest_path, slice_size, &slices)?;
@@ -198,7 +198,10 @@ impl SliceReader<'_> {
         let slice_size = self.set.slice_size as usize;
 
         if self.open.as_ref().map(|(fi, _)| *fi) != Some(file_index) {
-            let path = self.base_dir.join(&self.set.files[file_index].name);
+            let path = crate::recovery_set::contained_path(
+                self.base_dir,
+                &self.set.files[file_index].name,
+            )?;
             let file = std::fs::File::open(&path)
                 .with_context(|| format!("opening `{}` to read a known slice", path.display()))?;
             self.open = Some((file_index, file));
@@ -245,9 +248,10 @@ fn write_repaired_file(
                 let write_len = slice_write_len(*li, total_slices, entry.length, slice_size);
                 out.write_all(&data[..write_len])?;
             }
+            out.set_len(entry.length)?;
         }
         FileStatus::Damaged => {
-            let original = base_dir.join(&entry.name);
+            let original = crate::recovery_set::contained_path(base_dir, &entry.name)?;
             if dest_path != original {
                 std::fs::copy(&original, dest_path).with_context(|| {
                     format!(
@@ -266,6 +270,7 @@ fn write_repaired_file(
                 out.seek(SeekFrom::Start((*li * slice_size) as u64))?;
                 out.write_all(&data[..write_len])?;
             }
+            out.set_len(entry.length)?;
         }
         FileStatus::Ok => {
             unreachable!("write_repaired_file is only called for files with bad slices")
@@ -284,7 +289,9 @@ fn slice_write_len(
     slice_size: usize,
 ) -> usize {
     if local_index + 1 == total_slices {
-        (file_length - local_index as u64 * slice_size as u64) as usize
+        file_length
+            .saturating_sub(local_index as u64 * slice_size as u64)
+            .min(slice_size as u64) as usize
     } else {
         slice_size
     }

@@ -196,6 +196,10 @@ mod tests {
     #[test]
     fn a_slash_in_the_file_name_is_flattened_not_left_to_split_into_a_directory() {
         let groups = vec!["alt.test".to_string()];
+        // The embedded `"` exercises `default_subject`'s own quote handling
+        // (`"` -> `'`, see `article.rs`): a raw `"` would break the
+        // `"{name}" yEnc (n/m)` subject format indexers parse, so it's
+        // deliberately not the same character round-trip as the slash below.
         let segments = vec![seg("[01/14] - \"real.mkv\"", 1, 1, "<a1@x>")];
         let xml = pesto::nzb::generate(
             &groups,
@@ -208,7 +212,7 @@ mod tests {
         let queue = build(&parsed);
         assert_eq!(queue.files.len(), 1);
         assert!(!queue.files[0].name.contains('/'));
-        assert_eq!(queue.files[0].name, "[01_14] - \"real.mkv\"");
+        assert_eq!(queue.files[0].name, "[01_14] - 'real.mkv'");
     }
 
     #[test]

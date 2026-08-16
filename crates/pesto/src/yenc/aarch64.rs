@@ -10,10 +10,20 @@ pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     unsafe { encode_neon_impl(out, data, line_len) }
 }
 
-/// # Safety
-/// Caller must ensure `data` is a valid slice. This function uses NEON
-/// intrinsics which are always available on aarch64.
-pub unsafe fn encoded_size_neon(data: &[u8], line_len: usize) -> usize {
+/// Exact encoded length of `data` under NEON, including escapes and CRLFs.
+///
+/// Empty input is 0 (the same contract as [`super::encoded_size`]). This
+/// function uses NEON, which is always available on aarch64.
+pub fn encoded_size_neon(data: &[u8], line_len: usize) -> usize {
+    if data.is_empty() {
+        return 0;
+    }
+    // SAFETY: aarch64 always has NEON; `data` is a live slice and non-empty
+    // so `data.len() - 1` cannot underflow.
+    unsafe { encoded_size_neon_impl(data, line_len) }
+}
+
+unsafe fn encoded_size_neon_impl(data: &[u8], line_len: usize) -> usize {
     use std::arch::aarch64::*;
     let last = data.len() - 1;
     let mut escapes = 0usize;

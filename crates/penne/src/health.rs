@@ -7,7 +7,7 @@
 //!
 //! Originally scoped (see `ROADMAP.md` Phase 15) as a check *before* any
 //! download starts, mirroring `nzbget`'s `QueueCoordinator::CheckHealth`.
-//! Not feasible in that form: [`pesto::par2::recovery_set::RecoverySet::load`]
+//! Not feasible in that form: [`pesto::par2::recovery_set::RecoverySet::load_metadata`]
 //! needs the `.par2` index and its recovery volumes already sitting on
 //! disk to know how much recovery data exists at all, and nothing is on
 //! disk before a download begins. `nzbget`'s own version has the identical
@@ -103,10 +103,10 @@ pub fn evaluate(
     let Some(index_path) = find_par2_index(dest_dir, known_files)? else {
         return Ok(None);
     };
-    let recovery_set = RecoverySet::load(&index_path)
+    let recovery_set = RecoverySet::load_metadata(&index_path)
         .with_context(|| format!("loading PAR2 recovery set from {}", index_path.display()))?;
     let available_recovery_bytes =
-        recovery_set.recovery_blocks.len() as u64 * recovery_set.slice_size;
+        recovery_set.available_recovery_blocks() as u64 * recovery_set.slice_size;
     Ok(Some(HealthCheck {
         damaged_bytes,
         available_recovery_bytes,

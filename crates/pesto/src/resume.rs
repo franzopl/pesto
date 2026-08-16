@@ -23,7 +23,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ObfuscateMode;
+use crate::config::{Config, ObfuscateMode};
 
 /// Posting parameters that change how the *whole* input is chunked or named.
 /// Captured once per run and compared on `--resume`: any difference means
@@ -42,6 +42,47 @@ pub struct RunFingerprint {
     /// resumed run's reused Message-IDs would be recorded against a subject
     /// that no longer matches what the original run actually posted.
     pub file_counter: bool,
+    /// Geometry / compression options that change the posted bytes without
+    /// touching `article_size` or `par2_percent`. `#[serde(default)]` so a
+    /// state file written before these fields existed still loads.
+    #[serde(default)]
+    pub par2_slice_size: Option<usize>,
+    #[serde(default)]
+    pub par2_slice_count: Option<usize>,
+    #[serde(default)]
+    pub par2_recovery_count: Option<usize>,
+    #[serde(default)]
+    pub compress_volume_size: Option<String>,
+    /// SHA-256 hex of the compression password. The state file is plaintext;
+    /// never store the password itself.
+    #[serde(default)]
+    pub compress_password: Option<String>,
+    #[serde(default)]
+    pub line_length: usize,
+}
+
+impl RunFingerprint {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            article_size: config.article_size as u64,
+            obfuscate: config.obfuscate,
+            compress_format: config.compress_format.clone(),
+            par2_percent: config.par2,
+            file_counter: config.file_counter,
+            par2_slice_size: config.par2_slice_size,
+            par2_slice_count: config.par2_slice_count,
+            par2_recovery_count: config.par2_recovery_count,
+            compress_volume_size: config.compress_volume_size.clone(),
+            compress_password: config.compress_password.as_deref().map(hash_secret),
+            line_length: config.line_length,
+        }
+    }
+}
+
+fn hash_secret(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(secret.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A single file's identity at the time its segments were recorded. Compared
@@ -101,22 +142,43 @@ impl ResumeState {
     }
 
     /// Load state from `path`. Returns an empty state when the file does not
-    /// exist (fresh run) or cannot be parsed (corrupt state file).
+    /// exist (fresh run) or cannot be parsed (corrupt state file). I/O
+    /// failures other than not-found remain hard errors.
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading resume state `{}`", path.display()));
+            }
+        };
+        match serde_json::from_str(&text) {
+            Ok(state) => Ok(state),
+            Err(_) => Ok(Self::default()),
         }
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading resume state `{}`", path.display()))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("parsing resume state `{}`", path.display()))
     }
 
-    /// Write the current state to `path`, creating or truncating the file.
+    /// Write the current state to `path` via a sibling temp file + rename
+    /// so a crash mid-write cannot leave a truncated JSON document.
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = serde_json::to_string(self).context("serialising resume state")?;
-        std::fs::write(path, text)
-            .with_context(|| format!("writing resume state `{}`", path.display()))
+        let tmp = {
+            let mut name = path.as_os_str().to_owned();
+            name.push(".tmp");
+            std::path::PathBuf::from(name)
+        };
+        std::fs::write(&tmp, &text)
+            .with_context(|| format!("writing resume state `{}`", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| {
+            format!(
+                "replacing resume state `{}` from `{}`",
+                path.display(),
+                tmp.display()
+            )
+        })
     }
 
     /// Compare `current` against the fingerprint this state was last
@@ -251,6 +313,12 @@ mod tests {
             compress_format: None,
             par2_percent: 0,
             file_counter: false,
+            par2_slice_size: None,
+            par2_slice_count: None,
+            par2_recovery_count: None,
+            compress_volume_size: None,
+            compress_password: None,
+            line_length: 128,
         }
     }
 
@@ -441,5 +509,54 @@ mod tests {
                 mtime: Some(1)
             }
         ));
+    }
+
+    #[test]
+    fn corrupt_state_file_loads_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, "this is not json {").unwrap();
+        let loaded = ResumeState::load(&path).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn save_is_readable_after_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = ResumeState::default();
+        s.record("a.bin", 1, "id1@x", 100);
+        s.save(&path).unwrap();
+        assert!(!path.with_file_name("state.json.tmp").exists());
+        let loaded = ResumeState::load(&path).unwrap();
+        assert_eq!(loaded.get("a.bin", 1).unwrap().message_id, "id1@x");
+    }
+
+    #[test]
+    fn each_new_fingerprint_field_changes_identity() {
+        let base = fp(768_000);
+        let mut slice = base.clone();
+        slice.par2_slice_size = Some(4096);
+        assert_ne!(base, slice);
+
+        let mut count = base.clone();
+        count.par2_slice_count = Some(100);
+        assert_ne!(base, count);
+
+        let mut rec = base.clone();
+        rec.par2_recovery_count = Some(20);
+        assert_ne!(base, rec);
+
+        let mut vol = base.clone();
+        vol.compress_volume_size = Some("500m".into());
+        assert_ne!(base, vol);
+
+        let mut pw = base.clone();
+        pw.compress_password = Some(hash_secret("secret"));
+        assert_ne!(base, pw);
+
+        let mut ll = base.clone();
+        ll.line_length = 256;
+        assert_ne!(base, ll);
     }
 }

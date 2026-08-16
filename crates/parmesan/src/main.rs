@@ -446,7 +446,7 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
 }
 
 fn run_verify(args: VerifyArgs) -> Result<()> {
-    let set = RecoverySet::load(&args.index)
+    let set = RecoverySet::load_metadata(&args.index)
         .with_context(|| format!("loading recovery set from `{}`", args.index.display()))?;
     let base_dir = args
         .index
@@ -496,7 +496,7 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
 }
 
 fn run_repair(args: RepairArgs) -> Result<()> {
-    let set = RecoverySet::load(&args.index)
+    let mut set = RecoverySet::load_metadata(&args.index)
         .with_context(|| format!("loading recovery set from `{}`", args.index.display()))?;
     let base_dir = args
         .index
@@ -537,6 +537,7 @@ fn run_repair(args: RepairArgs) -> Result<()> {
         out_dir: args.out_dir.clone(),
         dry_run: args.dry_run,
     };
+    set.load_recovery_blocks(Some(report.total_bad_slices()))?;
     let plan = repair::repair(&set, &report, &base_dir, &options)?;
 
     if args.json {

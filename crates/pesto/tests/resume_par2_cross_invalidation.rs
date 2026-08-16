@@ -179,13 +179,7 @@ async fn changed_file_with_par2_invalidates_previously_resumed_par2_volumes_too(
     // per-file fingerprint check that would otherwise catch this on their
     // own (see the module doc comment).
     let mut prior = ResumeState::default();
-    prior.validate_run(&RunFingerprint {
-        article_size: config.article_size as u64,
-        obfuscate: ObfuscateMode::None,
-        compress_format: None,
-        par2_percent: config.par2,
-        file_counter: config.file_counter,
-    });
+    prior.validate_run(&RunFingerprint::from_config(&config));
     prior.record_file(
         "movie.bin",
         FileFingerprint {

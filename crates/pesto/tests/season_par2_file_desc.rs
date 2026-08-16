@@ -209,3 +209,36 @@ async fn season_par2_verifies_and_repairs_under_the_real_episode_names() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// Regression test: the season path shares `par2_geometry_from_sizes` with
+/// the per-file path (fixing the "ignores --par2-slice-count/
+/// --par2-recovery-count" bug), but that refactor dropped the season path's
+/// old silent `.min(65535)` clamp on `recovery_count` without replacing it
+/// with the same PAR2 spec-limit validation `producer()` performs for the
+/// per-file path. An explicit `--par2-recovery-count` above the GF(2^16)
+/// exponent space must fail loudly here too, not overflow into a malformed
+/// recovery set.
+#[tokio::test(flavor = "multi_thread")]
+async fn season_par2_rejects_recovery_count_past_the_spec_limit() {
+    let root = std::env::temp_dir().join(format!("pesto_season_par2_limit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let episode_path = root.join("S01E01.mkv");
+    std::fs::write(&episode_path, content(0, 50_000)).unwrap();
+
+    let mut config = season_config(16_384);
+    config.par2_recovery_count = Some(70_000);
+    let par2_dir = root.join("par2out");
+    std::fs::create_dir_all(&par2_dir).unwrap();
+
+    let err = generate_and_write_season_par2(&[episode_path], "Season01", &par2_dir, &config)
+        .await
+        .expect_err("recovery_count above 65535 must be rejected, not overflow silently");
+    assert!(
+        err.to_string().contains("too many recovery blocks"),
+        "unexpected error: {err}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
