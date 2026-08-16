@@ -1633,6 +1633,7 @@ dependencies = [
  "libc",
  "md-5",
  "parmesan-par2",
+ "proptest",
  "rayon",
  "reqwest",
  "self-replace",

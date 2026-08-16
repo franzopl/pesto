@@ -151,12 +151,17 @@ introduced.
       `FileHasher` state serialization alongside slices. Only worth doing if
       real-world feedback says the re-read hurts; Phase 1c's pass-splitting work
       may make this cheaper to land.
-- [ ] **Replace hand-written yEnc SIMD differential vectors with a property
-      test.** *(Carried over from Phase 1b — not part of #121.)* One proptest
-      over arbitrary `(data, line_len)` asserting every available backend
-      against `encode_scalar` covers all architectures at once and does not
-      need a new hand-written list per backend. `proptest` is already a
-      workspace dependency.
+- [x] **Replace hand-written yEnc SIMD differential vectors with a property
+      test.** *(Carried over from Phase 1b — not part of #121.)* Added
+      `proptest` as a `pesto` dev-dependency and replaced the per-backend
+      hand-written vector lists (SSSE3/AVX2/NEON × all-256-bytes, critical
+      bytes, positional boundaries, short line lengths, large payload) with
+      `all_backends_match_scalar`: one proptest over arbitrary `(data,
+      line_len)` that checks every backend compiled for the target
+      architecture — via `all_encoder_outputs`, so a new backend needs no new
+      hand-written list — against `encode_scalar`, plus `encoded_size` and
+      round-trip decoding. A deterministic 750 KB payload test remains for
+      the widest SIMD chunk strides.
 
 ---
 

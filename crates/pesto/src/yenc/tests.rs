@@ -1,4 +1,5 @@
 use super::*;
+use proptest::prelude::*;
 
 /// Minimal yEnc decoder used to verify that encoding is reversible.
 fn decode(encoded: &[u8]) -> Vec<u8> {
@@ -343,7 +344,8 @@ fn full_256_byte_round_trip() {
     assert_eq!(decode(&encode_s(&data, 128)), data);
 }
 
-// --- 26b: SSSE3 path produces identical output to scalar ---
+// --- All available SIMD backends agree with encode_scalar, via a property
+// test instead of hand-written per-backend vector lists. ---
 
 #[cfg(target_arch = "x86_64")]
 fn encode_ssse3_vec(data: &[u8], line_len: usize) -> Vec<u8> {
@@ -352,241 +354,12 @@ fn encode_ssse3_vec(data: &[u8], line_len: usize) -> Vec<u8> {
     out
 }
 
-/// Macro: assert SSSE3 output equals scalar output for `data` and `line_len`.
-#[allow(unused_macros)]
-macro_rules! assert_ssse3_eq {
-    ($data:expr, $line_len:expr) => {{
-        #[cfg(target_arch = "x86_64")]
-        {
-            let scalar = encode_s($data, $line_len);
-            let simd = encode_ssse3_vec($data, $line_len);
-            assert_eq!(
-                simd, scalar,
-                "SSSE3 diverges from scalar (line_len={})",
-                $line_len
-            );
-        }
-    }};
-}
-
-#[test]
-fn ssse3_matches_scalar_all_256_byte_values() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = (0u8..=255).collect();
-        assert_ssse3_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn ssse3_matches_scalar_all_critical_bytes() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // All four critical raw inputs, repeated to span many lines.
-        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
-            .iter()
-            .cycle()
-            .copied()
-            .take(512)
-            .collect();
-        assert_ssse3_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn ssse3_matches_scalar_positional_bytes_at_boundaries() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Dot/space/tab at line start and end with line_len=4.
-        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
-            .iter()
-            .cycle()
-            .copied()
-            .take(256)
-            .collect();
-        assert_ssse3_eq!(&data, 4);
-    }
-}
-
-#[test]
-fn ssse3_matches_scalar_large_random_like_payload() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // 750 KB of pseudo-random data (covers the typical article size).
-        let data: Vec<u8> = (0u8..=255)
-            .cycle()
-            .enumerate()
-            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
-            .take(750 * 1024)
-            .collect();
-        assert_ssse3_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn ssse3_matches_scalar_empty() {
-    #[cfg(target_arch = "x86_64")]
-    assert_ssse3_eq!(&[], 128);
-}
-
-#[test]
-fn ssse3_matches_scalar_single_byte() {
-    #[cfg(target_arch = "x86_64")]
-    for b in 0u8..=255 {
-        let data = [b];
-        assert_ssse3_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn ssse3_matches_scalar_short_line_len() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Stress the boundary logic with very short lines.
-        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
-        for ll in [1, 2, 3, 4, 7, 16, 17] {
-            assert_ssse3_eq!(&data, ll);
-        }
-    }
-}
-
-#[test]
-fn ssse3_round_trip() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
-        let mut encoded = Vec::new();
-        encode_ssse3(&mut encoded, &data, 128);
-        assert_eq!(decode(&encoded), data);
-    }
-}
-
-// --- 26c: AVX2 path produces identical output to scalar ---
-
 #[cfg(target_arch = "x86_64")]
 fn encode_avx2_vec(data: &[u8], line_len: usize) -> Vec<u8> {
     let mut out = Vec::new();
     encode_avx2(&mut out, data, line_len);
     out
 }
-
-#[allow(unused_macros)]
-macro_rules! assert_avx2_eq {
-    ($data:expr, $line_len:expr) => {{
-        #[cfg(target_arch = "x86_64")]
-        {
-            let scalar = encode_s($data, $line_len);
-            let simd = encode_avx2_vec($data, $line_len);
-            assert_eq!(
-                simd, scalar,
-                "AVX2 diverges from scalar (line_len={})",
-                $line_len
-            );
-        }
-    }};
-}
-
-#[test]
-fn avx2_matches_scalar_all_256_byte_values() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = (0u8..=255).collect();
-        assert_avx2_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn avx2_matches_scalar_all_critical_bytes() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
-            .iter()
-            .cycle()
-            .copied()
-            .take(512)
-            .collect();
-        assert_avx2_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn avx2_matches_scalar_positional_bytes_at_boundaries() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
-            .iter()
-            .cycle()
-            .copied()
-            .take(256)
-            .collect();
-        assert_avx2_eq!(&data, 4);
-    }
-}
-
-#[test]
-fn avx2_matches_scalar_large_random_like_payload() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = (0u8..=255)
-            .cycle()
-            .enumerate()
-            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
-            .take(750 * 1024)
-            .collect();
-        assert_avx2_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn avx2_matches_scalar_empty() {
-    #[cfg(target_arch = "x86_64")]
-    assert_avx2_eq!(&[], 128);
-}
-
-#[test]
-fn avx2_matches_scalar_single_byte() {
-    #[cfg(target_arch = "x86_64")]
-    for b in 0u8..=255 {
-        let data = [b];
-        assert_avx2_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn avx2_matches_scalar_short_line_len() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
-        for ll in [1, 2, 3, 4, 7, 16, 17, 32, 33] {
-            assert_avx2_eq!(&data, ll);
-        }
-    }
-}
-
-#[test]
-fn avx2_round_trip() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
-        let mut encoded = Vec::new();
-        encode_avx2(&mut encoded, &data, 128);
-        assert_eq!(decode(&encoded), data);
-    }
-}
-
-// --- dispatcher always matches scalar ---
-
-#[test]
-fn dispatcher_matches_scalar_large_payload() {
-    let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
-    let mut a = Vec::new();
-    let mut b = Vec::new();
-    super::encode(&mut a, &data, 128);
-    encode_scalar(&mut b, &data, 128);
-    assert_eq!(a, b);
-}
-
-// --- 26b/c (aarch64): NEON path produces identical output to scalar ---
 
 #[cfg(target_arch = "aarch64")]
 fn encode_neon_vec(data: &[u8], line_len: usize) -> Vec<u8> {
@@ -595,153 +368,75 @@ fn encode_neon_vec(data: &[u8], line_len: usize) -> Vec<u8> {
     out
 }
 
-#[allow(unused_macros)]
-macro_rules! assert_neon_eq {
-    ($data:expr, $line_len:expr) => {{
-        #[cfg(target_arch = "aarch64")]
-        {
-            let scalar = encode_s($data, $line_len);
-            let simd = encode_neon_vec($data, $line_len);
-            assert_eq!(
-                simd, scalar,
-                "NEON diverges from scalar (line_len={})",
-                $line_len
+/// Every SIMD backend compiled for this architecture, plus the runtime
+/// dispatcher, labeled for assertion messages. A newly added backend is
+/// covered automatically by listing it here — no new hand-written vector
+/// list needed per backend.
+fn all_encoder_outputs(data: &[u8], line_len: usize) -> Vec<(&'static str, Vec<u8>)> {
+    let mut out = vec![("dispatcher", {
+        let mut v = Vec::new();
+        super::encode(&mut v, data, line_len);
+        v
+    })];
+    #[cfg(target_arch = "x86_64")]
+    {
+        out.push(("ssse3", encode_ssse3_vec(data, line_len)));
+        out.push(("avx2", encode_avx2_vec(data, line_len)));
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        out.push(("neon", encode_neon_vec(data, line_len)));
+    }
+    out
+}
+
+proptest! {
+    /// Every compiled backend must match `encode_scalar` byte-for-byte for
+    /// arbitrary `(data, line_len)`, round-trip back to the original data,
+    /// and agree with `encoded_size`'s prediction. `line_len` is biased
+    /// toward small values because the escape/wrap boundary logic (critical
+    /// bytes, the dot/tab/space positional rules, line-start/line-end
+    /// detection) is where backends are most likely to diverge, and short
+    /// lines force many wraps per input. Shrinking finds a minimal failing
+    /// case automatically, replacing the old hand-picked vectors (all 256
+    /// byte values, critical bytes, positional boundaries, short line
+    /// lengths) that used to be listed out once per backend.
+    #[test]
+    fn all_backends_match_scalar(
+        data in prop::collection::vec(any::<u8>(), 0..2048),
+        line_len in prop_oneof![1usize..17, 17usize..300],
+    ) {
+        let scalar = encode_s(&data, line_len);
+        prop_assert_eq!(encoded_size(&data, line_len), scalar.len());
+        prop_assert_eq!(decode(&scalar), data.clone());
+        for (name, out) in all_encoder_outputs(&data, line_len) {
+            prop_assert_eq!(
+                &out, &scalar,
+                "{} diverges from scalar (line_len={})", name, line_len
             );
-            assert_eq!(
-                crate::yenc::aarch64::encoded_size_neon($data, $line_len),
-                simd.len(),
-                "encoded_size_neon != encode_neon length (line_len={})",
-                $line_len
+            prop_assert!(
+                !crate::nntp::yenc_body_has_leading_dot(&out),
+                "{} produced a leading-dot line (line_len={})", name, line_len
             );
-        }
-    }};
-}
-
-#[test]
-fn neon_matches_scalar_all_256_byte_values() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let data: Vec<u8> = (0u8..=255).collect();
-        assert_neon_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn neon_matches_scalar_all_critical_bytes() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let data: Vec<u8> = [NUL_IN, LF_IN, CR_IN, EQ_IN]
-            .iter()
-            .cycle()
-            .copied()
-            .take(512)
-            .collect();
-        assert_neon_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn neon_matches_scalar_positional_bytes_at_boundaries() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let data: Vec<u8> = [DOT_IN, SP_IN, TAB_IN, 0x00]
-            .iter()
-            .cycle()
-            .copied()
-            .take(256)
-            .collect();
-        assert_neon_eq!(&data, 4);
-    }
-}
-
-#[test]
-fn neon_matches_scalar_large_random_like_payload() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let data: Vec<u8> = (0u8..=255)
-            .cycle()
-            .enumerate()
-            .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
-            .take(750 * 1024)
-            .collect();
-        assert_neon_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn neon_matches_scalar_empty() {
-    #[cfg(target_arch = "aarch64")]
-    assert_neon_eq!(&[], 128);
-}
-
-#[test]
-fn neon_matches_scalar_single_byte() {
-    #[cfg(target_arch = "aarch64")]
-    for b in 0u8..=255 {
-        let data = [b];
-        assert_neon_eq!(&data, 128);
-    }
-}
-
-#[test]
-fn neon_matches_scalar_short_line_len() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let data: Vec<u8> = (0u8..=255).cycle().take(512).collect();
-        for ll in [1, 2, 3, 4, 7, 16, 17] {
-            assert_neon_eq!(&data, ll);
         }
     }
 }
 
+/// Deterministic large-payload regression (750 KB, the typical article
+/// size): exercises the widest SIMD chunk strides (32/64 bytes) that small
+/// proptest-generated inputs rarely reach in depth.
 #[test]
-fn neon_round_trip() {
-    #[cfg(target_arch = "aarch64")]
-    {
-        let data: Vec<u8> = (0u8..=255).cycle().take(750 * 1024).collect();
-        let mut encoded = Vec::new();
-        encode_neon(&mut encoded, &data, 128);
-        assert_eq!(decode(&encoded), data);
-    }
-}
-
-/// Every compiled backend must match `encode_scalar` for arbitrary
-/// `(data, line_len)`. This is the architecture-independent property that
-/// replaces per-backend vector lists.
-#[test]
-fn available_backends_match_scalar_on_varied_inputs() {
-    let payloads: &[&[u8]] = &[
-        &[],
-        &[0x00],
-        &[0x04], // becomes '.'
-        &[0xD6], // becomes NUL
-        &(0u8..=255).collect::<Vec<_>>(),
-    ];
-    let extra: Vec<u8> = (0u8..=255)
+fn large_payload_all_backends_match_scalar() {
+    let data: Vec<u8> = (0u8..=255)
         .cycle()
         .enumerate()
-        .map(|(i, b)| b.wrapping_add((i * 3) as u8))
-        .take(8192)
+        .map(|(i, b): (usize, u8)| b.wrapping_add((i.wrapping_mul(7).wrapping_add(13)) as u8))
+        .take(750 * 1024)
         .collect();
-    for data in payloads
-        .iter()
-        .copied()
-        .chain(std::iter::once(extra.as_slice()))
-    {
-        for line_len in [1usize, 2, 3, 4, 7, 16, 17, 32, 128] {
-            let scalar = encode_s(data, line_len);
-            let mut dispatched = Vec::new();
-            super::encode(&mut dispatched, data, line_len);
-            assert_eq!(
-                dispatched, scalar,
-                "dispatcher vs scalar line_len={line_len}"
-            );
-            assert_eq!(encoded_size(data, line_len), scalar.len());
-            assert!(
-                !crate::nntp::yenc_body_has_leading_dot(&scalar),
-                "scalar produced a leading-dot line at line_len={line_len}"
-            );
-        }
+    let scalar = encode_s(&data, 128);
+    assert_eq!(decode(&scalar), data);
+    for (name, out) in all_encoder_outputs(&data, 128) {
+        assert_eq!(out, scalar, "{name} diverges from scalar on large payload");
     }
 }
 
