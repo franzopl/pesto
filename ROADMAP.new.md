@@ -236,8 +236,13 @@ The remaining gap against the legacy Python version.
 `penne` first — `sugo` builds on it.
 
 - [ ] Multi-`.nzb` batch input (a queue of queues).
-- [ ] Exit codes distinguishing "fully complete", "complete after repair" and
-      "incomplete"; `--verbose`/`--quiet` matching `pesto`'s conventions.
+- [x] **Exit codes distinguishing "fully complete", "complete after repair"
+      and "incomplete"; `--verbose`/`--quiet` matching `pesto`'s conventions.**
+      `penne download` now returns a real exit code (0/1/2/3) instead of a
+      binary `Result<()>` that exited 0 for an incomplete `--mode download`
+      run; `-v`/`--verbose`/`--log-file` (global) and `download --quiet` mirror
+      `pesto`'s flags exactly, reusing `pesto::logging::init` directly. See
+      `crates/penne/ROADMAP.md` Phase 5.
 - [ ] On-demand extra-volume fetching: today every `.par2` volume in the NZB is
       downloaded whether or not repair needs it.
 - [ ] Parallel `verify()` — currently single-threaded and sequential; pairs

@@ -178,6 +178,16 @@ fn run_penne_download_with_mode(nzb_path: &Path, config_path: &Path, mode: &str)
         .unwrap()
 }
 
+fn run_penne_download_quiet(nzb_path: &Path, config_path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_penne"))
+        .arg("download")
+        .arg(nzb_path)
+        .args(["--config", config_path.to_str().unwrap()])
+        .arg("--quiet")
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn download_fetches_decodes_and_writes_the_file() {
     let data = b"hello from penne end-to-end test".to_vec();
@@ -342,8 +352,11 @@ fn download_recovers_a_fully_missing_segment_via_par2() {
     let config_path = write_config(dir.path(), &download_dir, addr.port());
 
     let output = run_penne_download(&nzb_path, &config_path);
-    assert!(
-        output.status.success(),
+    // Exit 1 = "complete after repair": PAR2 fixed a fully-missing segment,
+    // which is exactly what this test exercises.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
         "stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -430,6 +443,58 @@ fn download_prints_live_progress_instead_of_staying_silent_until_done() {
         stderr.contains("assembled: movie.bin"),
         "stderr did not report the file being assembled:\n{stderr}"
     );
+}
+
+#[test]
+fn quiet_suppresses_the_live_progress_panel() {
+    let data = b"hello from a quiet penne run".to_vec();
+    let encoded = encode_part(
+        "greeting.txt",
+        data.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &data,
+        128,
+        None,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("art1@test", encoded.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+    let nzb_path = write_nzb(
+        dir.path(),
+        vec![segment(
+            "greeting.txt",
+            1,
+            1,
+            "art1@test",
+            data.len() as u64,
+        )],
+    );
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download_quiet(&nzb_path, &config_path);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("fetching:"),
+        "--quiet should suppress the progress panel entirely:\n{stderr}"
+    );
+
+    let written = std::fs::read(download_dir.join("greeting.txt")).unwrap();
+    assert_eq!(written, data);
 }
 
 #[test]
@@ -566,8 +631,11 @@ fn mode_download_skips_par2_repair_and_leaves_an_incomplete_file_unwritten() {
 
     let output = run_penne_download_with_mode(&nzb_path, &config_path, "download");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
+    // Exit 2 = "incomplete": the file is genuinely missing data on disk,
+    // even though `--mode download` means no repair was even attempted.
+    assert_eq!(
+        output.status.code(),
+        Some(2),
         "stdout: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );

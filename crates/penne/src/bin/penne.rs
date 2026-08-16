@@ -20,6 +20,13 @@ use clap::{Parser, Subcommand};
 use penne::check::CheckMethod;
 use penne::config::ProcessingMode;
 
+/// `penne download`'s exit codes — see [`Command::Download`]'s doc comment
+/// for the user-facing description.
+const EXIT_COMPLETE: i32 = 0;
+const EXIT_REPAIRED: i32 = 1;
+const EXIT_INCOMPLETE: i32 = 2;
+const EXIT_FATAL: i32 = 3;
+
 #[derive(Parser)]
 #[command(
     name = "penne",
@@ -42,6 +49,20 @@ struct Cli {
     /// config path is used.
     #[arg(long, global = true)]
     config: Option<Option<PathBuf>>,
+
+    /// Increase log verbosity. Repeat for more detail:
+    ///   `-v` = INFO (server selection, mode, PAR2/extract decisions),
+    ///   `-vv` = DEBUG (NNTP commands and responses — credentials masked),
+    ///   `-vvv` = TRACE (fine-grained timing and buffer events).
+    /// Logs are written to stderr (or --log-file). `RUST_LOG` overrides the
+    /// level when set. Matches `pesto`'s `-v`/`--verbose` convention.
+    #[arg(short, long, action = clap::ArgAction::Count, global = true, value_name = "LEVEL")]
+    verbose: u8,
+
+    /// Redirect verbose log output to FILE instead of stderr. Has no effect
+    /// without -v.
+    #[arg(long, global = true, value_name = "FILE")]
+    log_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -51,7 +72,14 @@ enum Command {
         /// Path to the `.nzb` file.
         nzb: PathBuf,
     },
-    /// Download and assemble the contents of a `.nzb`.
+    /// Download and assemble the contents of a `.nzb`. Exits 0 if every file
+    /// ended up complete with no repair needed, 1 if PAR2 repaired something
+    /// but the end result is complete, 2 if data is still missing or damaged
+    /// (PAR2 couldn't fix it, no recovery data was available, or repair was
+    /// skipped via `--mode download`), 3 on a fatal error (config, network,
+    /// I/O). `--stat`'s own pass/fail (see below) surfaces as a fatal error
+    /// too, since it never reaches the download/repair pipeline these codes
+    /// describe.
     Download {
         /// Path to the `.nzb` file.
         nzb: PathBuf,
@@ -112,6 +140,11 @@ enum Command {
         /// unset too.
         #[arg(long, value_enum)]
         mode: Option<ProcessingMode>,
+        /// Suppress the live progress panel; only status/result lines print.
+        /// Matches `pesto`'s `-q`/`--quiet` convention — handy for tmux/screen
+        /// sessions or when output is redirected to a log file.
+        #[arg(long, short)]
+        quiet: bool,
     },
     /// Check article availability across one or more `.nzb` files without
     /// downloading. Exits 0 if all articles are present, 1 if any are
@@ -153,8 +186,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    pesto::logging::init(cli.verbose, cli.log_file.as_deref(), None)?;
 
     // `penne --config` with no value: launch the interactive setup wizard,
     // regardless of whether a subcommand was also given.
@@ -172,8 +205,9 @@ async fn main() -> Result<()> {
             sample,
             server,
             mode,
+            quiet,
         }) => {
-            download(
+            let exit_code = download(
                 &nzb,
                 out_dir,
                 cli.config.flatten(),
@@ -182,8 +216,14 @@ async fn main() -> Result<()> {
                 sample,
                 &server,
                 mode,
+                quiet,
             )
             .await
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e:#}");
+                EXIT_FATAL
+            });
+            process::exit(exit_code);
         }
         Some(Command::Check {
             nzb,
@@ -245,7 +285,8 @@ async fn download(
     sample: Option<usize>,
     server_names: &[String],
     cli_mode: Option<ProcessingMode>,
-) -> Result<()> {
+    quiet: bool,
+) -> Result<i32> {
     anyhow::ensure!(
         stat.is_some() || sample.is_none(),
         "--sample only makes sense with --stat; a real download always fetches every segment"
@@ -280,8 +321,14 @@ async fn download(
     let mode = cli_mode.unwrap_or(config.mode);
 
     if let Some(method) = stat {
+        // `--stat` never reaches the download/repair pipeline, so it doesn't
+        // participate in the complete/repaired/incomplete distinction below —
+        // it either confirms availability (0) or fails outright (surfaced as
+        // an `Err`, exit EXIT_FATAL), per its own doc comment.
         let Some(per_file) = sample else {
-            return check_availability(&queue, &config.server_tiers, method, config.retries).await;
+            return check_availability(&queue, &config.server_tiers, method, config.retries)
+                .await
+                .map(|()| EXIT_COMPLETE);
         };
         let sampled = penne::queue::sample(&queue, per_file);
         let full_total: usize = queue.files.iter().map(|f| f.segments.len()).sum();
@@ -291,7 +338,9 @@ async fn download(
             per_file.max(1),
             sampled.files.len()
         );
-        return check_availability(&sampled, &config.server_tiers, method, config.retries).await;
+        return check_availability(&sampled, &config.server_tiers, method, config.retries)
+            .await
+            .map(|()| EXIT_COMPLETE);
     }
 
     let dest_dir = out_dir.unwrap_or(config.download_dir);
@@ -307,7 +356,12 @@ async fn download(
     );
 
     let (tx, rx) = penne::progress::channel();
-    let progress_task = penne::ui::terminal::spawn_renderer(rx);
+    let progress_task = if !quiet {
+        Some(penne::ui::terminal::spawn_renderer(rx))
+    } else {
+        drop(rx);
+        None
+    };
 
     let outcome = penne::download::download_queue(
         &queue,
@@ -323,7 +377,9 @@ async fn download(
     // here just waits for its last redraw to flush before the summary below
     // prints (avoiding any interleaving with the unbounded channel's
     // draining).
-    progress_task.await.ok();
+    if let Some(task) = progress_task {
+        task.await.ok();
+    }
 
     println!(
         "fetched {} segment(s); {} missing; {} corrupt",
@@ -363,6 +419,16 @@ async fn download(
             }
         }
     }
+    // Provisional: raised to EXIT_REPAIRED below if PAR2 fixes something, or
+    // returned early as EXIT_INCOMPLETE if it can't. Stays EXIT_INCOMPLETE
+    // as-is when repair is skipped entirely (`--mode download` with
+    // `needs_repair > 0`) — the data really is incomplete on disk even
+    // though the user chose not to attempt a fix this run.
+    let mut exit_code = if needs_repair == 0 {
+        EXIT_COMPLETE
+    } else {
+        EXIT_INCOMPLETE
+    };
 
     let synthetic_base = nzb
         .file_stem()
@@ -432,9 +498,13 @@ async fn download(
         let ran_full_verify = verify_progress_task.await.unwrap_or(false);
         match repair_outcome {
             penne::repair::RepairOutcome::Ok if !ran_full_verify => {
-                println!("  quick-check passed from already-known checksums; full re-hash skipped")
+                println!("  quick-check passed from already-known checksums; full re-hash skipped");
+                exit_code = EXIT_COMPLETE;
             }
-            penne::repair::RepairOutcome::Ok => println!("  PAR2: all files verified intact"),
+            penne::repair::RepairOutcome::Ok => {
+                println!("  PAR2: all files verified intact");
+                exit_code = EXIT_COMPLETE;
+            }
             penne::repair::RepairOutcome::Repaired(plan) => {
                 for f in &plan.repaired_files {
                     println!(
@@ -442,20 +512,29 @@ async fn download(
                         f.name, f.slices_repaired
                     );
                 }
+                exit_code = EXIT_REPAIRED;
             }
             penne::repair::RepairOutcome::NotRepairable(report) => {
-                anyhow::bail!(
-                    "{} damaged slice(s) exceed available PAR2 recovery data ({} block(s)); download is incomplete",
+                eprintln!(
+                    "error: {} damaged slice(s) exceed available PAR2 recovery data ({} block(s)); download is incomplete",
                     report.total_bad_slices(),
                     report.available_recovery_blocks
                 );
+                // Bails out here (skipping extraction/cleanup/cache-clear
+                // below) exactly like the old `anyhow::bail!` did — the
+                // difference is this is a known, reported outcome (exit
+                // EXIT_INCOMPLETE), not a generic fatal `Err`.
+                return Ok(EXIT_INCOMPLETE);
             }
             penne::repair::RepairOutcome::NoRecoveryData => {
                 println!("  no PAR2 recovery data found; skipping verification");
-                anyhow::ensure!(
-                    needs_repair == 0,
-                    "{needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
-                );
+                if needs_repair > 0 {
+                    eprintln!(
+                        "error: {needs_repair} file(s) incomplete or damaged, and no PAR2 recovery data was found to repair them"
+                    );
+                    return Ok(EXIT_INCOMPLETE);
+                }
+                exit_code = EXIT_COMPLETE;
             }
         }
     } else if needs_repair > 0 {
@@ -507,7 +586,7 @@ async fn download(
         penne::cache::clear(&dest_dir)?;
     }
 
-    Ok(())
+    Ok(exit_code)
 }
 
 /// `penne download --stat`: verify every segment is still present on the

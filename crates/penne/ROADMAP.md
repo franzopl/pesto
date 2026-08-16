@@ -43,7 +43,7 @@ testable state.
 | 2 | NNTP article retrieval — `BODY` in `pesto::nntp`, `DownloadClient::body`, per-segment server failover, missing-segment tracking |
 | 3 | yEnc decoding — `pesto::yenc::decode_part`, wired into `download_queue` with per-segment corrupt-copy failover |
 | 4 | File assembly — `penne::assemble::assemble`/`assemble_all`, whole-file CRC-32, temp-file-then-rename; `penne download` CLI now performs a real end-to-end download |
-| 5 (partial) | Progress & CLI UX — `pesto`-style live panel in `penne download` (overall bar, speed, ETA, capped per-file bars), on stderr; plain fallback when redirected. Exit-code granularity and `--verbose`/`--quiet` still open. |
+| 5 | Progress & CLI UX — `pesto`-style live panel in `penne download` (overall bar, speed, ETA, capped per-file bars), on stderr; plain fallback when redirected; exit codes distinguishing complete/repaired/incomplete; `-v`/`--verbose`/`--log-file`/`--quiet` matching `pesto`'s conventions. |
 | 6 | PAR2 verify & repair — `penne::repair::verify_and_repair`, wired into `penne download`; recreates fully-missing files and patches damaged ones via `pesto::par2` |
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
@@ -185,7 +185,7 @@ back.
       `std::process::Command` inside an async `tokio` test would otherwise
       risk starving the mock server's own task).
 
-## Phase 5 — Progress & CLI UX (partial: live progress done; exit-code granularity and `--verbose`/`--quiet` still open)
+## Phase 5 — Progress & CLI UX ✅
 
 - [x] Wire `penne::progress::ProgressEvent` into `penne download`: found
       missing while dogfooding a release build — `download_queue` ran with
@@ -232,9 +232,34 @@ back.
       list), the updated `tests/cli_download_end_to_end.rs` (now asserting
       on `stderr`), and manually under a real pty via `script` against a
       12-file/48-segment synthetic release.
-- [ ] Exit codes distinguishing "fully complete", "complete after repair",
-      and "incomplete/missing data" — a downloader's most important signal.
-- [ ] `--verbose`/`--quiet`, matching `pesto`'s conventions.
+- [x] **Exit codes distinguishing "fully complete", "complete after
+      repair", and "incomplete/missing data".** `download()` now returns
+      `Result<i32>` instead of `Result<()>`: `0` = every file complete, `1` =
+      PAR2 repaired something but the end result is complete, `2` = data is
+      still missing/damaged (PAR2 couldn't fix it, no recovery data was
+      found, or repair was skipped via `--mode download`), `3` = a fatal
+      error. `main`'s `Download` arm now calls `process::exit`, mirroring
+      the pattern `Check` already established. `NotRepairable` and
+      `NoRecoveryData`-with-damage no longer `anyhow::bail!`/`ensure!` (which
+      collapsed them into the same generic-error exit as a config or network
+      failure) — they `eprintln!` the same message and `return Ok(2)`,
+      preserving the "stop before extraction/cleanup/cache-clear" behavior
+      the bail used to give for free. Closes the real gap this was tracking:
+      `--mode download` with missing/damaged data used to exit `0`.
+      Two existing end-to-end tests asserted `status.success()` for exactly
+      these two outcomes (a PAR2 repair, and a `--mode download` incomplete
+      file) and had to be updated to assert the specific new code instead —
+      confirmation the old exit-0-for-everything behavior was real, not
+      hypothetical. A new `quiet_suppresses_the_live_progress_panel` test
+      covers the flag below.
+- [x] **`-v`/`--verbose` and `--log-file`** (global flags) plus `download
+      -q`/`--quiet`, matching `pesto`'s conventions exactly — `main` now
+      calls `pesto::logging::init(cli.verbose, cli.log_file.as_deref(),
+      None)` instead of the bare `tracing_subscriber::fmt::init()`, which had
+      no verbosity control at all. `--quiet` suppresses `download`'s live
+      progress panel (channel receiver dropped, sender becomes a no-op),
+      mirroring `check`'s existing `--quiet` handling; `check` already had
+      its own local `--quiet`, `download` didn't.
 
 ## Phase 6 — PAR2 verify & repair ✅ (core done; on-demand extra-volume fetch still open)
 
