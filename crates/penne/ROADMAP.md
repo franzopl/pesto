@@ -48,7 +48,7 @@ testable state.
 | 7 | Archive extraction — `penne::extract::extract_all` (`.rar`/`.7z`/`.zip`, multi-volume, password), wired into `penne download` after PAR2 |
 | 8 | Resilience — `penne::cache` (segment-level resume), configurable retry/backoff in `download_queue` |
 | 9 | Performance — N-parallel-connections-per-server concurrency in `download_queue`, closing Phase 2's long-standing open item |
-| 10 (partial) | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard. Release workflow still open. |
+| 10 | Packaging & release — README rewrite, XDG default config path, `penne --config` interactive wizard, `release-penne.yml` (four releases shipped: v0.1.0-v0.4.1). |
 | 11 (partial) | De-obfuscation — `pesto::nzb::parse` now accepts standard (non-`pesto`) NZBs; `penne::deobfuscate` recovers real file names from PAR2 and guesses the rest from magic bytes + queue order; `--password` override. Multi-recovery-set clustering and multi-volume ZIP guessing out of scope. |
 | 12 | Availability check — `penne::check`/`penne download --stat`: verifies every segment via `STAT` (no body transfer, no disk writes), with the same per-server-priority/N-worker-per-server concurrency as a real download; reports exact bytes used via new `Connection`-level byte-transfer tracking; live progress bar via `penne::ui::check`; `STAT` commands pipelined (depth 20) to amortize round-trip latency on top of connection concurrency. |
 | 13 (partial) | Post-download visibility & assembly speedup — status lines before deobfuscate/verify/extract instead of silence; `assemble()` skips redundant per-segment `seek()` calls (~3x faster writes on a real disk, measured with `fsync`). PAR2 verify parallelization still open. |
@@ -467,9 +467,12 @@ back.
       (regardless of whether a subcommand was also given); a path → load
       that file; omitted entirely → the default path, with a clear error
       (not a silent no-servers run) if nothing exists there yet.
-- [ ] Add `penne` to the release workflow once it has a stable CLI surface
-      (see `.github/workflows/release-pesto.yml` / `release-parmesan.yml`
-      for the pattern to follow).
+- [x] **Add `penne` to the release workflow.** Done — this item was stale.
+      `.github/workflows/release-penne.yml` mirrors `release-pesto.yml`/
+      `release-parmesan.yml` exactly (Linux glibc/musl + Windows binaries on
+      a `penne-v*` tag push, GitHub Release body pointing at
+      `crates/penne/CHANGELOG.md`) and has already cut four real releases:
+      `penne-v0.1.0`, `v0.2.0`, `v0.4.0`, `v0.4.1`.
 
 ## Phase 11 — De-obfuscation ✅ (core done; multi-recovery-set clustering and multi-volume ZIP guessing explicitly out of scope)
 
