@@ -88,6 +88,12 @@ pub enum ProgressEvent {
     Failed { description: String },
     /// Ctrl-C was received; the run is winding down.
     Interrupted,
+    /// An external pause flag was set: every posting worker is suspended at
+    /// the next segment-batch boundary, connections kept alive rather than
+    /// torn down. See `poster::post_files_inner`'s `external_pause`.
+    Paused,
+    /// The external pause flag was cleared: posting resumes.
+    Resumed,
     /// Terminal event: the run is over.
     Finished,
     /// Archive compression has started. `total_bytes` is the sum of raw input
@@ -299,6 +305,12 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     }
                     ProgressEvent::Interrupted => {
                         let _ = writeln!(out, r#"{{"type":"interrupted"}}"#);
+                    }
+                    ProgressEvent::Paused => {
+                        let _ = writeln!(out, r#"{{"type":"paused"}}"#);
+                    }
+                    ProgressEvent::Resumed => {
+                        let _ = writeln!(out, r#"{{"type":"resumed"}}"#);
                     }
                     ProgressEvent::CompressStarted { total_bytes: tb } => {
                         let _ =

@@ -149,10 +149,28 @@ introduced.
       there, left as a follow-up. Out of scope for this pass: the streaming
       check coordinator's and `repost_failed_tasks`' own ephemeral
       connections.
-- [ ] **Real pause/resume in the poster.** `upapasta` has the UI for it and can
-      only freeze stats today. Needs a public `pesto` API that suspends workers at
-      a segment boundary and resumes without tearing down connections — closely
-      related to the broker work above.
+- [x] **Real pause/resume in the poster.** Added `Shared.paused: Arc<AtomicBool>`,
+      mirrored from a new `external_pause` parameter by `post_files_inner`'s
+      existing cancel-polling task (now a continuous loop instead of one-shot,
+      so it can toggle back and forth), and checked by `worker()` at the same
+      segment-batch boundary as `cancelled`. While paused, a worker sits in a
+      short-poll wait loop (`PAUSE_POLL`, 100ms — deliberately *not* the 2s
+      `IDLE_POLL` used for idle-but-unpaused keepalive fan-out, or cancelling
+      while paused would be sluggish) sending the same `MODE READER` keepalive
+      already used for idle time within a run, so the connection survives
+      without the broker or `ConnectionSlot` needing any changes. Workers never
+      draining the queue while paused means a producer racing ahead naturally
+      blocks on the bounded channel — pause propagates to the encode side for
+      free. New public `post_pausable` in `lib.rs` (alongside `post`/
+      `post_cancelable`, purely additive — `post_cancelable` has no in-repo
+      callers today, so nothing else changed) and new `ProgressEvent::Paused`/
+      `Resumed`. `upapasta`'s pause UI (the `p` key, `upload_paused` state,
+      `PauseUpload`/`ResumeUpload` events) was removed in its Phase 40c-5
+      specifically because this capability didn't exist yet — a "paused" state
+      that froze the stats display while the upload kept running underneath was
+      judged dishonest, so the UI was pulled rather than kept lying (see
+      `crates/upapasta/ROADMAP.md` 40c-5 and Phase 46). Re-adding that UI on top
+      of this mechanism is Phase 3's already-tracked item, left as a follow-up.
 - [ ] **Server-side queue limit detection** (`441 Too many articles`) to cap
       pipeline depth adaptively. Previously deferred; revisit if reports appear.
 - [ ] **Season PAR2 from spooled slices** *(deferred, low priority)*. Avoids one

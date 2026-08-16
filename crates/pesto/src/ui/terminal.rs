@@ -464,6 +464,17 @@ impl RenderState {
             }
             ProgressEvent::Failed { description } => self.failed_description = Some(description),
             ProgressEvent::Interrupted => self.interrupted = true,
+            // No CLI flag drives external_pause yet (embedder-only, see
+            // ROADMAP.new.md Phase 2) — reuse the existing status line so a
+            // future embedder-triggered pause still renders sensibly here.
+            ProgressEvent::Paused => {
+                self.status = "paused".to_string();
+                self.status_since = Some(Instant::now());
+            }
+            ProgressEvent::Resumed => {
+                self.status = String::new();
+                self.status_since = None;
+            }
             ProgressEvent::Finished => self.finished = true,
             ProgressEvent::CompressStarted { total_bytes } => {
                 self.compress_active = true;

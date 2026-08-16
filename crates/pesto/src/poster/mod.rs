@@ -395,6 +395,11 @@ struct Shared {
     /// Progress channel; `None` keeps the poster silent (library default).
     events: Option<ProgressSender>,
     cancelled: Arc<AtomicBool>,
+    /// Mirrors an external pause flag (see `post_files_inner`'s
+    /// `external_pause`). Checked by `worker()` at the same segment-batch
+    /// boundary as `cancelled`; unlike `cancelled` this can flip back to
+    /// `false`, resuming the same connection instead of tearing it down.
+    paused: Arc<AtomicBool>,
     /// Resume state shared among workers. `Some` whenever a resume-state
     /// path was given and this isn't a dry run/`--par2-only` — tracked
     /// unconditionally, regardless of `--resume` (see `validate_run`'s call
@@ -539,6 +544,7 @@ pub async fn post_files_with_progress_and_cancel(
         external_cancel,
         entry_label,
         None,
+        None,
     )
     .await
 }
@@ -547,13 +553,20 @@ pub async fn post_files_with_progress_and_cancel(
 /// [`ConnectionBroker`] whose already-authenticated connections are checked
 /// out for this run and checked back in (instead of disconnected) when done,
 /// so a later call sharing the same broker reuses them without paying a
-/// fresh TLS+AUTH handshake.
+/// fresh TLS+AUTH handshake, and/or an `external_pause` flag: setting it to
+/// `true` suspends every posting worker at the next segment-batch boundary
+/// (connections stay open and kept alive) and setting it back to `false`
+/// resumes immediately, without paying a reconnect. Only the posting phase
+/// is pausable — PAR2 generation, compression and the final check/repost
+/// passes run to completion regardless, the same phase scoping `cancel`
+/// already has.
 ///
 /// This is CLI-internal plumbing for `--each`/`--season` batching (see
 /// `run_batch` in `bin/pesto.rs`) — embedders should use
-/// [`post_files_with_progress_and_cancel`], `post` or `post_cancelable`,
-/// which always build and tear down their own pool per call and remain
-/// unaffected by this parameter (`broker: None`).
+/// [`post_files_with_progress_and_cancel`], `post`, `post_cancelable` or
+/// `post_pausable`, which always build and tear down their own pool per
+/// call and remain unaffected by the `broker` parameter (`broker: None`).
+#[allow(clippy::too_many_arguments)]
 pub async fn post_files_inner(
     config: &Config,
     files: &[InputFile],
@@ -562,6 +575,7 @@ pub async fn post_files_inner(
     external_cancel: Option<Arc<AtomicBool>>,
     entry_label: Option<&str>,
     broker: Option<Arc<ConnectionBroker>>,
+    external_pause: Option<Arc<AtomicBool>>,
 ) -> Result<PostOutcome> {
     configure_rayon(config.threads);
 
@@ -934,6 +948,7 @@ pub async fn post_files_inner(
         failed_tasks: Mutex::new(Vec::new()),
         events,
         cancelled: Arc::new(AtomicBool::new(false)),
+        paused: Arc::new(AtomicBool::new(false)),
         resume: resume_arc,
         resume_path: resume_path_owned,
         spool_dir: spool_dir_owned,
@@ -1026,17 +1041,28 @@ pub async fn post_files_inner(
     let cancel_handle = {
         let shared = shared.clone();
         tokio::spawn(async move {
-            if let Some(ref flag) = external_cancel {
-                loop {
-                    if flag.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                }
-                shared.cancelled.store(true, Ordering::Relaxed);
-                shared.emit(ProgressEvent::Interrupted);
-            } else {
+            if external_cancel.is_none() && external_pause.is_none() {
                 std::future::pending::<()>().await;
+            }
+            loop {
+                if let Some(ref flag) = external_cancel {
+                    if flag.load(Ordering::Relaxed) {
+                        shared.cancelled.store(true, Ordering::Relaxed);
+                        shared.emit(ProgressEvent::Interrupted);
+                        return;
+                    }
+                }
+                if let Some(ref flag) = external_pause {
+                    let want = flag.load(Ordering::Relaxed);
+                    if shared.paused.swap(want, Ordering::Relaxed) != want {
+                        shared.emit(if want {
+                            ProgressEvent::Paused
+                        } else {
+                            ProgressEvent::Resumed
+                        });
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
         })
     };
@@ -2703,11 +2729,35 @@ async fn worker(
     // that every connection gets its keepalive before the server's idle timeout.
     // 2 s × 30 workers = 60 s worst-case round-trip, well within a 2-min timeout.
     const IDLE_POLL: Duration = Duration::from_secs(2);
+    // Wakeup period while paused — much shorter than `IDLE_POLL`, which is
+    // tuned for keepalive fan-out across many workers, not for how quickly a
+    // paused worker notices `cancelled`/resume. Cancelling must stay roughly
+    // as responsive while paused as it already is everywhere else.
+    const PAUSE_POLL: Duration = Duration::from_millis(100);
     let mut last_used = Instant::now();
 
     loop {
         if shared.cancelled.load(Ordering::Relaxed) {
             break;
+        }
+
+        if shared.paused.load(Ordering::Relaxed) {
+            // Suspended at a segment-batch boundary: keep the connection
+            // alive (the same MODE READER keepalive used for idle time
+            // within a run) without consuming from the queue, so a producer
+            // racing ahead applies natural back-pressure instead of the run
+            // continuing underneath a "paused" UI that lied about it.
+            while shared.paused.load(Ordering::Relaxed) && !shared.cancelled.load(Ordering::Relaxed)
+            {
+                if keepalive_enabled
+                    && last_used.elapsed() >= Duration::from_secs(keepalive_interval)
+                {
+                    slot.keepalive().await;
+                    last_used = Instant::now();
+                }
+                tokio::time::sleep(PAUSE_POLL).await;
+            }
+            continue;
         }
 
         // Send keepalive if the connection has been idle past the configured
@@ -4760,6 +4810,7 @@ mod tests {
             failed_tasks: Mutex::new(Vec::new()),
             events: None,
             cancelled: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
             resume: None,
             resume_path: None,
             spool_dir: None,

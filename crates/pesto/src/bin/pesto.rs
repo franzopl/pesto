@@ -1484,6 +1484,7 @@ async fn run_single_upload(
         cancel.cloned(),
         Some(entry_label),
         broker,
+        None,
     )
     .await?;
     let _ = renderer.await;

@@ -92,3 +92,32 @@ pub async fn post_cancelable(
     .await?;
     Ok((outcome, rx))
 }
+
+/// Like [`post_cancelable`] but also accepts an external pause flag.
+///
+/// Set `pause` to `true` at any point to suspend every posting worker at the
+/// next segment-batch boundary — connections are kept open (and kept alive)
+/// rather than torn down, so setting it back to `false` resumes immediately
+/// without paying a reconnect. Only the posting phase is pausable; PAR2
+/// generation, compression and the final check/repost passes run to
+/// completion regardless — the same phase scoping `cancel` already has.
+pub async fn post_pausable(
+    config: config::Config,
+    files: Vec<walk::InputFile>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<(poster::PostOutcome, progress::ProgressReceiver)> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = poster::post_files_inner(
+        &config,
+        &files,
+        Some(tx),
+        None,
+        cancel,
+        None,
+        None,
+        Some(pause),
+    )
+    .await?;
+    Ok((outcome, rx))
+}
