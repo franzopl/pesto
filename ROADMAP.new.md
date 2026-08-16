@@ -251,8 +251,15 @@ The remaining gap against the legacy Python version.
       `crates/penne/ROADMAP.md` Phase 5.
 - [ ] On-demand extra-volume fetching: today every `.par2` volume in the NZB is
       downloaded whether or not repair needs it.
-- [ ] Parallel `verify()` — currently single-threaded and sequential; pairs
-      naturally with #118's streaming rework.
+- [x] **Investigated: parallel `verify()` — no measurable win, reverted.**
+      Implemented (`rayon`-parallel slice hashing in batches) and A/B
+      benchmarked before committing: 568.6 vs. 573.6 MiB/s on a 250 MiB
+      fixture in `--release` — within noise. At `--release` speed, MD5+CRC32
+      is already fast enough that sequential file reads dominate wall time,
+      not hashing — `rayon` parallelizes compute, not I/O. See
+      `crates/penne/ROADMAP.md` Phase 13 for the full writeup and what a
+      real follow-up would need to target instead (the read path, not the
+      hash step).
 - [ ] Double-buffered writer / buffer pool on the assembly path.
 - [ ] Incremental extraction (`DirectUnpack`-style).
 - [ ] Benchmark against a real indexer/provider pair.
