@@ -17,6 +17,7 @@ use pesto::config::{
     self, parse_memory_limit_spec, parse_upload_rate, Config, FileConfig, ObfuscateMode, Overrides,
 };
 use pesto::logging;
+use pesto::nntp::pool::ConnectionBroker;
 use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
 use tracing::{error, info};
@@ -1092,6 +1093,7 @@ async fn run_single_upload(
     cancel: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     forced_password: Option<&str>,
     keep_compress_temp: bool,
+    broker: Option<Arc<ConnectionBroker>>,
 ) -> Result<UploadResult> {
     let config = &params.config;
     // Resolved once, used for the pre-upload summary, the archive itself,
@@ -1474,13 +1476,14 @@ async fn run_single_upload(
     let posted_paths: Vec<PathBuf> = inputs.iter().map(|f| f.path.clone()).collect();
 
     let t_post = std::time::Instant::now();
-    let outcome = pesto::poster::post_files_with_progress_and_cancel(
+    let outcome = pesto::poster::post_files_inner(
         config,
         &inputs,
         Some(progress_tx),
         resume_path.as_deref(),
         cancel.cloned(),
         Some(entry_label),
+        broker,
     )
     .await?;
     let _ = renderer.await;
@@ -2313,6 +2316,19 @@ async fn run_batch(
     };
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
+
+    // One connection broker for the whole batch: every episode below checks
+    // out already-authenticated connections instead of paying a fresh
+    // TLS+AUTH handshake per episode (see ROADMAP.new.md Phase 2). Sized to
+    // the configured total connection budget and shared (via the broker's
+    // internal semaphore) across concurrently running episodes under
+    // `--jobs N`, so real concurrent sockets never exceed that budget.
+    let (broker, broker_keepalive) = ConnectionBroker::new(
+        Arc::new(params.config.all_servers().collect()),
+        params.config.total_connections(),
+        params.config.keepalive_interval,
+    );
+
     let mut all_segments: Vec<PostedSegment> = Vec::new();
     let mut all_groups: Vec<String> = Vec::new();
     let mut any_cancelled = false;
@@ -2334,6 +2350,7 @@ async fn run_batch(
         let params = Arc::clone(&params);
         let task_cancel = cancel.clone();
         let task_password = season_password.clone();
+        let task_broker = broker.clone();
         let label = entry
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -2358,6 +2375,7 @@ async fn run_batch(
                 Some(&task_cancel),
                 task_password.as_deref(),
                 keep_compress_temp,
+                Some(task_broker),
             )
             .await
         });
@@ -2394,6 +2412,11 @@ async fn run_batch(
             }
         }
     }
+
+    // Every episode has checked its connections back in by now — close them
+    // for real and stop the keepalive task.
+    broker.shutdown().await;
+    broker_keepalive.abort();
 
     info!(entries = total_entries, "--each complete");
 
@@ -2886,6 +2909,7 @@ async fn run_watch(
                                 Some(&task_cancel),
                                 None,
                                 false,
+                                None,
                             )
                             .await
                             {
@@ -3541,7 +3565,16 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
             }
         })
         .unwrap_or_else(|| format!("{}", std::process::id()));
-    let result = run_single_upload(&params, &cli.files, &label, Some(&cancel), None, false).await?;
+    let result = run_single_upload(
+        &params,
+        &cli.files,
+        &label,
+        Some(&cancel),
+        None,
+        false,
+        None,
+    )
+    .await?;
 
     if let Some(ref p) = session_log {
         write_session_summary(

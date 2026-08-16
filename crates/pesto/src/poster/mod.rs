@@ -22,7 +22,7 @@ use crate::article::{
     obfuscated_name_with_prefix, rand_u64, random_from, Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
-use crate::nntp::pool::{ConnectionPool, ConnectionSlot};
+use crate::nntp::pool::{ConnectionBroker, ConnectionPool, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::ResumeState;
 use crate::walk::{natural_cmp, InputFile};
@@ -530,6 +530,38 @@ pub async fn post_files_with_progress_and_cancel(
     resume_state_path: Option<&Path>,
     external_cancel: Option<Arc<AtomicBool>>,
     entry_label: Option<&str>,
+) -> Result<PostOutcome> {
+    post_files_inner(
+        config,
+        files,
+        events,
+        resume_state_path,
+        external_cancel,
+        entry_label,
+        None,
+    )
+    .await
+}
+
+/// Like [`post_files_with_progress_and_cancel`], but lets the caller supply a
+/// [`ConnectionBroker`] whose already-authenticated connections are checked
+/// out for this run and checked back in (instead of disconnected) when done,
+/// so a later call sharing the same broker reuses them without paying a
+/// fresh TLS+AUTH handshake.
+///
+/// This is CLI-internal plumbing for `--each`/`--season` batching (see
+/// `run_batch` in `bin/pesto.rs`) — embedders should use
+/// [`post_files_with_progress_and_cancel`], `post` or `post_cancelable`,
+/// which always build and tear down their own pool per call and remain
+/// unaffected by this parameter (`broker: None`).
+pub async fn post_files_inner(
+    config: &Config,
+    files: &[InputFile],
+    events: Option<ProgressSender>,
+    resume_state_path: Option<&Path>,
+    external_cancel: Option<Arc<AtomicBool>>,
+    entry_label: Option<&str>,
+    broker: Option<Arc<ConnectionBroker>>,
 ) -> Result<PostOutcome> {
     configure_rayon(config.threads);
 
@@ -1057,14 +1089,18 @@ pub async fn post_files_with_progress_and_cancel(
     let tx_opt = if worker_count > 0 {
         let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        let pool = ConnectionPool::build(shared.servers.clone(), worker_count);
-        for (idx, slot) in pool.into_slots().into_iter().enumerate() {
+        let slots = match &broker {
+            Some(broker) => broker.checkout(worker_count).await,
+            None => ConnectionPool::build(shared.servers.clone(), worker_count).into_slots(),
+        };
+        for (idx, slot) in slots.into_iter().enumerate() {
             handles.push(tokio::spawn(worker(
                 shared.clone(),
                 rx.clone(),
                 idx,
                 slot,
                 check_tx.clone(),
+                broker.clone(),
             )));
         }
         Some(tx)
@@ -2634,6 +2670,7 @@ async fn worker(
     conn_id: usize,
     mut slot: ConnectionSlot,
     check_tx: Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
+    broker: Option<Arc<ConnectionBroker>>,
 ) {
     let mut rate_limiter = RateLimiter::new(
         // Divide the global rate across all workers proportionally.
@@ -3127,7 +3164,10 @@ async fn worker(
     }
 
     shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
-    slot.quit().await;
+    match broker {
+        Some(broker) => broker.checkin(slot).await,
+        None => slot.quit().await,
+    }
 }
 
 /// Build a `PostTask`, generating per-article subject and From when in

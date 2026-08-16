@@ -131,15 +131,24 @@ introduced.
 
 ## Phase 2 — `pesto` engine work
 
-- [ ] **Connection pool reuse across `--each` episodes.** *(Carried over; still the
-      largest single performance win available.)* Each episode currently builds a
-      fresh pool — ~60 TLS+AUTH cycles per episode, ~1,560 for a 26-episode run
-      (~18% of runtime). Requires decoupling pool lifecycle from episode lifecycle
-      so workers hold connections and receive a new work channel per episode.
-      Complications: `--jobs N` runs episodes in parallel with independent pools,
-      and each episode builds its own `Shared`. A connection-broker layer is the
-      likely shape. Note that Phase 35 keepalive already removed the *spurious*
-      reconnect bursts; this is the intentional teardown that remains.
+- [x] **Connection pool reuse across `--each` episodes.** Added
+      `nntp::pool::ConnectionBroker`: a long-lived set of `ConnectionSlot`s,
+      checked out per episode and checked back in (instead of `QUIT`) when a
+      worker is done, with a background task keeping idle-between-episodes
+      connections alive via the same `MODE READER` keepalive workers already
+      use within a run. `run_batch` builds one broker per `--each`/`--season`
+      batch, sized to `total_connections()` and shared via the broker's
+      internal semaphore across concurrent episodes under `--jobs N` — which
+      also fixes `--jobs N` independently over-opening up to `N ×
+      total_connections()` real sockets, capping it at the configured budget
+      instead. `poster::post_files_inner` takes the broker as an optional
+      parameter; the public `post`/`post_cancelable`/
+      `post_files_with_progress_and_cancel` are unaffected (`broker: None`,
+      exact prior behavior) so `upapasta` and other embedders are untouched.
+      `--watch` and the single-file path still pass `None` — same win applies
+      there, left as a follow-up. Out of scope for this pass: the streaming
+      check coordinator's and `repost_failed_tasks`' own ephemeral
+      connections.
 - [ ] **Real pause/resume in the poster.** `upapasta` has the UI for it and can
       only freeze stats today. Needs a public `pesto` API that suspends workers at
       a segment boundary and resumes without tearing down connections — closely

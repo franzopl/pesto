@@ -7,9 +7,13 @@
 //! failure, and rotates through the server list on repeated errors so work
 //! shifts to a healthy server automatically.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::{info, warn};
 
@@ -191,6 +195,114 @@ impl ConnectionPool {
     }
 }
 
+/// How often the broker's background task checks idle connections for a
+/// pending keepalive, mirroring the poster worker's own `IDLE_POLL`.
+const BROKER_IDLE_POLL: Duration = Duration::from_secs(2);
+
+/// A long-lived set of [`ConnectionSlot`]s shared across several sequential
+/// (or, under `--jobs`, concurrent) posting runs — e.g. the episodes of an
+/// `--each`/`--season` batch — so the TLS+AUTH handshake is paid once per
+/// connection for the whole batch instead of once per episode.
+///
+/// Slots are checked out for the duration of one run and checked back in
+/// (not disconnected) when that run's worker is done with them, so the next
+/// episode's workers reuse already-authenticated connections. A background
+/// task sends periodic keepalives to slots sitting idle in the broker
+/// between episodes, the same way a posting worker already does for slots
+/// idle *within* a run.
+pub struct ConnectionBroker {
+    idle: Mutex<VecDeque<(ConnectionSlot, Instant)>>,
+    permits: Semaphore,
+}
+
+impl ConnectionBroker {
+    /// Build a broker with `capacity` connections distributed across
+    /// `servers` by quota (via [`ConnectionPool::build`]), and spawn its
+    /// background keepalive task. `keepalive_interval` is in seconds; `0`
+    /// disables the keepalive task entirely (matching
+    /// `Config::keepalive_interval`'s convention).
+    ///
+    /// Returns the broker and the keepalive task's `JoinHandle`, which the
+    /// caller should `.abort()` once [`shutdown`][Self::shutdown] has run.
+    pub fn new(
+        servers: Arc<Vec<ServerEntry>>,
+        capacity: usize,
+        keepalive_interval: u64,
+    ) -> (Arc<Self>, JoinHandle<()>) {
+        let slots = ConnectionPool::build(servers, capacity).into_slots();
+        let now = Instant::now();
+        let broker = Arc::new(ConnectionBroker {
+            idle: Mutex::new(slots.into_iter().map(|s| (s, now)).collect()),
+            permits: Semaphore::new(capacity),
+        });
+
+        let keepalive_task = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                if keepalive_interval == 0 {
+                    return;
+                }
+                loop {
+                    tokio::time::sleep(BROKER_IDLE_POLL).await;
+                    let mut idle = broker.idle.lock().await;
+                    for (slot, last_used) in idle.iter_mut() {
+                        if last_used.elapsed() >= Duration::from_secs(keepalive_interval) {
+                            slot.keepalive().await;
+                            *last_used = Instant::now();
+                        }
+                    }
+                }
+            })
+        };
+
+        (broker, keepalive_task)
+    }
+
+    /// Check out `n` connections, waiting for enough to become idle if the
+    /// broker's whole capacity is currently checked out elsewhere (this is
+    /// how concurrent `--jobs` episodes end up sharing one fixed connection
+    /// budget instead of each opening their own).
+    pub async fn checkout(&self, n: usize) -> Vec<ConnectionSlot> {
+        if n == 0 {
+            return Vec::new();
+        }
+        // Acquired permits are intentionally leaked (not held/released via
+        // guard) — capacity is returned to the semaphore explicitly by
+        // `checkin`, once each slot actually comes back.
+        self.permits
+            .acquire_many(n as u32)
+            .await
+            .expect("broker semaphore is never closed")
+            .forget();
+        let mut idle = self.idle.lock().await;
+        (0..n)
+            .map(|_| {
+                idle.pop_front()
+                    .expect("permits guarantee a matching idle slot")
+                    .0
+            })
+            .collect()
+    }
+
+    /// Return a checked-out connection to the idle pool instead of closing
+    /// it, so a later `checkout` (the next episode, or another concurrent
+    /// one) can reuse it without reconnecting.
+    pub async fn checkin(&self, slot: ConnectionSlot) {
+        self.idle.lock().await.push_back((slot, Instant::now()));
+        self.permits.add_permits(1);
+    }
+
+    /// Send `QUIT` on every idle connection. Call once, after every checked
+    /// out slot has been returned via `checkin` (i.e. after the whole batch
+    /// that shares this broker has finished).
+    pub async fn shutdown(&self) {
+        let mut idle = self.idle.lock().await;
+        for (mut slot, _) in idle.drain(..) {
+            slot.quit().await;
+        }
+    }
+}
+
 /// Open a connection to `server` and authenticate when credentials are
 /// configured.
 pub(crate) async fn connect_and_auth(server: &ServerEntry) -> Result<Connection> {
@@ -329,5 +441,58 @@ mod tests {
         // Can't call async quit in a sync test, but we can verify the slot
         // has no connection to begin with.
         assert!(slot.conn.is_none());
+    }
+
+    // ── ConnectionBroker ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn broker_checkout_returns_exactly_n_slots() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(4)]), 4, 0);
+        let slots = broker.checkout(3).await;
+        assert_eq!(slots.len(), 3);
+        keepalive.abort();
+    }
+
+    #[tokio::test]
+    async fn broker_checkout_beyond_capacity_blocks_until_checkin() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(2)]), 2, 0);
+        let slots = broker.checkout(2).await;
+        assert_eq!(slots.len(), 2);
+
+        // The whole capacity is checked out — a further checkout must not
+        // resolve until one of those slots comes back.
+        let blocked = tokio::time::timeout(Duration::from_millis(100), broker.checkout(1)).await;
+        assert!(
+            blocked.is_err(),
+            "checkout beyond capacity resolved without a matching checkin"
+        );
+
+        broker.checkin(slots.into_iter().next().unwrap()).await;
+        let resumed = tokio::time::timeout(Duration::from_millis(100), broker.checkout(1)).await;
+        assert!(
+            resumed.is_ok(),
+            "checkout did not resume after a checkin freed capacity"
+        );
+        keepalive.abort();
+    }
+
+    #[tokio::test]
+    async fn broker_checkin_makes_a_slot_available_again() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(1)]), 1, 0);
+        let mut slots = broker.checkout(1).await;
+        let slot = slots.pop().unwrap();
+        broker.checkin(slot).await;
+
+        let slots_again = broker.checkout(1).await;
+        assert_eq!(slots_again.len(), 1);
+        keepalive.abort();
+    }
+
+    #[tokio::test]
+    async fn broker_shutdown_drains_the_idle_queue() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(3)]), 3, 0);
+        broker.shutdown().await;
+        assert!(broker.idle.lock().await.is_empty());
+        keepalive.abort();
     }
 }
