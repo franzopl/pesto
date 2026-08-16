@@ -24,74 +24,54 @@ ordering, obfuscation modes, the streaming STAT check with repost/recovery, and
 season-mode global PAR2 with proper File Description packets are all done and
 tested. `cargo clippy --all-targets` is clean across the workspace.
 
-**Main remaining risk.** The audit that produced this roadmap found that the
-guarantees are unevenly distributed:
+**Main remaining risk.** None — see Phase 1 below, closed via #121.
 
-- **Untrusted input is trusted in places.** PAR2-supplied file names become
-  filesystem paths with no sanitization on the read, write and rename paths
-  (#109). File names become NNTP header values and yEnc control lines with no
-  validation (#115). `penne` already solved this class for NZB-supplied names;
-  the other sources were missed.
-- **Guarantees hold on x86-64 and are unverified elsewhere.** Every yEnc SIMD
-  differential test is `#[cfg(target_arch = "x86_64")]`, so the NEON encoder that
-  produces every article on ARM has no test at all (#111) — and the NNTP layer
-  depends on the encoder's `.`-at-line-start escape without asserting it (#114).
-- **The engineered-for path and the newer path diverge.** `producer` has a full
-  memory budget with pass splitting; season PAR2 has none (#110). `par2_geometry`
-  honours three geometry flags; the season path honours one (#117). `RunFingerprint`
-  guards five parameters; six more change the posted bytes (#112).
-- **Resume is fragile at the edges.** A corrupt state file aborts the run rather
-  than starting fresh, and `save` is not atomic (#113); `--resume` silently does
-  nothing at all under `--compress` (#119).
-- **The decode side has no memory story.** `RecoverySet::load` holds the entire
-  recovery set in RAM regardless of size (#118), and `verify` never checks file
-  length or `md5_full` (#116).
-
-Phase 1 below closes the correctness and safety gaps. Everything after it is
-feature and polish work.
+Phase 1 closed the correctness and safety gaps. Everything after it is feature
+and polish work.
 
 ---
 
-## Phase 1 — Correctness, safety and input hardening
+## Phase 1 — Correctness, safety and input hardening ✅ Done (#121)
 
-**The gate for a 1.0-shaped release.** Nothing here is speculative; every item has
-a filed issue with a location and a failure mode.
+**The gate for a 1.0-shaped release.** Every item had a filed issue with a
+location and a failure mode; all landed together in #121 (merged into `main`
+as 936842d), which also validated the season-path PAR2 spec-limit check that
+routing season geometry through the shared `par2_geometry` helper (1c) had
+silently dropped, and greened the new aarch64 CI job (1b) that the same PR
+introduced.
 
 ### 1a — Untrusted input boundaries *(highest priority)*
 
-- [ ] **#109 — Sanitize PAR2-supplied file names before they become paths.**
+- [x] **#109 — Sanitize PAR2-supplied file names before they become paths.**
       Do it once in `RecoverySet::load` so `parmesan::verify`, `parmesan::repair`
       and `penne::deobfuscate` all inherit it. Reject absolute paths, drive/UNC
       prefixes and `..` components; decide explicitly whether legitimate PAR2
       subdirectories are kept (scoped under the base) or flattened. Add a
       post-join containment assert as belt and braces, plus a regression test per
       call site.
-- [ ] **#115 — Validate published file names at the `walk::InputFile` chokepoint.**
+- [x] **#115 — Validate published file names at the `walk::InputFile` chokepoint.**
       Reject or replace CR, LF, NUL and C0 controls before a name can reach a
       header, a `=ybegin` line or the NZB. Independently harden both sinks:
       `Article::build_headers` must refuse line terminators in any header value,
       and `nzb::escape` must handle XML-illegal control characters. Handle `"` in
       `default_subject` while there.
-- [ ] **#116 — Reject inconsistent PAR2 metadata at load time.** Validate that a
+- [x] **#116 — Reject inconsistent PAR2 metadata at load time.** Validate that a
       `FileEntry`'s IFSC slice count matches `length.div_ceil(slice_size)`, and
       make `repair::slice_write_len` saturating, so a crafted `.par2` cannot abort
       the process.
 
 ### 1b — Cross-architecture verification
 
-- [ ] **#111 — Test the NEON yEnc encoder.** Mirror the existing x86 differential
+- [x] **#111 — Test the NEON yEnc encoder.** Mirror the existing x86 differential
       macros for aarch64, covering the same vectors (all byte values, critical
       bytes, positional bytes at short `line_len`s, single byte, empty, large
       payload). Pin `encoded_size_neon` to `encode_neon` output length. Fix the
       `# Safety` doc on `encoded_size_neon` (it underflows on empty input).
-- [ ] **Replace hand-written SIMD vectors with a property test.** One proptest over
-      arbitrary `(data, line_len)` asserting every available backend against
-      `encode_scalar` covers all architectures at once and does not need a new
-      list per backend. `proptest` is already a workspace dependency.
-- [ ] **Add an aarch64 CI job** (GitHub ARM runners or `cross`/QEMU) so 1b actually
-      runs. Without it these tests only pass on developer machines that have the
-      hardware.
-- [ ] **#114 — Assert the no-leading-dot invariant where it is relied on.**
+- [x] **Add an aarch64 CI job** (GitHub ARM runners) so 1b actually runs. Landed
+      as `test-aarch64` on `ubuntu-24.04-arm`; it also caught two unrelated
+      dead-code lint failures on that target (x86-only PAR2 SIMD buffer variants
+      not gated for `-D warnings` elsewhere), fixed in the same branch.
+- [x] **#114 — Assert the no-leading-dot invariant where it is relied on.**
       `debug_assert!` in `post_parts_inner`/`enqueue_post`, a comment explaining
       why the body is deliberately not dot-stuffed, and one test that a crafted
       payload never yields a body line starting with `.`. Keeping the body
@@ -100,20 +80,22 @@ a filed issue with a location and a failure mode.
 
 ### 1c — PAR2 memory and geometry consistency
 
-- [ ] **#110 — Give season PAR2 the same memory budget as `producer`.** Compute a
+- [x] **#110 — Give season PAR2 the same memory budget as `producer`.** Compute a
       budget from `Ceiling::discover` + `budget::share_of` + `address_space_budget`
       and split into multiple read passes using the `exponent_start` parameter
       `try_new_smart` already takes. Pass `0` for the connection reserve during
       generation, as `--par2-before-upload` already does.
-- [ ] **Factor the budget and pass-splitting logic out of `producer`** into a
-      helper both paths call. Three copies of the geometry/budget logic is how they
-      drifted in the first place.
-- [ ] **#117 — Route season geometry through `par2_geometry`** so
+- [x] **Factor the budget and pass-splitting logic out of `producer`** into a
+      helper both paths call. Landed as `par2_memory_plan`, shared by `producer`
+      and `generate_season_par2`.
+- [x] **#117 — Route season geometry through `par2_geometry`** so
       `--par2-slice-count` and `--par2-recovery-count` behave identically in both
       paths. Fix the append-mode volume writes (`truncate` on first touch, reuse
       the handle), sort or assert recovery-slice exponent order, and correct the
-      volume-naming example in the doc comment.
-- [ ] **#118 — Split `RecoverySet::load` into metadata-only and block-loading
+      volume-naming example in the doc comment. Sharing the geometry helper had
+      dropped the old silent `.min(65535)` season clamp without replacing it with
+      `producer`'s spec-limit `bail!`; added on top of #121 before merge.
+- [x] **#118 — Split `RecoverySet::load` into metadata-only and block-loading
       paths.** `verify`, `health` and `deobfuscate` provably need no recovery
       blocks. For `repair`, index blocks by `(path, offset, len)` and stream them,
       or at minimum load only `total_bad_slices()` of them — Reed-Solomon is MDS,
@@ -121,17 +103,17 @@ a filed issue with a location and a failure mode.
 
 ### 1d — Resume robustness
 
-- [ ] **#112 — Derive `RunFingerprint` from `Config`.** Add `par2_slice_size`,
+- [x] **#112 — Derive `RunFingerprint` from `Config`.** Add `par2_slice_size`,
       `par2_slice_count`, `par2_recovery_count`, `compress_volume_size`,
       `compress_password` (hashed — the state file is plaintext) and `line_length`.
       Build it in one `RunFingerprint::from_config` used by both construction
       sites, generate `resume_flags_string` from the same source, and add a test
       asserting each field changes the fingerprint.
-- [ ] **#113 — Make resume state robust.** `load` returns an empty state on a parse
+- [x] **#113 — Make resume state robust.** `load` returns an empty state on a parse
       error (as its doc already promises), keeping hard errors only for genuine
       I/O failures; `save` writes to a temp file and renames. This is also the
       migration path for the new fingerprint fields.
-- [ ] **#119 — Decide `--resume` + `--compress` explicitly.** Preferred: keep the
+- [x] **#119 — Decide `--resume` + `--compress` explicitly.** Preferred: keep the
       generated archive keyed by `archive_stem` and reuse it when its recorded
       `{size, mtime}` still match, which makes the existing `archive_stem`
       persistence pay off. Otherwise document the incompatibility, warn once up
@@ -139,10 +121,10 @@ a filed issue with a location and a failure mode.
 
 ### 1e — Documentation truth
 
-- [ ] Refresh `parmesan/src/recovery_set.rs` and `repair.rs` module docs — both
+- [x] Refresh `parmesan/src/recovery_set.rs` and `repair.rs` module docs — both
       still describe the pre-Phase-48 ordering situation and point at roadmap
       phases that have moved on.
-- [ ] Audit `docs/memory-management.md` against what `--memory-limit` actually
+- [x] Audit `docs/memory-management.md` against what `--memory-limit` actually
       bounds once #110 lands.
 
 ---
@@ -169,6 +151,12 @@ a filed issue with a location and a failure mode.
       `FileHasher` state serialization alongside slices. Only worth doing if
       real-world feedback says the re-read hurts; Phase 1c's pass-splitting work
       may make this cheaper to land.
+- [ ] **Replace hand-written yEnc SIMD differential vectors with a property
+      test.** *(Carried over from Phase 1b — not part of #121.)* One proptest
+      over arbitrary `(data, line_len)` asserting every available backend
+      against `encode_scalar` covers all architectures at once and does not
+      need a new hand-written list per backend. `proptest` is already a
+      workspace dependency.
 
 ---
 
