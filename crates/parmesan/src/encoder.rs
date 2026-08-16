@@ -102,8 +102,15 @@ type Avx2Table = (
 pub(super) enum RecoveryBufferSet {
     Normal(Vec<Vec<u16>>),
     /// Each inner `Vec<u8>` has length `altmap_size(slice_words)` = `slice_words * 2`.
+    /// Only ever constructed on x86_64 (see `new_altmap`); matched against
+    /// generically elsewhere so it can't be `#[cfg(target_arch = "x86_64")]`
+    /// itself without breaking those match arms on other targets.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Altmap(Vec<Vec<u8>>),
     /// Each inner `Vec<u8>` has length `shuffle2x_buffer_size(slice_words)` = `slice_words * 2`.
+    /// Only ever constructed on x86_64 (see `new_shuffle2x`); same reasoning
+    /// as `Altmap` above.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Shuffle2x(Vec<Vec<u8>>),
 }
 
