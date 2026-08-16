@@ -136,6 +136,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             && !app.history.searching
                             && app.history.nzb_viewer.is_none()
                             && !app.config_state.editing
+                            && !app.watch.editing
                             && !app.show_upload_confirm
                             && app.prowlarr.search.is_none()
                             && app.prowlarr.batch.is_none() =>
@@ -147,6 +148,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             && !app.history.searching
                             && app.history.nzb_viewer.is_none()
                             && !app.config_state.editing
+                            && !app.watch.editing
                             && !app.show_upload_confirm
                             && app.prowlarr.search.is_none()
                             && app.prowlarr.batch.is_none() =>
@@ -165,7 +167,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                             app.refresh_history();
                         }
                     }
-                    // F1–F6: direct tab jump
+                    // F1–F7: direct tab jump
                     KeyCode::F(1) => {
                         app.state = app::AppState::Dashboard;
                     }
@@ -185,6 +187,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                     }
                     KeyCode::F(6) => {
                         app.state = app::AppState::Config;
+                    }
+                    KeyCode::F(7) => {
+                        app.state = app::AppState::Watch;
                     }
                     // ── Upload config panel (text-edit mode takes priority) ──
                     _ if app.show_upload_confirm && app.confirm_editing => match key.code {
@@ -450,6 +455,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                     {
                         app.cancel_upload();
                     }
+                    // Pause/resume current upload
+                    KeyCode::Char('p')
+                        if app.state == app::AppState::Dashboard && app.upload_in_progress =>
+                    {
+                        app.toggle_pause_upload();
+                    }
                     // ── History screen keys ────────────────────────────────
                     // NZB viewer overlay takes priority when open
                     _ if app.state == app::AppState::History
@@ -584,6 +595,26 @@ async fn run_app<B: ratatui::backend::Backend>(
                         }
                         _ => {}
                     },
+                    // ── Watch screen (text-edit mode) ──────────────────────
+                    _ if app.state == app::AppState::Watch && app.watch.editing => match key.code {
+                        KeyCode::Esc => app.watch_cancel_edit(),
+                        KeyCode::Enter => app.watch_confirm_edit(),
+                        KeyCode::Backspace => {
+                            app.watch.edit_buf.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.watch.edit_buf.push(c);
+                        }
+                        _ => {}
+                    },
+                    // ── Watch screen (navigation) ──────────────────────────
+                    _ if app.state == app::AppState::Watch => match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => app.watch_select_next(),
+                        KeyCode::Char('k') | KeyCode::Up => app.watch_select_prev(),
+                        KeyCode::Enter | KeyCode::Char('e') => app.watch_start_edit(),
+                        KeyCode::Char('w') => app.toggle_watch_enabled(),
+                        _ => {}
+                    },
                     _ => {}
                 },
                 AppEvent::Progress(msg) => {
@@ -679,6 +710,26 @@ async fn run_app<B: ratatui::backend::Backend>(
                 }
                 AppEvent::UploadFinished { success, cancelled } => {
                     app.upload_finished(success, cancelled);
+                    // A manual batch just freed the poster — let a waiting
+                    // watch item start right away instead of idling until
+                    // the next poll interval.
+                    start_watch_upload(app, tx.clone());
+                }
+                AppEvent::WatchScanReady { entries } => {
+                    app.apply_watch_scan(entries);
+                }
+                AppEvent::WatchUploadDone {
+                    path,
+                    success,
+                    cancelled,
+                    size_bytes,
+                    nzb_path,
+                    duration_s,
+                } => {
+                    app.watch_upload_done(
+                        path, success, cancelled, size_bytes, nzb_path, duration_s,
+                    );
+                    start_watch_upload(app, tx.clone());
                 }
                 AppEvent::ProwlarrStatus(status) => {
                     match &status {
@@ -832,6 +883,36 @@ async fn run_app<B: ratatui::backend::Backend>(
                     results,
                 });
             });
+        }
+
+        // Watch mode: periodically rescan the configured directory off-thread.
+        // `scanning` guards against a scan overlapping the next poll tick if
+        // a directory listing is unusually slow.
+        if app.watch.enabled && !app.watch.scanning {
+            let due = app
+                .watch
+                .last_scan
+                .map(|t| t.elapsed() >= Duration::from_secs(app.watch.interval_secs))
+                .unwrap_or(true);
+            if due {
+                if let Some(dir) = app.watch.dir.clone() {
+                    app.watch.scanning = true;
+                    let ext_filter = app.watch.ext_filter.clone();
+                    let tx_watch = tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let entries = scan_watch_dir(&dir, &ext_filter);
+                        let _ = tx_watch.send(AppEvent::WatchScanReady { entries });
+                    });
+                }
+            }
+        }
+
+        // Watch mode: start the next stabilized item once the poster is free.
+        // (Also triggered right after a manual/watch upload finishes, above —
+        // this covers the case where items became ready while nothing was
+        // running at all.)
+        if app.watch.enabled && !app.upload_in_progress {
+            start_watch_upload(app, tx.clone());
         }
 
         // Small sleep to avoid busy-looping the draw thread
@@ -1381,6 +1462,10 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
     let folder_mode = app.effective_folder_mode();
 
     let cancel_token = app.current_cancel_token.clone().unwrap_or_default();
+    let pause_flag = app
+        .current_pause_flag
+        .clone()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
 
     // Direct uploads into nzb_dir/uploaded/ so the vault can distinguish them
     // from downloaded and manually-placed NZBs.
@@ -1428,6 +1513,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     nzb_out_dir.clone(),
                     tx.clone(),
                     cancel_token.clone(),
+                    pause_flag.clone(),
                 )
                 .await;
                 let duration_s = item_start.elapsed().as_secs_f64();
@@ -1514,6 +1600,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                     nzb_out_dir.clone(),
                     tx.clone(),
                     cancel_token.clone(),
+                    pause_flag.clone(),
                 )
                 .await;
                 let ep_dur = ep_start.elapsed().as_secs_f64();
@@ -1579,6 +1666,7 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                         nzb_out_dir.clone(),
                         tx.clone(),
                         cancel_token.clone(),
+                        pause_flag.clone(),
                     )
                     .await;
                     let ep_dur = ep_start.elapsed().as_secs_f64();
@@ -1881,6 +1969,7 @@ async fn run_real_upload(
     nzb_out_dir: Option<PathBuf>,
     tx: mpsc::UnboundedSender<AppEvent>,
     cancel_token: CancellationToken,
+    pause_flag: Arc<AtomicBool>,
 ) -> anyhow::Result<pesto::upload::UploadOutcome> {
     // Route pesto's internal DEBUG traces to a per-upload session log file.
     // This mirrors what the pesto CLI does via --session-log.
@@ -1929,6 +2018,7 @@ async fn run_real_upload(
             Some(cancel_flag),
             nzb_override,
             true,
+            Some(pause_flag),
         )
         .await
     });
@@ -2055,6 +2145,144 @@ async fn run_real_upload(
     Ok(outcome)
 }
 
+/// Dispatch the next watch-mode item, if any, through the same upload
+/// pipeline manual uploads use. No-op when the ready queue is empty or an
+/// upload (manual or watch) is already running — the caller is expected to
+/// have checked `!app.upload_in_progress` already, but a stale/vanished path
+/// at the front of the queue is skipped in a loop rather than stalling watch
+/// mode until the next poll interval notices it too.
+fn start_watch_upload(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
+    if app.upload_in_progress {
+        return;
+    }
+    while let Some(path) = app.watch.ready.pop_front() {
+        if !path.exists() {
+            app.log_panel.push(format!(
+                "[watch] {} vanished before upload, skipping",
+                path.display()
+            ));
+            continue;
+        }
+
+        let (label, token, pause_flag) = app.begin_watch_upload(&path);
+
+        let config = if let Some(mut real_cfg) = app.effective_config_with_overrides() {
+            real_cfg.dry_run = false;
+            real_cfg
+        } else {
+            build_dry_run_config()
+        };
+        // Same "uploaded/" destination manual uploads use, so watch-sourced
+        // NZBs land in the same place and the Vault/History treat them alike.
+        let nzb_out_dir: Option<PathBuf> = app
+            .pesto_config
+            .as_ref()
+            .and_then(|c| c.nzb_dir.as_deref())
+            .map(|d| app::expand_tilde(d).join("uploaded"));
+        if let Some(ref d) = nzb_out_dir {
+            let _ = std::fs::create_dir_all(d);
+        }
+
+        let tx2 = tx.clone();
+        tokio::spawn(async move {
+            let start = Instant::now();
+            let result = run_real_upload(
+                config,
+                vec![path.clone()],
+                label,
+                nzb_out_dir,
+                tx2.clone(),
+                token,
+                pause_flag,
+            )
+            .await;
+            let duration_s = start.elapsed().as_secs_f64();
+            match result {
+                Ok(outcome) => {
+                    let _ = tx2.send(AppEvent::WatchUploadDone {
+                        path,
+                        success: !outcome.had_failures,
+                        cancelled: outcome.cancelled,
+                        size_bytes: outcome.total_bytes,
+                        nzb_path: outcome.nzb_path,
+                        duration_s,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx2.send(AppEvent::UploadError(format!(
+                        "[watch] {}: {e}",
+                        path.display()
+                    )));
+                    let _ = tx2.send(AppEvent::WatchUploadDone {
+                        path,
+                        success: false,
+                        cancelled: false,
+                        size_bytes: 0,
+                        nzb_path: None,
+                        duration_s,
+                    });
+                }
+            }
+        });
+        return;
+    }
+}
+
+/// Snapshot of `dir`'s top-level entries as (path, size) pairs, for watch
+/// mode's stability tracking. `.nfo`/`.nzb` artifacts and dotfiles are
+/// skipped; `ext_filter` (comma-separated, case-insensitive, empty = no
+/// filtering) narrows which *files* count — subdirectories are always kept
+/// since matching files may live inside them.
+fn scan_watch_dir(dir: &Path, ext_filter: &str) -> Vec<(PathBuf, u64)> {
+    let filters: Vec<&str> = ext_filter
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    read_dir
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            let hidden = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if hidden {
+                return false;
+            }
+            let ext = p.extension().and_then(|e| e.to_str());
+            let is_artifact =
+                ext.is_some_and(|e| e.eq_ignore_ascii_case("nfo") || e.eq_ignore_ascii_case("nzb"));
+            if is_artifact {
+                return false;
+            }
+            p.is_dir()
+                || filters.is_empty()
+                || ext.is_some_and(|e| filters.iter().any(|f| f.eq_ignore_ascii_case(e)))
+        })
+        .map(|p| {
+            let size = watch_entry_size(&p);
+            (p, size)
+        })
+        .collect()
+}
+
+/// Total size of a watch-mode candidate: direct metadata for a file, a
+/// recursive walk for a directory (same helper the queue uses for folder
+/// sizing).
+fn watch_entry_size(path: &Path) -> u64 {
+    if path.is_file() {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    } else {
+        app::dir_stats(path).1
+    }
+}
+
 /// Append a one-line structured summary to the session log file.
 ///
 /// Written after all tracing events so it is always the last line, making
@@ -2139,6 +2367,8 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
         E::Finished => "=== Pesto run finished ===".into(),
         E::Failed { description } => format!("FAILED: {}", description),
         E::Interrupted => "Interrupted by user".into(),
+        E::Paused => "=== Upload paused ===".into(),
+        E::Resumed => "=== Upload resumed ===".into(),
         E::CheckDone { failed } if *failed == 0 => "✓ Check: all articles verified".into(),
         E::CheckDone { failed } => {
             format!("✗ Check: {failed} article(s) still missing after every repost attempt")
@@ -2414,5 +2644,54 @@ fn extract_progress_update(
             par2_complete: false,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod watch_scan_dir_tests {
+    use super::scan_watch_dir;
+
+    /// `.nfo`/`.nzb` artifacts and dotfiles never show up as candidates,
+    /// extension filtering only narrows *files* (subdirectories always pass
+    /// through since a matching file may live inside), and sizes are real.
+    #[test]
+    fn skips_artifacts_and_hidden_entries_applies_ext_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("movie.mkv"), b"hello").unwrap();
+        std::fs::write(dir.path().join("subs.srt"), b"x").unwrap();
+        std::fs::write(dir.path().join("Show.nfo"), b"x").unwrap();
+        std::fs::write(dir.path().join("Show.nzb"), b"x").unwrap();
+        std::fs::write(dir.path().join(".hidden"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("Season 01")).unwrap();
+
+        let entries = scan_watch_dir(dir.path(), "mkv");
+        let names: Vec<String> = entries
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert!(names.contains(&"movie.mkv".to_string()));
+        assert!(names.contains(&"Season 01".to_string()));
+        assert!(!names.contains(&"subs.srt".to_string()));
+        assert!(!names.contains(&"Show.nfo".to_string()));
+        assert!(!names.contains(&"Show.nzb".to_string()));
+        assert!(!names.contains(&".hidden".to_string()));
+
+        let movie = entries
+            .iter()
+            .find(|(p, _)| p.file_name().unwrap() == "movie.mkv")
+            .unwrap();
+        assert_eq!(movie.1, 5);
+    }
+
+    /// An empty `ext_filter` matches every non-artifact, non-hidden file.
+    #[test]
+    fn empty_ext_filter_matches_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.mkv"), b"x").unwrap();
+        std::fs::write(dir.path().join("b.srt"), b"x").unwrap();
+
+        let entries = scan_watch_dir(dir.path(), "");
+        assert_eq!(entries.len(), 2);
     }
 }

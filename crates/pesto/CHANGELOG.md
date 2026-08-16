@@ -12,6 +12,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+- **`upload::run_upload` takes a new `pause: Option<Arc<AtomicBool>>` parameter**,
+  threaded straight through to `poster::post_files_inner`'s `external_pause`
+  (added in `0.7.0`'s `post_pausable`). Existing callers pass `None` for the
+  same behavior as before; the CLI's own `season-par2` sub-upload does this,
+  since PAR2 volumes have no pause UI to drive it. This is the library-side
+  half of real pause/resume in `upapasta`'s TUI — see its `ROADMAP.md` Phase 46.
+
 ## [0.7.0] — 2026-08-11
 
 ### Added

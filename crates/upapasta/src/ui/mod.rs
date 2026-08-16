@@ -137,13 +137,14 @@ fn draw_hook_picker_overlay(f: &mut Frame, app: &App, area: Rect) {
 /// the right. When `rule` is true a thin separator is drawn on the row below,
 /// giving structure without stacking bordered boxes.
 fn draw_top_bar(f: &mut Frame, app: &App, area: Rect, rule: bool) {
-    const TABS: [(&str, AppState); 6] = [
+    const TABS: [(&str, AppState); 7] = [
         ("Dashboard", AppState::Dashboard),
         ("Queue", AppState::Queue),
         ("Browser", AppState::Browser),
         ("History", AppState::History),
         ("Vault", AppState::NzbVault),
         ("Config", AppState::Config),
+        ("Watch", AppState::Watch),
     ];
 
     let mut spans: Vec<Span> = vec![
@@ -184,9 +185,20 @@ fn draw_top_bar(f: &mut Frame, app: &App, area: Rect, rule: bool) {
         area
     };
 
-    // Right-aligned version tag, drawn first so the tab strip can overlay the left.
+    // Right-aligned version tag (with a WATCH chip when watch mode is on),
+    // drawn first so the tab strip can overlay the left.
+    let mut right = Vec::new();
+    if app.watch.enabled {
+        right.push(Span::styled(
+            "WATCH ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    right.push(Span::styled("v2 ", theme::label()));
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled("v2 ", theme::label()))).alignment(Alignment::Right),
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
         strip_area,
     );
     f.render_widget(Paragraph::new(Line::from(spans)), strip_area);
@@ -217,6 +229,9 @@ fn draw_main(f: &mut Frame, app: &mut App, area: Rect) {
         }
         AppState::Config => {
             draw_config(f, app, area);
+        }
+        AppState::Watch => {
+            draw_watch(f, app, area);
         }
     }
 }
@@ -1093,21 +1108,40 @@ fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
         "ETA --:--".to_string()
     };
 
-    let label = format!(
-        "{}%  {} / {}  {}  {}",
-        upload_pct,
-        pesto::progress::format_size(p.done_bytes),
-        pesto::progress::format_size(p.total_bytes),
-        speed_str,
-        eta_str,
-    );
+    let label = if p.is_paused {
+        format!(
+            "PAUSED  {}%  {} / {}",
+            upload_pct,
+            pesto::progress::format_size(p.done_bytes),
+            pesto::progress::format_size(p.total_bytes),
+        )
+    } else {
+        format!(
+            "{}%  {} / {}  {}  {}",
+            upload_pct,
+            pesto::progress::format_size(p.done_bytes),
+            pesto::progress::format_size(p.total_bytes),
+            speed_str,
+            eta_str,
+        )
+    };
+
+    let accent = if p.is_paused {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
 
     let gauge_style = Style::default()
-        .fg(Color::Green)
+        .fg(accent)
         .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
 
-    let title = " UPLOAD  [x: cancel] ";
+    let title = if p.is_paused {
+        " UPLOAD  [p: resume] [x: cancel] "
+    } else {
+        " UPLOAD  [p: pause] [x: cancel] "
+    };
 
     let gauge = Gauge::default()
         .block(
@@ -1115,11 +1149,9 @@ fn draw_upload_bar(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .title(Span::styled(
                     title,
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ))
-                .border_style(Style::default().fg(Color::Green)),
+                .border_style(Style::default().fg(accent)),
         )
         .gauge_style(gauge_style)
         .percent(upload_pct)
@@ -1348,7 +1380,11 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             "j/k move · Enter/←→ edit · y start · Esc cancel".into()
         }
     } else if app.upload_in_progress {
-        "x cancel · Tab switch · q quit".into()
+        if app.progress.is_paused {
+            "p resume · x cancel · Tab switch · q quit".into()
+        } else {
+            "p pause · x cancel · Tab switch · q quit".into()
+        }
     } else if app.state == AppState::Queue && !app.upload_queue.items.is_empty() {
         "u upload · d remove · c clear · J/K reorder · p fetch NZBs · Tab switch".into()
     } else if app.state == AppState::Browser {
@@ -1365,6 +1401,15 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         }
     } else if app.state == AppState::Config {
         "j/k move · Enter/e edit · r reset · R reset all · C check Prowlarr · Tab switch".into()
+    } else if app.state == AppState::Watch && app.watch.editing {
+        "Enter confirm · Esc cancel edit".into()
+    } else if app.state == AppState::Watch {
+        let toggle = if app.watch.enabled {
+            "w stop"
+        } else {
+            "w start"
+        };
+        format!("j/k move · Enter/e edit · {toggle} · Tab switch")
     } else {
         "Tab switch · q quit".into()
     };
@@ -1968,6 +2013,191 @@ fn draw_config(f: &mut Frame, app: &App, area: Rect) {
     let mut list_state = ListState::default();
     list_state.select(Some(selected));
     f.render_stateful_widget(list, chunks[1], &mut list_state);
+}
+
+struct WatchField {
+    label: &'static str,
+    value: String,
+    hint: &'static str,
+}
+
+fn build_watch_fields(app: &App) -> Vec<WatchField> {
+    use crate::app::UNSET;
+    vec![
+        WatchField {
+            label: "Directory",
+            value: app
+                .watch
+                .dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| UNSET.into()),
+            hint: "Folder to monitor for new files/folders",
+        },
+        WatchField {
+            label: "Done directory",
+            value: app
+                .watch
+                .done_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| format!("{UNSET}  (source left in place after upload)")),
+            hint: "Move source here after a successful upload",
+        },
+        WatchField {
+            label: "Extensions",
+            value: if app.watch.ext_filter.is_empty() {
+                format!("{UNSET}  (no filtering)")
+            } else {
+                app.watch.ext_filter.clone()
+            },
+            hint: "Comma-separated, e.g. mkv,mp4 — folders always match",
+        },
+        WatchField {
+            label: "Interval",
+            value: format!("{}s", app.watch.interval_secs),
+            hint: "Seconds between directory scans",
+        },
+    ]
+}
+
+/// Watch-mode screen (F7): configure the monitored directory and see its
+/// live status (baselining, stabilizing, queued, uploading).
+fn draw_watch(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Min(6)])
+        .split(area);
+
+    // ── Editable fields ──────────────────────────────────────────────────
+    let fields = build_watch_fields(app);
+    let selected = app.watch.selected;
+    let editing = app.watch.editing;
+
+    let items: Vec<ListItem> = fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let is_sel = i == selected;
+            let label_style = if is_sel {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let value_display = if is_sel && editing {
+                format!("{}_", app.watch.edit_buf)
+            } else {
+                field.value.clone()
+            };
+            let value_style = if is_sel && editing {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let line = Line::from(vec![
+                Span::styled(format!("{:<16}", field.label), label_style),
+                Span::styled(value_display, value_style),
+                if is_sel {
+                    Span::styled(
+                        format!("   ← {}", field.hint),
+                        Style::default().fg(Color::DarkGray),
+                    )
+                } else {
+                    Span::raw("")
+                },
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let title = if app.watch.enabled {
+        " Watch settings — RUNNING (w to stop) "
+    } else {
+        " Watch settings — stopped (w to start) "
+    };
+    let accent = if app.watch.enabled {
+        Color::Yellow
+    } else {
+        Color::Blue
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(accent)),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray));
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected));
+    f.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    // ── Live status ──────────────────────────────────────────────────────
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(current) = &app.watch.current {
+        let name = current
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| current.display().to_string());
+        lines.push(Line::styled(
+            format!(" ▶ uploading: {name}"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if !app.watch.pending.is_empty() {
+        lines.push(Line::styled(
+            format!(" ⏳ stabilizing ({}):", app.watch.pending.len()),
+            Style::default().fg(Color::DarkGray),
+        ));
+        for path in app.watch.pending.keys().take(5) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            lines.push(Line::raw(format!("    {name}")));
+        }
+    }
+
+    if !app.watch.ready.is_empty() {
+        lines.push(Line::styled(
+            format!(" ◷ queued ({}):", app.watch.ready.len()),
+            Style::default().fg(Color::Cyan),
+        ));
+        for path in app.watch.ready.iter().take(5) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            lines.push(Line::raw(format!("    {name}")));
+        }
+    }
+
+    if lines.is_empty() {
+        let msg = if !app.watch.enabled {
+            "Set a directory above, then press w to start watching."
+        } else {
+            "Idle — watching for new files or folders."
+        };
+        lines.push(Line::styled(
+            format!(" {msg}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let status = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Status ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(status, chunks[1]);
 }
 
 fn draw_nzb_viewer_overlay(f: &mut Frame, app: &App, area: Rect) {

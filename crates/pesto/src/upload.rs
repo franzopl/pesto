@@ -38,6 +38,11 @@ pub struct UploadOutcome {
 /// `entry_label` is the display name written to history and passed to hooks.
 /// `write_history` controls whether a record is appended to the shared
 /// pesto history file after a successful upload.
+/// `pause`, when given, suspends the posting phase at the next segment-batch
+/// boundary while `true` — see [`crate::poster::post_files_inner`]'s doc for
+/// the same scoping `cancel` already has (PAR2/compression/check still run
+/// to completion).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_upload(
     config: &Config,
     entry_paths: &[PathBuf],
@@ -46,6 +51,7 @@ pub async fn run_upload(
     cancel: Option<Arc<AtomicBool>>,
     nzb_out_override: Option<PathBuf>,
     write_history: bool,
+    pause: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<UploadOutcome> {
     let upload_start = std::time::Instant::now();
     let mut inputs = crate::walk::expand_inputs(entry_paths)?;
@@ -218,26 +224,17 @@ pub async fn run_upload(
 
     // ── Post ─────────────────────────────────────────────────────────────────
     let post_tx = progress_tx.clone();
-    let outcome = if let Some(ref cancel_flag) = cancel {
-        crate::poster::post_files_with_progress_and_cancel(
-            config,
-            &inputs,
-            post_tx,
-            resume_path.as_deref(),
-            Some(cancel_flag.clone()),
-            Some(entry_label),
-        )
-        .await?
-    } else {
-        crate::poster::post_files_with_progress(
-            config,
-            &inputs,
-            post_tx,
-            resume_path.as_deref(),
-            Some(entry_label),
-        )
-        .await?
-    };
+    let outcome = crate::poster::post_files_inner(
+        config,
+        &inputs,
+        post_tx,
+        resume_path.as_deref(),
+        cancel.clone(),
+        Some(entry_label),
+        None,
+        pause,
+    )
+    .await?;
     // ─────────────────────────────────────────────────────────────────────────
 
     let has_post_failures = !outcome.failures.is_empty();

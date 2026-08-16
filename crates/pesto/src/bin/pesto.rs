@@ -2174,6 +2174,7 @@ async fn post_season_par2_volumes(
         Some(cancel.clone()),
         Some(par2_nzb_path), // write NZB to temp (discarded after)
         false,               // don't write history for PAR2 volumes
+        None,                // no pause support for PAR2 volume posting
     )
     .await?;
 
