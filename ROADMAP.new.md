@@ -196,13 +196,28 @@ introduced.
 
 The remaining gap against the legacy Python version.
 
-- [ ] **Watch mode** with smart rules and move-to-done logic — the single largest
-      missing feature.
+- [x] **Watch mode v1.** Dedicated Watch screen (F7): one monitored directory,
+      optional extension filter, configurable poll interval, move-to-done on
+      success. Detected top-level entries are baselined on first scan (nothing
+      pre-existing is uploaded), then auto-upload once their size repeats
+      unchanged across two scans — the same settle check `pesto --watch` uses
+      — through the same single-item pipeline manual uploads use, so pause/
+      cancel/progress on the Dashboard work for free. Runs outside the manual
+      Queue tab entirely (its own `ready` queue) so it can never sweep up
+      items the user queued but hasn't confirmed; `upload_in_progress` is
+      shared so a manual and a watch upload never run concurrently. Settings
+      persist to `upapasta-watch.json`; `enabled` deliberately does not, so a
+      background upload can never start silently on launch. Multiple watch
+      directories with per-directory rules remain a v2 idea, not committed.
 - [ ] **Metadata enrichment**: TMDb lookup, improved NFO generation.
 - [ ] **First-run setup wizard.**
 - [ ] Directory-level queuing (Space on a directory marks its files recursively).
 - [ ] Auto-switch to Dashboard when an upload starts.
-- [ ] Real pause (blocked on Phase 2's pesto API).
+- [x] **Real pause.** `upload::run_upload` now takes a `pause` flag threaded
+      through to `poster::post_files_inner`'s `external_pause`; the TUI's `p`
+      key on the Dashboard toggles it (`App::toggle_pause_upload`), with a
+      yellow "PAUSED" gauge state and updated status-bar hints. See
+      `crates/upapasta/ROADMAP.md` Phase 46.
 - [ ] Theme support (dark/light, user-configurable colors).
 - [ ] TUI performance tuning during long uploads.
 - [ ] Comprehensive error handling and user feedback.

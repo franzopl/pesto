@@ -183,6 +183,23 @@ pub enum AppEvent {
         hook_name: String,
         log: Vec<String>,
     },
+    // A background rescan of the watch directory finished: top-level entries
+    // as (path, size) snapshots for stability tracking.
+    WatchScanReady {
+        entries: Vec<(std::path::PathBuf, u64)>,
+    },
+    // A watch-triggered upload finished (success, failure, or cancellation).
+    // Separate from `UploadFinished`/`ItemUploadDone`, which are the manual
+    // queue's batch-completion events — watch mode drives its own single-item
+    // pipeline outside the manual queue so the two never interfere.
+    WatchUploadDone {
+        path: std::path::PathBuf,
+        success: bool,
+        cancelled: bool,
+        size_bytes: u64,
+        nzb_path: Option<std::path::PathBuf>,
+        duration_s: f64,
+    },
 }
 
 pub struct EventHandler {

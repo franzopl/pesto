@@ -6,7 +6,9 @@ use crate::nzb_viewer::{NzbContents, NzbViewerState};
 use crate::prowlarr::{ConnectionStatus, ProwlarrConfig};
 use crate::ui::components::{FileTree, LogPanel, StatusBar, UploadQueue};
 use pesto::config::{self, Config as PestoConfig, FileConfig, ObfuscateMode};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +23,9 @@ pub enum AppState {
     History,
     NzbVault,
     Config,
+    /// Watch-mode setup and live status (monitored directory, stabilizing /
+    /// queued items, on/off toggle).
+    Watch,
 }
 
 #[derive(Debug, Default)]
@@ -34,6 +39,12 @@ pub struct UploadProgress {
     #[allow(dead_code)]
     pub active_connections: usize,
     pub is_cancelled: bool,
+    /// True while the user has paused the upload (`p` on the Dashboard).
+    /// Posting workers suspend at the next segment-batch boundary; PAR2,
+    /// compression and the check/repost passes are unaffected — see
+    /// `pesto::poster::post_files_inner`'s doc for the same scoping `cancel`
+    /// already has.
+    pub is_paused: bool,
 
     /// Ring buffer of recent speeds (MB/s) for sparkline
     pub speed_history: Vec<f64>,
@@ -429,6 +440,10 @@ pub struct App {
     pub upload_in_progress: bool,
     pub progress: UploadProgress,
     pub current_cancel_token: Option<CancellationToken>,
+    /// Shared with the in-flight upload task via `pesto::upload::run_upload`'s
+    /// `pause` parameter. Set to `true`/`false` by `toggle_pause_upload`;
+    /// dropped (set back to `None`) when the upload ends.
+    pub current_pause_flag: Option<Arc<AtomicBool>>,
 
     /// Loaded pesto config (if available)
     pub pesto_config: Option<PestoConfig>,
@@ -448,6 +463,9 @@ pub struct App {
 
     /// Config screen state + per-session overrides
     pub config_state: ConfigState,
+
+    /// Watch-mode state (monitored directory, stability tracking, toggle).
+    pub watch: WatchState,
 
     /// When true, draw the upload config panel (replaces NZB detail in browser)
     pub show_upload_confirm: bool,
@@ -834,6 +852,54 @@ pub struct ConfirmFieldView {
     pub hint: &'static str,
 }
 
+/// Persisted watch-mode settings (survives restarts); `enabled` is
+/// deliberately excluded — watch never resumes silently on launch, so a
+/// background upload can never start without the user seeing it happen.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct WatchSettings {
+    dir: Option<PathBuf>,
+    done_dir: Option<PathBuf>,
+    /// Comma-separated extensions (e.g. "mkv,mp4"); empty = no filtering.
+    ext_filter: String,
+    interval_secs: u64,
+}
+
+/// State for the Watch screen: monitors one directory, auto-uploading each
+/// top-level entry once its size is unchanged across two consecutive scans
+/// (the same settle check `pesto --watch` uses), then optionally moves the
+/// source into `done_dir`.
+#[derive(Debug, Default)]
+pub struct WatchState {
+    pub enabled: bool,
+    pub dir: Option<PathBuf>,
+    pub done_dir: Option<PathBuf>,
+    pub ext_filter: String,
+    pub interval_secs: u64,
+    pub last_scan: Option<Instant>,
+    /// Set while a background scan of `dir` is in flight, so the poll loop
+    /// never overlaps two scans of the same directory.
+    pub scanning: bool,
+    /// True once the first scan of the current `dir` has run: that scan's
+    /// entries are the pre-existing baseline (ignored, never uploaded) —
+    /// only entries that show up in later scans are new arrivals.
+    pub baseline_captured: bool,
+    /// path -> size observed on the previous scan, for the settle check.
+    pub pending: std::collections::HashMap<PathBuf, u64>,
+    /// Stable entries waiting for the poster to be free.
+    pub ready: std::collections::VecDeque<PathBuf>,
+    /// Permanently resolved paths (baselined, uploaded, failed, cancelled or
+    /// ignored as empty) that must never be re-detected.
+    pub seen: std::collections::HashSet<PathBuf>,
+    /// The entry currently uploading via watch, if any.
+    pub current: Option<PathBuf>,
+    /// Index of the selected field in the Watch screen's field list.
+    pub selected: usize,
+    pub editing: bool,
+    pub edit_buf: String,
+}
+
+pub const WATCH_FIELD_COUNT: usize = 4;
+
 /// State for the Config screen.
 #[derive(Debug, Default)]
 pub struct ConfigState {
@@ -892,6 +958,7 @@ impl App {
             upload_in_progress: false,
             progress: UploadProgress::default(),
             current_cancel_token: None,
+            current_pause_flag: None,
             pesto_config,
             config_path,
             config_error,
@@ -899,6 +966,7 @@ impl App {
             history: HistoryState::default(),
             upload_started_at: None,
             config_state: ConfigState::default(),
+            watch: WatchState::default(),
             show_upload_confirm: false,
             confirm_field: 0,
             confirm_editing: false,
@@ -908,6 +976,7 @@ impl App {
             prowlarr: ProwlarrState::default(),
             hook_picker: None,
         };
+        app.load_watch_settings();
         // Import legacy JSONL once if catalog is empty
         if let Some(ref cat) = app.catalog {
             if !cat.is_populated() {
@@ -1053,7 +1122,8 @@ impl App {
             AppState::Browser => AppState::History,
             AppState::History => AppState::NzbVault,
             AppState::NzbVault => AppState::Config,
-            AppState::Config => AppState::Dashboard,
+            AppState::Config => AppState::Watch,
+            AppState::Watch => AppState::Dashboard,
         };
         if self.state == AppState::NzbVault {
             self.load_vault();
@@ -1063,12 +1133,13 @@ impl App {
 
     pub fn prev_tab(&mut self) {
         self.state = match self.state {
-            AppState::Dashboard => AppState::Config,
+            AppState::Dashboard => AppState::Watch,
             AppState::Queue => AppState::Dashboard,
             AppState::Browser => AppState::Queue,
             AppState::History => AppState::Browser,
             AppState::NzbVault => AppState::History,
             AppState::Config => AppState::NzbVault,
+            AppState::Watch => AppState::Config,
         };
         if self.state == AppState::NzbVault {
             self.load_vault();
@@ -1188,6 +1259,7 @@ impl App {
 
         let token = CancellationToken::new();
         self.current_cancel_token = Some(token.clone());
+        self.current_pause_flag = Some(Arc::new(AtomicBool::new(false)));
 
         // Initialize per-file tracking
         let file_progress: Vec<FileProgress> = self
@@ -1441,6 +1513,8 @@ impl App {
         self.upload_in_progress = false;
         self.upload_queue.active = 0;
         self.progress.is_cancelled = cancelled;
+        self.progress.is_paused = false;
+        self.current_pause_flag = None;
 
         // On a non-cancelled batch, successfully uploaded items leave the queue
         // (they now live in History with a ✓ badge); failed items stay queued
@@ -1496,6 +1570,281 @@ impl App {
 
         // Refresh the history list if it's currently visible
         self.refresh_history();
+    }
+
+    // ── Watch mode ──────────────────────────────────────────────────────────
+
+    pub fn watch_select_next(&mut self) {
+        self.watch.selected = (self.watch.selected + 1).min(WATCH_FIELD_COUNT - 1);
+    }
+
+    pub fn watch_select_prev(&mut self) {
+        self.watch.selected = self.watch.selected.saturating_sub(1);
+    }
+
+    pub fn watch_start_edit(&mut self) {
+        self.watch.edit_buf = match self.watch.selected {
+            0 => self
+                .watch
+                .dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            1 => self
+                .watch
+                .done_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            2 => self.watch.ext_filter.clone(),
+            3 => self.watch.interval_secs.to_string(),
+            _ => String::new(),
+        };
+        self.watch.editing = true;
+    }
+
+    pub fn watch_cancel_edit(&mut self) {
+        self.watch.editing = false;
+        self.watch.edit_buf.clear();
+    }
+
+    /// Commit the edit buffer for the selected field. Changing the watched
+    /// directory resets all stability/dedup state: paths tracked against the
+    /// old directory have no bearing on the new one.
+    pub fn watch_confirm_edit(&mut self) {
+        let buf = self.watch.edit_buf.trim().to_string();
+        match self.watch.selected {
+            0 => {
+                let new_dir = if buf.is_empty() {
+                    None
+                } else {
+                    Some(expand_tilde(&buf))
+                };
+                if new_dir != self.watch.dir {
+                    self.watch.dir = new_dir;
+                    self.watch.pending.clear();
+                    self.watch.ready.clear();
+                    self.watch.seen.clear();
+                    self.watch.baseline_captured = false;
+                    self.watch.last_scan = None;
+                }
+            }
+            1 => {
+                self.watch.done_dir = if buf.is_empty() {
+                    None
+                } else {
+                    Some(expand_tilde(&buf))
+                };
+            }
+            2 => {
+                self.watch.ext_filter = buf.trim_start_matches('.').replace(' ', "");
+            }
+            3 => {
+                if let Ok(secs) = buf.parse::<u64>() {
+                    self.watch.interval_secs = secs.max(5);
+                }
+            }
+            _ => {}
+        }
+        self.watch.editing = false;
+        self.watch.edit_buf.clear();
+        self.save_watch_settings();
+    }
+
+    /// Start or stop watching. Refuses to start without a valid directory;
+    /// stopping never touches items already queued or mid-upload — it only
+    /// stops future scans/dispatches.
+    pub fn toggle_watch_enabled(&mut self) {
+        if self.watch.enabled {
+            self.watch.enabled = false;
+            self.status_bar.set("Watch stopped");
+            self.log_panel.push("=== Watch stopped ===".to_string());
+            return;
+        }
+        let Some(dir) = self.watch.dir.clone() else {
+            self.status_bar.set("Set a directory first (Enter to edit)");
+            return;
+        };
+        if !dir.is_dir() {
+            self.status_bar
+                .set(format!("Not a directory: {}", dir.display()));
+            return;
+        }
+        self.watch.enabled = true;
+        self.watch.last_scan = None; // scan on the next loop iteration
+        self.status_bar.set(format!("Watching {}", dir.display()));
+        self.log_panel
+            .push(format!("=== Watch started: {} ===", dir.display()));
+    }
+
+    /// Fold a background scan's (path, size) snapshot into the stability
+    /// tracker and log the result. The actual bookkeeping lives in the
+    /// free function [`fold_watch_scan`] so it is testable without a full
+    /// `App`.
+    pub fn apply_watch_scan(&mut self, entries: Vec<(PathBuf, u64)>) {
+        self.watch.scanning = false;
+        self.watch.last_scan = Some(Instant::now());
+        for (line, is_warn) in fold_watch_scan(&mut self.watch, &entries) {
+            if is_warn {
+                self.log_panel.push_warn(line);
+            } else {
+                self.log_panel.push(line);
+            }
+        }
+    }
+
+    /// Prepare app state for a single watch-triggered upload and return the
+    /// pieces the caller needs to spawn the pipeline. Mirrors `trigger_upload`
+    /// but for exactly one item, outside the manual queue.
+    pub fn begin_watch_upload(
+        &mut self,
+        path: &Path,
+    ) -> (String, CancellationToken, Arc<AtomicBool>) {
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "watch-item".to_string());
+
+        self.watch.current = Some(path.to_path_buf());
+        self.upload_in_progress = true;
+        self.upload_started_at = Some(Instant::now());
+
+        let token = CancellationToken::new();
+        self.current_cancel_token = Some(token.clone());
+        let pause_flag = Arc::new(AtomicBool::new(false));
+        self.current_pause_flag = Some(pause_flag.clone());
+
+        self.progress = UploadProgress {
+            start_time: Some(Instant::now()),
+            speed_history: vec![0.0; 5],
+            files: vec![FileProgress {
+                name: label.clone(),
+                total_segments: 0,
+                done_segments: 0,
+                total_bytes: 0,
+                done_bytes: 0,
+                status: FileStatus::Pending,
+            }],
+            ..Default::default()
+        };
+
+        self.status_bar
+            .set(format!("[watch] uploading {label} (x to cancel)"));
+        self.log_panel
+            .push(format!("=== [watch] Starting upload: {label} ==="));
+
+        (label, token, pause_flag)
+    }
+
+    /// A watch-triggered upload finished. Unlike the manual queue's
+    /// `upload_finished`, a failed or cancelled item is never retried here —
+    /// it stays in `watch.seen` permanently, matching the manual `x`-to-cancel
+    /// semantics used everywhere else in the app.
+    pub fn watch_upload_done(
+        &mut self,
+        path: PathBuf,
+        success: bool,
+        cancelled: bool,
+        size_bytes: u64,
+        nzb_path: Option<PathBuf>,
+        duration_s: f64,
+    ) {
+        self.upload_in_progress = false;
+        self.watch.current = None;
+        self.current_cancel_token = None;
+        self.current_pause_flag = None;
+        self.progress.is_paused = false;
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+
+        if cancelled {
+            self.progress.is_cancelled = true;
+            self.status_bar.set(format!("[watch] cancelled: {name}"));
+            self.log_panel
+                .push(format!("=== [watch] Cancelled: {name} ==="));
+            return;
+        }
+        self.progress.is_cancelled = false;
+
+        self.record_catalog_entry(name.clone(), size_bytes, nzb_path, duration_s, !success);
+
+        if success {
+            self.status_bar.set(format!("[watch] done: {name}"));
+            self.log_panel
+                .push(format!("=== [watch] Completed: {name} ==="));
+            self.move_watch_item_to_done(&path, &name);
+        } else {
+            self.status_bar
+                .set(format!("[watch] failed: {name} (see log)"));
+            self.log_panel
+                .push_error(format!("[watch] upload failed: {name}"));
+        }
+    }
+
+    /// Move a successfully uploaded watch item into `watch.done_dir`, if set.
+    /// `rename` is a same-filesystem metadata op (no data copy), so this is
+    /// safe to call inline from the event loop; a cross-device destination
+    /// fails fast rather than silently copying gigabytes on the render thread.
+    fn move_watch_item_to_done(&mut self, path: &Path, name: &str) {
+        let Some(done_dir) = self.watch.done_dir.clone() else {
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&done_dir) {
+            self.log_panel
+                .push_error(format!("[watch] could not create done dir: {e}"));
+            return;
+        }
+        let Some(file_name) = path.file_name() else {
+            return;
+        };
+        let dest = done_dir.join(file_name);
+        match std::fs::rename(path, &dest) {
+            Ok(()) => {
+                self.log_panel
+                    .push(format!("[watch] moved {name} -> {}", dest.display()));
+            }
+            Err(e) => {
+                self.log_panel
+                    .push_error(format!("[watch] move failed for {name}: {e}"));
+            }
+        }
+    }
+
+    /// Persist watch settings (directory, done dir, extension filter,
+    /// interval) so they survive a restart. `enabled` is deliberately not
+    /// persisted — see `WatchSettings`'s doc comment.
+    pub fn save_watch_settings(&self) {
+        if let Some(path) = watch_settings_path() {
+            let settings = WatchSettings {
+                dir: self.watch.dir.clone(),
+                done_dir: self.watch.done_dir.clone(),
+                ext_filter: self.watch.ext_filter.clone(),
+                interval_secs: self.watch.interval_secs,
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
+    /// Load previously saved watch settings. Falls back to a 30s interval
+    /// when nothing was ever saved (or the saved value is unusable).
+    pub fn load_watch_settings(&mut self) {
+        let loaded = watch_settings_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|data| serde_json::from_str::<WatchSettings>(&data).ok());
+        let settings = loaded.unwrap_or_default();
+        self.watch.dir = settings.dir;
+        self.watch.done_dir = settings.done_dir;
+        self.watch.ext_filter = settings.ext_filter;
+        self.watch.interval_secs = if settings.interval_secs == 0 {
+            30
+        } else {
+            settings.interval_secs
+        };
     }
 
     /// Called from the event loop when we receive a human log line
@@ -1567,6 +1916,28 @@ impl App {
         self.status_bar.set("Cancelling upload...");
         self.log_panel
             .push("=== Upload cancellation requested ===".to_string());
+    }
+
+    /// Flip the shared pause flag for the in-flight upload. Connections stay
+    /// open and kept alive while paused (see `post_files_inner`), so toggling
+    /// back resumes immediately without a reconnect.
+    pub fn toggle_pause_upload(&mut self) {
+        if !self.upload_in_progress || self.progress.is_cancelled {
+            return;
+        }
+        let Some(flag) = self.current_pause_flag.as_ref() else {
+            return;
+        };
+        let now_paused = !self.progress.is_paused;
+        flag.store(now_paused, std::sync::atomic::Ordering::Relaxed);
+        self.progress.is_paused = now_paused;
+        if now_paused {
+            self.status_bar.set("Pausing... (p to resume)");
+            self.log_panel.push("=== Pause requested ===".to_string());
+        } else {
+            self.status_bar.set("Resuming...");
+            self.log_panel.push("=== Resume requested ===".to_string());
+        }
     }
 
     /// Returns a user-friendly summary of the settings that will be used
@@ -2753,6 +3124,84 @@ fn queue_path() -> Option<PathBuf> {
     pesto::config::config_dir().map(|d| d.join("upapasta-queue.json"))
 }
 
+/// Path to the persisted watch-mode settings.
+fn watch_settings_path() -> Option<PathBuf> {
+    pesto::config::config_dir().map(|d| d.join("upapasta-watch.json"))
+}
+
+/// Fold a background scan's (path, size) snapshot into `watch`'s stability
+/// tracker, returning the log lines the caller should display as `(message,
+/// is_warn)`. The first scan of a directory only baselines it (marks every
+/// current entry as already-seen, without queuing anything) — see
+/// `WatchState::baseline_captured`. Later scans queue an entry once its size
+/// stops changing across two consecutive scans, mirroring the settle check
+/// `pesto --watch` uses.
+fn fold_watch_scan(watch: &mut WatchState, entries: &[(PathBuf, u64)]) -> Vec<(String, bool)> {
+    let mut lines = Vec::new();
+
+    if !watch.baseline_captured {
+        watch.baseline_captured = true;
+        for (path, _) in entries {
+            watch.seen.insert(path.clone());
+        }
+        if !entries.is_empty() {
+            lines.push((
+                format!(
+                    "[watch] baseline captured — {} existing item(s) ignored",
+                    entries.len()
+                ),
+                false,
+            ));
+        }
+        return lines;
+    }
+
+    let done_dir = watch.done_dir.clone();
+    for (path, size) in entries {
+        if watch.seen.contains(path) {
+            continue;
+        }
+        if done_dir.as_ref().is_some_and(|done| path.starts_with(done)) {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        match watch.pending.get(path).copied() {
+            None => {
+                watch.pending.insert(path.clone(), *size);
+                lines.push((
+                    format!("[watch] detected {name} — waiting to stabilize"),
+                    false,
+                ));
+            }
+            Some(prev) if prev != *size => {
+                watch.pending.insert(path.clone(), *size);
+            }
+            Some(prev) => {
+                watch.pending.remove(path);
+                watch.seen.insert(path.clone());
+                if prev == 0 {
+                    lines.push((format!("[watch] {name}: empty, ignoring"), true));
+                } else {
+                    watch.ready.push_back(path.clone());
+                    lines.push((
+                        format!("[watch] {name} is stable — queued for upload"),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Drop stability tracking for anything that vanished before settling.
+    let present: std::collections::HashSet<&PathBuf> = entries.iter().map(|(p, _)| p).collect();
+    watch.pending.retain(|p, _| present.contains(p));
+
+    lines
+}
+
 /// Insert, update, or remove `[output.indexer].<field>` in a config.toml
 /// document, preserving everything else (comments, ordering, formatting).
 ///
@@ -2856,6 +3305,111 @@ fn load_pesto_config() -> (Option<PestoConfig>, Option<PathBuf>, Option<String>)
 mod tests {
     use super::{apply_indexer_field, queue_entry_info, queue_entry_info_quick};
     use std::fs;
+
+    mod watch_scan {
+        use super::super::{fold_watch_scan, WatchState};
+        use std::path::PathBuf;
+
+        fn p(name: &str) -> PathBuf {
+            PathBuf::from(format!("/watch/{name}"))
+        }
+
+        /// The first scan of a directory only baselines it: every entry
+        /// already present is marked seen but nothing is queued, matching
+        /// the "ignore what already exists" behavior watch mode promises.
+        #[test]
+        fn first_scan_baselines_without_queuing() {
+            let mut w = WatchState::default();
+            let lines = fold_watch_scan(&mut w, &[(p("a.mkv"), 100), (p("b.mkv"), 200)]);
+
+            assert!(w.baseline_captured);
+            assert!(w.ready.is_empty());
+            assert!(w.pending.is_empty());
+            assert!(w.seen.contains(&p("a.mkv")));
+            assert!(w.seen.contains(&p("b.mkv")));
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].0.contains("baseline captured"));
+        }
+
+        /// A brand-new entry (after baselining) is tracked as pending on its
+        /// first sighting, then queued only once its size repeats unchanged.
+        #[test]
+        fn new_entry_queues_once_size_is_stable_across_two_scans() {
+            let mut w = WatchState::default();
+            fold_watch_scan(&mut w, &[]); // baseline: nothing pre-existing
+
+            fold_watch_scan(&mut w, &[(p("new.mkv"), 100)]);
+            assert!(w.ready.is_empty(), "queued before stabilizing");
+            assert_eq!(w.pending.get(&p("new.mkv")), Some(&100));
+
+            fold_watch_scan(&mut w, &[(p("new.mkv"), 100)]);
+            assert_eq!(w.ready.into_iter().collect::<Vec<_>>(), vec![p("new.mkv")]);
+            assert!(w.pending.is_empty());
+            assert!(w.seen.contains(&p("new.mkv")));
+        }
+
+        /// A still-growing file must never be queued: each differing size
+        /// just re-arms the settle check instead.
+        #[test]
+        fn still_changing_size_is_never_queued() {
+            let mut w = WatchState::default();
+            fold_watch_scan(&mut w, &[]);
+
+            fold_watch_scan(&mut w, &[(p("f.mkv"), 100)]);
+            fold_watch_scan(&mut w, &[(p("f.mkv"), 150)]);
+            fold_watch_scan(&mut w, &[(p("f.mkv"), 200)]);
+
+            assert!(w.ready.is_empty());
+            assert_eq!(w.pending.get(&p("f.mkv")), Some(&200));
+        }
+
+        /// A stable empty file/dir is ignored (marked seen) rather than
+        /// queued for a pointless upload.
+        #[test]
+        fn stable_empty_entry_is_ignored_not_queued() {
+            let mut w = WatchState::default();
+            fold_watch_scan(&mut w, &[]);
+
+            fold_watch_scan(&mut w, &[(p("empty.txt"), 0)]);
+            let lines = fold_watch_scan(&mut w, &[(p("empty.txt"), 0)]);
+
+            assert!(w.ready.is_empty());
+            assert!(w.seen.contains(&p("empty.txt")));
+            assert!(lines.iter().any(|(_, is_warn)| *is_warn));
+        }
+
+        /// An entry inside `done_dir` (watch mode's own output) must never
+        /// be picked up, even once stable — otherwise a move-to-done would
+        /// feed straight back into the watch loop.
+        #[test]
+        fn entries_inside_done_dir_are_never_queued() {
+            let mut w = WatchState {
+                done_dir: Some(PathBuf::from("/watch/done")),
+                ..Default::default()
+            };
+            fold_watch_scan(&mut w, &[]);
+
+            fold_watch_scan(&mut w, &[(PathBuf::from("/watch/done/old.mkv"), 100)]);
+            fold_watch_scan(&mut w, &[(PathBuf::from("/watch/done/old.mkv"), 100)]);
+
+            assert!(w.ready.is_empty());
+            assert!(w.pending.is_empty());
+        }
+
+        /// An entry that disappears before settling (e.g. renamed or
+        /// deleted) drops out of `pending` instead of lingering forever.
+        #[test]
+        fn vanished_entry_is_dropped_from_pending() {
+            let mut w = WatchState::default();
+            fold_watch_scan(&mut w, &[]);
+
+            fold_watch_scan(&mut w, &[(p("gone.mkv"), 100)]);
+            assert!(w.pending.contains_key(&p("gone.mkv")));
+
+            fold_watch_scan(&mut w, &[]);
+            assert!(w.pending.is_empty());
+        }
+    }
 
     fn indexer_str(doc_text: &str, field: &str) -> Option<String> {
         let doc = doc_text

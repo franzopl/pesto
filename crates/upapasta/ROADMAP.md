@@ -400,9 +400,76 @@ This phase is lower priority. Do not block earlier phases on it.
 - Retry failed articles automatically with exponential backoff.
 - Per-server connection health indicators in the Config screen.
 - Alert when a server connection is degraded during upload.
-- **Real pause/resume:** requires a suspend mechanism in `pesto`'s poster
-  (hold the connection pool without tearing it down). Removed from the TUI in
-  40c-5 until the engine supports it — do not re-add a UI-only pause.
+- **Real pause/resume ✅ Done.** `pesto`'s `poster::post_files_inner` gained an
+  `external_pause` flag (Phase 2 of `ROADMAP.new.md`); `upload::run_upload`
+  now takes a matching `pause: Option<Arc<AtomicBool>>` and threads it
+  straight through instead of branching between the cancel-only and
+  cancel+pause poster entry points. The TUI re-adds the `p` key on the
+  Dashboard (`App::toggle_pause_upload`, `App::current_pause_flag`): it flips
+  the shared `AtomicBool`, the upload bar switches to a yellow "PAUSED" state
+  with `[p: resume]`, and the status-bar hint swaps between "p pause"/"p
+  resume". Unlike the dishonest pre-40c-5 pause, workers now genuinely stop
+  draining the segment queue at the next batch boundary and keep the
+  connection alive via the same `MODE READER` keepalive idle time already
+  uses, so resuming pays no reconnect. PAR2 generation, compression and the
+  check/repost passes are unaffected by pause, matching `cancel`'s scoping.
+
+---
+
+## Phase 47 — Watch Mode v1 ✅ Done
+
+The single largest feature gap against the legacy Python version, scoped down
+to one directory + one rule set for v1 (see `ROADMAP.new.md` Phase 3).
+
+- **New Watch screen (F7, `AppState::Watch`).** Editable fields — Directory,
+  Done directory, Extensions (comma-separated, empty = no filtering),
+  Interval — with the same select/Enter-to-edit UX as the Config screen.
+  `w` toggles watching on/off; a status panel shows the currently-uploading
+  item plus the stabilizing/queued lists. A yellow `WATCH` chip appears in
+  the top bar whenever it's running, from any tab.
+- **Detection.** A background `spawn_blocking` scan (`scan_watch_dir`) lists
+  the directory's top-level entries every `interval_secs`, skipping
+  dotfiles and `.nfo`/`.nzb` artifacts. The *first* scan of a directory only
+  baselines it (`WatchState::baseline_captured`) — nothing already present
+  gets uploaded, matching the legacy `watch.py` behavior. Later scans queue
+  an entry once its size repeats unchanged across two consecutive scans
+  (`App::apply_watch_scan` / the free `fold_watch_scan`, unit-tested in
+  `app.rs`'s `watch_scan` module without needing a full `App`).
+- **Auto-upload, not auto-queue.** A stabilized entry uploads immediately
+  through the *same* single-item pipeline manual uploads use
+  (`App::begin_watch_upload` + `run_real_upload`), so the Dashboard's
+  progress bars, `x` cancel and `p` pause all work on a watch-triggered
+  upload for free. It deliberately runs outside the manual Queue tab's
+  `upload_queue.items` — a separate `WatchState::ready` queue — so an
+  unrelated watch detection can never sweep up files the user queued via
+  Space but hasn't confirmed with `u`. Both paths share `upload_in_progress`
+  so a manual and a watch upload never run concurrently; whichever is
+  waiting resumes the instant the other's `UploadFinished`/`WatchUploadDone`
+  event lands.
+- **Move-to-done.** A successful watch upload is recorded in the catalog
+  exactly like a manual one, then `rename`d into `done_dir` if set (a
+  same-filesystem metadata op, safe to run inline on the event-loop thread;
+  a cross-device destination fails fast with a logged error instead of
+  silently copying gigabytes). A cancelled or failed watch item is never
+  retried — it stays in `WatchState::seen` permanently, mirroring the `x`
+  semantics used everywhere else in the app.
+- **Persistence.** Directory/done-dir/extensions/interval survive a restart
+  (`upapasta-watch.json`). `enabled` is deliberately excluded from that file
+  — watch mode never resumes silently on launch, so a background upload can
+  never start without the user seeing it happen first.
+- **Not in v1:** multiple watch directories with independent per-directory
+  rules (the roadmap's "smart rules" phrase) — deferred until real usage
+  shows it's needed; season/per-file folder-mode handling for watched
+  folders (a watched folder always uploads as a single release, matching
+  legacy `watch.py`).
+
+> **Caution for anyone testing this manually:** dropping a file into the
+> watched directory queues a **real** upload the moment it stabilizes,
+> including running the user's real post-upload hooks (indexer submission,
+> etc.) if a real `pesto` config is loaded — there is no confirmation step
+> by design. Point it at a config with no server configured, or be ready to
+> disable watch (`w`) within one poll interval, before testing with real
+> files present.
 
 ---
 
@@ -434,7 +501,7 @@ This phase is lower priority. Do not block earlier phases on it.
 
 | Key         | Context          | Action                              |
 |-------------|------------------|-------------------------------------|
-| F1–F6       | Global           | Jump to tab (Dash/Queue/Browser/Hist/Vault/Config) |
+| F1–F7       | Global           | Jump to tab (Dash/Queue/Browser/Hist/Vault/Config/Watch) |
 | Tab / S-Tab | Global           | Cycle tabs                          |
 | j / k       | Lists            | Move cursor                         |
 | Enter       | File tree        | Enter directory / open detail       |
@@ -446,7 +513,9 @@ This phase is lower priority. Do not block earlier phases on it.
 | d / Del     | Queue            | Remove item from queue              |
 | c           | Queue            | Clear queue                         |
 | Shift+J/K   | Queue            | Reorder items                       |
-| x           | Queue, Dashboard | Cancel running upload               |
+| x           | Dashboard        | Cancel running upload (manual or watch) |
+| p           | Dashboard        | Pause / resume running upload       |
+| w           | Watch            | Start / stop watching the configured directory |
 | /           | Log, History     | Start search                        |
 | Esc         | Any              | Close modal / cancel search         |
 | P           | Browser, Vault   | Search Prowlarr for selected file   |
@@ -478,4 +547,5 @@ This phase is lower priority. Do not block earlier phases on it.
 | 43d       | Automated Prowlarr backup workflow               | 🔲 Planned |
 | 44        | Catalog enhancements (tags, export, dedup)       | 🔲 Planned |
 | 45        | TMDb metadata enrichment                         | 🔲 Later   |
-| 46        | Multi-server posting + retry + real pause        | 🔲 Later   |
+| 46        | Multi-server posting + retry (real pause ✅ done) | 🔲 Later   |
+| 47        | Watch mode v1 (one directory, auto-upload, move-to-done) | ✅ Done |
