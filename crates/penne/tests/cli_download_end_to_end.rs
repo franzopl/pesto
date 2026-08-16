@@ -123,6 +123,14 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
 }
 
 fn write_nzb(dir: &Path, segments: Vec<PostedSegment>) -> std::path::PathBuf {
+    write_nzb_named(dir, "test.nzb", segments)
+}
+
+fn write_nzb_named(
+    dir: &Path,
+    file_name: &str,
+    segments: Vec<PostedSegment>,
+) -> std::path::PathBuf {
     let groups = vec!["alt.binaries.test".to_string()];
     let xml = pesto::nzb::generate(
         &groups,
@@ -130,7 +138,7 @@ fn write_nzb(dir: &Path, segments: Vec<PostedSegment>) -> std::path::PathBuf {
         &NzbMeta::default(),
         pesto::config::ObfuscateMode::None,
     );
-    let nzb_path = dir.join("test.nzb");
+    let nzb_path = dir.join(file_name);
     std::fs::write(&nzb_path, xml).unwrap();
     nzb_path
 }
@@ -184,6 +192,15 @@ fn run_penne_download_quiet(nzb_path: &Path, config_path: &Path) -> Output {
         .arg(nzb_path)
         .args(["--config", config_path.to_str().unwrap()])
         .arg("--quiet")
+        .output()
+        .unwrap()
+}
+
+fn run_penne_download_multi(nzb_paths: &[std::path::PathBuf], config_path: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_penne"))
+        .arg("download")
+        .args(nzb_paths)
+        .args(["--config", config_path.to_str().unwrap()])
         .output()
         .unwrap()
 }
@@ -495,6 +512,94 @@ fn quiet_suppresses_the_live_progress_panel() {
 
     let written = std::fs::read(download_dir.join("greeting.txt")).unwrap();
     assert_eq!(written, data);
+}
+
+#[test]
+fn download_processes_multiple_nzbs_each_into_its_own_subdirectory() {
+    // Both releases ship a same-named file. Passing both `.nzb`s to one
+    // `penne download` invocation must not let the second overwrite the
+    // first — each release beyond the first gets its own subdirectory named
+    // after its `.nzb` file's stem.
+    let data_a = b"release A's greeting".to_vec();
+    let data_b = b"release B's greeting".to_vec();
+    let encoded_a = encode_part(
+        "greeting.txt",
+        data_a.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &data_a,
+        128,
+        None,
+    );
+    let encoded_b = encode_part(
+        "greeting.txt",
+        data_b.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        &data_b,
+        128,
+        None,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("art-a@test", encoded_a.body);
+    known.insert("art-b@test", encoded_b.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+    let nzb_a = write_nzb_named(
+        dir.path(),
+        "release-a.nzb",
+        vec![segment(
+            "greeting.txt",
+            1,
+            1,
+            "art-a@test",
+            data_a.len() as u64,
+        )],
+    );
+    let nzb_b = write_nzb_named(
+        dir.path(),
+        "release-b.nzb",
+        vec![segment(
+            "greeting.txt",
+            1,
+            1,
+            "art-b@test",
+            data_b.len() as u64,
+        )],
+    );
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download_multi(&[nzb_a, nzb_b], &config_path);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("=== [1/2]") && stdout.contains("=== [2/2]"),
+        "expected a per-release banner for each item:\n{stdout}"
+    );
+
+    assert_eq!(
+        std::fs::read(download_dir.join("release-a").join("greeting.txt")).unwrap(),
+        data_a
+    );
+    assert_eq!(
+        std::fs::read(download_dir.join("release-b").join("greeting.txt")).unwrap(),
+        data_b
+    );
 }
 
 #[test]

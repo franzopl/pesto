@@ -66,8 +66,24 @@ testable state.
 - [x] `penne::nzb::summarize` — file/segment/byte counts (`penne info`).
 - [x] `penne::queue::build` — group parsed segments into `QueuedFile`/`QueuedSegment`
       (pure data, no I/O; drives Phase 2 onward).
-- [ ] Handle multi-`.nzb` batch input (a queue of queues) once single-file
-      download works end-to-end.
+- [x] **Handle multi-`.nzb` batch input (a queue of queues).** `penne
+      download` takes `nzb: Vec<PathBuf>` (was a single `PathBuf`); each is
+      still routed through the exact same single-item pipeline (unchanged
+      behavior for one file), just called in a sequential loop from `main`.
+      Each release beyond the first downloads into its own subdirectory
+      (its `.nzb`'s file stem) under the shared destination, so two releases
+      shipping a same-named file — a routine reality (`readme.txt`,
+      generically-named `.par2` sets) — can't collide; a single `.nzb` keeps
+      the old flat destination, unchanged. The overall exit code is the
+      worst (highest, per Phase 5's 0/1/2/3 scale) of any individual
+      release's own code, so one incomplete release in a batch of ten still
+      fails the run. A per-item `Err` (bad NZB, network failure) is caught
+      and mapped to that item's own `EXIT_FATAL` rather than aborting the
+      rest of the batch — mirroring how `main` already handles the
+      single-item case, just per iteration instead of once. New end-to-end
+      test `download_processes_multiple_nzbs_each_into_its_own_subdirectory`
+      proves the collision case specifically (two releases, same inner file
+      name, same command).
 
 ## Phase 2 — NNTP article retrieval ✅
 
