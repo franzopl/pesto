@@ -3866,6 +3866,17 @@ async fn generate_season_par2(episode_paths: &[PathBuf], config: &Config) -> Res
         total_slices, recovery_count, "season PAR2 geometry"
     );
 
+    // Validate PAR2 spec limits — same check `producer()` does for the
+    // per-file path. Sharing `par2_geometry_from_sizes` between the two
+    // paths means an explicit `--par2-slice-count`/`--par2-recovery-count`
+    // can equally overflow the GF(2^16) exponent space here.
+    if total_slices > 32768 {
+        anyhow::bail!("too many input slices: {total_slices} (max 32768). Increase --slice-size or decrease --slice-count.");
+    }
+    if recovery_count > 65535 {
+        anyhow::bail!("too many recovery blocks: {recovery_count} (max 65535). Increase --slice-size or decrease --par2/--recovery-count.");
+    }
+
     if total_slices == 0 {
         return Ok(SeasonPar2Set::empty());
     }
