@@ -256,7 +256,12 @@ The remaining gap against the legacy Python version.
 - [ ] Double-buffered writer / buffer pool on the assembly path.
 - [ ] Incremental extraction (`DirectUnpack`-style).
 - [ ] Benchmark against a real indexer/provider pair.
-- [ ] Add `penne` to the release workflow once its CLI surface is stable.
+- [x] **Add `penne` to the release workflow.** Already done, predating this
+      file — `.github/workflows/release-penne.yml` exists, mirrors
+      `release-pesto.yml`/`release-parmesan.yml` (Linux glibc/musl + Windows
+      binaries on a `penne-v*` tag push, GitHub Release pointing at
+      `crates/penne/CHANGELOG.md`), and has cut four real releases
+      (`penne-v0.1.0` through `penne-v0.4.1`). This item was stale.
 
 ---
 
