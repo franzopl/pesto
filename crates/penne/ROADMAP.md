@@ -834,17 +834,32 @@ time before finally printing `PAR2: all files verified intact`.
          could dominate real-world throughput independent of anything in
          `penne`. Flagged to the reporter directly — freeing space on that
          volume is outside this codebase's scope to fix.
-- [ ] **Still open**: `verify()` remains single-threaded and sequential
-      across files even in `--release` — `parmesan` already depends on
-      `rayon` (used extensively by the encoder for Reed-Solomon), so
-      parallelizing slice verification is a contained, believable further
-      win if the ~12–16s `--release` figure for a single very large file
-      is ever still worth cutting down. A live progress readout for the
-      verify phase (mirroring `pesto`'s existing
-      `Par2EncodeStarted`/`Par2InputProgress` events on the posting side)
-      is a separate, larger piece of work spanning `parmesan`,
-      `penne::repair`, and `penne::ui` — deferred until the status-line
-      fix plus the assembly speedup above prove insufficient on their own.
+- [x] **Investigated: parallelizing `verify()`'s slice checksums — no
+      measurable win, reverted.** Implemented and benchmarked before
+      committing: `parmesan::verify::verify_with_progress` read slices in
+      batches (bounded to 16 MiB) and hashed each batch's slices across
+      every core via `rayon::par_chunks` instead of one at a time,
+      correctness-tested including a cross-batch-offset regression test and
+      the real `par2cmdline` compat suite (all green). A/B timing on a 250
+      MiB synthetic file in `--release`, same machine, same fixture:
+      **568.6 MiB/s sequential vs. 573.6 MiB/s parallel — within noise, no
+      real improvement.** Root cause: this phase's own earlier benchmark
+      (immediately above) measured `--release` at 567 MiB/s vs. an
+      unoptimized *debug* build at 49 MiB/s and concluded verify was
+      "CPU-bound" — true for the debug build, but at `--release` speed
+      MD5+CRC32 is already fast enough that sequential file reads (even
+      page-cache-warm) dominate wall time instead, so fanning the hash step
+      out across cores has nothing to hide behind. `rayon` parallelizes
+      compute, not I/O — this workload's `--release` bottleneck turned out
+      to be the latter. Reverted rather than shipping unproven complexity
+      (batch buffering, offset math, a test-only tuned constant). If this
+      is revisited, profile the read path itself (syscall count, buffer
+      sizing) rather than the hash step.
+- [ ] A live progress readout for the verify phase (mirroring `pesto`'s
+      existing `Par2EncodeStarted`/`Par2InputProgress` events on the posting
+      side) is a separate, larger piece of work spanning `parmesan`,
+      `penne::repair`, and `penne::ui` — deferred until the status-line fix
+      plus the assembly speedup above prove insufficient on their own.
 
 ---
 
