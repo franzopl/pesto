@@ -1709,6 +1709,19 @@ impl App {
         self.upload_in_progress = true;
         self.upload_started_at = Some(Instant::now());
 
+        // Unlike the manual queue's `y`-to-confirm flow (which already jumps
+        // to the Dashboard as part of that explicit action), a watch upload
+        // starts on its own — surface it unless the user is mid-edit
+        // somewhere else, where yanking the screen away would lose context.
+        if !self.watch.editing
+            && !self.config_state.editing
+            && !self.confirm_editing
+            && !self.log_panel.searching
+            && !self.history.searching
+        {
+            self.state = AppState::Dashboard;
+        }
+
         let token = CancellationToken::new();
         self.current_cancel_token = Some(token.clone());
         let pause_flag = Arc::new(AtomicBool::new(false));

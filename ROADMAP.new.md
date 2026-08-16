@@ -212,7 +212,13 @@ The remaining gap against the legacy Python version.
 - [ ] **Metadata enrichment**: TMDb lookup, improved NFO generation.
 - [ ] **First-run setup wizard.**
 - [ ] Directory-level queuing (Space on a directory marks its files recursively).
-- [ ] Auto-switch to Dashboard when an upload starts.
+- [x] **Auto-switch to Dashboard when an upload starts.** Manual uploads already
+      did this as part of the explicit `y`-to-confirm action; watch-triggered
+      uploads didn't, since they start on their own with no confirm step —
+      `App::begin_watch_upload` now jumps to the Dashboard too, unless the
+      user is mid-edit somewhere else (Config/Watch field editing, the
+      upload-confirm panel, or an active search), where yanking the screen
+      away would lose their typing.
 - [x] **Real pause.** `upload::run_upload` now takes a `pause` flag threaded
       through to `poster::post_files_inner`'s `external_pause`; the TUI's `p`
       key on the Dashboard toggles it (`App::toggle_pause_upload`), with a
