@@ -7,6 +7,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`penne download` exit codes distinguishing fully complete, complete
+  after repair, and incomplete.** Previously any `Result<()>` `Ok` exited 0
+  regardless of whether PAR2 had to repair something, or whether data was
+  still missing/damaged after a run under `--mode download` (which skips
+  repair) — the latter case exited 0 even though the release wasn't
+  actually usable. Now: `0` = every file complete, nothing needed fixing;
+  `1` = PAR2 repaired something but the end result is complete; `2` =
+  incomplete (PAR2 couldn't fix it, no recovery data was found, or repair
+  was skipped by `--mode`); `3` = a fatal error (config/network/I/O).
+- **`-v`/`--verbose` and `--log-file`**, global flags matching `pesto`'s own
+  convention exactly (`-v`/`-vv`/`-vvv` = INFO/DEBUG/TRACE, reusing
+  `pesto::logging::init` directly instead of the bare
+  `tracing_subscriber::fmt::init()` call, which had no verbosity control at
+  all).
+- **`penne download -q`/`--quiet`**, matching `pesto`'s `--quiet`: suppresses
+  the live progress panel, leaving only the status/result lines. `penne
+  check` already had its own `--quiet`; `download` didn't.
+
 ## [0.4.1] — 2026-08-12
 
 ### Fixed
