@@ -1581,6 +1581,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "indicatif",
+ "libc",
  "md-5",
  "proptest",
  "rayon",

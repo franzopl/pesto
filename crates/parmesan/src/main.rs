@@ -1,3 +1,5 @@
+mod memory;
+
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use md5::{Digest, Md5};
@@ -207,8 +209,9 @@ const KNOWN_FIRST_ARGS: [&str; 8] = [
     "--version",
 ];
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Must run before any thread exists — see `memory` module docs (#137).
+    memory::tune_allocator();
     tracing_subscriber::fmt::init();
 
     // Bare invocation (`parmesan <files>...`) aliases to `create` for
@@ -221,11 +224,16 @@ async fn main() -> Result<()> {
     }
     let cli = Cli::parse_from(args);
 
-    match cli.command {
-        Command::Create(args) => run_create(args).await,
-        Command::Verify(args) => run_verify(args),
-        Command::Repair(args) => run_repair(args),
-    }
+    // A hand-built runtime instead of `#[tokio::main]`'s default, which
+    // sizes worker threads to `nproc` — see `memory::build_runtime`.
+    let rt = memory::build_runtime()?;
+    rt.block_on(async move {
+        match cli.command {
+            Command::Create(args) => run_create(args).await,
+            Command::Verify(args) => run_verify(args),
+            Command::Repair(args) => run_repair(args),
+        }
+    })
 }
 
 async fn run_create(cli: CreateArgs) -> Result<()> {

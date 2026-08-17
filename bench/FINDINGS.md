@@ -412,6 +412,84 @@ parmesan is clearly ahead of both.
 
 ---
 
+## 8. `parmesan create` exhausted virtual address space on high-core machines, independent of `--memory-limit`
+
+**Fixed in [#137](https://github.com/franzopl/pesto/issues/137).** On a
+128-core remote box with a restrictive `RLIMIT_AS` (`ulimit -v`, applied
+system-wide via PAM `limits.conf` — a real shared-host/HPC/container
+pattern, not a benchmarking quirk), `parmesan create` panicked well inside
+the configured `--memory-limit 1024MiB`:
+
+```
+thread 'main' panicked at crates/parmesan/src/encoder.rs:351:13:
+PAR2 recovery buffer allocation failed (202 blocks × 1101824 bytes): memory allocation failed because the memory allocator returned an error
+```
+
+`parpar` and `par2cmdline` completed the identical workload/geometry under
+the same `ulimit -v` without issue.
+
+**Root cause, confirmed by direct `VmPeak` A/B measurement** (not assumed —
+this machine only has 12 cores, so the original panic doesn't reproduce
+here, but the mechanism does and scales the same way): the recovery buffer
+itself was never the problem — `RecoveryEncoder::new_smart` only ever
+allocates `recovery_count × slice_size` for the pass currently running, and
+`ops::ingest_files` streams input in 8 MiB chunks rather than reading whole
+files. What actually consumed the address space was thread fan-out that ran
+*before* either of those:
+
+- `#[tokio::main]`'s default multi-thread runtime spawned one worker thread
+  per core, even though `ingest_files` only ever drives one file at a time
+  (one `spawn_blocking` reader feeding an await loop) and never needed more
+  than a couple.
+- glibc's malloc creates up to `8 × ncores` per-thread arenas by default,
+  each reserving tens of MiB of address space — nearly RSS-free, counted in
+  full against `RLIMIT_AS`, and never returned. With the tokio pool and the
+  rayon pool (`performance_core_count`, correctly sized to physical cores
+  for real RS throughput) both contending on malloc, arena growth alone
+  dwarfed the actual working set.
+
+Same 20 MB workload, `-t $(nproc)` (12 here), median of 3 runs, peak
+`VmPeak` from `/proc/<pid>/status` polled at 10 ms while the process ran:
+
+| build | `VmPeak` |
+|---|---:|
+| before (unmodified `#[tokio::main]`, default glibc arenas) | 1 897 480 KiB (**1.81 GiB**) |
+| before + `MALLOC_ARENA_MAX=2` only (arena cap, thread counts unchanged) | 193 544 KiB (189 MiB) |
+| after (capped tokio workers **and** `mallopt(M_ARENA_MAX, 2)`) | 171 912 KiB (168 MiB) |
+
+**A 11× reduction, and the arena cap alone accounts for ~90% of it** — on a
+12-core box. Both mechanisms scale with `ncores` (arena count directly;
+tokio's default worker count 1:1), so the gap between "before" and "after"
+grows with core count: this is consistent with the issue's own estimate of
+a ~1 GiB glibc floor on 16 cores and ~8 GiB on 128, which is what turned a
+222 MiB recovery buffer into an allocation failure on the reporting
+machine.
+
+**Fix** (`crates/parmesan/src/memory.rs`, applied at the top of `main`,
+before any thread exists):
+
+- `tune_allocator()` — `mallopt(M_ARENA_MAX, 2)`, matching the value
+  `pesto` itself already uses for the same reason
+  (`crates/pesto/src/memory/mod.rs`). No-op on musl (no per-core arenas
+  there) and non-Unix.
+- `build_runtime()` — a hand-built tokio runtime with `worker_threads(4)`,
+  `max_blocking_threads(16)` and 1 MiB stacks, replacing
+  `#[tokio::main]`'s `ncores`/512/2 MiB defaults. Still multi-threaded:
+  `ingest_files` uses `block_in_place`, which requires it.
+- The rayon pool is deliberately **not** capped — it's the genuinely
+  CPU-bound stage and stays sized to `performance_core_count()` for
+  throughput, same as `pesto`'s equivalent split (rayon scaled, tokio
+  capped) in its own memory module.
+
+`bench/run.sh par2` was not re-run under a simulated `ulimit -v` as part of
+this fix (no high-core machine available); the measurement above isolates
+and confirms the mechanism instead. Re-running the full repro from the
+issue (`ulimit -Sv 10000000; ulimit -Hv 10000000; ./bench/run.sh par2
+--workload movie-1080p --yes`) on an actual high-core box remains open
+follow-up if the panic recurs.
+
+---
+
 ## Bugs the suite found in itself
 
 Worth recording, because they are the reason to trust the numbers above.
@@ -465,6 +543,10 @@ report:
    documented trade-off for hybrid-CPU safety (see the note added to §2
    above). Closed as working as intended,
    [#132](https://github.com/franzopl/pesto/issues/132).
+7. ~~Fix `parmesan create`'s address-space blowup on high-core machines~~ —
+   done, [#137](https://github.com/franzopl/pesto/issues/137): capped tokio
+   worker threads and glibc malloc arenas independent of `nproc`, an 11×
+   `VmPeak` reduction measured on this machine. Details in §8.
 
 ---
 
