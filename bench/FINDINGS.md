@@ -231,6 +231,74 @@ no real gain" (#126). These numbers do not contradict that — verify is already
 ahead — but they do suggest **repair** deserves the same experiment, and it is
 a different code path.
 
+**Fixed in [#131](https://github.com/franzopl/pesto/issues/131).** The 47%
+`many-small` create gap above was root-caused by profiling (`perf record` +
+`strace -f -c`), not assumed, and the actual mechanism was neither of the two
+things it was easiest to suspect:
+
+- **Not the encoder's flush cache-blocking.** `RecoveryEncoder::add_slice`
+  flushes every 128 queued slices or `flush_limit_bytes` (256 MiB),
+  whichever comes first — for `many-small`'s 64 KiB slices that is the
+  128-slice branch, well short of the byte budget. Tested removing the count
+  cap entirely (byte limit only): wall time got *worse* (2.05s → 2.1–2.5s)
+  and peak RSS went up 7.7× (79 MiB → 611 MiB). The cache-blocking is
+  correctly tuned, not a bug — ruled out.
+- **Not the #137 tokio worker-pool cap.** With `#[tokio::main]`'s old
+  default (one worker per core — 12 here — instead of #137's fixed 4),
+  the same workload measured 2.2–2.46s: slightly *slower* than the current
+  2.05s baseline, not faster. #137 did not regress this path — ruled out.
+
+`perf record -g` (cycles) on `many-small` showed ~63% of *executed* cycles
+inside the RS SIMD kernel (real work) but only ~300% average CPU use out of
+a 600% ceiling (`-t 6`); `strace -f -c` on the same run showed **22,270
+`futex` calls (3.29s cumulative) and 7,578 `sched_yield`** in a 2.05s
+wall-clock run — threads parking and waking far more than they compute.
+`ops::ingest_files` processes its `for file_info in files` loop strictly one
+file at a time: each file pays a fresh `tokio::sync::mpsc::channel` plus a
+`spawn_blocking` reader task and a channel round-trip, even when the entire
+file is one syscall — with 2 000 files, that ceremony is paid 2 000 times
+regardless of size, while the rayon pool sits idle except during the rare
+flush bursts big enough to need it.
+
+**Fix** (`crates/parmesan/src/ops.rs`): files that fit in one read (≤
+`CHUNK_SIZE`, 8 MiB — the same constant the streaming reader already chunks
+by) skip the channel and task-spawn entirely and are read with a single
+`std::fs::read` inside one `block_in_place`, then fed through the same
+slice-accumulation logic (extracted into `feed_chunk`, shared verbatim with
+the unchanged streaming path so large-file behavior — and the `held`/
+`is_last_of_file` bookkeeping this module's doc comment warns about — is
+byte-for-byte identical to before). Slice order and per-file sequencing are
+untouched, so this is an I/O-strategy change only, not a reordering: PAR2's
+Reed-Solomon coefficients are positional (see `sort_files_by_file_id`'s
+doc comment), and the hasher thread still consumes slices in the same order.
+
+Official suite numbers, `./bench/run.sh par2 --workload many-small --scale
+0.25 --reps 5` (the exact repro command from #131), median of 5:
+
+| tool | before | after | vs before |
+|---|---:|---:|---:|
+| parmesan | 72.3 MiB/s | **178.3 MiB/s** | **+147%** |
+| parpar | 136.6 MiB/s | 135.6 MiB/s (noise) | — |
+
+**parmesan now beats parpar by 31% on `many-small`** (178.3 vs 135.6 MiB/s),
+a full reversal from being 47% behind. `mixed-folder` and `movie-1080p` — both
+already on the streaming (unchanged) code path — were re-measured to confirm
+no regression; the ~5–10% deltas seen there are within this machine's
+`powersave`-governor noise (see "Two caveats" at the top of this file), not a
+code-path change, since neither workload's files are small enough to take the
+new branch. All 9 checks in `bench/suites/60-correctness.sh` pass, plus the
+full `#[ignore]`d `par2cmdline_compat` cross-tool suite (byte-exact repairs
+both directions, unicode filenames, multi-file damage).
+
+This fix is in `parmesan`'s own `ops::ingest_files`, used by the standalone
+`parmesan create` CLI measured in this table. `pesto`'s poster
+(`crates/pesto/src/poster/mod.rs`) has its own separate file-ingestion loop —
+it uses `Par2Worker`/`RecoveryEncoder` directly rather than
+`ops::ingest_files`, to overlap PAR2 generation with upload — so §5's
+`many-small` end-to-end row is a *different* code path and was not measured
+as part of this fix; whether it has an analogous per-file overhead problem is
+open, not assumed fixed here.
+
 ---
 
 ## 4. Pipeline stages: where the time actually goes
@@ -545,9 +613,12 @@ report:
    [#130](https://github.com/franzopl/pesto/issues/130): 20-53% wall-clock
    gain (sub-linear, bandwidth-bound — see §3), `many-small` repair now beats
    par2cmdline instead of losing to it. Details above.
-2. **Investigate the small-file PAR2 path.** 47% behind parpar on
-   `many-small`, and it is what makes the only end-to-end row pesto loses.
-   — [#131](https://github.com/franzopl/pesto/issues/131), blocked on (5)
+2. ~~Investigate the small-file PAR2 path.~~ — done,
+   [#131](https://github.com/franzopl/pesto/issues/131): root-caused by
+   profiling to per-file task/channel overhead in `ops::ingest_files`, not
+   the encoder's flush cadence or the #137 thread tuning (both tested and
+   ruled out). `many-small` create: 72.3 → 178.3 MiB/s (+147%), now 31%
+   *ahead* of parpar instead of 47% behind. Details above.
 3. **Look at posting a single large file, and the connection-pool regression
    past 4 connections.** 0.54× nyuu at 0 ms on one big file, while being
    2.7× nyuu on many small files; the connection curve peaking then falling
