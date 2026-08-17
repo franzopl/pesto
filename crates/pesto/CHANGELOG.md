@@ -26,6 +26,42 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   same behavior as before; the CLI's own `season-par2` sub-upload does this,
   since PAR2 volumes have no pause UI to drive it. This is the library-side
   half of real pause/resume in `upapasta`'s TUI — see its `ROADMAP.md` Phase 46.
+- **The final automatic recovery pass (`check::recover_missing`) gets its own "recover" box and phase label in
+  the terminal panel**, instead of leaving it to look frozen. Before this, once the streaming check queue
+  drained, `CheckDone` already turned `check_active` off — so the panel had nothing to show but a static 100%
+  upload bar, an idle connection grid, and a header that fell through to a mislabeled "writing PAR2" (nothing
+  distinguished the recovery phase from that fallback branch). New `ProgressEvent::CheckRecoverStarted`/
+  `CheckRecoverProgress` events carry a real done/total count and per-article outcome for this pass, including
+  on failure — a repost or final-STAT failure inside the pass used to be completely silent (a `tracing::warn!`
+  only, invisible without `-v`).
+- **The `conns` line shows real check-pool activity, not just its configured size.** New
+  `ProgressEvent::CheckConnectionBusy`/`CheckConnectionIdle` events (only fired while a check-pool connection is
+  actually doing a STAT or repost) drive a per-connection dot row and an `X/N check` count, the same treatment
+  the upload pool's own connections already got. `CheckPoolScaledUp` also keeps that count accurate once the
+  upload's connections join in to help drain a backlog (`CheckCoordinatorHandle::scale_up`) — previously the
+  panel kept showing the smaller pool size announced at `Started` even after it grew.
+- **`ui::render::wrap()`**: word-wraps long panel status/failure text across a few lines (capped at 4, so a
+  status with no natural size limit — arbitrary hook output, a long list of empty-file names — still can't grow
+  the panel unbounded) instead of silently cutting it with `truncate()`'s single `…`. Dense one-line status
+  messages, like the PAR2 memory-budget banner (`memory: address-space limit … | reserved for overhead … |
+  PAR2 budget …/pass`), lost their back half on a normal-width terminal with no way to read the rest.
+
+### Changed
+- **The final automatic recovery pass (`check::recover_missing`) now runs concurrently**, bounded by
+  `Config::effective_check_connections()` — the same connection budget the streaming check itself uses — instead
+  of reposting-and-verifying one stubborn article at a time. A batch near `check_recover_max`'s default of 50
+  could previously take minutes strictly serially (repost + `check_delay_secs` + STAT, one article after
+  another) with the upload already sitting at 100% and every connection idle.
+
+### Fixed
+- **The panel header no longer claims "writing PAR2" during the final recovery pass.** The fallback branch that
+  shows once the upload and streaming check are both done (`!self.files.is_empty() && !self.finished`) used to
+  be the only thing left once `check_active` turned off, regardless of whether PAR2 writing was actually
+  running.
+- **A confirmed recovery now corrects the final summary's "missing"/"reposted" tallies.** `CheckDone` snapshots
+  the missing count before the recovery pass gets a chance to fix anything; a successful recovery used to leave
+  that snapshot stale, so the run summary could go on reporting an article as missing after it had actually been
+  confirmed present.
 
 ## [0.7.0] — 2026-08-11
 

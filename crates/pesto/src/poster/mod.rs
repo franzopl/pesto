@@ -1265,13 +1265,11 @@ pub async fn post_files_inner(
                     .cloned()
                     .collect()
             };
-            shared.emit(ProgressEvent::Status {
-                text: format!(
-                    "check: {} article(s) still missing after every round; \
-                     attempting one more automatic recovery pass",
-                    candidates.len()
-                ),
-            });
+            // `recover_missing` itself emits `CheckRecoverStarted`/
+            // `CheckRecoverProgress` (structured, so the renderer can show a
+            // real progress box instead of a one-shot status line — see
+            // `ui::terminal`'s "recover" box).
+            //
             // `recover_missing` returns *fresh* Message-IDs (every repost
             // gets a new one — see `repost_one`), so its output can never be
             // matched directly against `still_missing`'s old ids. Snapshot

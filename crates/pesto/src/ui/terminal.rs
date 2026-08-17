@@ -1,7 +1,7 @@
 use crate::progress::{ProgressEvent, ProgressReceiver, ProgressSender, RendererOptions, RunMode};
 use crate::ui::render::{
     ansi, box_bottom, box_line, box_top, format_duration, render_bar, render_sparkline,
-    terminal_width, truncate, SUBCHAR,
+    terminal_width, truncate, visible_len, wrap, SUBCHAR,
 };
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
@@ -188,8 +188,18 @@ struct RenderState {
     plain_connections_printed: bool,
     /// Number of NNTP connections dedicated to the streaming STAT check,
     /// separate from `conn_files`/`conn_state` (upload connections only).
-    /// 0 when checking is disabled.
+    /// 0 when checking is disabled. Grows past the `Started`-announced
+    /// value on `CheckPoolScaledUp` (see `check::CheckCoordinatorHandle::
+    /// scale_up`), so this is always the pool's *current* size.
     check_connections: usize,
+    /// Busy/idle state of each check-pool connection, indexed the same way
+    /// as `conn_state` but in the check pool's own numbering — a connection
+    /// is `Busy` only while actually doing a STAT or repost, `Idle`
+    /// otherwise (polling an empty queue, or every ready item still inside
+    /// its retry/repost delay). Without this the `conns` line only ever
+    /// showed the check pool's *configured* size, with no way to tell a
+    /// pool working through a backlog from one sitting on backoffs.
+    check_conn_state: Vec<ConnState>,
     /// File currently posted by each worker connection (`None` = idle).
     conn_files: Vec<Option<String>>,
     /// Per-file `(done, total)` segment counts, for the file tally.
@@ -278,6 +288,21 @@ struct RenderState {
     /// resolved article, so a fast-moving pool of concurrent check workers
     /// doesn't wipe it before the user can read it.
     check_retry: Option<(String, Instant)>,
+    // Final automatic recovery pass (`poster::check::recover_missing`) — runs
+    // strictly *after* the streaming check queue has fully drained
+    // (`check_active` is already false by the time this starts), for a
+    // small, bounded tail of articles that never got confirmed. It has its
+    // own phase/box rather than reusing the check box: it is sequential
+    // (one article at a time), so without a dedicated indicator the panel
+    // showed a 100% upload bar, an idle connection grid, and nothing else
+    // moving for however long the batch took.
+    recover_active: bool,
+    recover_done: u64,
+    recover_total: u64,
+    /// Resolutions in this batch that came back `ok: false` (repost failed,
+    /// or the final STAT still couldn't confirm it).
+    recover_failed: u64,
+    recover_start: Instant,
     // PAR2 input slice encode progress
     par2_encode_done: usize,
     par2_encode_total: usize,
@@ -309,6 +334,7 @@ impl RenderState {
             plain_failed_printed: false,
             plain_connections_printed: false,
             check_connections: 0,
+            check_conn_state: Vec::new(),
             conn_files: Vec::new(),
             files: HashMap::new(),
             lines_drawn: 0,
@@ -332,6 +358,11 @@ impl RenderState {
             check_reposted: 0,
             check_start: Instant::now(),
             check_retry: None,
+            recover_active: false,
+            recover_done: 0,
+            recover_total: 0,
+            recover_failed: 0,
+            recover_start: Instant::now(),
             par2_encode_done: 0,
             par2_encode_total: 0,
             par2_encode_start: Instant::now(),
@@ -374,6 +405,7 @@ impl RenderState {
                 self.check_connections = check_connections;
                 self.conn_files = vec![None; connections];
                 self.conn_state = vec![ConnState::Idle; connections];
+                self.check_conn_state = vec![ConnState::Idle; check_connections];
                 for f in files {
                     self.total_segments += f.segments;
                     self.total_bytes += f.bytes;
@@ -571,6 +603,50 @@ impl RenderState {
                 self.check_active = false;
                 self.check_failed = failed;
                 self.check_retry = None;
+            }
+            ProgressEvent::CheckRecoverStarted { total } => {
+                self.recover_active = true;
+                self.recover_done = 0;
+                self.recover_total = total;
+                self.recover_failed = 0;
+                self.recover_start = Instant::now();
+            }
+            ProgressEvent::CheckRecoverProgress { done, total, ok } => {
+                self.recover_done = done;
+                self.recover_total = total;
+                if ok {
+                    // This article was part of `check_failed`'s count from
+                    // `CheckDone` (that's how it ended up in this batch);
+                    // now that it's confirmed, the "missing" tally and the
+                    // final summary line must reflect that instead of
+                    // freezing on the pre-recovery number. Also counts
+                    // toward `check_reposted` — the streaming coordinator's
+                    // own counter never sees recovery-pass reposts, since
+                    // `recover_missing` runs standalone, after that
+                    // coordinator has already shut down.
+                    self.check_failed = self.check_failed.saturating_sub(1);
+                    self.check_reposted += 1;
+                } else {
+                    self.recover_failed += 1;
+                }
+                if done >= total {
+                    self.recover_active = false;
+                }
+            }
+            ProgressEvent::CheckConnectionBusy { conn } => {
+                if let Some(s) = self.check_conn_state.get_mut(conn) {
+                    *s = ConnState::Busy;
+                }
+            }
+            ProgressEvent::CheckConnectionIdle { conn } => {
+                if let Some(s) = self.check_conn_state.get_mut(conn) {
+                    *s = ConnState::Idle;
+                }
+            }
+            ProgressEvent::CheckPoolScaledUp { check_connections } => {
+                self.check_connections = check_connections;
+                self.check_conn_state
+                    .resize(check_connections, ConnState::Idle);
             }
         }
     }
@@ -819,6 +895,13 @@ impl RenderState {
 
         let eta_str = if final_draw {
             format!("done {}", format_duration(self.elapsed_secs()))
+        } else if self.recover_active {
+            // `pct` is already 100% here (it tracks upload segments, and the
+            // recovery pass only starts once every one of those is done),
+            // so without this the quiet line reads "100% · ETA —" for
+            // however long the sequential recovery batch takes — visually
+            // indistinguishable from a hang.
+            format!("recovering {}/{}", self.recover_done, self.recover_total)
         } else if let Some((secs, unstable)) = self.overall_eta_secs() {
             let mark = if unstable { "~" } else { "" };
             format!("ETA {mark}{}", format_duration(secs))
@@ -1085,6 +1168,15 @@ impl RenderState {
             ansi("posting data", "32") // green
         } else if self.check_active {
             ansi("verifying", "34") // blue — matches the check bar's band
+        } else if self.recover_active {
+            // Must come before the "writing PAR2" fallback below: once the
+            // upload and streaming check are both done, that fallback's
+            // `!self.files.is_empty() && !self.finished` condition is true
+            // for the *entire* recovery pass too (nothing else distinguishes
+            // them), so without this branch the header lied about "writing
+            // PAR2" while pesto was actually reposting stubborn misses one
+            // at a time.
+            ansi("recovering", "31") // red — a handful of articles needed reposting
         } else if self.par2_write_active || (!self.files.is_empty() && !self.finished) {
             ansi("writing PAR2", "36") // cyan
         } else if self.finished {
@@ -1263,6 +1355,43 @@ impl RenderState {
                 lines.push(box_bottom(body_w));
             }
 
+            // --- final recovery pass box ------------------------------------
+            // Only ever active once `check_active` above has already gone
+            // false (see `poster::post_files_inner`: the streaming check
+            // queue fully drains, *then* this bounded pass runs on whatever
+            // small tail is left) — the two boxes never show at the same
+            // time. Has its own bar (unlike the check box) because, unlike
+            // the streaming check, this pass has a known, fixed total up
+            // front (`CheckRecoverStarted`), so a real percentage is
+            // meaningful here.
+            if self.recover_active || (final_draw && self.recover_total > 0) {
+                let frac = if self.recover_total > 0 {
+                    (self.recover_done as f64 / self.recover_total as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let pct = (frac * 100.0).round() as u64;
+                let bar = render_bar(frac, bar_w);
+                let line1 = format!(
+                    "[{bar}] {pct:>3}%  {}/{} article(s)",
+                    self.recover_done, self.recover_total
+                );
+                let ok_count = self.recover_done.saturating_sub(self.recover_failed);
+                let mut line2 = ansi(&format!("{ok_count} recovered"), CHECK_BAND_COLOR);
+                if self.recover_failed > 0 {
+                    line2.push_str(&format!(
+                        " · {}",
+                        ansi(&format!("{} still missing", self.recover_failed), "31")
+                    ));
+                }
+                let elapsed = self.recover_start.elapsed().as_secs_f64().max(0.001);
+                line2.push_str(&format!(" · elapsed {}", format_duration(elapsed)));
+                lines.push(box_top("recover", body_w));
+                lines.push(box_line(&line1, body_w));
+                lines.push(box_line(&line2, body_w));
+                lines.push(box_bottom(body_w));
+            }
+
             // --- per-connection activity as a single dot row --------------
             // Was a two-per-line grid of `conn N ▸ file` cells: up to six rows
             // that, since every worker posts the *same* file, repeated one
@@ -1291,8 +1420,29 @@ impl RenderState {
                 } else {
                     String::new()
                 };
+                // Real activity, not just the configured pool size: a check
+                // pool sitting entirely on 20-second STAT-retry backoffs
+                // used to look identical to one actively working through a
+                // backlog — both just said "N check".
                 let check_str = if self.check_connections > 0 {
-                    format!(" · {} check", self.check_connections)
+                    let check_active = self
+                        .check_conn_state
+                        .iter()
+                        .filter(|&&s| s == ConnState::Busy)
+                        .count();
+                    let check_dots = if self.check_connections <= GRID_LIMIT {
+                        let mut s = String::from(" ");
+                        for st in &self.check_conn_state {
+                            s.push_str(&conn_dot(*st));
+                        }
+                        s
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        " ·{check_dots} {check_active}/{} check",
+                        self.check_connections
+                    )
                 } else {
                     String::new()
                 };
@@ -1397,8 +1547,16 @@ impl RenderState {
         }
 
         // --- optional status / interrupt / failure note -------------------
+        // Both branches below can carry information-dense free text (a
+        // long filename plus a network error message; a multi-clause status
+        // like the PAR2 memory-budget banner) that easily exceeds one
+        // terminal row. `truncate`-ing it to fit used to just cut the back
+        // half off with a bare "…" and no way to read the rest. Word-wrap
+        // it across a few lines instead — bounded by `STATUS_MAX_LINES` so
+        // a genuinely unbounded value (arbitrary hook output, a long list
+        // of file names) still can't make the panel grow without limit.
         if let Some(desc) = &self.failed_description {
-            lines.push(format!("⚠ {desc}"));
+            lines.extend(wrapped_note("⚠ ", desc, width));
         } else if self.interrupted {
             lines.push("⚠ interrupt received — finishing in-flight segments".to_string());
         } else if !self.status.is_empty() {
@@ -1407,7 +1565,8 @@ impl RenderState {
             } else {
                 String::new()
             };
-            lines.push(format!("▸ {}{}", self.status, elapsed_str));
+            let full = format!("{}{}", self.status, elapsed_str);
+            lines.extend(wrapped_note("▸ ", &full, width));
         }
 
         lines
@@ -1491,6 +1650,28 @@ impl RenderState {
             return;
         }
 
+        // Final recovery pass — see the TTY panel's "recover" box. Its own
+        // early-return branch for the same reason as `compress_active`/
+        // `par2_write_active` above: without one, this sequential,
+        // potentially multi-minute pass produced no plain-mode output at all
+        // once the streaming check's `check_active` suffix below stopped
+        // applying (`CheckDone` already fired by the time this starts).
+        if self.recover_active {
+            let ok_count = self.recover_done.saturating_sub(self.recover_failed);
+            let missing_str = if self.recover_failed > 0 {
+                format!(" · {} still missing", self.recover_failed)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                err,
+                "recovering: {}/{} article(s) · {ok_count} recovered{missing_str}",
+                self.recover_done, self.recover_total,
+            );
+            let _ = err.flush();
+            return;
+        }
+
         // Streaming check runs concurrently with the upload, so it's an
         // extra suffix on the normal progress line rather than a phase that
         // suppresses it.
@@ -1547,6 +1728,37 @@ impl RenderState {
         }
         let _ = err.flush();
     }
+}
+
+/// Maximum physical lines a wrapped status/failure note may occupy. Bounds
+/// the panel's height against a status text with no natural upper size (raw
+/// hook output, a long list of file names) — past this many lines the
+/// remainder is dropped with a trailing `…` on the last line rather than
+/// letting one bad status push the rest of the panel off screen.
+const STATUS_MAX_LINES: usize = 4;
+
+/// Word-wrap `text` (via [`wrap`]) into panel lines prefixed with `marker` on
+/// the first line and matching indentation on the rest, capped at
+/// [`STATUS_MAX_LINES`]. See the call site in `panel_lines` for why this
+/// exists: a `truncate`-to-one-line status used to silently cut long,
+/// information-dense messages in half with no way to read the rest.
+fn wrapped_note(marker: &str, text: &str, width: usize) -> Vec<String> {
+    let marker_w = visible_len(marker);
+    let wrap_width = width.saturating_sub(marker_w).max(1);
+    let mut lines = wrap(text, wrap_width);
+    let overflowed = lines.len() > STATUS_MAX_LINES;
+    lines.truncate(STATUS_MAX_LINES);
+    if overflowed {
+        if let Some(last) = lines.last_mut() {
+            *last = truncate(&format!("{last}…"), wrap_width);
+        }
+    }
+    let indent = " ".repeat(marker_w);
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| format!("{}{line}", if i == 0 { marker } else { &indent }))
+        .collect()
 }
 
 /// One cell of the connection grid with colour-coded state (phase 21b).
@@ -2046,6 +2258,123 @@ mod tests {
         assert!(
             state.overall_eta_secs().is_none(),
             "a lone draining check must not synthesise an ETA"
+        );
+    }
+
+    /// Upload finished, streaming check drained with a couple of stubborn
+    /// misses, and the final recovery pass just started on that small tail —
+    /// mirrors what `poster::post_files_inner` actually does: `CheckDone`
+    /// fires (turning `check_active` off) strictly before
+    /// `check::recover_missing` (and its `CheckRecoverStarted`) ever runs.
+    fn recovery_pass_running() -> RenderState {
+        let mut state = upload_done_check_running();
+        state.apply(ProgressEvent::CheckDone { failed: 2 });
+        state.apply(ProgressEvent::CheckRecoverStarted { total: 2 });
+        state
+    }
+
+    #[test]
+    fn header_says_recovering_during_the_final_recovery_pass() {
+        let state = recovery_pass_running();
+        let header = &state.panel_lines(false, 100)[0];
+        assert!(
+            header.contains("recovering"),
+            "header should name the recovery pass: {header:?}"
+        );
+        assert!(
+            !header.contains("writing PAR2"),
+            "header must not fall through to the PAR2-write label during recovery: {header:?}"
+        );
+        assert!(
+            !header.contains("verifying"),
+            "the streaming check already finished by the time recovery starts: {header:?}"
+        );
+    }
+
+    #[test]
+    fn recover_box_replaces_the_check_box_and_tracks_progress() {
+        let mut state = recovery_pass_running();
+        let panel = state.panel_lines(false, 100);
+        assert!(
+            panel.iter().any(|l| l.contains("recover")),
+            "a recover box should be drawn while the pass is active:\n{}",
+            panel.join("\n")
+        );
+        assert!(
+            !panel.iter().any(|l| l.contains("verified")),
+            "the check box's tally line must not still be showing:\n{}",
+            panel.join("\n")
+        );
+
+        state.apply(ProgressEvent::CheckRecoverProgress {
+            done: 1,
+            total: 2,
+            ok: true,
+        });
+        let panel = state.panel_lines(false, 100);
+        let bar_line = panel
+            .iter()
+            .find(|l| l.contains("article(s)"))
+            .expect("recover progress line drawn");
+        assert!(
+            bar_line.contains("1/2 article(s)"),
+            "recover box should track done/total: {bar_line:?}"
+        );
+        let tally_line = panel
+            .iter()
+            .find(|l| l.contains("recovered"))
+            .expect("recover tally line drawn");
+        assert!(
+            tally_line.contains("1 recovered"),
+            "recover box should count confirmed reposts: {tally_line:?}"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_recovery_repairs_the_missing_and_reposted_tallies() {
+        // `CheckDone` snapshots `check_failed` *before* the recovery pass
+        // gets a chance to fix anything; a successful recovery must correct
+        // that snapshot (and credit the repost), or the final summary would
+        // go on reporting an article as missing after it was actually
+        // confirmed present.
+        let mut state = recovery_pass_running();
+        assert_eq!(state.check_failed, 2);
+        assert_eq!(state.check_reposted, 0);
+
+        state.apply(ProgressEvent::CheckRecoverProgress {
+            done: 1,
+            total: 2,
+            ok: true,
+        });
+        assert_eq!(state.check_failed, 1);
+        assert_eq!(state.check_reposted, 1);
+    }
+
+    #[test]
+    fn a_failed_recovery_still_reports_progress_instead_of_going_silent() {
+        // Before this fix, a repost or final-STAT failure inside the
+        // recovery pass emitted nothing but a `tracing::warn!` (invisible
+        // without `-v`) — the batch could go silent for however long the
+        // remaining round trips took. Every resolution, success or failure,
+        // must now move `recover_done` and show up in the panel.
+        let mut state = recovery_pass_running();
+        state.apply(ProgressEvent::CheckRecoverProgress {
+            done: 1,
+            total: 2,
+            ok: false,
+        });
+        assert_eq!(state.recover_done, 1);
+        assert_eq!(state.recover_failed, 1);
+        // A failed resolution must not be mistaken for a fixed article.
+        assert_eq!(state.check_failed, 2);
+        let panel = state.panel_lines(false, 100);
+        let tally_line = panel
+            .iter()
+            .find(|l| l.contains("recovered"))
+            .expect("recover tally line drawn");
+        assert!(
+            tally_line.contains("still missing"),
+            "a failed resolution should surface in the panel, not go silent: {tally_line:?}"
         );
     }
 

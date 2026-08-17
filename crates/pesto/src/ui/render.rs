@@ -167,6 +167,66 @@ pub fn pad(s: &str, width: usize) -> String {
     out
 }
 
+/// Word-wrap `s` into lines of at most `width` *visible* columns each,
+/// breaking on whitespace where possible. A single word wider than `width`
+/// on its own (a long path, hostname, or hex message-ID with no spaces) is
+/// hard-broken at the width boundary instead of overflowing.
+///
+/// Every returned line is guaranteed `visible_len(line) <= width`, which is
+/// what lets a caller push each one as an ordinary panel line: `ui::terminal`
+/// depends on every emitted line fitting one physical terminal row (its
+/// cursor-movement redraw counts *logical* lines), so a long, information-
+/// dense status message needs to become several such lines instead of one
+/// line silently cut short by [`truncate`].
+pub fn wrap(s: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for word in s.split_whitespace() {
+        let word_width = visible_len(word);
+        if word_width > width {
+            // The word alone doesn't fit even on an empty line — hard-break
+            // it across as many `width`-wide chunks as needed rather than
+            // let it overflow the row.
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut chunk_width = 0usize;
+            for c in word.chars() {
+                let w = c.width().unwrap_or(0);
+                if chunk_width + w > width && !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    chunk_width = 0;
+                }
+                current.push(c);
+                chunk_width += w;
+            }
+            current_width = chunk_width;
+            continue;
+        }
+        let sep_width = if current.is_empty() { 0 } else { 1 };
+        if current_width + sep_width + word_width > width {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(word);
+        current_width += word_width;
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 /// Truncate `s` to at most `width` *visible* characters, marking a cut with
 /// `…`. ANSI escape sequences are preserved rather than being sliced
 /// through; if truncation cuts off before a colour's closing `\x1b[0m`, a
@@ -320,6 +380,70 @@ mod tests {
     #[test]
     fn truncate_leaves_short_lines_untouched() {
         assert_eq!(truncate("short", 80), "short");
+    }
+
+    #[test]
+    fn wrap_never_loses_content_unlike_truncate() {
+        // The actual PAR2 memory-budget status line (see `poster::mod`),
+        // which used to get cut short with `truncate` at normal terminal
+        // widths — the reader never saw anything past the "…".
+        let long = "memory: address-space limit none detected | reserved for overhead \
+                     (connections+threads+runtime) 512.0 MiB | PAR2 budget 8.0 GiB/pass \
+                     | split into 2 passes | global --memory-limit ceiling 16.0 GiB";
+        for width in [40, 60, 80, 120] {
+            let lines = wrap(long, width);
+            assert!(
+                lines.len() > 1,
+                "width={width}: a message this long should wrap onto more than one line"
+            );
+            let rejoined = lines.join(" ");
+            for word in long.split_whitespace() {
+                assert!(
+                    rejoined.contains(word),
+                    "width={width}: {word:?} lost during wrap — rejoined: {rejoined:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_every_line_fits_the_requested_width() {
+        let long = "memory: address-space limit none detected | reserved for overhead \
+                     (connections+threads+runtime) 512.0 MiB | PAR2 budget 8.0 GiB/pass";
+        for width in [1, 5, 10, 20, 40, 80] {
+            for line in wrap(long, width) {
+                assert!(
+                    visible_len(&line) <= width,
+                    "width={width} produced a {}-wide line: {line:?}",
+                    visible_len(&line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_hard_breaks_a_single_word_wider_than_the_line() {
+        // A long Message-ID or path with no spaces must not overflow the
+        // row just because it has nowhere to break on whitespace.
+        let id = "18cc9fb3cbdc0862.10f2.2995b4f9c5230ed3@pesto.example.invalid";
+        for line in wrap(id, 10) {
+            assert!(visible_len(&line) <= 10, "line too wide: {line:?}");
+        }
+        assert_eq!(
+            wrap(id, 10).concat(),
+            id,
+            "hard-breaking must not drop characters"
+        );
+    }
+
+    #[test]
+    fn wrap_short_text_is_a_single_line() {
+        assert_eq!(wrap("short status", 80), vec!["short status".to_string()]);
+    }
+
+    #[test]
+    fn wrap_empty_input_is_one_empty_line() {
+        assert_eq!(wrap("", 80), vec![String::new()]);
     }
 
     #[test]

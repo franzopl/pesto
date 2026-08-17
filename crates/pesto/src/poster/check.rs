@@ -235,6 +235,15 @@ impl CheckCoordinatorHandle {
                 check_worker(inner, base_idx + i).await;
             }));
         }
+        if additional > 0 {
+            // The panel's `conns` line otherwise keeps showing the pool
+            // size announced at `Started`, even once it's grown — right
+            // when the upload's connections join in, the moment the check
+            // pool is doing its most visible catch-up work.
+            self.inner.emit(ProgressEvent::CheckPoolScaledUp {
+                check_connections: self.workers.len(),
+            });
+        }
     }
 
     /// Close the input (no more segments will be queued) and wait for every
@@ -373,7 +382,15 @@ async fn check_worker(inner: Arc<Inner>, worker_idx: usize) {
             continue;
         };
 
+        // Busy for the duration of `process_item`'s actual network activity
+        // (STAT, and any repost it triggers) — everywhere else in this loop
+        // (draining a cancelled queue, or the 250ms poll above while every
+        // item is still inside its retry/repost delay) this connection is
+        // genuinely idle, which the old panel had no way to distinguish
+        // from "working through a backlog".
+        inner.emit(ProgressEvent::CheckConnectionBusy { conn: worker_idx });
         process_item(&inner, &mut slot, worker_idx, item).await;
+        inner.emit(ProgressEvent::CheckConnectionIdle { conn: worker_idx });
     }
 
     slot.quit().await;
@@ -673,6 +690,15 @@ async fn repost_one(
 /// after `check_delay_secs` — one round trip per article, not the full
 /// `check_retries`-attempt cycle.
 ///
+/// Runs the batch across up to `config.effective_check_connections()` worker
+/// tasks pulling from a shared queue — the same connection budget the
+/// streaming check itself uses, never more than there is work to do. This
+/// used to be a strict one-article-at-a-time loop: with `check_recover_max`
+/// defaulting to 50 and each article costing a repost round trip plus
+/// `check_delay_secs`, a stubborn batch could take minutes with the upload
+/// already at 100% and every upload connection sitting idle — the exact
+/// "why is this frozen" case the recovery pass exists to resolve *quickly*.
+///
 /// Returns the subset of `segments` that got reposted *and* confirmed
 /// present; anything not in the returned list is still genuinely missing.
 pub(crate) async fn recover_missing(
@@ -685,49 +711,100 @@ pub(crate) async fn recover_missing(
         return Vec::new();
     }
 
-    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
-    // One connection per distinct server actually referenced, reused across
-    // the whole batch instead of reconnecting per article.
-    let mut slots: HashMap<usize, ConnectionSlot> = HashMap::new();
-    let mut recovered = Vec::with_capacity(segments.len());
-
-    for seg in segments {
-        let idx = seg.server_idx.min(servers.len().saturating_sub(1));
-        let slot = slots
-            .entry(idx)
-            .or_insert_with(|| ConnectionSlot::new(Arc::clone(&servers), idx));
-
-        let new_seg = match repost_one(config, slot, &seg, groups).await {
-            Ok(new_seg) => new_seg,
-            Err(e) => {
-                warn!(id = %seg.message_id, error = %e, "check: final recovery repost failed");
-                continue;
-            }
-        };
-
-        tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
-
-        let confirmed = match slot.ensure_connected().await {
-            Ok(conn) => conn.stat(&new_seg.message_id).await.unwrap_or(false),
-            Err(_) => false,
-        };
-
-        if confirmed {
-            if let Some(tx) = events {
-                let _ = tx.send(ProgressEvent::Status {
-                    text: format!(
-                        "check: recovered {} on final pass ({}/{})",
-                        new_seg.message_id, new_seg.part, new_seg.total
-                    ),
-                });
-            }
-            recovered.push(new_seg);
-        } else {
-            warn!(id = %new_seg.message_id, "check: recovery repost accepted but not confirmed on final STAT");
-        }
+    let total = segments.len() as u64;
+    if let Some(tx) = events {
+        let _ = tx.send(ProgressEvent::CheckRecoverStarted { total });
     }
 
-    recovered
+    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
+    let n_workers = config
+        .effective_check_connections()
+        .max(1)
+        .min(segments.len());
+
+    let queue = Arc::new(Mutex::new(segments));
+    let done = Arc::new(AtomicUsize::new(0));
+    let recovered = Arc::new(Mutex::new(Vec::with_capacity(total as usize)));
+
+    let mut workers = Vec::with_capacity(n_workers);
+    for _ in 0..n_workers {
+        let config = config.clone();
+        let groups = groups.to_vec();
+        let servers = Arc::clone(&servers);
+        let queue = Arc::clone(&queue);
+        let done = Arc::clone(&done);
+        let recovered = Arc::clone(&recovered);
+        let events = events.cloned();
+
+        workers.push(tokio::spawn(async move {
+            // One connection per distinct server this worker happens to
+            // draw a segment for, reused across whatever it pulls from the
+            // shared queue instead of reconnecting per article.
+            let mut slots: HashMap<usize, ConnectionSlot> = HashMap::new();
+
+            loop {
+                let seg = queue.lock().unwrap().pop();
+                let Some(seg) = seg else { break };
+
+                let idx = seg.server_idx.min(servers.len().saturating_sub(1));
+                let slot = slots
+                    .entry(idx)
+                    .or_insert_with(|| ConnectionSlot::new(Arc::clone(&servers), idx));
+
+                let ok = match repost_one(&config, slot, &seg, &groups).await {
+                    Ok(new_seg) => {
+                        tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
+                        let confirmed = match slot.ensure_connected().await {
+                            Ok(conn) => conn.stat(&new_seg.message_id).await.unwrap_or(false),
+                            Err(_) => false,
+                        };
+                        if confirmed {
+                            recovered.lock().unwrap().push(new_seg);
+                            true
+                        } else {
+                            warn!(
+                                id = %new_seg.message_id,
+                                "check: recovery repost accepted but not confirmed on final STAT"
+                            );
+                            false
+                        }
+                    }
+                    Err(e) => {
+                        warn!(id = %seg.message_id, error = %e, "check: final recovery repost failed");
+                        false
+                    }
+                };
+
+                // Emits `CheckRecoverProgress` for *every* resolution,
+                // success or failure — unlike the old plain `Status` text,
+                // which only fired on success. A batch with real,
+                // unrecoverable misses used to go completely silent
+                // (nothing but a `tracing::warn!`, invisible without `-v`)
+                // for however long those repost/STAT round trips took.
+                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(tx) = &events {
+                    let _ = tx.send(ProgressEvent::CheckRecoverProgress {
+                        done: n as u64,
+                        total,
+                        ok,
+                    });
+                }
+            }
+
+            for (_, mut slot) in slots {
+                slot.quit().await;
+            }
+        }));
+    }
+
+    for w in workers {
+        let _ = w.await;
+    }
+
+    Arc::try_unwrap(recovered)
+        .expect("every worker task has finished by now")
+        .into_inner()
+        .unwrap()
 }
 
 #[cfg(test)]
