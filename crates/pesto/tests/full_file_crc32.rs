@@ -156,6 +156,7 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

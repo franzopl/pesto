@@ -159,6 +159,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

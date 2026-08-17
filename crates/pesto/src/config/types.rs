@@ -497,6 +497,11 @@ pub struct Config {
     pub imdb_id: Option<String>,
     /// TheTVDB ID emitted as `<meta type="tvdbid">`.
     pub tvdb_id: Option<String>,
+    /// Media kind of `tvdb_id`, kept alongside it to pick the right
+    /// `/dereferrer/movie|series/<id>` link in the `.nfo` header and to
+    /// derive a default `nzb_category` when the user hasn't set one
+    /// explicitly.
+    pub tvdb_kind: Option<crate::nzb::TvdbKind>,
     /// MyAnimeList ID emitted as `<meta type="malid">`.
     pub mal_id: Option<String>,
     pub indexer_url: Option<String>,

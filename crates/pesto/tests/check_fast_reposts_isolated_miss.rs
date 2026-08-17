@@ -208,6 +208,7 @@ async fn check_fast_reposts_an_isolated_miss_instead_of_waiting_out_patient_retr
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

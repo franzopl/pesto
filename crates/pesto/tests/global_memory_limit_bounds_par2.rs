@@ -78,6 +78,7 @@ async fn tiny_global_memory_limit_rejects_an_oversized_par2_memory_limit() {
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

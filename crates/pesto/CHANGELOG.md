@@ -13,6 +13,13 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 ## [Unreleased]
 
 ### Added
+- **`--tvdb-id`/`--tvdb` accepts a media kind: `movie/<id>` or `series/<id>`** (`tv/<id>` accepted as an alias
+  for `series/<id>`; `:` also accepted as the separator, matching `--tmdb`'s convention). TheTVDB catalogs both
+  movies and series, but the `.nfo` dereferrer link needs the right URL segment
+  (`/dereferrer/movie/<id>` vs. `/dereferrer/series/<id>`) — previously hardcoded to `series`, so a movie's TVDB
+  ID produced a broken link. A bare numeric ID (e.g. `81189`) is still accepted and defaults to `series`, so
+  existing configs and scripts keep working unchanged. When `--nzb-category` and `--tmdb` are both unset, the
+  category now also defaults to `movies`/`tv` from `--tvdb-id`'s kind, same as `--tmdb` already does.
 - **`upload::run_upload` takes a new `pause: Option<Arc<AtomicBool>>` parameter**,
   threaded straight through to `poster::post_files_inner`'s `external_pause`
   (added in `0.7.0`'s `post_pausable`). Existing callers pass `None` for the
