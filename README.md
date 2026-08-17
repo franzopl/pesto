@@ -1311,8 +1311,10 @@ pesto is ~9% ahead of node-yencode on this CPU, and the gap widens sharply on
 smaller buffers — 4× at 4 KiB, where node's per-call overhead dominates (see
 [`bench/FINDINGS.md`](bench/FINDINGS.md) §2 for the full size sweep).
 Selecting the AVX2 kernel directly instead of `auto` measures a further ~3%
-faster; the dispatch overhead is tracked in
-[#132](https://github.com/franzopl/pesto/issues/132).
+faster on this homogeneous CPU — but `auto` deliberately caps at SSSE3
+everywhere, because AVX2 measured ~5% slower than SSSE3 on Alder Lake+ E-cores;
+see `ROADMAP.new.md`'s "Deferred" section and `crates/pesto/src/yenc/x86.rs`.
+The 3% seen here is that safety margin's cost on a CPU that never needed it.
 
 ¹ Predates the current benchmark suite and has not been re-verified with it;
 kept here as the last measurement on hybrid (P+E core) hardware, which the

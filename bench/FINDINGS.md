@@ -105,12 +105,26 @@ node's per-call overhead dominates. This contradicts the current README, which
 reports the two as neck-and-neck at ~2200 MiB/s on this CPU; that entry
 predates the current encoder and should be refreshed.
 
-**`auto` costs 2–7% versus dispatching straight to AVX2** — 2304 vs 2369 at the
-article size (2.7%), 2874 vs 3086 at `ll=256` (6.9%). Both are outside the
-noise on those rows. `auto` also lands *below SSSE3* at `ll=256`/128 KiB (4119
-vs 4019 is within noise, but 7614 vs 7720 at 4 KiB is not). The runtime
-dispatch is worth a look — it is pure overhead on a machine that has already
-decided which kernel it wants.
+**`auto` costs 2–7% versus dispatching straight to AVX2 on this CPU** — 2304
+vs 2369 at the article size (2.7%), 2874 vs 3086 at `ll=256` (6.9%). This is
+not a dispatch bug: `pesto::yenc::x86::encode` (the `auto` path) deliberately
+caps at SSSE3 everywhere — `encode_avx2()` exists separately for explicit
+selection — because AVX2 measured ~5% slower than SSSE3 on Alder Lake+
+E-cores at `ll=128`. This was investigated and closed on purpose; see
+`ROADMAP.new.md`'s "Deferred / intentionally not implemented" section and the
+comment on `x86::encode`. The 2.7% here is that safety margin's cost on a
+homogeneous CPU that never needed it — not overhead to eliminate.
+(The earlier reading of "`auto` also lands below SSSE3" in the raw data was
+measurement noise, not a real effect: `auto` and explicit SSSE3 call the
+exact same code path, so any difference between their rows is two
+independent benchmark runs of one implementation, not two implementations.)
+
+One real open question this raises: the ~5% figure the policy is based on
+was measured at `ll=128` only. Whether SSSE3-over-AVX2 is still the right
+call at `ll=256` — where the gap to AVX2 is larger, 6.9% vs 2.7% — has not
+been tested on hybrid hardware. Worth revisiting only if `DEFAULT_LINE_LENGTH`
+or the `--line-length 256` recommendation from the next finding ever changes
+in practice, and only on hybrid hardware — not something to guess at here.
 
 **`ll=256` encodes 30% faster than `ll=128`** at the article size (3086 vs
 2369). `ROADMAP.new.md` records that raising `DEFAULT_LINE_LENGTH` to 256 was
@@ -385,21 +399,30 @@ Worth recording, because they are the reason to trust the numbers above.
 
 ## What to do with this
 
-In rough order of expected value:
+In rough order of expected value. Status as of the issues opened from this
+report:
 
 1. **Parallelise `parmesan`'s repair path.** cpu ≈ 1.00 against par2cmdline's
    3.52–4.35. It is the only place a competitor wins on an operation where
-   parmesan is otherwise ahead.
+   parmesan is otherwise ahead. — [#130](https://github.com/franzopl/pesto/issues/130)
 2. **Investigate the small-file PAR2 path.** 47% behind parpar on
    `many-small`, and it is what makes the only end-to-end row pesto loses.
-3. **Look at posting a single large file.** 0.54× nyuu at 0 ms, while being
-   2.7× nyuu on many small files. The per-file path is strong; the streaming
-   path for one big file is not.
-4. **Check the connection-pool regression past 4 connections** at low latency.
-5. **Re-run all of this on a GFNI machine.** Every PAR2 conclusion here is
+   — [#131](https://github.com/franzopl/pesto/issues/131), blocked on (5)
+3. **Look at posting a single large file, and the connection-pool regression
+   past 4 connections.** 0.54× nyuu at 0 ms on one big file, while being
+   2.7× nyuu on many small files; the connection curve peaking then falling
+   as more connections are added is the same shape of problem and likely the
+   same root cause. — [#129](https://github.com/franzopl/pesto/issues/129)
+4. **Re-run all of this on a GFNI machine.** Every PAR2 conclusion here is
    about the AVX2 kernel, on a CPU that cannot reach parmesan's fastest paths.
-6. **Refresh the README's yEnc table** — it reports parity with node-yencode;
-   the measurement now shows +12% at the article size.
+   — [#128](https://github.com/franzopl/pesto/issues/128)
+5. ~~Refresh the README's yEnc table~~ — done,
+   [#133](https://github.com/franzopl/pesto/issues/133).
+6. ~~Look at the `auto` dispatch cost vs explicit AVX2~~ — investigated, not
+   a bug: `auto` deliberately caps at SSSE3, a pre-existing, measured,
+   documented trade-off for hybrid-CPU safety (see the note added to §2
+   above). Closed as working as intended,
+   [#132](https://github.com/franzopl/pesto/issues/132).
 
 ---
 
