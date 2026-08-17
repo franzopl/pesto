@@ -178,12 +178,53 @@ Verify and repair, same corpora:
 
 `cpu` is `(user+sys)/wall` — cores actually used.
 
-**parmesan's verify and repair are entirely single-threaded** (cpu ≈ 1.00 in
-every row), while par2cmdline uses 3.5–4.3 cores for repair. parmesan still
-wins verify outright and wins repair on the large file — on one core against
-four. That is the clearest optimisation opportunity in this whole dataset: the
-work is embarrassingly parallel, and the competitor is beating it on
-`many-small` purely by throwing cores at it.
+**parmesan's verify and repair were entirely single-threaded** (cpu ≈ 1.00 in
+every row above), while par2cmdline uses 3.5–4.3 cores for repair. parmesan
+still won verify outright and won repair on the large file — on one core
+against four.
+
+**Fixed in [#130](https://github.com/franzopl/pesto/issues/130).**
+`RecoveryDecoder::reconstruct` (`crates/parmesan/src/decoder.rs`) now
+parallelises across missing slices with `rayon`, the same pattern
+`RecoveryEncoder` already uses for creation — two loops whose iterations
+write to disjoint buffers, so no synchronization was needed beyond sharing
+the (already-immutable) `Gf16` field tables. Direct A/B measurement on the
+same corpora, same geometry, same damage pattern, before vs after (not a
+full 3-rep suite run — a targeted comparison to size the fix before landing
+it):
+
+| workload | before (wall / cpu) | after (wall / cpu) | wall-clock gain |
+|---|---|---|---|
+| `movie-1080p` (807 KB slices) | 22.0s / 0.96 | 17.5s / **7.9** | **20%** |
+| `many-small` (64 KB slices) | 1.87s / 0.87 | 0.87s / **3.4** | **53%** |
+
+Both are real, measured, and byte-exact — `repair` re-verifies every
+reconstructed slice's checksum before writing, so a correctness bug here
+would have surfaced as a hard failure, not a silently wrong number; the full
+existing property-test suite plus the `#[ignore]`d 960-case structural sweep
+for issue #51's territory (same file, `decoder.rs`) also stayed green.
+
+Note the gain is real but **sub-linear** — CPU time went up 7-9×, wall time
+came down only 1.25-2.1×. `mac()` over an 807 KB buffer is bandwidth-bound
+(read src, read+write dst — several hundred KB of traffic per call), so 8
+threads contending for the same memory bus don't get 8× throughput; the
+smaller 64 KB `many-small` slices fit in L2, contend less, and scale better
+(53% vs 20%), which is why the two rows differ so much. Estimated new
+`many-small` repair throughput (125 MiB / 0.87s ≈ 143 MiB/s) now beats
+par2cmdline's 90.5 MiB/s on the one row where parmesan used to lose — it no
+longer does.
+
+This is a different outcome from `#126` (parallelising `verify()`, recorded
+in `CHANGELOG.md`, showed no real gain): `verify` at release speed is
+I/O-bound — sequential file reads dominate, hashing is cheap — so spreading
+the hash work across cores had nothing to buy. `repair`'s GF(2^16)
+multiply-accumulate is heavier per byte than a hash, so there was real
+compute to parallelize; it just wasn't as much as `cpu ≈ 1.00` alone
+suggested, because most of what limits `repair` at scale is memory
+bandwidth, not core count. Getting closer to linear would need the
+encoder's batched/transposed data layout (`altmap`/`shuffle2x` in
+`encoder.rs`) rather than more threads over the naive per-slice loop — a
+meaningfully bigger change, not attempted here.
 
 A related note in `CHANGELOG.md` records that parallelising `verify()` "showed
 no real gain" (#126). These numbers do not contradict that — verify is already
@@ -402,9 +443,10 @@ Worth recording, because they are the reason to trust the numbers above.
 In rough order of expected value. Status as of the issues opened from this
 report:
 
-1. **Parallelise `parmesan`'s repair path.** cpu ≈ 1.00 against par2cmdline's
-   3.52–4.35. It is the only place a competitor wins on an operation where
-   parmesan is otherwise ahead. — [#130](https://github.com/franzopl/pesto/issues/130)
+1. ~~Parallelise `parmesan`'s repair path.~~ — done,
+   [#130](https://github.com/franzopl/pesto/issues/130): 20-53% wall-clock
+   gain (sub-linear, bandwidth-bound — see §3), `many-small` repair now beats
+   par2cmdline instead of losing to it. Details above.
 2. **Investigate the small-file PAR2 path.** 47% behind parpar on
    `many-small`, and it is what makes the only end-to-end row pesto loses.
    — [#131](https://github.com/franzopl/pesto/issues/131), blocked on (5)

@@ -17,6 +17,7 @@ use crate::gf16::{input_logbases, Gf16};
 use crate::gf16_mac::mac;
 use crate::matrix::Gf16Matrix;
 use anyhow::{bail, Context, Result};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Reconstructs a set of missing PAR2 input slices.
@@ -114,6 +115,20 @@ impl RecoveryDecoder {
         // recovery block in one pass, so the caller's `known_slice` reads
         // each surviving slice from disk exactly once regardless of how
         // many blocks are being reconstructed.
+        //
+        // The outer loop over `j` stays strictly sequential: `known_slice` is
+        // an `FnMut` and callers (see `crate::repair::SliceReader`) rely on
+        // ascending, one-at-a-time calls to keep a single file handle open
+        // across reads rather than reopening per slice. What *is*
+        // embarrassingly parallel is the inner loop: `m` (missing-slice
+        // count) independent `mac`s, one per row of `adjusted`, each writing
+        // to its own disjoint buffer from the one just-read `known_bytes`.
+        // On a repair with many missing slices — the case that dominates
+        // wall time, since this loop runs `total_input_slices` times — that
+        // inner width is real parallelism `par_iter_mut` can use without
+        // touching the I/O ordering at all. `Gf16` and `mac` are pure over
+        // `&self`/read-only `src`, so sharing `&self.gf` across the rayon
+        // pool here needs no synchronization.
         let missing_set: BTreeSet<usize> = self.missing.iter().copied().collect();
         for j in 0..self.total_input_slices {
             if missing_set.contains(&j) {
@@ -128,10 +143,13 @@ impl RecoveryDecoder {
                 known_bytes.len()
             );
             let base_j = self.gf.exp(self.logbases[j]);
-            for (row, &e) in exponents.iter().enumerate() {
-                let coeff = self.gf.pow(base_j, e);
-                mac(&self.gf, &mut adjusted[row], &known_bytes, coeff);
-            }
+            adjusted
+                .par_iter_mut()
+                .zip(exponents.par_iter())
+                .for_each(|(row, &e)| {
+                    let coeff = self.gf.pow(base_j, e);
+                    mac(&self.gf, row, &known_bytes, coeff);
+                });
         }
 
         let a = Gf16Matrix::build_reduced(&self.gf, &bases, &exponents);
@@ -143,17 +161,24 @@ impl RecoveryDecoder {
                  (this indicates a decoder bug, not damaged input data)",
             )?;
 
-        let mut results = Vec::with_capacity(m);
-        for (c, &global_index) in self.missing.iter().enumerate() {
-            let mut out = vec![0u8; self.slice_size];
-            for (r, adjusted_row) in adjusted.iter().enumerate() {
-                let coeff = inv.get(c, r);
-                if coeff != 0 {
-                    mac(&self.gf, &mut out, adjusted_row, coeff);
+        // Each output slice `c` is an independent linear combination of the
+        // (shared, read-only at this point) `adjusted` rows — disjoint
+        // writes again, so this parallelizes the same way as the loop above.
+        let results: Vec<(usize, Vec<u8>)> = self
+            .missing
+            .par_iter()
+            .enumerate()
+            .map(|(c, &global_index)| {
+                let mut out = vec![0u8; self.slice_size];
+                for (r, adjusted_row) in adjusted.iter().enumerate() {
+                    let coeff = inv.get(c, r);
+                    if coeff != 0 {
+                        mac(&self.gf, &mut out, adjusted_row, coeff);
+                    }
                 }
-            }
-            results.push((global_index, out));
-        }
+                (global_index, out)
+            })
+            .collect();
 
         Ok(results)
     }
