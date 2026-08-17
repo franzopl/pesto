@@ -188,6 +188,21 @@ pub fn calculate_geometry(
 }
 
 /// Ingests files into a PAR2 worker.
+///
+/// Exactly one slice per file is flagged `is_last_of_file`, and it must be the
+/// file's genuine final slice: [`Par2Worker`]'s hasher thread finalizes and
+/// pushes a file's MD5/CRC only on that flag. Miss it and the hash bleeds into
+/// the next file — or, for the last file in the set, the worker returns fewer
+/// hashes than there are files and the caller indexes past the end.
+///
+/// Getting that right is why the last slice is held back rather than sent as
+/// soon as it is full: only once the reader has hit EOF is it known whether
+/// the slice just filled was the last one. Flagging only a *partial* trailing
+/// slice — the obvious shortcut — silently breaks every file whose size is an
+/// exact multiple of the slice size, which is not an edge case at all once a
+/// caller passes an explicit `--slice-size` (see the regression test in
+/// `tests/exact_multiple_slice_size.rs`, and the same bug's earlier sighting
+/// in `pesto`'s poster, `crates/pesto/tests/par2_exact_multiple_of_slice_size.rs`).
 pub async fn ingest_files(
     files: &[InputFile],
     worker: &Par2Worker,
@@ -218,6 +233,9 @@ pub async fn ingest_files(
 
         let mut slice_accum = worker.take_buffer(slice_size);
         slice_accum.clear();
+        // The most recently filled slice, not yet handed to the worker: it
+        // cannot be sent until we know whether another slice follows it.
+        let mut held: Option<Vec<u8>> = None;
 
         while let Some(chunk) = rx.recv().await {
             let mut chunk_pos = 0;
@@ -230,9 +248,13 @@ pub async fn ingest_files(
                 if slice_accum.len() >= slice_size {
                     let next = worker.take_buffer(slice_size);
                     let padded = std::mem::replace(&mut slice_accum, next);
-                    tokio::task::block_in_place(|| {
-                        worker.send_slice(padded, slice_size, false);
-                    });
+                    // A new full slice exists, so whatever was held is
+                    // definitely not this file's last one.
+                    if let Some(previous) = held.replace(padded) {
+                        tokio::task::block_in_place(|| {
+                            worker.send_slice(previous, slice_size, false);
+                        });
+                    }
                 }
             }
         }
@@ -240,9 +262,18 @@ pub async fn ingest_files(
         reader_handle.await??;
 
         if !slice_accum.is_empty() {
+            // A partial trailing slice: it is the last one, and anything held
+            // back is not.
+            if let Some(previous) = held.take() {
+                tokio::task::block_in_place(|| worker.send_slice(previous, slice_size, false));
+            }
             let actual_len = slice_accum.len();
             slice_accum.resize(slice_size, 0);
             tokio::task::block_in_place(|| worker.send_slice(slice_accum, actual_len, true));
+        } else if let Some(last) = held.take() {
+            // The file's size is an exact multiple of the slice size, so the
+            // slice held back above really is its final one.
+            tokio::task::block_in_place(|| worker.send_slice(last, slice_size, true));
         }
     }
 

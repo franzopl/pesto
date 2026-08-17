@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use md5::{Digest, Md5};
 use parmesan::ops::{
     calculate_geometry, ingest_files, sort_files_by_file_id, CreateOptions, InputFile,
 };
@@ -7,7 +8,7 @@ use parmesan::recovery_set::RecoverySet;
 use parmesan::repair::{self, RepairOptions};
 use parmesan::verify::{self, FileStatus, VerifyReport};
 use parmesan::worker::Par2Worker;
-use parmesan::{encoder::RecoveryEncoder, layout, packet, SimdPath};
+use parmesan::{encoder, encoder::RecoveryEncoder, layout, packet, SimdPath};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use walkdir::WalkDir;
@@ -334,7 +335,45 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
             tokio::task::block_in_place(|| worker.finish());
 
         if pass_idx == 0 {
-            let all_hashes = hashes;
+            // An empty file contributes zero input slices (PAR2 spec: slice
+            // count is `ceil(length / slice_size)`), so `ingest_files` sends
+            // the worker nothing for it and the worker returns no hash for it
+            // either. It still needs a File Description packet, so its hashes
+            // are synthesized here — the MD5 of no bytes — and the worker's
+            // hashes are consumed as a stream over the *non-empty* files only.
+            //
+            // Indexing `hashes` by file position instead used to panic with
+            // `index out of bounds` on any set containing an empty file, which
+            // a release folder with a placeholder or a stub `.nfo` produces
+            // routinely. `pesto`'s own poster already does it this way; see
+            // `crates/pesto/src/poster/mod.rs`.
+            //
+            // Note this is a deliberate divergence from par2cmdline, which
+            // refuses to protect zero-length files at all ("Skipping 0 byte
+            // file") and reports a zero-length File Description entry it did
+            // not write as damaged. Including the entry keeps the recovery set
+            // a complete description of what was posted — the property `pesto`
+            // needs, since the file is in the NZB either way — at the cost of
+            // that one cosmetic disagreement on verify.
+            let md5_empty: [u8; 16] = Md5::digest([]).into();
+            let mut worker_hashes = hashes.into_iter();
+            let all_hashes: Vec<encoder::FileHashes> = input_files
+                .iter()
+                .map(|f| {
+                    if f.size == 0 {
+                        encoder::FileHashes {
+                            md5_full: md5_empty,
+                            md5_16k: md5_empty,
+                            length: 0,
+                        }
+                    } else {
+                        worker_hashes
+                            .next()
+                            .expect("worker returned fewer hashes than non-empty input files")
+                    }
+                })
+                .collect();
+
             let mut cs_iter = slice_checksums.into_iter();
             for (idx, f) in input_files.iter().enumerate() {
                 let n = (f.size as usize).div_ceil(slice_size);
