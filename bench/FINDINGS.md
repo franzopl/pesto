@@ -428,14 +428,13 @@ PAR2 recovery buffer allocation failed (202 blocks × 1101824 bytes): memory all
 `parpar` and `par2cmdline` completed the identical workload/geometry under
 the same `ulimit -v` without issue.
 
-**Root cause, confirmed by direct `VmPeak` A/B measurement** (not assumed —
-this machine only has 12 cores, so the original panic doesn't reproduce
-here, but the mechanism does and scales the same way): the recovery buffer
-itself was never the problem — `RecoveryEncoder::new_smart` only ever
-allocates `recovery_count × slice_size` for the pass currently running, and
-`ops::ingest_files` streams input in 8 MiB chunks rather than reading whole
-files. What actually consumed the address space was thread fan-out that ran
-*before* either of those:
+**Root cause, confirmed two ways: isolated A/B measurement on a 12-core dev
+box, then the literal panic reproduced and fixed on a real 128-core box.**
+The recovery buffer itself was never the problem — `RecoveryEncoder::new_smart`
+only ever allocates `recovery_count × slice_size` for the pass currently
+running, and `ops::ingest_files` streams input in 8 MiB chunks rather than
+reading whole files. What actually consumed the address space was thread
+fan-out that ran *before* either of those:
 
 - `#[tokio::main]`'s default multi-thread runtime spawned one worker thread
   per core, even though `ingest_files` only ever drives one file at a time
@@ -448,8 +447,9 @@ files. What actually consumed the address space was thread fan-out that ran
   for real RS throughput) both contending on malloc, arena growth alone
   dwarfed the actual working set.
 
-Same 20 MB workload, `-t $(nproc)` (12 here), median of 3 runs, peak
-`VmPeak` from `/proc/<pid>/status` polled at 10 ms while the process ran:
+Isolating the two mechanisms, same 20 MB workload, `-t $(nproc)` (12 here),
+median of 3 runs, peak `VmPeak` from `/proc/<pid>/status` polled at 10 ms
+while the process ran:
 
 | build | `VmPeak` |
 |---|---:|
@@ -457,13 +457,34 @@ Same 20 MB workload, `-t $(nproc)` (12 here), median of 3 runs, peak
 | before + `MALLOC_ARENA_MAX=2` only (arena cap, thread counts unchanged) | 193 544 KiB (189 MiB) |
 | after (capped tokio workers **and** `mallopt(M_ARENA_MAX, 2)`) | 171 912 KiB (168 MiB) |
 
-**A 11× reduction, and the arena cap alone accounts for ~90% of it** — on a
-12-core box. Both mechanisms scale with `ncores` (arena count directly;
-tokio's default worker count 1:1), so the gap between "before" and "after"
-grows with core count: this is consistent with the issue's own estimate of
-a ~1 GiB glibc floor on 16 cores and ~8 GiB on 128, which is what turned a
-222 MiB recovery buffer into an allocation failure on the reporting
-machine.
+An 11× reduction, and the arena cap alone accounts for ~90% of it, on a
+12-core box.
+
+**Then reproduced directly** on `baron.usbx.me`, an AMD EPYC 7742 / 128-core
+/ 503 GiB box with the *exact* environment from the issue — `* hard as
+10000000` in `/etc/security/limits.conf`, applied automatically to every
+session via `pam_limits.so` — using the same `movie-1080p`-sized workload
+(6 GiB, 1 file), `-m 1024MiB`, default (auto) thread count:
+
+| build | result | `VmPeak` at exit |
+|---|---|---:|
+| before (`main`, pre-fix) | **panics**, exit 134 (SIGABRT) | 9 999 764 KiB — 24 KiB short of the 10 000 000 KiB ceiling |
+| after (this fix) | succeeds, PAR2 set verifies OK | 1 418 676 KiB (1.35 GiB) — 86% headroom to spare |
+
+The before build's panic is the issue's own crash, byte for byte:
+
+```
+thread 'main' (3096599) panicked at crates/parmesan/src/encoder.rs:351:13:
+PAR2 recovery buffer allocation failed (200 blocks × 3221184 bytes): memory allocation failed because the memory allocator returned an error
+```
+
+and its `VmPeak` at the moment of death confirms the diagnosis directly —
+not a memory shortage (503 GiB physical RAM sat almost entirely idle) but
+address space pinned to within 24 KiB of the configured ceiling, for a
+recovery buffer request of 200 × 3.2 MiB ≈ 614 MiB, nowhere near either the
+1 GiB `--memory-limit` or the 9.54 GiB `RLIMIT_AS`. `parmesan verify` on the
+after build's output confirmed the PAR2 set produced under the ceiling is
+correct (2001/2001 slices OK), not just "didn't crash."
 
 **Fix** (`crates/parmesan/src/memory.rs`, applied at the top of `main`,
 before any thread exists):
@@ -481,12 +502,11 @@ before any thread exists):
   throughput, same as `pesto`'s equivalent split (rayon scaled, tokio
   capped) in its own memory module.
 
-`bench/run.sh par2` was not re-run under a simulated `ulimit -v` as part of
-this fix (no high-core machine available); the measurement above isolates
-and confirms the mechanism instead. Re-running the full repro from the
-issue (`ulimit -Sv 10000000; ulimit -Hv 10000000; ./bench/run.sh par2
---workload movie-1080p --yes`) on an actual high-core box remains open
-follow-up if the panic recurs.
+`bench/run.sh par2` itself was not run on `baron.usbx.me` as part of this
+fix (it needs `parpar`/`par2cmdline` installed there for the comparison
+columns, and a full corpus generation pass); the direct `parmesan create`
+repro above uses the same workload shape and geometry and is the part of
+the suite's repro command that actually exercises the bug.
 
 ---
 
@@ -545,8 +565,10 @@ report:
    [#132](https://github.com/franzopl/pesto/issues/132).
 7. ~~Fix `parmesan create`'s address-space blowup on high-core machines~~ —
    done, [#137](https://github.com/franzopl/pesto/issues/137): capped tokio
-   worker threads and glibc malloc arenas independent of `nproc`, an 11×
-   `VmPeak` reduction measured on this machine. Details in §8.
+   worker threads and glibc malloc arenas independent of `nproc`. Reproduced
+   the exact panic on the original 128-core/`RLIMIT_AS` box and confirmed
+   the fix there (`VmPeak` 9 999 764 KiB → 1 418 676 KiB, no more crash), on
+   top of an 11× `VmPeak` reduction measured on this machine. Details in §8.
 
 ---
 
