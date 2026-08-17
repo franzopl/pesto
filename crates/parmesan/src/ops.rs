@@ -187,6 +187,41 @@ pub fn calculate_geometry(
     Ok((slice_size, total_slices, recovery_count))
 }
 
+/// Chunk size for the streaming reader below, and the cutoff under which a
+/// file is read as a single blocking call instead — see `ingest_files`.
+const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Split `chunk` into `slice_size` pieces, handing each completed-and-since-
+/// superseded slice to `worker` (holding the newest one back — see
+/// `ingest_files`'s doc comment for why). Pure and synchronous: callers doing
+/// this from async context are responsible for wrapping the call in
+/// `tokio::task::block_in_place`, since `Par2Worker::send_slice` blocks.
+fn feed_chunk(
+    chunk: &[u8],
+    worker: &Par2Worker,
+    slice_size: usize,
+    slice_accum: &mut Vec<u8>,
+    held: &mut Option<Vec<u8>>,
+) {
+    let mut chunk_pos = 0;
+    while chunk_pos < chunk.len() {
+        let space = slice_size - slice_accum.len();
+        let take = space.min(chunk.len() - chunk_pos);
+        slice_accum.extend_from_slice(&chunk[chunk_pos..chunk_pos + take]);
+        chunk_pos += take;
+
+        if slice_accum.len() >= slice_size {
+            let next = worker.take_buffer(slice_size);
+            let padded = std::mem::replace(slice_accum, next);
+            // A new full slice exists, so whatever was held is definitely
+            // not this file's last one.
+            if let Some(previous) = held.replace(padded) {
+                worker.send_slice(previous, slice_size, false);
+            }
+        }
+    }
+}
+
 /// Ingests files into a PAR2 worker.
 ///
 /// Exactly one slice per file is flagged `is_last_of_file`, and it must be the
@@ -209,57 +244,61 @@ pub async fn ingest_files(
     slice_size: usize,
 ) -> Result<()> {
     for file_info in files {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-        let path = file_info.path.clone();
-
-        // Double-buffered reader task: fetch data while we process previous chunks.
-        let reader_handle = tokio::task::spawn_blocking(move || {
-            use std::fs::File;
-            use std::io::Read;
-            let mut file = File::open(&path)?;
-            loop {
-                let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8 MiB chunks
-                let n = file.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                buf.truncate(n);
-                if tx.blocking_send(buf).is_err() {
-                    break;
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-
         let mut slice_accum = worker.take_buffer(slice_size);
         slice_accum.clear();
         // The most recently filled slice, not yet handed to the worker: it
         // cannot be sent until we know whether another slice follows it.
         let mut held: Option<Vec<u8>> = None;
 
-        while let Some(chunk) = rx.recv().await {
-            let mut chunk_pos = 0;
-            while chunk_pos < chunk.len() {
-                let space = slice_size - slice_accum.len();
-                let take = space.min(chunk.len() - chunk_pos);
-                slice_accum.extend_from_slice(&chunk[chunk_pos..chunk_pos + take]);
-                chunk_pos += take;
+        // A file that fits in one chunk has nothing for the double-buffered
+        // path below to overlap — reading it is one syscall either way — so
+        // route it through a single blocking read instead of paying a
+        // spawn_blocking task and an mpsc channel for that one syscall.
+        // Skipping this matters at scale: a corpus of thousands of
+        // sub-slice files (see `bench/FINDINGS.md` §5, issue #131) pays that
+        // task-spawn/channel-handoff cost once per file regardless of size,
+        // and profiling showed it dominating wall time — most cores sitting
+        // idle between the rare flushes big enough to need them — even
+        // though the per-file work is tiny.
+        if (file_info.size as usize) <= CHUNK_SIZE {
+            let path = file_info.path.clone();
+            tokio::task::block_in_place(|| -> Result<()> {
+                let buf = std::fs::read(&path)
+                    .with_context(|| format!("reading `{}`", path.display()))?;
+                feed_chunk(&buf, worker, slice_size, &mut slice_accum, &mut held);
+                Ok(())
+            })?;
+        } else {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+            let path = file_info.path.clone();
 
-                if slice_accum.len() >= slice_size {
-                    let next = worker.take_buffer(slice_size);
-                    let padded = std::mem::replace(&mut slice_accum, next);
-                    // A new full slice exists, so whatever was held is
-                    // definitely not this file's last one.
-                    if let Some(previous) = held.replace(padded) {
-                        tokio::task::block_in_place(|| {
-                            worker.send_slice(previous, slice_size, false);
-                        });
+            // Double-buffered reader task: fetch data while we process previous chunks.
+            let reader_handle = tokio::task::spawn_blocking(move || {
+                use std::fs::File;
+                use std::io::Read;
+                let mut file = File::open(&path)?;
+                loop {
+                    let mut buf = vec![0u8; CHUNK_SIZE];
+                    let n = file.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    buf.truncate(n);
+                    if tx.blocking_send(buf).is_err() {
+                        break;
                     }
                 }
-            }
-        }
+                Ok::<_, anyhow::Error>(())
+            });
 
-        reader_handle.await??;
+            while let Some(chunk) = rx.recv().await {
+                tokio::task::block_in_place(|| {
+                    feed_chunk(&chunk, worker, slice_size, &mut slice_accum, &mut held);
+                });
+            }
+
+            reader_handle.await??;
+        }
 
         if !slice_accum.is_empty() {
             // A partial trailing slice: it is the last one, and anything held
