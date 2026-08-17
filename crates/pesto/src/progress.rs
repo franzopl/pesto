@@ -160,6 +160,43 @@ pub enum ProgressEvent {
     /// its original copy exhausted its STAT attempts. `reposted` is a
     /// running count of reposts so far this run.
     CheckReposted { reposted: u64 },
+    /// The one-time final recovery pass (see `poster::check::recover_missing`)
+    /// has started, for a small stubborn tail of articles the streaming
+    /// check queue couldn't confirm after every `check_post_retries` round.
+    /// `total` is how many articles are in this batch. Unlike the streaming
+    /// check, this pass is sequential (one article at a time — repost, wait
+    /// `check_delay_secs`, STAT), so it can take a while with no other
+    /// visible activity; the renderer gives it its own phase and progress
+    /// box instead of leaving the user looking at an idle connection grid.
+    CheckRecoverStarted { total: u64 },
+    /// One article in the final recovery pass was resolved. `done` is a
+    /// running count within this batch (out of `total` from
+    /// `CheckRecoverStarted`); `ok` is true when the repost was confirmed
+    /// present, false when either the repost itself failed or the final
+    /// STAT still couldn't confirm it — both cases used to be completely
+    /// silent (a `tracing::warn!` only), fired for every resolution
+    /// (success or failure) so the run never goes quiet for the whole
+    /// batch.
+    CheckRecoverProgress { done: u64, total: u64, ok: bool },
+    /// Streaming-check worker connection `conn` (indexed within the check
+    /// pool, separate from the upload pool's own `conn` numbering) started
+    /// network activity — a STAT, or a repost after a confirmed miss.
+    /// Before this, the panel's `conns` line only ever showed the check
+    /// pool's *configured* size ("4 check"), never how many of those
+    /// connections were actually doing anything at a given moment — a
+    /// pool that looked identical whether it was working through a
+    /// backlog or sitting on 20-second STAT-retry backoffs.
+    CheckConnectionBusy { conn: usize },
+    /// The check worker named by [`CheckConnectionBusy`] went back to
+    /// waiting for its next ready item (queue empty, or every ready item
+    /// still inside its retry/repost delay).
+    CheckConnectionIdle { conn: usize },
+    /// The check pool grew past the size announced in [`Started`]'s
+    /// `check_connections` — see `CheckCoordinatorHandle::scale_up`: once
+    /// the upload's own connections go idle, they get reused to help drain
+    /// any remaining check backlog instead of sitting unused. `check_connections`
+    /// is the pool's new total size, not a delta.
+    CheckPoolScaledUp { check_connections: usize },
     /// Worker connection `conn` is authenticating with the server.
     ConnectionAuth { conn: usize },
     /// Worker connection `conn` failed an attempt and is retrying.
@@ -380,11 +417,30 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ =
                             writeln!(out, r#"{{"type":"check_reposted","reposted":{reposted}}}"#);
                     }
+                    ProgressEvent::CheckRecoverStarted { total } => {
+                        let _ =
+                            writeln!(out, r#"{{"type":"check_recover_started","total":{total}}}"#);
+                    }
+                    ProgressEvent::CheckRecoverProgress { done, total, ok } => {
+                        let ok_str = if ok { "true" } else { "false" };
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_recover_progress","done":{done},"total":{total},"ok":{ok_str}}}"#
+                        );
+                    }
+                    ProgressEvent::CheckPoolScaledUp { check_connections } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_pool_scaled_up","check_connections":{check_connections}}}"#
+                        );
+                    }
                     // Connection and pool events are noisy and not useful to consumers.
                     ProgressEvent::ConnectionBusy { .. }
                     | ProgressEvent::ConnectionIdle { .. }
                     | ProgressEvent::ConnectionAuth { .. }
                     | ProgressEvent::ConnectionRetrying { .. }
+                    | ProgressEvent::CheckConnectionBusy { .. }
+                    | ProgressEvent::CheckConnectionIdle { .. }
                     | ProgressEvent::BufferPoolStats { .. }
                     | ProgressEvent::Finished => {}
                 }
