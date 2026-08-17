@@ -355,6 +355,10 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
             // a complete description of what was posted — the property `pesto`
             // needs, since the file is in the NZB either way — at the cost of
             // that one cosmetic disagreement on verify.
+            //
+            // Decision (issue #135): keep this behavior — match `pesto`, not
+            // `par2cmdline`. See `ROADMAP.new.md`'s "Deferred / intentionally
+            // not implemented" section for the recorded rationale.
             let md5_empty: [u8; 16] = Md5::digest([]).into();
             let mut worker_hashes = hashes.into_iter();
             let all_hashes: Vec<encoder::FileHashes> = input_files
