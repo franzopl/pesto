@@ -1297,17 +1297,28 @@ pesto dispatches automatically to the best SIMD path at runtime
 
 ### yEnc encoding throughput
 
-Line length 128 bytes (Usenet default). Both tools use internal timers after
-warmup + N iterations (pure CPU, data already in memory).
+Line length 128 bytes (Usenet default), real article size (768 000 bytes).
+Both tools use internal timers after warmup + N iterations (pure CPU, data
+already in memory). `pesto` figures are the `auto` runtime dispatch shown
+above — the path a normal invocation takes.
 
-| CPU | pesto | node-yencode |
+| CPU | pesto (auto) | node-yencode |
 |-----|-------|--------------|
-| i5-10400 (Comet Lake, no E-cores) | ~2 200 MB/s | ~2 200 MB/s |
-| i5-14400 (Raptor Lake, hybrid)    | ~2 900 MB/s | ~4 500 MB/s |
+| i5-10400 (Comet Lake, no E-cores) | **~2 300 MiB/s** | ~2 120 MiB/s |
+| i5-14400 (Raptor Lake, hybrid)    | ~2 900 MB/s¹ | ~4 500 MB/s¹ |
 
-On homogeneous CPUs pesto and node-yencode are neck-and-neck. The gap on
-hybrid CPUs is under investigation — E-cores may favour node-yencode's SIMD
-strategy at line_len=128.
+pesto is ~9% ahead of node-yencode on this CPU, and the gap widens sharply on
+smaller buffers — 4× at 4 KiB, where node's per-call overhead dominates (see
+[`bench/FINDINGS.md`](bench/FINDINGS.md) §2 for the full size sweep).
+Selecting the AVX2 kernel directly instead of `auto` measures a further ~3%
+faster; the dispatch overhead is tracked in
+[#132](https://github.com/franzopl/pesto/issues/132).
+
+¹ Predates the current benchmark suite and has not been re-verified with it;
+kept here as the last measurement on hybrid (P+E core) hardware, which the
+suite has not been run on since. The "neck-and-neck" framing that used to sit
+here matched an older `pesto` encoder and is no longer accurate on the
+i5-10400 — see the reproduction command below to check your own CPU.
 
 ### PAR2 creation throughput
 
