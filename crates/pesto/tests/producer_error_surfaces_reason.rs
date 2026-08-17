@@ -68,6 +68,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

@@ -32,7 +32,8 @@ pub struct NzbMeta {
     pub tmdb_id: Option<String>,
     /// IMDb ID (`<meta type="imdbid">`), e.g. `tt1234567` — see [`parse_imdb_ref`].
     pub imdb_id: Option<String>,
-    /// TheTVDB ID (`<meta type="tvdbid">`) — see [`parse_tvdb_ref`].
+    /// TheTVDB numeric ID (`<meta type="tvdbid">`), movie/series kind
+    /// stripped — see [`parse_tvdb_ref`].
     pub tvdb_id: Option<String>,
     /// MyAnimeList ID (`<meta type="malid">`) — see [`parse_mal_ref`].
     pub mal_id: Option<String>,
@@ -114,13 +115,63 @@ pub fn parse_imdb_ref(s: &str) -> Result<String, String> {
     Ok(format!("tt{digits:0>7}"))
 }
 
-/// Parse a `--tvdb-id` value into its normalized form: a plain numeric string.
+/// Media type of a [`parse_tvdb_ref`] result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TvdbKind {
+    Movie,
+    Series,
+}
+
+impl TvdbKind {
+    /// URL segment used by TheTVDB's own dereferrer
+    /// (`/dereferrer/movie/<id>` or `/dereferrer/series/<id>`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TvdbKind::Movie => "movie",
+            TvdbKind::Series => "series",
+        }
+    }
+
+    /// `.nzb` category to fall back to when the user hasn't set one explicitly.
+    pub fn default_category(self) -> &'static str {
+        match self {
+            TvdbKind::Movie => "movies",
+            TvdbKind::Series => "tv",
+        }
+    }
+}
+
+/// Parse a `--tvdb-id` value into its media kind and numeric ID.
 ///
-/// Unlike TMDb, TheTVDB IDs aren't split into separate movie/series
-/// namespaces from the caller's point of view — the plain ID resolves
-/// correctly through TheTVDB's own dereferrer link (see [`NzbMeta::tvdb_id`]).
-pub fn parse_tvdb_ref(s: &str) -> Result<String, String> {
-    parse_numeric_ref(s, "TVDB")
+/// Accepts `movie/<id>` or `series/<id>` (`tv` also accepted as an alias for
+/// `series`, matching the `--tmdb` convention), mirroring TheTVDB's own
+/// `/movies/<slug>` and `/series/<slug>` split. `:` is also accepted as the
+/// separator (`movie:<id>`), same as `--tmdb`.
+///
+/// A bare numeric ID with no `/` or `:` (e.g. `81189`) is still accepted for
+/// backwards compatibility and defaults to `series` — TheTVDB's original,
+/// and still by far most common, content type — so existing configs and
+/// scripts keep working unchanged.
+pub fn parse_tvdb_ref(s: &str) -> Result<(TvdbKind, String), String> {
+    match s.split_once(['/', ':']) {
+        Some((kind_str, id)) => {
+            let kind = match kind_str.to_ascii_lowercase().as_str() {
+                "movie" => TvdbKind::Movie,
+                "series" | "tv" => TvdbKind::Series,
+                other => {
+                    return Err(format!(
+                        "unknown TVDB media type `{other}` (expected `movie` or `series`)"
+                    ))
+                }
+            };
+            let id = parse_numeric_ref(id, "TVDB")?;
+            Ok((kind, id))
+        }
+        None => {
+            let id = parse_numeric_ref(s, "TVDB")?;
+            Ok((TvdbKind::Series, id))
+        }
+    }
 }
 
 /// Parse a `--mal-id` value into its normalized form: a plain numeric string.
@@ -640,6 +691,14 @@ mod tests {
     }
 
     #[test]
+    fn tvdb_kind_default_category_and_dereferrer_segment() {
+        assert_eq!(TvdbKind::Movie.default_category(), "movies");
+        assert_eq!(TvdbKind::Series.default_category(), "tv");
+        assert_eq!(TvdbKind::Movie.as_str(), "movie");
+        assert_eq!(TvdbKind::Series.as_str(), "series");
+    }
+
+    #[test]
     fn format_tmdb_ref_normalizes_to_slash() {
         assert_eq!(format_tmdb_ref(TmdbKind::Movie, "12345"), "movie/12345");
         assert_eq!(format_tmdb_ref(TmdbKind::Tv, "9999"), "tv/9999");
@@ -673,9 +732,39 @@ mod tests {
     }
 
     #[test]
-    fn parse_tvdb_ref_accepts_plain_digits() {
-        assert_eq!(parse_tvdb_ref("81189"), Ok("81189".to_string()));
-        assert_eq!(parse_tvdb_ref("  81189  "), Ok("81189".to_string()));
+    fn parse_tvdb_ref_accepts_plain_digits_as_series() {
+        assert_eq!(
+            parse_tvdb_ref("81189"),
+            Ok((TvdbKind::Series, "81189".to_string()))
+        );
+        assert_eq!(
+            parse_tvdb_ref("  81189  "),
+            Ok((TvdbKind::Series, "81189".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_tvdb_ref_accepts_typed_movie_and_series() {
+        assert_eq!(
+            parse_tvdb_ref("movie/123"),
+            Ok((TvdbKind::Movie, "123".to_string()))
+        );
+        assert_eq!(
+            parse_tvdb_ref("series/81189"),
+            Ok((TvdbKind::Series, "81189".to_string()))
+        );
+        assert_eq!(
+            parse_tvdb_ref("MOVIE:123"),
+            Ok((TvdbKind::Movie, "123".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_tvdb_ref_accepts_tv_as_series_alias() {
+        assert_eq!(
+            parse_tvdb_ref("tv/81189"),
+            Ok((TvdbKind::Series, "81189".to_string()))
+        );
     }
 
     #[test]
@@ -683,6 +772,8 @@ mod tests {
         assert!(parse_tvdb_ref("tt81189").is_err());
         assert!(parse_tvdb_ref("").is_err());
         assert!(parse_tvdb_ref("abc").is_err());
+        assert!(parse_tvdb_ref("episode/123").is_err());
+        assert!(parse_tvdb_ref("movie/abc").is_err());
     }
 
     #[test]

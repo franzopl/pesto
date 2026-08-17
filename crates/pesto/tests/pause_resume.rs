@@ -126,6 +126,7 @@ fn test_config(port: u16, connections: usize) -> Config {
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

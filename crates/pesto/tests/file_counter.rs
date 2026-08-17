@@ -56,6 +56,7 @@ fn dry_run_config(file_counter: bool, par2_recovery_count: Option<usize>) -> Con
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

@@ -147,6 +147,7 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,

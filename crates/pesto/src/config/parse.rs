@@ -151,7 +151,7 @@ impl Config {
             .transpose()
             .map_err(|e| anyhow::anyhow!(e))
             .with_context(|| "parsing --imdb-id")?;
-        let tvdb_id = cli
+        let tvdb = cli
             .tvdb_id
             .as_deref()
             .map(crate::nzb::parse_tvdb_ref)
@@ -361,10 +361,15 @@ impl Config {
             nzb_password: cli.nzb_password.or(file.output.nzb_password),
             nzb_category: {
                 let explicit = cli.nzb_category.or(file.output.nzb_category);
-                explicit.or_else(|| {
-                    tmdb.as_ref()
-                        .map(|(kind, _)| kind.default_category().to_string())
-                })
+                explicit
+                    .or_else(|| {
+                        tmdb.as_ref()
+                            .map(|(kind, _)| kind.default_category().to_string())
+                    })
+                    .or_else(|| {
+                        tvdb.as_ref()
+                            .map(|(kind, _)| kind.default_category().to_string())
+                    })
             },
             nzb_tags: if cli.nzb_tags.is_empty() {
                 file.output.nzb_tags
@@ -376,7 +381,8 @@ impl Config {
                 .map(|(kind, id)| crate::nzb::format_tmdb_ref(*kind, id)),
             tmdb_kind: tmdb.as_ref().map(|(kind, _)| *kind),
             imdb_id,
-            tvdb_id,
+            tvdb_id: tvdb.as_ref().map(|(_, id)| id.clone()),
+            tvdb_kind: tvdb.as_ref().map(|(kind, _)| *kind),
             mal_id,
             nzb_dir: cli.nzb_dir.or(file.output.nzb_dir),
             indexer_url: file.output.indexer.url,

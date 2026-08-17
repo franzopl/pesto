@@ -353,9 +353,15 @@ struct Cli {
     #[arg(long, alias = "imdb", value_name = "ID")]
     imdb_id: Option<String>,
 
-    /// TheTVDB ID written to `<meta type="tvdbid">` in the `.nzb`, e.g.
-    /// `81189`. Also added as a line in the `.nfo` when `--nfo` is set.
-    /// Aliased as `--tvdb`.
+    /// TheTVDB reference written to `<meta type="tvdbid">` in the `.nzb`, as
+    /// `movie/<id>` or `series/<id>` (`movie:<id>` / `series:<id>`, and
+    /// `tv/<id>` as an alias for `series/<id>`, also accepted). A bare
+    /// numeric ID (e.g. `81189`) is still accepted and defaults to `series`.
+    /// When `--nzb-category` and `--tmdb` are both unset, the category
+    /// defaults to `movies` or `tv` accordingly. Also added as a line in the
+    /// `.nfo` when `--nfo` is set, linking to the right TheTVDB dereferrer
+    /// (`/dereferrer/movie/<id>` or `/dereferrer/series/<id>`). Aliased as
+    /// `--tvdb`.
     #[arg(long, alias = "tvdb", value_name = "ID")]
     tvdb_id: Option<String>,
 
@@ -1998,9 +2004,14 @@ fn nfo_metadata_header(config: &Config) -> String {
     }
     if let Some(tvdb_id) = &config.tvdb_id {
         // The dereferrer link resolves by ID alone, without needing the
-        // show's slug.
+        // title's slug — but the path segment must still match the media
+        // kind (movie vs. series), unlike a plain numeric ID.
+        let kind = config
+            .tvdb_kind
+            .unwrap_or(pesto::nzb::TvdbKind::Series)
+            .as_str();
         header.push_str(&format!(
-            "TVDB : https://thetvdb.com/dereferrer/series/{tvdb_id}\n"
+            "TVDB : https://thetvdb.com/dereferrer/{kind}/{tvdb_id}\n"
         ));
     }
     if let Some(mal_id) = &config.mal_id {
@@ -4160,6 +4171,53 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn resolve_with_tvdb(tvdb_id: &str) -> Config {
+        let mut file = FileConfig::default();
+        file.server.host = Some("news.example.com".into());
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        Config::resolve(
+            file,
+            Overrides {
+                tvdb_id: Some(tvdb_id.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tvdb_bare_id_defaults_to_series_category_and_dereferrer() {
+        let config = resolve_with_tvdb("81189");
+        assert_eq!(config.nzb_category.as_deref(), Some("tv"));
+        assert!(
+            nfo_metadata_header(&config).contains("https://thetvdb.com/dereferrer/series/81189")
+        );
+    }
+
+    #[test]
+    fn tvdb_movie_ref_sets_movies_category_and_dereferrer() {
+        let config = resolve_with_tvdb("movie/123");
+        assert_eq!(config.nzb_category.as_deref(), Some("movies"));
+        assert!(nfo_metadata_header(&config).contains("https://thetvdb.com/dereferrer/movie/123"));
+    }
+
+    #[test]
+    fn tvdb_explicit_category_overrides_kind_default() {
+        let mut file = FileConfig::default();
+        file.server.host = Some("news.example.com".into());
+        file.posting.groups = Some(vec!["alt.test".into()]);
+        let config = Config::resolve(
+            file,
+            Overrides {
+                tvdb_id: Some("movie/123".to_string()),
+                nzb_category: Some("custom".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(config.nzb_category.as_deref(), Some("custom"));
     }
 
     fn test_upload_params(config: Config) -> UploadParams {

@@ -154,6 +154,7 @@ fn config(addr: SocketAddr, par2_before_upload: bool) -> Config {
         tmdb_kind: None,
         imdb_id: None,
         tvdb_id: None,
+        tvdb_kind: None,
         mal_id: None,
         indexer_url: None,
         indexer_api_key: None,
