@@ -1,0 +1,29 @@
+# Two thousand small files: the per-file overhead worst case.
+#
+# Half a gigabyte of data spread over 2 000 files, each smaller than one
+# article. Throughput in MiB/s is not the interesting number here — files per
+# second is. Everything that is O(files) rather than O(bytes) shows up:
+# directory walking, per-file CRC-32, one PAR2 File Description packet each,
+# one NZB <file> element each, and an article whose header is a large
+# fraction of its payload.
+#
+# Expect it to be slow out of all proportion to its size, and expect the PAR2
+# rows to show the widest spread between tools in the whole suite: every file
+# smaller than a slice still consumes a whole padded slice, so the recovery
+# computation is sized by file *count*, not by bytes. That is the measurement,
+# not a flaw in it — though `--scale 0.1` is the sensible way to run this
+# workload while iterating on something else.
+
+WL_DESC="2000 sub-article files (per-file overhead worst case)"
+WL_TIER=quick
+WL_SEED=1006
+
+WL_GENSETS=(
+    "many-small|chunk-%04d.bin|2000|256K|100"
+)
+
+WL_PAR2_PCT=10
+WL_ARTICLE_SIZE=768000
+WL_OBFUSCATE=none
+WL_CONNECTIONS=8
+WL_LAYERS="stages e2e"

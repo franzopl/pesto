@@ -1,0 +1,32 @@
+# A release folder as it actually arrives: one video plus its debris.
+#
+# Subtitles, an NFO, a sample and a few artwork files alongside the main file.
+# Sizes span five orders of magnitude, which is the point: a 1 KB subtitle
+# still costs a full article, a File Description packet and an NZB <file>
+# entry, and a pipeline tuned only for large files pays a visible per-file
+# price here. It also exercises the recursive walker and nested paths.
+
+WL_DESC="Release folder: one video plus subtitles, NFO, sample, artwork"
+WL_TIER=quick
+WL_SEED=1005
+
+WL_FILES=(
+    "Benchmark.Movie.2026.1080p.WEB-DL-BENCH/Benchmark.Movie.2026.1080p.WEB-DL-BENCH.mkv|2G|100"
+    "Benchmark.Movie.2026.1080p.WEB-DL-BENCH/Sample/sample.mkv|48M|100"
+    "Benchmark.Movie.2026.1080p.WEB-DL-BENCH/benchmark.nfo|8K|30"
+    "Benchmark.Movie.2026.1080p.WEB-DL-BENCH/poster.jpg|420K|95"
+    "Benchmark.Movie.2026.1080p.WEB-DL-BENCH/fanart.jpg|1200K|95"
+)
+
+WL_GENSETS=(
+    "Benchmark.Movie.2026.1080p.WEB-DL-BENCH/Subs|subtitle-%02d.srt|24|64K|25"
+)
+
+WL_PAR2_PCT=10
+WL_ARTICLE_SIZE=768000
+WL_OBFUSCATE=none
+WL_CONNECTIONS=8
+# Also carries the connection-scaling sweep: it is the smallest workload whose
+# articles are full-sized, so the curve has the right shape without the
+# 1-connection/50 ms cell costing half an hour (see 50-scaling.sh).
+WL_LAYERS="stages e2e scaling"

@@ -1,0 +1,154 @@
+name: Benchmarks
+
+# Deliberately not on every push or PR.
+#
+# The microbenchmarks are CPU-bound and reasonably stable, but a GitHub runner
+# is a shared VM: it drifts by several percent between runs and occasionally by
+# much more. Gating every PR on that would produce false failures, and a gate
+# people learn to ignore is worse than no gate. So this runs on demand and
+# weekly, catches regressions above a deliberately loose threshold, and always
+# uploads the full results for a human to look at.
+#
+# The end-to-end and scaling suites are not run here at all — their numbers
+# only mean something on known hardware. Run those locally:
+#   ./bench/run.sh e2e scaling --reps 5
+
+on:
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: "Fail if a case regresses by more than this percentage"
+        default: "10"
+        required: false
+      reps:
+        description: "Repetitions per case"
+        default: "5"
+        required: false
+  schedule:
+    # Mondays, 04:00 UTC — off-peak, so runner contention is lowest.
+    - cron: "0 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  micro:
+    name: Microbenchmarks (yEnc + PAR2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Install competitors
+        # Optional by design — the suite skips whatever is absent — but having
+        # them makes the CI table a real comparison rather than a solo run.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y par2 time
+          npm install -g @animetosho/parpar || echo "parpar unavailable; PAR2 comparison will be partial"
+
+      - name: Build
+        run: |
+          cargo build --release \
+            -p pesto-poster -p parmesan-par2 --bins \
+            --example bench-gen --example yenc-bench --example mock_nntp_server
+
+      - name: Record runner hardware
+        # The same information system.json captures, surfaced in the log: a
+        # regression that turns out to be a different runner generation is the
+        # most common false positive, and this is what identifies it.
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          grep -o -E '\b(avx2|avx512f|avx512bw|gfni|ssse3)\b' /proc/cpuinfo | sort -u
+
+      - name: Run microbenchmarks
+        run: |
+          ./bench/run.sh micro \
+            --workload many-small \
+            --scale 0.05 \
+            --reps "${{ github.event.inputs.reps || '5' }}" \
+            --yes
+
+      - name: Compare against the committed baseline
+        # `continue-on-error` is not set: a real regression should fail the
+        # job. A missing baseline is not a regression, though — the first run
+        # on a new runner generation has nothing to compare with.
+        run: |
+          baseline=bench/baseline/ci-x86_64.json
+          candidate=$(ls -d bench/results/*/latest/results.json 2>/dev/null | head -1)
+          if [[ ! -r $baseline ]]; then
+            echo "::notice::no committed baseline yet — recording this run's numbers as the report only"
+            exit 0
+          fi
+          ./bench/compare.sh "$baseline" "$candidate" \
+            --threshold "${{ github.event.inputs.threshold || '10' }}"
+
+      - name: Summarise into the job page
+        if: always()
+        run: |
+          report=$(ls -d bench/results/*/latest/report.md 2>/dev/null | head -1)
+          [[ -r $report ]] && cat "$report" >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            bench/results/*/*/report.md
+            bench/results/*/*/summary.csv
+            bench/results/*/*/raw.csv
+            bench/results/*/*/results.json
+            bench/results/*/*/system.json
+          retention-days: 30
+
+  correctness:
+    name: Cross-tool PAR2 and yEnc correctness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-cargo-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Install competitors
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y par2 time
+          npm install -g @animetosho/parpar || true
+
+      - name: Build
+        run: |
+          cargo build --release \
+            -p pesto-poster -p parmesan-par2 --bins \
+            --example bench-gen --example yenc-bench --example mock_nntp_server
+
+      # Unlike the throughput numbers, these checks are pass/fail and not
+      # timing-sensitive at all, so a shared runner is a perfectly good place
+      # to run them. They are cheap (a ~40 MiB corpus) and they cover the
+      # claims that matter most: that recovery sets are interchangeable with
+      # par2cmdline and parpar in both directions, and that what pesto puts on
+      # the wire decodes back to the source with an independent decoder.
+      - name: Cross-tool correctness
+        run: ./bench/suites/60-correctness.sh
