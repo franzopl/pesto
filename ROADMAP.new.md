@@ -311,7 +311,19 @@ Recorded so they are not re-litigated:
   stable release-wide `[N/M]` is exactly the correlation vector those modes exist
   to deny. On by default for `none`/`full-shared`, which already accept that
   correlation.
-- **`DEFAULT_LINE_LENGTH` stays 128.** Raising to 256 was benchmarked and rejected.
+- **`DEFAULT_LINE_LENGTH` stays 128** (issue #134). `--line-length 256` measures ~30% faster AVX2
+  encode at the real article size — 3086 vs 2369 MiB/s (`bench/FINDINGS.md` §2) — a real, non-trivial
+  win, not a rounding error. Kept at 128 anyway: some indexers/downstream tooling still assume the
+  Usenet-conventional 128-byte line, and the compatibility risk of changing the default for every
+  existing user outweighs the win. `--line-length 256` is the escape hatch for anyone who wants it
+  without that risk; see the README's "yEnc encoding throughput" section.
+- **`parmesan`'s empty-file handling matches `pesto`, not `par2cmdline`** (issue #135). A zero-byte
+  input gets a synthesized MD5-of-nothing and a full File Description packet, same as `pesto`'s
+  poster (`crates/pesto/src/poster/mod.rs`) — `par2cmdline` instead skips zero-length files entirely
+  and, on verify, flags a File Description entry it didn't write as damaged rather than absent.
+  Matching `pesto` keeps the recovery set a complete description of everything actually posted, at
+  the cost of that one cosmetic disagreement with `par2cmdline` on verify. See the `md5_empty`
+  comment in `crates/parmesan/src/main.rs`.
 - **The AVX2 yEnc encoder is not preferred over SSSE3** by the dispatcher —
   investigated and closed; SSSE3 wins on the measured hardware.
 - **yEnc SIMD escaping / multi-line encoding** (PSHUFB in-place escape insertion,

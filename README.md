@@ -1322,6 +1322,14 @@ suite has not been run on since. The "neck-and-neck" framing that used to sit
 here matched an older `pesto` encoder and is no longer accurate on the
 i5-10400 — see the reproduction command below to check your own CPU.
 
+The numbers above use the default `--line-length 128` (Usenet convention, and
+what most indexers/tooling assume). `--line-length 256` encodes ~30% faster —
+3086 vs 2369 MiB/s AVX2 at the real article size (`bench/FINDINGS.md` §2) —
+at the cost of posting non-default-width lines. `pesto` keeps 128 as the
+default for compatibility (see `ROADMAP.new.md`'s "Deferred" section), but if
+you control both ends (private indexer, your own downstream tooling) and want
+the throughput, `--line-length 256` is there to opt in.
+
 ### PAR2 creation throughput
 
 10% recovery, ~1 000 input slices, random data files.
