@@ -1,0 +1,22 @@
+# A full season: eight episodes in one folder.
+#
+# Multi-file is where PAR2 stops being a single-file problem: the spec orders
+# input slices by File ID, so the recovery set depends on every file being fed
+# in the right order, and the index gains a File Description packet per
+# episode. It is also the workload that separates posting one NZB per episode
+# from posting one global recovery set across the season (`--season`), which
+# is what pesto does and what most competitors cannot do at all.
+
+WL_DESC="8-episode season pack (multi-file, global PAR2)"
+WL_TIER=standard
+WL_SEED=1003
+
+WL_GENSETS=(
+    "Benchmark.Show.S01.1080p.WEB-DL.DDP5.1.H.264-BENCH|Benchmark.Show.S01E%02d.1080p.WEB-DL.DDP5.1.H.264-BENCH.mkv|8|1200M|100"
+)
+
+WL_PAR2_PCT=10
+WL_ARTICLE_SIZE=768000
+WL_OBFUSCATE=none
+WL_CONNECTIONS=8
+WL_LAYERS="stages e2e"

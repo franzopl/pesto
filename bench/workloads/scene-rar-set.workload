@@ -1,0 +1,23 @@
+# A scene-style release: compressed into volumes, obfuscated, then posted.
+#
+# The realistic "everything on" case. Entropy is 65% rather than 100 so the
+# archiver has something real to do — a corpus of pure random bytes would make
+# `--compress` look free, and a corpus of zeroes would make it look magic.
+# Obfuscation is `full-shared`, the mode most uploaders actually use: random
+# names on the wire, but one shared token so indexers can still group the set.
+
+WL_DESC="Scene-style release: rar volumes + obfuscation + PAR2"
+WL_TIER=standard
+WL_SEED=1004
+
+WL_FILES=(
+    "Benchmark.Release.2026.1080p.BluRay.x264-BENCH/source.mkv|4G|65"
+)
+
+WL_PAR2_PCT=10
+WL_ARTICLE_SIZE=768000
+WL_COMPRESS=rar
+WL_COMPRESS_VOLUME=500m
+WL_OBFUSCATE=full-shared
+WL_CONNECTIONS=8
+WL_LAYERS="stages e2e"

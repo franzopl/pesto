@@ -1,0 +1,21 @@
+# One 4K Blu-ray remux: the largest thing anyone routinely posts.
+#
+# Exists to stress what the smaller workloads cannot: PAR2 memory budgeting
+# (the recovery buffers cannot all be held at once, so the encoder has to
+# split the input into several passes) and the PAR2 spec's 32 768-input-slice
+# ceiling, which forces a much larger slice size than the default heuristic
+# would pick. Heavy tier — opt in with `--tier heavy`.
+
+WL_DESC="4K Blu-ray remux (memory-bound PAR2, multi-pass)"
+WL_TIER=heavy
+WL_SEED=1002
+
+WL_FILES=(
+    "Benchmark.Movie.2026.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC-BENCH.mkv|40G|100"
+)
+
+WL_PAR2_PCT=10
+WL_ARTICLE_SIZE=768000
+WL_OBFUSCATE=none
+WL_CONNECTIONS=16
+WL_LAYERS="stages e2e"

@@ -1,6 +1,9 @@
 /target
+# Benchmark outputs and generated corpora. The corpora are large and fully
+# reproducible from bench/workloads/ + a seed, so they are cached locally
+# and never committed; share the tables in report.md instead.
 /bench/results/
-/bench/par2_out/
+/bench/data/
 /node_modules/
 /bench_out/
 /bench_par2_out/

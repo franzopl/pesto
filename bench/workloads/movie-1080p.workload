@@ -1,0 +1,20 @@
+# One 1080p WEB-DL movie: a single large file.
+#
+# The most common upload on Usenet by a wide margin, and the case the whole
+# pipeline is tuned for: one file, thousands of articles, PAR2 computed over a
+# single recovery set. Nothing here exercises the walker or per-file overhead
+# — that is deliberate, so this workload isolates raw streaming throughput.
+
+WL_DESC="Single 1080p WEB-DL movie (one large file)"
+WL_TIER=standard
+WL_SEED=1001
+
+WL_FILES=(
+    "Benchmark.Movie.2026.1080p.WEB-DL.DDP5.1.H.264-BENCH.mkv|6G|100"
+)
+
+WL_PAR2_PCT=10
+WL_ARTICLE_SIZE=768000
+WL_OBFUSCATE=none
+WL_CONNECTIONS=8
+WL_LAYERS="stages e2e"

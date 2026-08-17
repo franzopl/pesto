@@ -1336,12 +1336,24 @@ parmesan closes the gap to parpar as file size grows and surpasses it at
 
 ```bash
 cargo build --release
-./bench/yenc.sh          # yEnc throughput vs node-yencode
-./bench/par2.sh          # PAR2 creation vs parpar / par2cmdline
-./bench/posting.sh       # end-to-end article pipeline (dry-run)
+./bench/run.sh --list    # what would run, and which competitors are installed
+./bench/run.sh micro     # yEnc + PAR2 microbenchmarks (no test corpus needed)
+./bench/run.sh           # everything: micro, pipeline stages, full uploads
 ```
 
-See [`bench/README.md`](bench/README.md) for details.
+No Usenet account is needed. Test corpora are generated from fixed seeds, so
+the input bytes are identical on any machine, and all posting runs go to a
+local mock NNTP server — which also means the end-to-end numbers can be taken
+with a simulated round-trip time (`--latencies 0,30`) instead of whatever the
+network was doing that afternoon.
+
+Each run writes `report.md` (tables), `summary.csv`, `raw.csv` and
+`results.json` under `bench/results/<host>/<timestamp>/`, alongside a
+`system.json` recording the CPU, SIMD tier, core count and every tool version.
+
+See [`bench/README.md`](bench/README.md) for the methodology, the exact flags
+used to make each comparison fair, and the limitations that apply to these
+numbers.
 
 ---
 
