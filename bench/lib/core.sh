@@ -150,9 +150,9 @@ ensure_built() {
     [[ -x $BENCH_GEN_BIN ]]  || missing+=("bench-gen")
     [[ -x $YENC_BENCH_BIN ]] || missing+=("yenc-bench")
     [[ -x $MOCK_NNTP_BIN ]]  || missing+=("mock_nntp_server")
-    [[ ${#missing[@]} -eq 0 ]] && return 0
-
-    info "building missing binaries: ${missing[*]}"
+    # Always invoke cargo: skipping when the binary exists silently benches
+    # yesterday's code.
+    info "building release binaries${missing:+ (was missing: ${missing[*]})}"
     command -v cargo >/dev/null 2>&1 || die "cargo not found; install Rust from https://rustup.rs"
     ( cd "$REPO_ROOT" && cargo build --release \
         -p pesto-poster -p parmesan-par2 \

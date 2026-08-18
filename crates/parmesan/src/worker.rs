@@ -54,8 +54,14 @@ impl Par2Worker {
     pub fn spawn(enc: RecoveryEncoder, compute_hashes: bool, channel_depth: usize) -> Self {
         let channel_depth = channel_depth.max(2); // at least double-buffered
         let (tx, rx) = std::sync::mpsc::sync_channel::<Par2Work>(channel_depth);
-        // Return channel for recycled buffers.
-        let (free_tx, free_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(channel_depth);
+        // Recycle path is unbounded on purpose. The encoder flushes 128 slices
+        // at a time (see `RecoveryEncoder`); a bounded `sync_channel` of
+        // `channel_depth` (64) silently dropped half of every flush via
+        // `try_send`, so the producer allocated a new slice buffer each time
+        // and RSS ballooned on many-small workloads. Live buffers are already
+        // bounded by what the encoder queued — this channel only ferries them
+        // back. `send` fails only if the producer has already dropped `free_rx`.
+        let (free_tx, free_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
         let handle = std::thread::spawn(move || {
             let (rs_tx, rs_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(channel_depth);
@@ -114,7 +120,7 @@ impl Par2Worker {
                 // After add_slice, if a flush was triggered, free_buffers holds
                 // the recycled slices. Ferry them back to the producer.
                 for buf in enc.drain_free_buffers() {
-                    let _ = free_tx.try_send(buf); // drop if return channel is full
+                    let _ = free_tx.send(buf);
                 }
             }
             let (slices, checksums) = enc.finish();

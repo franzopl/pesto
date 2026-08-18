@@ -3,6 +3,7 @@ use crate::worker::Par2Worker;
 use crate::SimdPath;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// High-level PAR2 creation parameters.
 #[derive(Debug, Clone)]
@@ -135,8 +136,18 @@ pub fn calculate_geometry(
 
         // Grow slice size if we'd exceed the PAR2 hard limit.
         while n > 32768 {
-            s *= 2;
-            n = total_slice_count(files, s);
+            let next = s.saturating_mul(2);
+            if next == s {
+                break;
+            }
+            let n2 = total_slice_count(files, next);
+            // One slice per non-empty file is the floor — growing the slice
+            // cannot help a set with more files than the spec allows.
+            if n2 >= n {
+                break;
+            }
+            s = next;
+            n = n2;
         }
 
         // Detect small-file padding inflation: many files smaller than slice_size
@@ -238,12 +249,37 @@ fn feed_chunk(
 /// caller passes an explicit `--slice-size` (see the regression test in
 /// `tests/exact_multiple_slice_size.rs`, and the same bug's earlier sighting
 /// in `pesto`'s poster, `crates/pesto/tests/par2_exact_multiple_of_slice_size.rs`).
+///
+/// See [`ingest_files_with`] for cancellation and per-file hooks.
 pub async fn ingest_files(
     files: &[InputFile],
     worker: &Par2Worker,
     slice_size: usize,
 ) -> Result<()> {
+    ingest_files_with(files, worker, slice_size, None, |_| Ok(())).await
+}
+
+/// [`ingest_files`] with optional cancel and a per-file hook so callers such
+/// as `pesto` can drive progress without reimplementing the reader.
+pub async fn ingest_files_with<F>(
+    files: &[InputFile],
+    worker: &Par2Worker,
+    slice_size: usize,
+    cancelled: Option<&AtomicBool>,
+    mut after_file: F,
+) -> Result<()>
+where
+    F: FnMut(&InputFile) -> Result<()>,
+{
     for file_info in files {
+        if cancelled.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Ok(());
+        }
+        // Empty files contribute no slices; the hasher only finalizes on
+        // `is_last_of_file`, and callers insert the known empty-file hash.
+        if file_info.size == 0 {
+            continue;
+        }
         let mut slice_accum = worker.take_buffer(slice_size);
         slice_accum.clear();
         // The most recently filled slice, not yet handed to the worker: it
@@ -292,6 +328,11 @@ pub async fn ingest_files(
             });
 
             while let Some(chunk) = rx.recv().await {
+                if cancelled.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    drop(rx);
+                    let _ = reader_handle.await;
+                    return Ok(());
+                }
                 tokio::task::block_in_place(|| {
                     feed_chunk(&chunk, worker, slice_size, &mut slice_accum, &mut held);
                 });
@@ -314,6 +355,8 @@ pub async fn ingest_files(
             // slice held back above really is its final one.
             tokio::task::block_in_place(|| worker.send_slice(last, slice_size, true));
         }
+
+        after_file(file_info)?;
     }
 
     Ok(())
