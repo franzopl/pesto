@@ -359,6 +359,34 @@ struct FileMeta {
     file_index: u32,
 }
 
+/// Fans posted articles out to per-worker channels instead of one channel
+/// shared behind a lock — see the `tx_opt` construction site in
+/// `post_files_inner` for why. Each worker owns its `Receiver` outright, so
+/// dequeuing never contends with any other worker.
+struct TaskDispatcher {
+    senders: Vec<tokio::sync::mpsc::Sender<PostTask>>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl TaskDispatcher {
+    fn new(senders: Vec<tokio::sync::mpsc::Sender<PostTask>>) -> Self {
+        TaskDispatcher {
+            senders,
+            next: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Send to the next worker in round-robin order. Mirrors
+    /// `mpsc::Sender::send`'s signature so call sites are unaffected.
+    async fn send(
+        &self,
+        task: PostTask,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<PostTask>> {
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.senders.len();
+        self.senders[idx].send(task).await
+    }
+}
+
 struct PostTask {
     meta: Arc<FileMeta>,
     part: u32,
@@ -1113,23 +1141,40 @@ pub async fn post_files_inner(
     let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
     let tx_opt = if worker_count > 0 {
-        let (tx, rx) = tokio::sync::mpsc::channel(worker_count * 2);
-        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        // Each worker gets its own dedicated channel instead of every worker
+        // sharing one `Receiver` behind a `tokio::sync::Mutex` (issue #129):
+        // fanning N workers out from a single mutex-guarded channel forces
+        // every dequeue to go through that one lock, and at low latency
+        // (nearby provider, or the mock server the benchmark suite uses)
+        // articles are encoded and posted fast enough that dequeues happen
+        // thousands of times per second — frequent enough for the lock
+        // itself to become the bottleneck past a handful of connections,
+        // which is exactly the "peaks at 4 then regresses" shape the issue
+        // describes. `TaskDispatcher` round-robins across per-worker
+        // channels so no lock sits on the hot path at all.
+        let mut senders = Vec::with_capacity(worker_count);
+        let mut receivers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            senders.push(tx);
+            receivers.push(rx);
+        }
+        let dispatcher = TaskDispatcher::new(senders);
         let slots = match &broker {
             Some(broker) => broker.checkout(worker_count).await,
             None => ConnectionPool::build(shared.servers.clone(), worker_count).into_slots(),
         };
-        for (idx, slot) in slots.into_iter().enumerate() {
+        for (idx, (slot, rx)) in slots.into_iter().zip(receivers).enumerate() {
             handles.push(tokio::spawn(worker(
                 shared.clone(),
-                rx.clone(),
+                rx,
                 idx,
                 slot,
                 check_tx.clone(),
                 broker.clone(),
             )));
         }
-        Some(tx)
+        Some(dispatcher)
     } else {
         None
     };
@@ -1890,7 +1935,7 @@ fn par2_memory_plan(
 
 async fn producer(
     metas: Vec<Arc<FileMeta>>,
-    tx_opt: Option<tokio::sync::mpsc::Sender<PostTask>>,
+    tx_opt: Option<TaskDispatcher>,
     shared: Arc<Shared>,
     // Connections actually competing for RAM *right now*, used to size the
     // PAR2 memory budget (see `connection_overhead_reserve`) — normally
@@ -2424,7 +2469,7 @@ async fn post_pregenerated_release(
     metas: &[Arc<FileMeta>],
     par2_dir: &Path,
     recovery_count: usize,
-    tx: &tokio::sync::mpsc::Sender<PostTask>,
+    tx: &TaskDispatcher,
     shared: &Arc<Shared>,
 ) -> Result<()> {
     if shared.cancelled.load(Ordering::Relaxed) {
@@ -2511,7 +2556,7 @@ fn spawn_double_buffered_reader(
 /// which is unnecessary here since PAR2 is already on disk.
 async fn post_data_files(
     metas: &[Arc<FileMeta>],
-    tx: &tokio::sync::mpsc::Sender<PostTask>,
+    tx: &TaskDispatcher,
     shared: &Arc<Shared>,
 ) -> Result<()> {
     let article_size = shared.config.article_size;
@@ -2558,7 +2603,7 @@ async fn push_par2_file(
     wire_override: Option<String>,
     file_index: u32,
     shared: &Arc<Shared>,
-    tx: &tokio::sync::mpsc::Sender<PostTask>,
+    tx: &TaskDispatcher,
 ) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     let segments = yenc::segments(size, shared.config.article_size);
@@ -2690,7 +2735,7 @@ impl RateLimiter {
 
 async fn worker(
     shared: Arc<Shared>,
-    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<PostTask>>>,
+    mut rx: tokio::sync::mpsc::Receiver<PostTask>,
     conn_id: usize,
     mut slot: ConnectionSlot,
     check_tx: Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
@@ -2773,15 +2818,12 @@ async fn worker(
             Idle,
             Closed,
         }
-        let recv = {
-            let mut rx_guard = rx.lock().await;
-            tokio::select! {
-                task = rx_guard.recv() => match task {
-                    Some(t) => Recv::Task(t),
-                    None => Recv::Closed,
-                },
-                _ = tokio::time::sleep(IDLE_POLL), if keepalive_enabled => Recv::Idle,
-            }
+        let recv = tokio::select! {
+            task = rx.recv() => match task {
+                Some(t) => Recv::Task(t),
+                None => Recv::Closed,
+            },
+            _ = tokio::time::sleep(IDLE_POLL), if keepalive_enabled => Recv::Idle,
         };
         let first = match recv {
             Recv::Task(t) => {
@@ -2795,7 +2837,6 @@ async fn worker(
 
         // Non-blocking: try to fill the rest of the pipeline slot.
         if effective_depth > 1 {
-            let mut rx = rx.lock().await;
             while batch.len() < effective_depth {
                 match rx.try_recv() {
                     Ok(t) => batch.push(t),

@@ -373,6 +373,56 @@ MiB/s on `movie-1080p` — because every tool becomes latency-bound. Which is
 exactly why the suite measures both, and why a 0 ms-only comparison would be
 misleading in either direction.
 
+**Fixed in [#129](https://github.com/franzopl/pesto/issues/129).** Root-caused
+by `perf stat` on `movie-1080p` at increasing `--connections`, not assumed:
+total instructions executed stayed flat (~45.7 billion) across every
+connection count, but "CPUs utilized" fell from 3.08 at 4 connections to a
+flat ~2.1 from 8 upward — the same amount of work getting *less* parallelism
+as more workers were added, the signature of coordination overhead, not a
+capacity limit. The mechanism: every posting worker shared one
+`mpsc::Receiver<PostTask>` behind a single `tokio::sync::Mutex`
+(`worker()`, `crates/pesto/src/poster/mod.rs`), so every dequeue — thousands
+per second at 0 ms latency, where a ~768 KB article encodes and posts in
+sub-millisecond time — serialized through that one lock regardless of how
+many connections were open. `many-small` never showed it because its default
+run used 4 connections, at or below where the lock only just starts costing
+more than it saves.
+
+Ruled out first: holding the mutex guard across the blocking `.recv().await`
+when the channel was empty. Patched that in isolation (`try_recv()` in a
+polling loop, dropping the lock between attempts) and re-measured — the
+regression was unchanged, which said the cost was the sheer *frequency* of
+lock acquisition on the hot path, not what happened during an empty wait.
+
+**Fix** (`crates/pesto/src/poster/mod.rs`): replaced the single shared
+channel with `TaskDispatcher`, which round-robins articles across one
+dedicated channel per worker. Each worker owns its `Receiver` outright, so
+dequeuing never contends with any other worker — no lock on the hot path at
+all. Trade-off: round-robin fixes an article's destination worker up front,
+so a multi-server config with one slow/erroring connection can no longer
+have its share of work silently picked up by faster, idle workers the way a
+shared queue did implicitly. Acceptable for the common single-healthy-server
+case this fixes; a work-stealing scheme would recover the old behavior too,
+but was not needed to close this gap.
+
+Official suite numbers, same machine, same `--scale 0.25` methodology as the
+rest of this report, `./bench/run.sh e2e --workload movie-1080p --scale 0.25
+--reps 5 --latencies 0,30` (`bench/results/medialab/20260817T232816Z/`),
+median of 5:
+
+| | before | after | vs before |
+|---|---:|---:|---:|
+| pesto, `movie-1080p`, 0 ms | 618 MiB/s | **1236.7 MiB/s** | **+100%** |
+| nyuu, same run | 1136 MiB/s | 1117.9 MiB/s (noise) | — |
+| pesto ÷ nyuu | 0.54× | **1.11×** | pesto now *ahead* |
+
+pesto goes from losing to nyuu by nearly half to beating it outright on the
+exact workload the issue named, with nyuu itself unchanged (run-to-run noise
+only) — confirming the gain is pesto's, not a shift in the comparison. At
+30 ms latency the same case is untouched (84.0 vs the original 82 MiB/s,
+within noise): exactly as expected, since the lock was never the bottleneck
+once network RTT dominates each worker's loop.
+
 ### A full release — data plus 10% recovery
 
 Wall time; lower is better. `pesto (streaming)` is the default pipeline,
@@ -413,6 +463,23 @@ full-release rows. That is expected — implementations split recovery data into
 volumes differently — and the report flags it. The payload is the same 200
 recovery blocks; the article count is not the comparable quantity there.
 
+**After the [#129](https://github.com/franzopl/pesto/issues/129) connection-pool
+fix above**, `movie-1080p` re-measured on the same corpus and geometry:
+
+| workload | latency | pesto (streaming) | pesto (two-phase) | parpar+nyuu | ngPost |
+|---|---|---|---|---|---|
+| `movie-1080p` | 0 ms | **4.08s** (was 4.38s) | 4.93s (was 6.37s) | 5.52s (noise) | 45.06s (noise) |
+| `movie-1080p` | 30 ms | **20.12s** (unchanged) | 24.30s (noise) | 23.34s (noise) | 1m01s (noise) |
+
+`two-phase` — whose posting phase is a plain upload with no PAR2 overlap to
+hide behind — picks up essentially the whole gain (23% faster), since it is
+the more direct measurement of the connection pool itself; `streaming`
+improves too (7%) but PAR2 generation dominates enough of its wall time that
+the pool fix has less to work with. `parpar+nyuu` and `ngPost` are unrelated
+code paths and move only by measurement noise, as expected. At 30 ms nothing
+moves outside noise, consistent with the fix being specifically about
+low-latency lock contention.
+
 ### ngPost reliability
 
 ngPost failed 1 of 3 repetitions on `many-small` at 0 ms and 2 of 3 at 30 ms,
@@ -451,6 +518,42 @@ the connection count is what matters and the two are comparable.
 Note the 0 ms column is measuring against a mock server on loopback — it is a
 CPU and syscall benchmark, not a network one. The 10 ms column is the one that
 resembles a real provider.
+
+**Fixed in [#129](https://github.com/franzopl/pesto/issues/129)** — root
+cause and fix described in §5 above (the same shared-mutex dequeue
+bottleneck; this table and §5's "posting only" row are two views of the
+same mechanism, which is why they were investigated together). Re-measured
+with the exact repro from the issue, same machine, same `--scale 0.25`
+methodology as the rest of this report:
+`BENCH_SCALE=0.25 BENCH_REPS=5 BENCH_SCALING_LATENCIES=0,10 bash
+bench/suites/50-scaling.sh movie-1080p` (the 50 ms column was dropped from
+this re-run, not from the fix's validation — see this suite's own file
+header on why a 1.5 GiB corpus at 1 connection/50 ms costs minutes per
+repetition for a point the 10 ms column already makes; the original table
+above never measured it either, despite `SCALING_LATENCIES`'s default of
+`0,10,50`):
+
+| connections | 0 ms pesto | 0 ms nyuu | 10 ms pesto | 10 ms nyuu |
+|---|---|---|---|---|
+| 1 | 254.6 (was 263) | 567.4 | 24.9 (was 25.0) | 29.1 |
+| 2 | 481.8 (was 491) | 1003.3 | 48.9 (was 49.7) | 58.5 |
+| 4 | 776.5 (was 821) | 1065.9 | 99.3 (was 105) | 114.1 |
+| 8 | **1105.8** (was 613) | 1011.2 | 212.5 (was 219) | 237.8 |
+| 16 | **1366.5** (was 601) | 1116.3 | 424.7 (was 443) | 458.1 |
+| 32 | **1373.9** (was 545) | 1092.5 | 803.3 (was 570) | 815.3 |
+
+**The regression is gone, not just reduced.** At 0 ms pesto now climbs
+monotonically through the full sweep instead of peaking at 4 and falling —
+1105.8/1366.5/1373.9 MiB/s at 8/16/32 connections, against 613/601/545
+before, and **ahead of nyuu** from 8 connections on (nyuu: 1011.2/1116.3/
+1092.5). 1/2/4 connections are unchanged within noise (254.6 vs 263, 481.8
+vs 491, 776.5 vs 821), confirming the fix cost nothing at the connection
+counts that were never affected. At 10 ms the whole curve moved by noise
+only (the largest delta, conn32's 803.3 vs 570, is a *gain* — the old
+regression's tail was still dragging on this column too, just less visibly
+under latency) — consistent with §5's finding that this was a low-latency
+coordination cost, not a change to how pesto behaves under real network
+conditions.
 
 ---
 
@@ -619,11 +722,19 @@ report:
    the encoder's flush cadence or the #137 thread tuning (both tested and
    ruled out). `many-small` create: 72.3 → 178.3 MiB/s (+147%), now 31%
    *ahead* of parpar instead of 47% behind. Details above.
-3. **Look at posting a single large file, and the connection-pool regression
-   past 4 connections.** 0.54× nyuu at 0 ms on one big file, while being
-   2.7× nyuu on many small files; the connection curve peaking then falling
-   as more connections are added is the same shape of problem and likely the
-   same root cause. — [#129](https://github.com/franzopl/pesto/issues/129)
+3. ~~Look at posting a single large file, and the connection-pool regression
+   past 4 connections.~~ — done,
+   [#129](https://github.com/franzopl/pesto/issues/129): both were the same
+   root cause, confirmed by `perf stat` (flat instruction count, falling
+   CPU utilization as connections increased) rather than assumed — every
+   worker dequeued from one channel behind a single shared
+   `tokio::sync::Mutex`, which serialized dequeues often enough at 0 ms
+   latency to cost throughput past ~4 connections. Fixed by giving each
+   worker its own channel with round-robin dispatch instead. `movie-1080p`
+   posting-only: 618 → 1236.7 MiB/s (+100%), pesto now 1.11× nyuu instead of
+   0.54×; the connection-scaling curve no longer regresses and pesto leads
+   nyuu from 8 connections up (was behind at every point past 4). Details
+   above.
 4. **Re-run all of this on a GFNI machine.** Every PAR2 conclusion here is
    about the AVX2 kernel, on a CPU that cannot reach parmesan's fastest paths.
    — [#128](https://github.com/franzopl/pesto/issues/128)
