@@ -854,8 +854,40 @@ impl RecoveryEncoder {
         // Process if we hit the count limit (cache blocking) or a memory limit
         // (to keep the footprint lean). 256 MB is enough to amortize the flush
         // cost even for very few slices.
+        //
+        // §148: the count limit used to be 128, chosen without a documented
+        // tuning pass. Every `flush_*_work` pre-builds one SIMD coefficient
+        // table per (recovery_block × queued_slice) pair (`all_tables`) in one
+        // rayon pass, then a second rayon pass reads it back while doing the
+        // actual multiply, so this cap sets how much of that table is in
+        // flight per flush. Swept on this issue's `movie-1080p` reproduction
+        // (`bench/data/movie-1080p@0.25`, real `parmesan create` CLI, not just
+        // the in-process micro-benchmarks) at three very different recovery
+        // counts:
+        //
+        //   recovery_count=20:   64 ≈ 128 (no regression, table already tiny)
+        //   recovery_count=200:  64 is +21% over 128 (5.7s -> 4.7s median)
+        //   recovery_count=1000: 64 is +6% over 128, but noisy (this machine
+        //                        runs other services — pooled across two
+        //                        sweep sessions, ~19.9s vs ~21.2s median)
+        //
+        // A first attempt made this adaptive — shrinking the cap as
+        // `recovery_count` grows, on the theory that keeping the table's
+        // total byte size under this machine's 12 MiB L3 was the mechanism
+        // (perf stat showed 81% more cache-references and 92% more
+        // cache-misses than parpar's equivalent run at recovery_count=200,
+        // consistent with an overflowing working set at 128). That
+        // hypothesis does not fully hold up: at recovery_count=1000 the
+        // adaptive formula's shrunk cap (16) measured *worse* than the flat
+        // 128 it was meant to replace, and a follow-up `perf stat` on the
+        // fixed build showed cache-misses essentially unchanged (only CPU
+        // utilization and page-faults improved) — so the true mechanism is
+        // not fully understood, and a flat 64 (empirically safe and better
+        // across all three measured points, unlike the adaptive formula) is
+        // the honest, validated fix rather than a theory dressed up as one.
+        // See `bench/FINDINGS.md` §3 for the full writeup.
         let queued_bytes = self.queued_slices.len() * self.slice_words * 2;
-        if self.queued_slices.len() >= 128 || queued_bytes >= self.flush_limit_bytes {
+        if self.queued_slices.len() >= 64 || queued_bytes >= self.flush_limit_bytes {
             self.flush();
         }
     }

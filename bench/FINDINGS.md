@@ -620,23 +620,98 @@ applied here before trusting its output. Flagged as the concrete next step
 if this technique is pursued further; branch removal alone is not enough,
 so this is closed as "needs CSE, not just cleanup."
 
-**New lead, not yet tested: tiling.** parpar tunes its chunk/tile size per
-kernel (`gf16mul.cpp`'s `idealChunkSize` switch, around line 452): **8 KiB**
-for `GF16_SHUFFLE_AVX2` and `GF16_SHUFFLE2X_AVX2` ("try to target L2"), 16
-KiB for the SSSE3/AVX shuffle kernels, 128 KiB for `GF16_XOR_JIT_AVX2`.
-parmesan's `flush_avx2_work` and `flush_avx2_shuffle2x_work` both use a
-fixed **32 KiB** chunk (`encoder.rs` `chunk_size`/`chunk_size_bytes`) —
-4× parpar's tuned figure for the same kernel family, chosen without a
-documented tuning pass. Since the two kernels are now confirmed
-architecturally identical (above), and the remaining §3 gap is specifically
-worse on large single files (not `many-small`, already fixed by #131) —
-matching a cache-locality explanation better than an instruction-count
-one — this is a concrete, cheap-to-test candidate for closing real ground:
-sweep `chunk_size` toward 8 KiB on the AVX2 Shuffle2x path and re-run the
-existing `shuffle2x_vs_normal_layout_throughput_movie_1080p`-style
-methodology. Not attempted in this pass — a tiling change deserves the same
-multi-trial, interleaved-rep rigor every other number in this section got,
-which didn't fit in the same sitting as the ALTMAP experiment above.
+**Fifth lead, tested and closed: parpar's tiling figure doesn't transfer.**
+parpar tunes its chunk/tile size per kernel (`gf16mul.cpp`'s
+`idealChunkSize` switch, around line 452): **8 KiB** for `GF16_SHUFFLE_AVX2`
+and `GF16_SHUFFLE2X_AVX2` ("try to target L2"), against parmesan's fixed
+**32 KiB** chunk (`encoder.rs`, `flush_avx2_shuffle2x_work`'s
+`chunk_size_bytes`) for the same kernel family — a plausible, cheap-to-test
+cache-locality candidate. Swept `chunk_size_bytes` from 4 KiB to 128 KiB (a
+32× range) through the real `parmesan create` CLI on this machine's
+`movie-1080p` reproduction (200 recovery blocks, `-t 6 -m 1024MiB`, 3 reps
+per point): every value landed at 5.6–5.9 s, indistinguishable from noise.
+**This chunking constant has no measurable effect in this range on this
+workload.** parpar's 8 KiB figure does not transfer to parmesan's flush
+structure — most likely because the two tools tile completely differently
+(parpar tiles a single (coefficient, source, dest) triple; parmesan's chunk
+is a slice of *already-4×-unrolled* recovery buffers being walked against a
+pre-built `all_tables` matrix, a different memory-access shape the same
+tile-size intuition doesn't obviously carry over to). Closed as a dead end,
+not pursued further.
+
+**Sixth lead: the flush batch-size cap — found it.** Reproduced the §3 gap
+directly on this machine with the real CLIs and current binaries (not
+historical numbers): `parmesan create` on `movie-1080p`
+(`-s 806912 --recovery-count 200 -t 6 -m 1024MiB`) at 5.72 s median
+(268.7 MiB/s) against `parpar` (matched flags) at 3.90 s median
+(394.1 MiB/s) — parmesan **31.6% behind**, same shape as the original §3
+finding, on the same-model CPU (`cpu family: 6`, i5-10400-class). `perf
+stat` on both (identical workload, identical thread count) is the "off-CPU
+breakdown" flagged as never-attempted at the top of this section:
+
+| metric | parmesan | parpar | |
+|---|---:|---:|---|
+| instructions | 190.08 B | 188.87 B | **0.6% apart — confirms the kernels really are equivalent** |
+| cycles | 108.82 B | 91.76 B | parmesan +18.6% |
+| IPC | 1.75 | 2.06 | parmesan −15% |
+| CPUs utilized (of 6 physical) | 4.77 | 5.79 | parmesan 82% scaling, parpar 96% |
+| cache-references | 6.12 B | 3.38 B | parmesan +81% |
+| cache-misses | 1.41 B | 0.73 B | parmesan +92% |
+| page-faults | 155 127 | 64 230 | parmesan 2.4× |
+
+Near-identical instruction counts plus a large gap in cache traffic,
+page-faults, and core utilization point at memory behavior, not compute —
+consistent with §3's earlier peak-RSS finding (parmesan ~1.8–1.9× parpar's
+RSS on this same workload). The suspect: every `flush_*_work` pre-builds
+one SIMD coefficient table per (recovery_block × queued_slice) pair
+(`all_tables`) in one rayon pass, then a second rayon pass reads it back
+while doing the actual multiply — a "materialize, then stream" pattern.
+parpar's equivalent (`gf16_shuffle2x_muladd_x_avx2`) builds one
+coefficient's tables directly on the stack right before the loop that
+consumes them, immediately, on the same thread — it never materializes a
+`recovery_count × queued_slices` matrix in heap memory at all. The queued-
+slice cap in `add_slice` (flat `128`, undocumented origin) controls exactly
+how big that materialized table gets: at `recovery_count=200`, 128 queued
+slices sizes `all_tables` at ~28 MiB against this machine's 12 MiB L3.
+
+Swept the cap directly through the real CLI, 200 recovery blocks, 2–5 reps
+per point: 16 → ~5.6 s, 32 → ~5.0 s, **48–64 → ~4.7–4.9 s (best)**, 96 →
+~5.3 s, 128 (original) → ~5.7 s, 256 → ~6.35 s. Non-monotonic in both
+directions — confirms two competing costs (a materialized working set that
+grows worse with a bigger cap, and per-flush fixed overhead that grows
+worse with a smaller one), not simply "smaller is better." A follow-up
+`perf stat` on a cap-64 build partially undercuts the cache-locality
+explanation, though: cache-references/misses were **essentially unchanged**
+(6.61 B / 1.39 B, both ~flat vs. the cap-128 baseline) while CPU utilization
+rose past parpar's (6.13 of 6 physical cores) and page-faults dropped 16%
+(129 929 vs 155 127) — so wall-clock did improve for a real, measured
+reason, but it's more consistent with allocation size / parallelism
+efficiency than with the clean "L3 overflow" story the cache-miss counters
+were expected to confirm. Recorded honestly as *not fully explained*,
+alongside the fix that the sweep did find.
+
+A first attempt made the cap adaptive — shrinking it as `recovery_count`
+grows, sized to keep the table under a fixed byte budget — but that formula
+does not generalize: tested at `recovery_count=1000` (pooled across two
+sweep sessions, 5–6 reps each — this machine is noisy enough that a single
+pass understated it), the adaptive formula's floor (16) measured **worse**
+than the original flat 128 in an early narrow comparison, and even the
+better-tuned flat 64 only won by a modest, noisy margin there
+(median ≈19.9 s vs ≈21.2 s, pooled, +6%) — nothing like the clean +21% at
+`recovery_count=200`. At `recovery_count=20` cap 64 and 128 are
+indistinguishable (~2.6 s either way, table already tiny regardless of cap).
+**Shipped fix:** a flat `64` (`crates/parmesan/src/encoder.rs`,
+`add_slice`), not a formula — empirically safe (no regression at any tested
+`recovery_count` from 20 to 1000) and a real win at the geometry this issue
+is about (200 recovery blocks): **+21% on `movie-1080p`, 5.67 s → 4.67 s
+median** (5-rep interleaved, cross-verified against real `par2cmdline`
+create/verify/repair round-trips, all passing). Closes roughly a third of
+the remaining gap to parpar: **31.6% behind → 18.8% behind**
+(268.7 → 316.9 MiB/s, vs. parpar's 390.1 MiB/s that session). Not a full
+close — the underlying mechanism is still not fully pinned down (see
+above), and `recovery_count` values far outside the 20–1000 range tested
+here are unvalidated — but a real, measured, cross-tool-verified
+improvement, and the most concrete progress on #148 to date.
 
 ---
 
@@ -1098,7 +1173,7 @@ report:
    the fix there (`VmPeak` 9 999 764 KiB → 1 418 676 KiB, no more crash), on
    top of an 11× `VmPeak` reduction measured on this machine. Details in §8.
 8. **Find why `parmesan create` loses ground to parpar on large files** —
-   investigated, not fixed, [#148](https://github.com/franzopl/pesto/issues/148):
+   partially fixed, [#148](https://github.com/franzopl/pesto/issues/148):
    confirmed single-threaded MD5 hashing costs ~20% of cycles and is a real
    but bounded (~7% wall-clock ceiling) contributor; two candidate fixes
    (asm MD5, coarser flush batching) were tested and both measured *worse*,
@@ -1110,32 +1185,46 @@ report:
    third lead — widening the recovery-block unroll from 4 to 8 to halve
    redundant source-slice re-reads — was implemented, correctness-verified,
    and also closed: 7 independent trials landed at 0.96×-1.04×, no real
-   gain. Reading parpar's actual AVX2 kernel (not just its tiling/dispatch
-   layer) explains why: parpar's `mul16_vec2x` does 2 `_mm256_shuffle_epi8`
-   per accumulator update against parmesan Normal's 8 (Shuffle2x's 4 sits
-   in between) — an 8:4:2 ratio suggesting parmesan's Normal-layout kernel
-   is compute-bound on instruction count, not bandwidth-bound on redundant
-   reads, which is exactly consistent with widening the unroll buying
-   nothing. That "2-shuffle kernel" lead is now closed as a misreading:
-   fetching and reading parpar's actual upstream source
-   (`gf16_shuffle_avx2.c`) shows `mul16_vec2x` is a table-construction
-   helper called 3×/flush-setup, not the per-vector data hot loop — the
-   real hot loop (`gf16_shuffle2x_muladd_round_avx2`) uses 4 shuffles per
-   vector, architecturally identical to parmesan's existing Shuffle2x
-   kernel. A fourth lead — whether parmesan's own "XOR Bit Dependencies"
-   kernel (ALTMAP), the technique parpar's docs call generally fastest for
-   w=16 on x86 — could compete once its worst inefficiency (256
-   branch-tested mask bits re-decoded on every output vector) was removed,
-   was implemented, correctness-verified, and closed: still 89% slower than
-   Shuffle2x even after hoisting the branchy decode out of the hot loop,
-   because the real gap is XOR instruction count (~128 vs Shuffle2x's 4 per
-   chunk), which only a common-subexpression-elimination pass (JIT or not)
-   would fix — a materially bigger undertaking than anything tried in this
-   issue so far. New lead for a future pass, not yet tested: parpar tunes
-   its tile size per kernel (8 KiB for its AVX2 shuffle kernels) while
-   parmesan uses a fixed 32 KiB chunk for the same kernel family — a
-   concrete, cheap-to-test tiling/cache-locality candidate for the
-   remaining gap. Details in §3.
+   gain. That "2-shuffle kernel" lead (originally attributed to reading
+   parpar's `mul16_vec2x`) is now closed as a misreading: fetching and
+   reading parpar's actual upstream source (`gf16_shuffle_avx2.c`) shows
+   `mul16_vec2x` is a table-construction helper called 3×/flush-setup, not
+   the per-vector data hot loop — the real hot loop
+   (`gf16_shuffle2x_muladd_round_avx2`) uses 4 shuffles per vector,
+   architecturally identical to parmesan's existing Shuffle2x kernel. A
+   fourth lead — whether parmesan's own "XOR Bit Dependencies" kernel
+   (ALTMAP), the technique parpar's docs call generally fastest for w=16 on
+   x86 — could compete once its worst inefficiency (256 branch-tested mask
+   bits re-decoded on every output vector) was removed, was implemented,
+   correctness-verified, and closed: still 89% slower than Shuffle2x even
+   after hoisting the branchy decode out of the hot loop, because the real
+   gap is XOR instruction count (~128 vs Shuffle2x's 4 per chunk), which
+   only a common-subexpression-elimination pass (JIT or not) would fix — a
+   materially bigger undertaking than anything tried in this issue so far.
+   A fifth lead — parpar's per-kernel tile-size tuning (8 KiB vs parmesan's
+   fixed 32 KiB) — was swept from 4–128 KiB through the real CLI and closed:
+   no measurable effect in that range on this workload, parpar's figure
+   doesn't transfer to parmesan's different tiling structure. **A sixth
+   lead found a real, shipped fix.** Reproducing the gap directly
+   (`perf stat`, real CLIs, matched flags) showed near-identical instruction
+   counts (190.1B vs 188.9B, confirming the kernels really are equivalent)
+   but 81% more cache-references, 92% more cache-misses, and lower CPU
+   utilization for parmesan (4.77 vs parpar's 5.79 of 6 physical cores) —
+   the "off-CPU breakdown" this list had flagged as never attempted. Traced
+   to `add_slice`'s flush-batching cap (flat `128`, undocumented origin),
+   which sizes the per-flush SIMD coefficient table (`all_tables`,
+   materialized by one rayon pass and read back by another — parpar builds
+   its equivalent tables directly on-stack, never materializing a
+   `recovery_count × queued_slices` matrix in heap memory at all) —
+   swept and replaced with a flat `64`, empirically safe from
+   `recovery_count` 20 to 1000 and a real win at this issue's own geometry:
+   **+21% on `movie-1080p`** (5.67s → 4.67s median), closing the gap to
+   parpar from 31.6% to 18.8% behind, cross-verified against real
+   `par2cmdline` round-trips. The underlying mechanism is not fully pinned
+   down — a follow-up `perf stat` on the fix showed cache-misses essentially
+   unchanged, so it's more likely allocation size/parallelism efficiency
+   than the cache-overflow theory that motivated the sweep — flagged
+   honestly as open. Details in §3.
 
 ---
 
