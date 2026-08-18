@@ -1,6 +1,6 @@
 [package]
 name = "penne"
-version = "0.4.1"
+version = "0.5.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast NZB downloader: fetches articles over NNTP, reassembles files, verifies and repairs with PAR2."
@@ -20,7 +20,7 @@ name = "penne"
 path = "src/bin/penne.rs"
 
 [dependencies]
-pesto = { package = "pesto-poster", path = "../pesto", version = "0.7.0" }
+pesto = { package = "pesto-poster", path = "../pesto", version = "0.8.0" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }

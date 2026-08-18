@@ -7,7 +7,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-18
+
+### Added
+- **`RecoveryDecoder::reconstruct` now parallelises across missing slices with `rayon`**, the same pattern
+  `RecoveryEncoder` already used for creation. Sub-linear but real: `mac()` over a slice is bandwidth-bound, so
+  threads contending for memory bandwidth don't scale linearly, but wall-clock repair still improved 20% on a
+  large single file and 53% on many small files in the reference benchmark — `many-small` repair now beats
+  `par2cmdline` instead of losing to it. Every reconstructed slice is still re-verified against its checksum
+  before writing, so a correctness bug here would have surfaced as a hard failure, not a silently wrong number.
+- **`ops::ingest_files` skips the per-file channel/task-spawn round-trip for files that fit in one read.** Every
+  file previously paid a fresh `tokio::sync::mpsc::channel` plus a `spawn_blocking` reader task and a channel
+  round-trip regardless of size — with thousands of small files, that ceremony dominated wall time (profiling
+  showed threads parking and waking far more than they computed). Files at or under the existing streaming
+  chunk size (8 MiB) now read in one `std::fs::read` inside a single `block_in_place` instead. `many-small`
+  create: 72.3 → 178.3 MiB/s (+147%), reversing a 47%-behind-parpar result into 31% ahead of it. Large-file
+  behavior is unchanged (still the streaming path) and byte-for-byte identical output either way.
+- **`RecoverySet::load_metadata`** indexes recovery blocks on disk as `(path, offset, len)` without reading their
+  bodies into memory, and **`load_recovery_blocks(max_blocks)`** loads only what repair actually needs — the
+  existing eager `load` (metadata + every block's body) is unchanged and still the right call when a caller
+  genuinely wants everything. `verify`, `health`, and deobfuscation only ever needed the file list, not gigabytes
+  of recovery data resident just to answer "does a recovery set exist"; `repair` now loads only
+  `total_bad_slices()` blocks instead of the whole set regardless of how much damage was actually found.
+- **`encoder::altmap_kernel_available()` / `encoder::shuffle2x_kernel_available()`** — whether this CPU has the
+  kernel behind each specialized buffer layout, i.e. whether `new_altmap`/`new_shuffle2x` will keep the layout
+  or fall back to the portable one. Only the encoder knows the exact condition (ALTMAP needs AVX2 *without*
+  GFNI; Shuffle2x runs on GFNI hardware too), and callers that want to *measure* a specific kernel need to know
+  before they time it.
+
 ### Fixed
+- **`parmesan create` could exhaust virtual address space on high-core machines independent of
+  `--memory-limit`**, panicking well inside the configured budget on hosts with a restrictive `RLIMIT_AS`
+  (`ulimit -v`, a real shared-host/HPC/container pattern). Not the recovery buffer itself — `ingest_files`
+  already streams input in chunks and only allocates the current pass's recovery buffer — but thread fan-out
+  that ran before either of those: `#[tokio::main]`'s default one-worker-thread-per-core runtime, combined with
+  glibc's up-to-`8×ncores` per-thread malloc arenas (each reserving tens of MiB of address space, counted in
+  full against `RLIMIT_AS`, never returned). Fixed by capping the tokio runtime to a fixed worker-thread count
+  and calling `mallopt(M_ARENA_MAX, 2)` before any thread exists (matching the value `pesto` itself already
+  uses for the same reason); the CPU-bound rayon pool is deliberately left sized to physical cores, since it's
+  the only one of the two doing real throughput-sensitive work. An 11× `VmPeak` reduction on a 12-core dev box;
+  reproduced and confirmed fixed on the original 128-core/`RLIMIT_AS` box the crash was reported on.
+- **A malformed or adversarial season PAR2 input could overflow the GF(2^16) exponent space instead of failing
+  with an actionable error.** Added an explicit bounds check on the slice index against the calculated
+  `total_slices`, with a message carrying the actual vs. expected counts, instead of an out-of-bounds panic.
 - **`RecoveryEncoder` could silently return all-zero recovery blocks.** Three code paths reacted to a
   buffer layout whose SIMD kernel was unavailable by draining the queued input slices *without processing
   them* and carrying on, so `finish()` handed back parity that no PAR2 client can repair with — no error,
@@ -29,13 +71,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `SimdPath` for Normal-layout buffers, falling through to auto-detection otherwise (the same behaviour an
   unavailable path already had). The three silent-drain arms are now hard failures carrying the invariant
   they broke, so a future regression cannot go quiet again.
+- **A malformed IFSC packet whose slice count didn't match the file's actual length was accepted anyway.**
+  Length/slice-count agreement is now checked at load time; `verify` flags trailing junk data past a file's
+  recorded length instead of silently ignoring it; repair `set_len`s a reconstructed file to its recorded length
+  rather than leaving it however long the last written slice happened to make it; and slice byte-writes now
+  saturate instead of panicking on a length that doesn't divide evenly.
 
-### Added
-- **`encoder::altmap_kernel_available()` / `encoder::shuffle2x_kernel_available()`** — whether this CPU has the
-  kernel behind each specialized buffer layout, i.e. whether `new_altmap`/`new_shuffle2x` will keep the layout
-  or fall back to the portable one. Only the encoder knows the exact condition (ALTMAP needs AVX2 *without*
-  GFNI; Shuffle2x runs on GFNI hardware too), and callers that want to *measure* a specific kernel need to know
-  before they time it.
+### Security
+- **A PAR2 File Description name could escape the intended destination directory.** `RecoverySet::load` (and
+  `load_metadata`) parses file names out of PAR2 packets — data that, by construction, comes from whatever wrote
+  the `.par2` file, not from this process. A name containing `..`, an absolute path, or a drive prefix was
+  joined onto the destination directory unchanged, and nothing stopped the join from landing outside it. Names
+  are now sanitized on load, and the join itself goes through a new `contained_path(base, name)` that
+  hard-fails if the result isn't actually under `base` — belt-and-braces in case a future caller skips
+  sanitization. `pesto`'s `--check` repost path and `penne`'s deobfuscation both read PAR2 file names through
+  this same function, so the fix covers every consumer, not just `parmesan`'s own CLI.
 
 ### Changed
 - `new_altmap_produces_correct_recovery_data` no longer skips GFNI hardware — that skip was hiding the bug

@@ -7,8 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-18
+
 ### Added
 
+- **`penne repair` loads only the recovery blocks it actually needs**, via `parmesan`'s new
+  `RecoverySet::load_metadata` + `load_recovery_blocks(Some(total_bad_slices))` instead of `load`'s old
+  eager everything-into-memory behavior — `health` and deobfuscation, which only ever needed the file list,
+  get the same metadata-only treatment. Lower peak memory on a repair of a large release with only a small
+  amount of actual damage.
 - **`penne download` exit codes distinguishing fully complete, complete
   after repair, and incomplete.** Previously any `Result<()>` `Ok` exited 0
   regardless of whether PAR2 had to repair something, or whether data was
@@ -35,6 +42,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   destination, unchanged from before this flag accepted more than one
   path. The overall exit code is the worst of any individual release's own
   code.
+
+### Security
+
+- **A PAR2 file name from a downloaded `.par2` could escape the download destination directory during
+  deobfuscation.** `deobfuscate.rs` joined a PAR2 File Description's `name` field — untrusted data, sourced
+  from whatever NZB/indexer/uploader produced the release being downloaded, exactly the kind of external
+  input `penne` handles by design — straight onto `dest_dir`; a `..`, an absolute path, or a drive prefix in
+  that name reached the filesystem unchecked. Now routed through `parmesan`'s sanitization plus its
+  `contained_path` check (see `parmesan`'s own `0.5.0` changelog entry), which hard-fails a name that would
+  land outside `dest_dir` instead of writing there. This is the consumer where the fix matters most: `penne`
+  processes PAR2 content it never generated, from releases posted by parties it has no reason to trust.
 
 ## [0.4.1] — 2026-08-12
 

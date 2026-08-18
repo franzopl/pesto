@@ -12,7 +12,28 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-18
+
 ### Added
+- **Real pause/resume in the poster.** New public `post_pausable` (alongside `post`/`post_cancelable`) takes an
+  `external_pause: Arc<AtomicBool>`; setting it suspends every posting worker at the next segment-batch boundary
+  — connections stay open and are kept alive via the same `MODE READER` keepalive already used for idle time —
+  and clearing it resumes immediately with no reconnect. A producer racing ahead while paused naturally blocks
+  on the bounded article channel, so pause propagates to the encode side for free. New
+  `ProgressEvent::Paused`/`Resumed`. This is the library-side mechanism `upapasta`'s TUI needs for its pause key;
+  `upapasta` had removed its own pause UI specifically because this didn't exist yet (a "paused" state that only
+  froze the stats display while the upload kept running underneath was judged dishonest).
+- **`upload::run_upload` takes a new `pause: Option<Arc<AtomicBool>>` parameter**,
+  threaded straight through to `poster::post_files_inner`'s `external_pause` above. Existing callers pass `None`
+  for the same behavior as before; the CLI's own `season-par2` sub-upload does this, since PAR2 volumes have no
+  pause UI to drive it.
+- **Connections are reused across `--each`/`--season` episodes instead of reconnecting for every one.** New
+  `nntp::pool::ConnectionBroker`: a long-lived set of connections checked out per episode and checked back in
+  (instead of `QUIT`) when a worker finishes, kept alive between episodes by the same keepalive mechanism workers
+  already use within a run. `--jobs N` shares one broker across its concurrent episodes via a semaphore, which
+  also fixes those episodes independently over-opening up to `N × --connections` real sockets — usage is now
+  capped at the configured budget. `--watch` and the single-file path are unaffected (no broker, exact prior
+  behavior) and are a candidate for the same win as a follow-up.
 - **`--tvdb-id`/`--tvdb` accepts a media kind: `movie/<id>` or `series/<id>`** (`tv/<id>` accepted as an alias
   for `series/<id>`; `:` also accepted as the separator, matching `--tmdb`'s convention). TheTVDB catalogs both
   movies and series, but the `.nfo` dereferrer link needs the right URL segment
@@ -20,12 +41,6 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   ID produced a broken link. A bare numeric ID (e.g. `81189`) is still accepted and defaults to `series`, so
   existing configs and scripts keep working unchanged. When `--nzb-category` and `--tmdb` are both unset, the
   category now also defaults to `movies`/`tv` from `--tvdb-id`'s kind, same as `--tmdb` already does.
-- **`upload::run_upload` takes a new `pause: Option<Arc<AtomicBool>>` parameter**,
-  threaded straight through to `poster::post_files_inner`'s `external_pause`
-  (added in `0.7.0`'s `post_pausable`). Existing callers pass `None` for the
-  same behavior as before; the CLI's own `season-par2` sub-upload does this,
-  since PAR2 volumes have no pause UI to drive it. This is the library-side
-  half of real pause/resume in `upapasta`'s TUI — see its `ROADMAP.md` Phase 46.
 - **The final automatic recovery pass (`check::recover_missing`) gets its own "recover" box and phase label in
   the terminal panel**, instead of leaving it to look frozen. Before this, once the streaming check queue
   drained, `CheckDone` already turned `check_active` off — so the panel had nothing to show but a static 100%
@@ -54,14 +69,56 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   another) with the upload already sitting at 100% and every connection idle.
 
 ### Fixed
-- **The panel header no longer claims "writing PAR2" during the final recovery pass.** The fallback branch that
-  shows once the upload and streaming check are both done (`!self.files.is_empty() && !self.finished`) used to
-  be the only thing left once `check_active` turned off, regardless of whether PAR2 writing was actually
-  running.
-- **A confirmed recovery now corrects the final summary's "missing"/"reposted" tallies.** `CheckDone` snapshots
-  the missing count before the recovery pass gets a chance to fix anything; a successful recovery used to leave
-  that snapshot stale, so the run summary could go on reporting an article as missing after it had actually been
-  confirmed present.
+- **Connection-pool contention capped single-file posting throughput at ~0.5× nyuu, and regressed instead of
+  scaling past 4 connections.** Every posting worker dequeued from one shared `mpsc::Receiver<PostTask>` behind
+  a single `tokio::sync::Mutex`; at low latency, where a ~768 KB article encodes and posts in sub-millisecond
+  time, dequeues happen thousands of times per second — frequent enough for that one lock to become the
+  bottleneck once connection count passed ~4 (`perf stat` confirmed the mechanism directly: total instructions
+  executed stayed flat across every connection count tested, while measured CPU parallelism fell as more workers
+  were added, the signature of coordination overhead rather than a capacity limit). Fixed by giving each worker
+  its own channel with round-robin dispatch instead, so no lock sits on the dequeue hot path. `movie-1080p`
+  posting-only throughput: 618 → 1236.7 MiB/s (+100%), now ahead of nyuu instead of behind it; the
+  connection-scaling curve no longer regresses. See `bench/FINDINGS.md` §5/§6 for full before/after tables.
+  (issue #129)
+- **A connect that got a TCP accept but stalled inside the TLS handshake hung forever, at ~0% CPU.**
+  `Connection::connect` ran the TCP connect and TLS handshake before `read_timeout` was ever set on the
+  connection, so neither was actually bounded by it — a peer that accepted the socket but never completed (or
+  never continued) the handshake left the connecting task parked indefinitely, with the socket sitting
+  `ESTABLISHED` the whole time. `read_timeout` only ever protected operations after this point. Observed in
+  practice against a real provider that drops a sustained connection mid-batch and then stalls the automatic
+  reconnect's handshake. (issue #108)
+- **Season PAR2 generation could overflow the GF(2^16) exponent space instead of failing with an actionable
+  error.** Unifying season and per-file PAR2 geometry onto one shared `par2_geometry_from_sizes` dropped the
+  season path's old silent `.min(65535)` clamp on `recovery_count` without carrying over the
+  `total_slices`/`recovery_count` spec-limit checks the per-file path already enforced, so an oversized season
+  could exceed the PAR2 spec's block-count limits silently rather than `bail!`ing.
+- **A resumed run could reuse a Message-ID recorded under posting parameters that had since changed.**
+  `RunFingerprint` (the record `--resume` compares the current run's settings against before trusting saved
+  segments) didn't track `--par2-slice-size`/`--par2-slice-count`/`--par2-recovery-count`,
+  `--compress-volume-size`, the compression password, or `--line-length` — a resume across a change to any of
+  those looked identical to the fingerprint and was trusted anyway, even though the recorded segments no longer
+  describe what the new run would actually post. All now included (the compression password is hashed with
+  SHA-256, never stored in the plaintext state file).
+- **A corrupt or partially-written resume state file could abort the run instead of starting fresh.** `load` now
+  treats a file that exists but fails to parse the same as a missing one (empty state, fresh start) rather than
+  a hard error; `save` writes to a temp file and renames it into place, so a crash mid-write can no longer leave
+  a half-written state file behind for the next run to trip over.
+- **NEON's `encoded_size` underflowed on an empty input**, an edge case the x86 SIMD backends' differential
+  tests already covered but the NEON path didn't have an equivalent test for. Fixed alongside a new
+  `test-aarch64` CI job so an aarch64-only regression like this doesn't require an ARM box to catch again.
+
+### Security
+- **PAR2 File Description names are sanitized before touching the filesystem.** A name from a PAR2 index or
+  volume — data that, for `--check`'s repost path and for any tool reading back a posted release, originates
+  outside this process — could previously contain `..`, an absolute path, or a drive prefix and escape the
+  intended destination directory when joined onto it. Every read now goes through sanitization plus a
+  belt-and-braces `contained_path` check (`parmesan::recovery_set`) that rejects a joined path landing outside
+  its base, hard-failing instead of writing outside the intended directory.
+- **Header and subject injection from untrusted file names closed.** C0 control characters are now stripped from
+  input file names at the point they're read from disk; NNTP header values have CR/LF neutralized before being
+  written to the wire (a file or NZB name containing a literal newline could previously inject extra header
+  lines); `nzb::escape` drops XML-illegal control characters instead of passing them through; and a literal `"`
+  in a subject is replaced with `'` so it can't break the `"{name}" yEnc (n/m)` format indexers parse it with.
 
 ## [0.7.0] — 2026-08-11
 

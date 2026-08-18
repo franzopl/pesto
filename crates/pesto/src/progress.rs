@@ -187,11 +187,11 @@ pub enum ProgressEvent {
     /// pool that looked identical whether it was working through a
     /// backlog or sitting on 20-second STAT-retry backoffs.
     CheckConnectionBusy { conn: usize },
-    /// The check worker named by [`CheckConnectionBusy`] went back to
+    /// The check worker named by [`Self::CheckConnectionBusy`] went back to
     /// waiting for its next ready item (queue empty, or every ready item
     /// still inside its retry/repost delay).
     CheckConnectionIdle { conn: usize },
-    /// The check pool grew past the size announced in [`Started`]'s
+    /// The check pool grew past the size announced in [`Self::Started`]'s
     /// `check_connections` — see `CheckCoordinatorHandle::scale_up`: once
     /// the upload's own connections go idle, they get reused to help drain
     /// any remaining check backlog instead of sitting unused. `check_connections`
