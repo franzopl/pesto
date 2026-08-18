@@ -299,6 +299,65 @@ it uses `Par2Worker`/`RecoveryEncoder` directly rather than
 as part of this fix; whether it has an analogous per-file overhead problem is
 open, not assumed fixed here.
 
+**Measured in [#128](https://github.com/franzopl/pesto/issues/128): GFNI is
+real, but it does not close the gap to `parpar` — on large files it widens.**
+Every number above this point in §3 was measured on the i5-10400, which has
+no GFNI. Re-run on an AWS `c6i.4xlarge` (Intel Xeon Platinum 8375C, Ice
+Lake — `lscpu` confirms `gfni vaes vpclmulqdq avx512_vnni` present), same
+`--scale 0.25 --reps 5` methodology, `--simd-sweep` for the per-kernel
+breakdown:
+
+| workload | case | MiB/s | noise |
+|---|---|---:|---:|
+| `many-small` | create (auto) | 224.8 | 1.5% |
+| `many-small` | create (AVX2) | 175.3 | 0.5% |
+| `many-small` | create (AVX2+GFNI) | 231.9 | 1.5% |
+| `many-small` | create (AVX-512+GFNI) | 228.9 | 0.5% |
+| `mixed-folder` | create (auto) | 341.2 | 3.1% |
+| `mixed-folder` | create (AVX2) | 240.2 | 2.4% |
+| `mixed-folder` | create (AVX2+GFNI) | 330.5 | 2.7% |
+| `mixed-folder` | create (AVX-512+GFNI) | 345.5 | 1.5% |
+| `movie-1080p` | create (auto) | 356.4 | 6.7% |
+| `movie-1080p` | create (AVX2) | 259.8 | 0.9% |
+| `movie-1080p` | create (AVX2+GFNI) | 357.4 | 0.7% |
+| `movie-1080p` | create (AVX-512+GFNI) | 355.2 | 1.3% |
+
+**GFNI's own contribution, isolated on identical hardware (AVX2 →
+AVX2+GFNI, nothing else changed), is real and consistent: +32% on
+`many-small`, +38% on `mixed-folder`, +38% on `movie-1080p`.**
+**AVX-512+GFNI does not clearly beat AVX2+GFNI** — the two are within noise
+of each other on every workload (`movie-1080p`: 357.4 vs 355.2; the
+`mixed-folder` gap, 345.5 vs 330.5, is the largest and still only 4.5%).
+GFNI is the multiplier here, not vector width.
+
+**But `parpar` gained even more from the same hardware jump on large
+files, so the gap widened instead of closing:**
+
+| workload | parmesan vs parpar (i5-10400, AVX2) | parmesan vs parpar (Ice Lake, best kernel) |
+|---|---:|---:|
+| `many-small` | +31% (parmesan ahead, #131) | **+52%** (parmesan ahead) |
+| `mixed-folder` | −27% | **−38%** |
+| `movie-1080p` | −25% | **−49%** |
+
+`parpar` on `movie-1080p` went from 357.9 to 694.1 MiB/s across the same
+two machines — a 94% gain, more than double parmesan's own 38% gain from
+GFNI alone. `many-small` moved the other way, because that's the workload
+#131 already fixed for parmesan specifically; the large-file cases did not
+get an equivalent fix and the hardware advantage went disproportionately
+to `parpar` there.
+
+**Peak memory got relatively worse too, not just relative speed.** On
+`movie-1080p`, parmesan's peak RSS was 472.5 MiB against parpar's
+247.4 MiB (1.91×) while running at only 0.51× parpar's throughput — a
+worse memory-for-speed trade than the original i5-10400 measurement
+(442 vs 255 MiB, 1.73×, at 0.75× parpar's speed).
+
+This answers #128's open question, but sharpens rather than closes the
+investigation: GFNI is not the bottleneck holding back parmesan's
+large-file create performance relative to parpar — something in how the
+work is distributed across cores for one large input is. Tracked in
+[#148](https://github.com/franzopl/pesto/issues/148).
+
 ---
 
 ## 4. Pipeline stages: where the time actually goes
@@ -735,9 +794,16 @@ report:
    0.54×; the connection-scaling curve no longer regresses and pesto leads
    nyuu from 8 connections up (was behind at every point past 4). Details
    above.
-4. **Re-run all of this on a GFNI machine.** Every PAR2 conclusion here is
-   about the AVX2 kernel, on a CPU that cannot reach parmesan's fastest paths.
-   — [#128](https://github.com/franzopl/pesto/issues/128)
+4. ~~Re-run all of this on a GFNI machine.~~ — done,
+   [#128](https://github.com/franzopl/pesto/issues/128): GFNI is real
+   (+32–38% isolated on identical Ice Lake hardware, AVX2 → AVX2+GFNI) but
+   it does not close the gap to parpar on large files — the gap *widened*
+   (`movie-1080p`: −25% → −49%, `mixed-folder`: −27% → −38%), while
+   `many-small` (already fixed by #131) widened further in parmesan's
+   favor (+31% → +52%). Sharper follow-up opened as
+   [#148](https://github.com/franzopl/pesto/issues/148): something about
+   large-single-file work distribution, not raw SIMD throughput, is now
+   the bottleneck. Details above.
 5. ~~Refresh the README's yEnc table~~ — done,
    [#133](https://github.com/franzopl/pesto/issues/133).
 6. ~~Look at the `auto` dispatch cost vs explicit AVX2~~ — investigated, not
