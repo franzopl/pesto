@@ -60,10 +60,31 @@ fn catalog_dir(override_dir: Option<&Path>) -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Cap on `sanitize_name`'s output, in chars.
+///
+/// The binding constraint is Windows' classic `MAX_PATH` (260 chars per
+/// full path, still enforced by default — Rust does not add the `\\?\`
+/// verbatim-path prefix on plain `fs::copy`/`File::create` calls). A typical
+/// `%APPDATA%\pesto\nzb\` prefix plus username runs ~60-85 chars, and the
+/// `<stamp>_`/`.nzb` wrapper this constant is used inside of adds another 22,
+/// which leaves comfortable headroom under 260 while still covering
+/// real-world 2160p/HDR/HEVC scene release names (routinely 90+ chars).
+const MAX_SANITIZED_LEN: usize = 160;
+
 /// Sanitise a content name for use in a catalog file name: keep alphanumerics,
-/// `-`, `.` and spaces; replace everything else with `_`; cap at 80 chars.
+/// `-`, `.` and spaces; replace everything else with `_`; cap at
+/// [`MAX_SANITIZED_LEN`] chars.
+///
+/// Release names routinely exceed the cap (a 2160p HDR/HEVC scene name can run
+/// past 90 chars before the container extension), so a blind `take()` used to
+/// slice straight through the trailing `.mkv`/`.mp4` — and once `.nzb` was
+/// appended by the caller, a name like `...DUAL-alfaHD.mkv` became
+/// `...DUAL-a.nzb`, or worse, `...DUAL-.nzb` for a slightly longer title. When
+/// the name still has a short (<=6 char) trailing extension after truncation
+/// would remove it, keep the extension and shorten the stem instead.
 fn sanitize_name(name: &str) -> String {
-    name.chars()
+    let cleaned: String = name
+        .chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '.' || c == ' ' {
                 c
@@ -71,8 +92,22 @@ fn sanitize_name(name: &str) -> String {
                 '_'
             }
         })
-        .take(80)
-        .collect()
+        .collect();
+
+    if cleaned.chars().count() <= MAX_SANITIZED_LEN {
+        return cleaned;
+    }
+
+    let (stem, ext) = match cleaned.rfind('.') {
+        // `i` is a valid char boundary: '.' is single-byte ASCII.
+        Some(i) if cleaned.len() - i > 1 && cleaned[i..].chars().count() <= 6 => {
+            (&cleaned[..i], &cleaned[i..])
+        }
+        _ => (cleaned.as_str(), ""),
+    };
+    let stem_budget = MAX_SANITIZED_LEN.saturating_sub(ext.chars().count());
+    let stem: String = stem.chars().take(stem_budget).collect();
+    format!("{stem}{ext}")
 }
 
 /// Resolve the per-upload verbose log path under `<history_dir>/logs/`.
@@ -457,6 +492,35 @@ mod tests {
     #[test]
     fn json_opt_escapes_quotes() {
         assert_eq!(json_opt(Some(r#"say "hi""#)), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn sanitize_name_keeps_short_names_untouched() {
+        assert_eq!(sanitize_name("Movie.2026.mkv"), "Movie.2026.mkv");
+    }
+
+    // Regression (#150): a 2160p HDR/HEVC release name pushes the `.mkv`
+    // extension past the old 80-char cap, so a blind `take(80)` sliced through
+    // it — `...DUAL-alfaHD.mkv` became `...DUAL-a` (then `...DUAL-a.nzb` once
+    // the caller appended `.nzb`), and a slightly longer title could drop the
+    // extension entirely (`...DUAL-.nzb`, `...DUAL.nzb`). The extension must
+    // survive truncation.
+    #[test]
+    fn sanitize_name_preserves_extension_past_the_old_80_char_cap() {
+        let name = "Star.Wars.Andor.S01E02.That.Would.Be.Me.2160p.DSNP.WEB-DL.\
+                     DDP5.1.HDR.HEVC.DUAL-alfaHD.mkv";
+        assert!(name.chars().count() > 80);
+        let safe = sanitize_name(name);
+        assert!(safe.ends_with(".mkv"), "got {safe}");
+    }
+
+    #[test]
+    fn sanitize_name_truncates_past_the_new_cap_still_keeping_the_extension() {
+        let stem: String = std::iter::repeat_n('a', MAX_SANITIZED_LEN + 40).collect();
+        let name = format!("{stem}.mkv");
+        let safe = sanitize_name(&name);
+        assert!(safe.chars().count() <= MAX_SANITIZED_LEN);
+        assert!(safe.ends_with(".mkv"), "got {safe}");
     }
 
     // Regression: archiving an NZB whose computed destination resolves to the
