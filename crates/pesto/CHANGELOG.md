@@ -12,6 +12,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+- **`TaskDispatcher` no longer pins articles to a stalled worker (#145).** Round-robin
+  `send` used to `await` the chosen per-worker channel even when it was full, so a
+  slow/erroring server (depth 4) blocked the producer and starved the fast workers.
+  Offer now `try_send`s around the ring and only waits if every channel is full.
+  Heterogeneous bench (`4+4` connections, mixed-folder `--scale 0.25`, governor
+  `performance`): mixed 0+50 ms was **10.07s** (identical to both-slow 10.01s)
+  against both-fast 0.94s; after this change the mixed case is **3.17s**.
+
 ### Changed
 - **Auto PAR2 geometry now uses `parmesan::ops::calculate_geometry` (#154).** The poster
   used to pick `slice_size = (articles / target) × article_size`, which cannot merge

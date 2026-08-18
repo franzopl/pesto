@@ -306,13 +306,29 @@ impl TaskDispatcher {
         }
     }
 
-    /// Send to the next worker in round-robin order. Mirrors
-    /// `mpsc::Sender::send`'s signature so call sites are unaffected.
+    /// Offer the task to a worker that still has channel room, starting at
+    /// the next round-robin index. A stalled (slow-server) worker fills its
+    /// depth-4 channel and must not pin further articles — or the producer
+    /// — while idle workers sit empty (issue #145). If every channel is
+    /// full, wait on the original target so backpressure still applies.
     async fn send(
         &self,
         task: PostTask,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<PostTask>> {
-        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.senders.len();
+        let n = self.senders.len();
+        let start = self.next.fetch_add(1, Ordering::Relaxed);
+        let mut task = task;
+        for i in 0..n {
+            let idx = (start + i) % n;
+            match self.senders[idx].try_send(task) {
+                Ok(()) => return Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(t)) => task = t,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(t)) => {
+                    return Err(tokio::sync::mpsc::error::SendError(t));
+                }
+            }
+        }
+        let idx = start % n;
         self.senders[idx].send(task).await
     }
 }

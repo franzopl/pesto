@@ -503,7 +503,8 @@ bench/
 │   ├── 30-stages.sh        Layer B: pipeline stage attribution
 │   ├── 40-e2e.sh           Layer C: full uploads vs nyuu, ngPost, parpar+nyuu
 │   ├── 50-scaling.sh       Layer D: connection and thread scaling curves
-│   └── 60-correctness.sh   cross-tool interop + wire-level round-trip
+│   ├── 60-correctness.sh   cross-tool interop + wire-level round-trip
+│   └── 70-heterogeneous.sh two mocks, one slow (#145 dispatch)
 ├── workloads/*.workload    declarative corpus + posting definitions
 ├── tools/yenc_decode.py    independent yEnc decoder for the round-trip check
 ├── yencode.js              node-yencode driver, matched to the Rust one

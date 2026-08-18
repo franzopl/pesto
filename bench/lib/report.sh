@@ -28,6 +28,7 @@ report_build() {
         report_suite_stages "$summary"
         report_suite_e2e "$summary"
         report_suite_scaling "$summary"
+        report_suite_heterogeneous "$summary"
         report_footer "$run"
     } > "$out"
     echo "$out"
@@ -243,6 +244,21 @@ rows carry the same *payload*, not the same article count.
 
 EOF
     report_comparison_table "$summary" e2e pesto
+}
+
+report_suite_heterogeneous() {
+    local summary=$1
+    has_suite "$summary" heterogeneous || return 0
+    cat <<'EOF'
+## Heterogeneous servers
+
+Two mock NNTP servers, equal connection quotas. `both-0` / `both-50` are
+the healthy and uniformly-slow baselines; `hetero-0-50` is a fast primary
+plus a 50 ms degraded peer. Round-robin dispatch that cannot skip a full
+per-worker channel makes the mixed case collapse toward the slow baseline.
+
+EOF
+    report_comparison_table "$summary" heterogeneous pesto
 }
 
 report_suite_scaling() {
