@@ -809,12 +809,9 @@ lock acquisition on the hot path, not what happened during an empty wait.
 channel with `TaskDispatcher`, which round-robins articles across one
 dedicated channel per worker. Each worker owns its `Receiver` outright, so
 dequeuing never contends with any other worker — no lock on the hot path at
-all. Trade-off: round-robin fixes an article's destination worker up front,
-so a multi-server config with one slow/erroring connection can no longer
-have its share of work silently picked up by faster, idle workers the way a
-shared queue did implicitly. Acceptable for the common single-healthy-server
-case this fixes; a work-stealing scheme would recover the old behavior too,
-but was not needed to close this gap.
+all. Trade-off: a naive round-robin `send` that waits on the chosen channel
+pins articles (and the producer) to a stalled worker — measured and fixed
+in [#145](https://github.com/franzopl/pesto/issues/145), see below.
 
 Official suite numbers, same machine, same `--scale 0.25` methodology as the
 rest of this report, `./bench/run.sh e2e --workload movie-1080p --scale 0.25
@@ -918,6 +915,27 @@ the pool fix has less to work with. `parpar+nyuu` and `ngPost` are unrelated
 code paths and move only by measurement noise, as expected. At 30 ms nothing
 moves outside noise, consistent with the fix being specifically about
 low-latency lock contention.
+
+### Heterogeneous servers (#145)
+
+#129's per-worker channels removed implicit work-stealing. A dedicated suite
+(`bench/suites/70-heterogeneous.sh`) posts the same `mixed-folder` corpus
+(`--scale 0.25`, 525 MiB, 3 reps, governor `performance`) to two mock
+servers with 4 connections each:
+
+| case | before (pin + wait) | after (skip full channel) |
+|---|---:|---:|
+| both-0 | 0.94s | 1.13s (noise / extra `try_send`) |
+| both-50 | 10.01s | 10.01s |
+| hetero-0-50 | **10.07s** | **3.17s** |
+
+Pinned `send` made a half-fast / half-slow pair **as slow as both servers
+being slow**: the slow worker's depth-4 channel filled, the producer blocked
+on that `send`, and the four 0 ms workers went idle. Skipping a full
+channel and only waiting when every queue is full recovers most of the fast
+half (10.07s → 3.17s) without putting a lock back on dequeue. both-50 is
+unchanged — every worker is equally slow, so there is no better queue to
+pick. `20260818T190335Z` (before) / `20260818T190701Z` (after).
 
 ### ngPost reliability
 

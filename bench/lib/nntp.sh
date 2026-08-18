@@ -17,6 +17,8 @@
 MOCK_PID=""
 MOCK_PORT=""
 MOCK_STATS_FILE=""
+MOCK_PID2=""
+MOCK_PORT2=""
 
 # mock_start [--latency-ms N] [--save-dir DIR] [--drop-pct N] [--miss-pct N]
 #
@@ -56,14 +58,40 @@ mock_start() {
     [[ -n $MOCK_PORT ]] || die "mock NNTP server never reported a port"
 }
 
+# Second mock on another port — for the heterogeneous-server suite (#145).
+# Same readiness wait as `mock_start`. Does not replace MOCK_PID/MOCK_PORT.
+mock_start_secondary() {
+    local log="$BENCH_RUN_DIR/mock2.log"
+    "$MOCK_NNTP_BIN" --port 0 --quiet "$@" > "$log" 2>&1 &
+    MOCK_PID2=$!
+    bench_arm_exit_trap
+
+    local waited=0
+    while (( waited < 100 )); do
+        MOCK_PORT2=$(sed -n 's/^listening on 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$log" 2>/dev/null | head -1)
+        [[ -n $MOCK_PORT2 ]] && break
+        kill -0 "$MOCK_PID2" 2>/dev/null || die "secondary mock NNTP server died on startup: $(cat "$log")"
+        sleep 0.05
+        waited=$(( waited + 1 ))
+    done
+    [[ -n $MOCK_PORT2 ]] || die "secondary mock NNTP server never reported a port"
+}
+
 mock_stop() {
-    [[ -n $MOCK_PID ]] || return 0
     # SIGTERM, not SIGKILL: the server writes its JSON stats summary from the
     # signal handler, and that summary is how the suite verifies every tool
     # actually posted the same number of articles.
-    kill -TERM "$MOCK_PID" 2>/dev/null || true
-    wait "$MOCK_PID" 2>/dev/null || true
-    MOCK_PID=""
+    if [[ -n $MOCK_PID ]]; then
+        kill -TERM "$MOCK_PID" 2>/dev/null || true
+        wait "$MOCK_PID" 2>/dev/null || true
+        MOCK_PID=""
+    fi
+    if [[ -n $MOCK_PID2 ]]; then
+        kill -TERM "$MOCK_PID2" 2>/dev/null || true
+        wait "$MOCK_PID2" 2>/dev/null || true
+        MOCK_PID2=""
+        MOCK_PORT2=""
+    fi
 }
 
 # mock_final_stats — the JSON summary the server writes on SIGTERM:

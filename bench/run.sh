@@ -15,7 +15,7 @@ set -euo pipefail
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$BENCH_DIR/lib.sh"
 
-SUITES_ALL=(yenc par2 stages e2e scaling correctness)
+SUITES_ALL=(yenc par2 stages e2e scaling correctness heterogeneous)
 SUITES_MICRO=(yenc par2)
 SUITES_REQUESTED=()
 WORKLOADS_REQUESTED=()
@@ -35,6 +35,7 @@ Suites (default: all)
   e2e           full uploads vs nyuu, ngPost and parpar+nyuu
   scaling       connection-count and thread-count curves
   correctness   cross-tool PAR2 interop and a wire-level yEnc round-trip
+  heterogeneous two mock servers; one can be slow (round-robin vs degraded peer)
   micro         shorthand for: yenc par2
   all           every suite
 
@@ -62,7 +63,7 @@ EOF
 parse_cli() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            yenc|par2|stages|e2e|scaling|correctness)
+            yenc|par2|stages|e2e|scaling|correctness|heterogeneous)
                 SUITES_REQUESTED+=("$1"); shift ;;
             micro) SUITES_REQUESTED+=("${SUITES_MICRO[@]}"); shift ;;
             all)   SUITES_REQUESTED+=("${SUITES_ALL[@]}"); shift ;;
@@ -277,6 +278,15 @@ run_suites() {
                 # Takes no workload: it builds its own small flat corpus, for
                 # the reasons given at the top of that file.
                 suite_correctness || true ;;
+            heterogeneous)
+                source "$BENCH_DIR/suites/70-heterogeneous.sh"
+                local hetero_wl
+                hetero_wl=$(filter_layer e2e "${workloads[@]}" | head -1)
+                if [[ -z $hetero_wl ]]; then
+                    info "$(dim 'no selected workload opts into e2e — heterogeneous skipped')"
+                else
+                    suite_heterogeneous "$hetero_wl"
+                fi ;;
         esac
     done
 }
