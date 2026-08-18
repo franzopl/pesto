@@ -358,6 +358,71 @@ large-file create performance relative to parpar — something in how the
 work is distributed across cores for one large input is. Tracked in
 [#148](https://github.com/franzopl/pesto/issues/148).
 
+**Investigated in [#148](https://github.com/franzopl/pesto/issues/148):
+single-threaded MD5 hashing is a real, measured cost, but neither
+candidate fix helped — this stays open.** Profiling `parmesan create` on
+`movie-1080p` (i5-10400, no GFNI needed — the gap predates GFNI) with
+`perf record -g` found **19.6–20.9% of all CPU cycles in MD5 compression**
+(`md5::compress::soft::compress`), running on a single dedicated thread —
+[`Par2Worker`](../crates/parmesan/src/worker.rs)'s pipeline is a fixed
+three-stage design (reader → hasher → RS-consumer, the RS-consumer's
+`add_slice` calls triggering periodic rayon-parallel flushes), and the
+whole-file MD5 the hasher computes is algorithmically serial: PAR2's File
+Description packet needs the standard, spec-compliant digest, and there
+is no way to compute one MD5 stream across multiple cores without
+changing the algorithm. `strace -f -c` on the same run showed 92.2% of
+syscall time in `futex` (8,458 calls) — real thread park/wake overhead,
+though at a far lower density (~1,461 calls/s) than the 22,270-futex,
+2.05s run that characterized #131's *pre-fix* many-small case.
+
+Two concrete levers were tested, both empirically, both rejected by the
+numbers (5 repetitions each, tight distributions, same machine and
+corpus):
+
+- **The `md-5` crate's `asm` feature** (hand-written x86-64 assembly MD5
+  compression, `md5-asm`) — confirmed actually linked (`nm` shows the
+  `md5_compress` symbol) and profiled again: still 20.7% of cycles in
+  hashing, no better than the portable Rust `soft` path. Wall-clock got
+  *slower*, not faster: 5.79s (soft, median of 5) vs 6.02s (asm, median of
+  5). Old hand-tuned assembly from over a decade ago does not beat
+  LLVM-optimized scalar Rust for MD5's simple add/rotate/xor mix on a
+  modern out-of-order core — not a bug, just not a win here. Not adopted.
+- **Coarser RS flush batching** — raising `RecoveryEncoder::add_slice`'s
+  cache-blocking cap from 128 to 256 queued slices, on the theory that
+  fewer, larger rayon flush bursts would amortize thread park/wake cost
+  better. Measured *worse*: 6.40s median (5 reps) against the 5.79s
+  baseline, with *lower* total CPU-seconds (26.6s vs 27.2s) — i.e. less
+  work done in more wall-clock time, the signature of worse core
+  utilization, not better. This confirms, on a large-slice workload, the
+  same conclusion #131 reached on `many-small`'s small slices: the
+  128-slice cache-blocking cap is already correctly tuned, not a
+  bottleneck. Not adopted.
+
+As a clean upper bound on what fixing hashing entirely could buy: forcing
+`compute_hashes = false` (breaks correctness — diagnostic only, not
+shippable) cut wall time from a 5.79s baseline to a 5.39s median (5
+reps) — **roughly 7%**. Real, but not close to explaining a gap that
+runs from −25% to −49% behind parpar. For external context only (its
+source is a native Node addon, not read as part of this investigation):
+`strace -f -c` on `parpar` doing the identical create shows the same
+shape, 77.7% of syscall time in `futex` — so a futex-heavy profile under
+`strace` is not, by itself, something distinguishing parmesan's pipeline
+from parpar's; it's consistent with any multi-threaded work-stealing pool
+traced this way.
+
+**No safe, scoped fix came out of this pass.** MD5's serial cost is real
+but bounded (~7% ceiling) and inherent to the format, not a parmesan bug —
+every conformant PAR2 implementation pays it. The other ~40+ points of
+the gap remain unexplained by anything measured here: core utilization
+sat at 78–81% (4.7–4.85 of 6 physical cores) even in the best configuration
+tested, so scheduling/batching tweaks alone have limited further headroom.
+Whatever else parpar is doing differently for one large file was not
+isolated in this pass and needs its own investigation — worth an
+off-CPU/`perf sched` timeline of the `Par2Worker` pipeline specifically
+(which of the reader/hasher/RS-consumer stages' channels the 8,458 futex
+calls actually belong to was not broken down here) before the next
+attempt.
+
 ---
 
 ## 4. Pipeline stages: where the time actually goes
@@ -817,6 +882,14 @@ report:
    the exact panic on the original 128-core/`RLIMIT_AS` box and confirmed
    the fix there (`VmPeak` 9 999 764 KiB → 1 418 676 KiB, no more crash), on
    top of an 11× `VmPeak` reduction measured on this machine. Details in §8.
+8. **Find why `parmesan create` loses ground to parpar on large files** —
+   investigated, not fixed, [#148](https://github.com/franzopl/pesto/issues/148):
+   confirmed single-threaded MD5 hashing costs ~20% of cycles and is a real
+   but bounded (~7% wall-clock ceiling) contributor; two candidate fixes
+   (asm MD5, coarser flush batching) were tested and both measured *worse*,
+   not better. The remaining ~40+ points of the gap are unexplained — needs
+   an off-CPU/`perf sched` breakdown of the `Par2Worker` pipeline's 8,458
+   futex calls, not attempted here. Details in §3.
 
 ---
 

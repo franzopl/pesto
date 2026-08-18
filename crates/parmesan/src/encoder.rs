@@ -4788,4 +4788,118 @@ mod tests {
             );
         }
     }
+
+    // Ad hoc timing comparison for issue #148: on AVX2-without-GFNI hardware
+    // (this test's target), does the Shuffle2x layout still win, and by how
+    // much, when the multiply kernel (plain AVX2 either way) is held fixed?
+    // `try_new_smart` only ever picks Shuffle2x when GFNI is absent, and no
+    // Shuffle2x+GFNI kernel exists, so every GFNI-hardware benchmark run to
+    // date measured the Normal layout exclusively. This isolates the layout
+    // axis from the kernel axis on hardware where both layouts use the same
+    // kernel, as groundwork for deciding whether a combined Shuffle2x+GFNI
+    // kernel is worth building. `#[ignore]`d: takes several seconds, not
+    // routine-test material (`cargo test --release -p parmesan -- --ignored
+    // shuffle2x_vs_normal_layout_throughput_movie_1080p`).
+    #[test]
+    #[ignore]
+    fn shuffle2x_vs_normal_layout_throughput_movie_1080p() {
+        use std::time::Instant;
+
+        // Same geometry as bench/FINDINGS.md's `movie-1080p` workload
+        // (bench/results/ip-172-31-41-50/20260818T013317Z/raw.csv).
+        const SLICE_SIZE: usize = 806_912;
+        const TOTAL_SLICES: usize = 1997;
+        const RECOVERY_COUNT: usize = 200;
+        const EXPONENT_START: u32 = 0;
+        const REPS: u32 = 5;
+
+        // Deterministic pseudo-random content per slice, not all-zero/same
+        // bytes, so neither kernel takes a degenerate fast path.
+        fn xorshift_fill(seed: u64, buf: &mut [u8]) {
+            let mut state = seed | 1;
+            for chunk in buf.chunks_mut(8) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let bytes = state.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+        }
+        let slices: Vec<Vec<u8>> = (0..TOTAL_SLICES)
+            .map(|i| {
+                let mut buf = vec![0u8; SLICE_SIZE];
+                xorshift_fill(0x9E3779B97F4A7C15 ^ (i as u64), &mut buf);
+                buf
+            })
+            .collect();
+
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            !std::is_x86_feature_detected!("gfni"),
+            "this comparison is meaningless on GFNI hardware: Normal layout \
+             would auto-dispatch to the GFNI kernel instead of plain AVX2, \
+             breaking the kernel-held-fixed premise of this test"
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            std::is_x86_feature_detected!("avx2"),
+            "need AVX2 for a meaningful Shuffle2x-vs-Normal comparison"
+        );
+
+        let run_normal = || {
+            let mut enc =
+                RecoveryEncoder::new(SLICE_SIZE, TOTAL_SLICES, EXPONENT_START, RECOVERY_COUNT);
+            for s in &slices {
+                enc.add_slice(s.clone());
+            }
+            let _ = enc.finish();
+        };
+        let run_shuffle2x = || {
+            let mut enc = RecoveryEncoder::new_shuffle2x(
+                SLICE_SIZE,
+                TOTAL_SLICES,
+                EXPONENT_START,
+                RECOVERY_COUNT,
+            );
+            for s in &slices {
+                enc.add_slice(s.clone());
+            }
+            let _ = enc.finish();
+        };
+
+        // Warm-up (page-in slices, prime allocator) — unmeasured.
+        run_normal();
+        run_shuffle2x();
+
+        let mut normal_ms: Vec<f64> = Vec::with_capacity(REPS as usize);
+        let mut s2x_ms: Vec<f64> = Vec::with_capacity(REPS as usize);
+        for _ in 0..REPS {
+            let t = Instant::now();
+            run_normal();
+            normal_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        for _ in 0..REPS {
+            let t = Instant::now();
+            run_shuffle2x();
+            s2x_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        fn median(mut v: Vec<f64>) -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        }
+        let input_mib = (SLICE_SIZE * TOTAL_SLICES) as f64 / (1024.0 * 1024.0);
+        let normal_med_ms = median(normal_ms);
+        let s2x_med_ms = median(s2x_ms);
+        let normal_mibs = input_mib / (normal_med_ms / 1000.0);
+        let s2x_mibs = input_mib / (s2x_med_ms / 1000.0);
+
+        eprintln!(
+            "\n== Normal vs Shuffle2x, movie-1080p geometry, {input_mib:.1} MiB, {REPS} reps ==\n\
+             Normal+AVX2:    {normal_med_ms:.1} ms median -> {normal_mibs:.1} MiB/s\n\
+             Shuffle2x+AVX2: {s2x_med_ms:.1} ms median -> {s2x_mibs:.1} MiB/s\n\
+             Shuffle2x vs Normal: {:+.1}%\n",
+            (s2x_mibs / normal_mibs - 1.0) * 100.0
+        );
+    }
 }
