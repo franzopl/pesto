@@ -2056,10 +2056,10 @@ async fn producer(
                 let mut reader_handle = None;
 
                 if meta.size <= CHUNK_SIZE {
-                    let path = meta.path.clone();
                     file_buf = Some(
-                        tokio::task::block_in_place(|| std::fs::read(&path))
-                            .with_context(|| format!("reading `{}`", path.display()))?,
+                        tokio::fs::read(&meta.path)
+                            .await
+                            .with_context(|| format!("reading `{}`", meta.path.display()))?,
                     );
                 } else {
                     let (rx, handle) =
@@ -2492,10 +2492,10 @@ async fn post_data_files(
         let mut reader_handle = None;
 
         if meta.size <= CHUNK_SIZE {
-            let path = meta.path.clone();
             file_buf = Some(
-                tokio::task::block_in_place(|| std::fs::read(&path))
-                    .with_context(|| format!("reading `{}`", path.display()))?,
+                tokio::fs::read(&meta.path)
+                    .await
+                    .with_context(|| format!("reading `{}`", meta.path.display()))?,
             );
         } else {
             let (rx, handle) =
