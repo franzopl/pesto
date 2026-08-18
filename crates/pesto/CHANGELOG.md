@@ -13,6 +13,10 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 ## [Unreleased]
 
 ### Fixed
+- **Small-file ingest no longer calls `block_in_place` on the current-thread
+  runtime.** `#[tokio::test]` (and any `current_thread` runtime) panicked in
+  the five `dry_run_*` poster tests: `can call blocking only when running on
+  the multi-threaded runtime`. Those files now use `tokio::fs::read`.
 - **`TaskDispatcher` no longer pins articles to a stalled worker (#145).** Round-robin
   `send` used to `await` the chosen per-worker channel even when it was full, so a
   slow/erroring server (depth 4) blocked the producer and starved the fast workers.
