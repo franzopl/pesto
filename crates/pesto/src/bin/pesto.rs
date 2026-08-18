@@ -2633,6 +2633,10 @@ async fn run_batch(
             if !config.dry_run && !config.par2_only {
                 run_all_hooks(config, &hook_env);
             }
+        } else if any_failures {
+            eprintln!("error: season pack was not created due to earlier upload failures");
+        } else {
+            eprintln!("error: season pack was not created (no valid segments were uploaded)");
         }
     }
 
