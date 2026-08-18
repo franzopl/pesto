@@ -423,6 +423,58 @@ off-CPU/`perf sched` timeline of the `Par2Worker` pipeline specifically
 calls actually belong to was not broken down here) before the next
 attempt.
 
+**A second lead, tested and closed: the Shuffle2x layout does not help on
+GFNI hardware, even in principle.** `RecoveryEncoder::try_new_smart`
+(`crates/parmesan/src/encoder.rs`) only ever selects the Shuffle2x buffer
+layout when `avx2 && !gfni`; on GFNI hardware it always falls back to the
+Normal layout, and no Shuffle2x+GFNI (or Altmap+GFNI) kernel exists
+anywhere in the codebase. Every GFNI benchmark in this file to this point
+therefore measured the Normal layout exclusively. Two questions followed:
+does the Shuffle2x layout's advantage on non-GFNI hardware come from its
+buffer arrangement (which would plausibly still help combined with GFNI)
+or from its `PSHUFB`-based multiply trick (which GFNI's dedicated
+`GF2P8AFFINEQB` instruction would make redundant)? Answered in two steps,
+both as `#[ignore]`d tests in `crates/parmesan/src/encoder.rs`:
+
+*Step 1, this i5-10400 (no GFNI): does the layout matter at all, holding
+the kernel fixed at plain AVX2?* Yes, clearly — but the first reading was
+misleading. A single run said Shuffle2x beat Normal by +53%; five
+independent trials (this machine runs other services, not a dedicated
+bench box) ranged +8.2% to +53.0%, median **+51.3%**, floor **+33.2%**
+even under heavy contention. The low outlier traced to a load spike
+hitting specifically the back-to-back Shuffle2x block of that one trial —
+the original test ran all Normal reps then all Shuffle2x reps in two
+blocks, letting a transient spike contaminate one layout's numbers
+entirely. The layout axis is real and large on this hardware.
+
+*Step 2, AWS `c6i.4xlarge` (Ice Lake, GFNI): does it survive against
+Normal's actual GFNI kernel, not Normal's plain AVX2?* A second test
+(`shuffle2x_avx2_vs_normal_gfni_layout_throughput_movie_1080p`) compares
+Shuffle2x+AVX2 (still its only kernel) against Normal auto-dispatching to
+GFNI, with reps interleaved this time (Normal, Shuffle2x, Normal, ...)
+rather than blocked, specifically to avoid step 1's contamination
+mechanism. Three independent runs on a dedicated cloud instance, 7
+interleaved reps each:
+
+| run | Normal+GFNI | Shuffle2x+AVX2 | delta |
+|---|---:|---:|---:|
+| 1 | 634.7 MiB/s | 577.8 MiB/s | −9.0% |
+| 2 | 662.2 MiB/s | 606.4 MiB/s | −8.4% |
+| 3 | 662.5 MiB/s | 608.0 MiB/s | −8.2% |
+
+Tight and consistent: **Normal+GFNI wins by 8–9%, every time.** GFNI's
+dedicated instruction beats Shuffle2x's layout-plus-multiply-trick combo
+outright, even though the layout alone is worth +51% against a plain AVX2
+kernel. `try_new_smart`'s current heuristic (Normal on GFNI hardware,
+Shuffle2x otherwise) is confirmed correct, not a missed optimization — a
+combined Shuffle2x+GFNI kernel is very unlikely to beat what GFNI already
+achieves with the simpler Normal layout, and is not worth building on this
+evidence. This lead is closed.
+
+Two leads tested and closed (MD5/flush-batching, and layout-vs-GFNI); the
+~40+ points of unexplained gap named above stand as the next place to
+look — the off-CPU `perf sched` breakdown, not attempted in either pass.
+
 ---
 
 ## 4. Pipeline stages: where the time actually goes
@@ -887,9 +939,14 @@ report:
    confirmed single-threaded MD5 hashing costs ~20% of cycles and is a real
    but bounded (~7% wall-clock ceiling) contributor; two candidate fixes
    (asm MD5, coarser flush batching) were tested and both measured *worse*,
-   not better. The remaining ~40+ points of the gap are unexplained — needs
-   an off-CPU/`perf sched` breakdown of the `Par2Worker` pipeline's 8,458
-   futex calls, not attempted here. Details in §3.
+   not better. A second lead — whether the Shuffle2x layout still helps
+   combined with GFNI — was tested cleanly on real GFNI hardware (3
+   independent runs) and closed: Normal+GFNI beats Shuffle2x+AVX2 by 8–9%,
+   consistently, so `try_new_smart`'s current layout choice is already
+   correct and a combined Shuffle2x+GFNI kernel is not worth building. The
+   remaining ~40+ points of the gap are unexplained — needs an off-CPU/
+   `perf sched` breakdown of the `Par2Worker` pipeline's 8,458 futex calls,
+   not attempted in either pass. Details in §3.
 
 ---
 
