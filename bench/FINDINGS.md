@@ -475,6 +475,65 @@ Two leads tested and closed (MD5/flush-batching, and layout-vs-GFNI); the
 ~40+ points of unexplained gap named above stand as the next place to
 look — the off-CPU `perf sched` breakdown, not attempted in either pass.
 
+**A third lead, tested and closed: widening the recovery-block unroll does
+not help — and reading parpar's actual kernel explains why.** §3's
+`flush_avx2_work` (Normal layout) unrolls 4 recovery-block buffers at a
+time (`crates/parmesan/src/encoder.rs`, `par_chunks_mut(4)`); with 200
+buffers that means every queued input slice's bytes get re-read from
+memory ~50 times per flush instead of once — the same redundant-read shape
+`bench/FINDINGS.md` already flagged (§3's #130 discussion) as the kind of
+thing a batched/transposed layout should fix. A width-8 variant
+(`flush_avx2_work_w8`, mechanically identical, correctness-verified
+byte-identical output via a differential test) was implemented and
+benchmarked specifically to test whether halving the redundant re-reads
+(50 passes → 25) would show up as real throughput. It didn't: **7
+independent isolated single-flush measurements, both under heavy system
+load and after clearing it, all landed at 0.96×–1.04× parity** — no
+measurable improvement.
+
+That negative result motivated reading parpar's actual AVX2 kernel rather
+than just its dispatch/tiling layer (`gf16/controller_cpu.cpp`, cited
+above). Found in `gf16/gf16_shuffle_x86_common.h:94-124`, function
+`mul16_vec2x`:
+
+```c
+*dstLo = _mm256_xor_si256(tl, _mm256_shuffle_epi8(mulLo, ti));
+*dstHi = _mm256_xor_si256(th, _mm256_shuffle_epi8(mulHi, ti));
+```
+
+**2 `_mm256_shuffle_epi8` per accumulator update.** parpar pre-separates
+each input word's low/high bytes into two vectors before this call, so one
+shared nibble index (`ti`) drives both the low-output and high-output
+shuffle. Comparing shuffle counts per accumulator update, all confirmed
+directly in this codebase's own code/comments:
+
+| kernel | shuffles/update | where |
+|---|---:|---|
+| parmesan Normal (`avx2_apply_block`) | 8 | `encoder.rs:1651` |
+| parmesan Shuffle2x | 4 | `encoder.rs:60`, `:1649` ("~33% fewer instructions") |
+| parpar (`mul16_vec2x`) | 2 | `gf16_shuffle_x86_common.h:94-124` |
+
+An 8:4:2 ratio. This is a plausible, cited explanation for why the width-8
+test found nothing: if Normal's kernel already does 4× the shuffle
+instructions per byte that parpar's does, instruction throughput — not
+redundant memory reads — is the more likely dominant cost, and halving
+re-reads on top of an already compute-bound kernel wouldn't be expected to
+move wall time much. Not fully closed: whether parpar amortizes its
+per-coefficient multiply-table construction (`gf16_initial_mul_vector_x2`/
+`shuf0_vector`, same file, lines 31-66 and 222-248) differently than
+parmesan's `all_tables` — built from scratch via scalar `gf.mul()` calls on
+every single flush call, `n_rec × n_queued` entries — was not traced to a
+quantified comparison and is flagged open, not assumed.
+
+**New concrete lead for a future pass:** a 2-shuffle kernel using parpar's
+shared-nibble-index technique (pre-separate low/high bytes, one shuffle
+each side instead of four pairs) could plausibly close real ground on
+Normal-layout throughput. Not attempted here — this is unverified GF(2^16)
+multiply math on the correctness-critical hot path, and needs careful
+differential-testing before any benchmark from it would be trustworthy,
+the same discipline `width4_and_width8_avx2_kernels_produce_identical_recovery_data`
+applied to the (negative) width-8 experiment above.
+
 ---
 
 ## 4. Pipeline stages: where the time actually goes
@@ -943,10 +1002,20 @@ report:
    combined with GFNI — was tested cleanly on real GFNI hardware (3
    independent runs) and closed: Normal+GFNI beats Shuffle2x+AVX2 by 8–9%,
    consistently, so `try_new_smart`'s current layout choice is already
-   correct and a combined Shuffle2x+GFNI kernel is not worth building. The
-   remaining ~40+ points of the gap are unexplained — needs an off-CPU/
-   `perf sched` breakdown of the `Par2Worker` pipeline's 8,458 futex calls,
-   not attempted in either pass. Details in §3.
+   correct and a combined Shuffle2x+GFNI kernel is not worth building. A
+   third lead — widening the recovery-block unroll from 4 to 8 to halve
+   redundant source-slice re-reads — was implemented, correctness-verified,
+   and also closed: 7 independent trials landed at 0.96×-1.04×, no real
+   gain. Reading parpar's actual AVX2 kernel (not just its tiling/dispatch
+   layer) explains why: parpar's `mul16_vec2x` does 2 `_mm256_shuffle_epi8`
+   per accumulator update against parmesan Normal's 8 (Shuffle2x's 4 sits
+   in between) — an 8:4:2 ratio suggesting parmesan's Normal-layout kernel
+   is compute-bound on instruction count, not bandwidth-bound on redundant
+   reads, which is exactly consistent with widening the unroll buying
+   nothing. New lead for a future pass: a 2-shuffle kernel using parpar's
+   shared-nibble-index technique — not attempted, needs careful
+   differential testing on this correctness-critical GF(2^16) math before
+   trusting any benchmark from it. Details in §3.
 
 ---
 
