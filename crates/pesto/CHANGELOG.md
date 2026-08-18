@@ -21,6 +21,10 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   shrink `parmesan create` already uses. Official e2e, 0 ms, 3 reps, 500 MiB:
   streaming **56 → 209 MiB/s** (726 → 198 MiB RSS), two-phase **55 → 191 MiB/s**
   (710 → 176 MiB RSS), both ahead of `parpar+nyuu` at 166 MiB/s / 168 MiB.
+  [#144](https://github.com/franzopl/pesto/issues/144) close-out on the issue's
+  own command (`--scale 0.25 --reps 5 --latencies 0,30`, governor `performance`):
+  streaming **0.78s** vs parpar+nyuu **1.75s** at 0 ms (was 9.38s vs 1.73s);
+  **16.29s** vs **17.20s** at 30 ms.
 - **`--par2-only` / `--par2-before-upload` pre-pass and season-pack PAR2 now ingest through
   `parmesan::ops::ingest_files_with`** instead of a second file-by-file loop in the poster.
   Small files take parmesan's one-read fast path; last-slice/`is_last_of_file` bookkeeping lives

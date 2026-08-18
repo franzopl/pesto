@@ -877,9 +877,25 @@ pesto now leads parpar+nyuu on the like-for-like two-phase row (+15%) and on
 the streaming row (+26%). RSS is in the same band as parpar (~170–200 MiB)
 instead of 700+. `slice_size` on that run is 262144.
 
+**[#144](https://github.com/franzopl/pesto/issues/144) close-out**, same
+machine, governor `performance`, the issue's own command
+`./bench/run.sh e2e --workload many-small --scale 0.25 --reps 5 --latencies 0,30`
+(`20260818T183956Z`, 125 MiB, 2 000 files, median of 5):
+
+| latency | pesto (streaming) | pesto (two-phase) | parpar+nyuu |
+|---|---:|---:|---:|
+| 0 ms | **0.78s** (161 MiB/s, 57 MiB) | 0.85s (147 MiB/s, 53 MiB) | 1.75s (72 MiB/s, 127 MiB) |
+| 30 ms | **16.29s** | 16.77s | 17.20s |
+
+Against this issue's baseline (streaming **9.38s** vs parpar+nyuu **1.73s**
+at 0 ms) pesto is now **2.2× faster** than parpar+nyuu at 0 ms and slightly
+ahead at 30 ms. ngPost failed on every full-release row of this run (exit
+0/1/139), same reliability note as below.
+
 **Streaming is a small win again on `many-small` at 0 ms** after #154
-(2.39s vs 2.62s two-phase). The earlier “streaming 5.7% slower” result was
-measuring a 12×-padded encoder, not the overlap itself.
+(0.78s vs 0.85s two-phase at `--scale 0.25`; 2.39s vs 2.62s at scale 1.0).
+The earlier “streaming 5.7% slower” result was measuring a 12×-padded
+encoder, not the overlap itself.
 
 Article counts differ between pesto (4 418) and parpar+nyuu (4 049) on the
 full-release rows. That is expected — implementations split recovery data into
