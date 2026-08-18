@@ -12,6 +12,26 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Changed
+- **Auto PAR2 geometry now uses `parmesan::ops::calculate_geometry` (#154).** The poster
+  used to pick `slice_size = (articles / target) × article_size`, which cannot merge
+  slices *across* files. On `many-small` (2000 × 256 KiB) that produced 1.5–3 MiB
+  slices — 6–12× padding — so Reed-Solomon ran over gigabytes of zeros. Slice size
+  is now chosen from file sizes (256 KiB on that corpus), with the same ≤15% padding
+  shrink `parmesan create` already uses. Official e2e, 0 ms, 3 reps, 500 MiB:
+  streaming **56 → 209 MiB/s** (726 → 198 MiB RSS), two-phase **55 → 191 MiB/s**
+  (710 → 176 MiB RSS), both ahead of `parpar+nyuu` at 166 MiB/s / 168 MiB.
+- **`--par2-only` / `--par2-before-upload` pre-pass and season-pack PAR2 now ingest through
+  `parmesan::ops::ingest_files_with`** instead of a second file-by-file loop in the poster.
+  Small files take parmesan's one-read fast path; last-slice/`is_last_of_file` bookkeeping lives
+  in one place. The overlapping post+PAR2 producer path is unchanged (one disk read for articles
+  and slices).
+
+### Fixed
+- **Distributing PAR2 slice checksums no longer divides by zero** when the chosen
+  slice is smaller than the yEnc article (the `many-small` geometry). Per-file
+  slice count is `ceil(file_size / slice_size)`.
+
 ## [0.8.0] — 2026-08-18
 
 ### Added

@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`calculate_geometry` no longer overflows when a set has more files than the 32 768-slice
+  spec ceiling.** Growing the slice cannot merge files; the loop now stops if the count
+  does not drop (or if `slice_size` saturates) and returns the existing "too many slices"
+  error instead of panicking.
+- **`Par2Worker` no longer drops recycled slice buffers on every Reed-Solomon flush.** The encoder
+  returns up to 128 buffers at a time; the recycle path used a bounded `sync_channel` of depth 64
+  and `try_send`, so half of each flush was discarded and the producer allocated new slice-sized
+  `Vec`s from the OS. The recycle channel is now unbounded — live buffers were already bounded by
+  the encoder queue.
+
+### Added
+- **`ops::ingest_files_with`** — same ingestion as `ingest_files`, with optional cancel-at-file-boundary
+  and an `after_file` hook so callers such as `pesto` can drive progress without reimplementing the reader.
+
 ## [0.5.0] — 2026-08-18
 
 ### Added

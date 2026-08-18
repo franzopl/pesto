@@ -291,13 +291,10 @@ full `#[ignore]`d `par2cmdline_compat` cross-tool suite (byte-exact repairs
 both directions, unicode filenames, multi-file damage).
 
 This fix is in `parmesan`'s own `ops::ingest_files`, used by the standalone
-`parmesan create` CLI measured in this table. `pesto`'s poster
-(`crates/pesto/src/poster/mod.rs`) has its own separate file-ingestion loop —
-it uses `Par2Worker`/`RecoveryEncoder` directly rather than
-`ops::ingest_files`, to overlap PAR2 generation with upload — so §5's
-`many-small` end-to-end row is a *different* code path and was not measured
-as part of this fix; whether it has an analogous per-file overhead problem is
-open, not assumed fixed here.
+`parmesan create` CLI measured in this table. `pesto`'s `--par2-only` /
+`--par2-before-upload` pre-pass and season-pack path now call
+`ops::ingest_files_with` as well (#154). The overlapping post+PAR2 producer
+still feeds `Par2Worker` from the article read so the disk is scanned once.
 
 **Measured in [#128](https://github.com/franzopl/pesto/issues/128): GFNI is
 real, but it does not close the gap to `parpar` — on large files it widens.**
@@ -862,15 +859,27 @@ buys back more than the encoder loses.
 4.4s) — its two-phase pipeline with its own PAR2 implementation, not a close
 comparison of the same work.
 
-**`many-small` inverts everything.** parpar+nyuu finishes in 1.73s against
-pesto's 9.38s. This is §3's small-file weakness, amplified: PAR2 dominates the
-whole upload when there are 2 000 sub-slice files, and parmesan is half
-parpar's speed there. Fix the small-file PAR2 path and this row moves with it.
+**`many-small` used to invert everything** — parpar+nyuu 1.73s vs pesto 9.38s
+on the older scale-0.25-shaped table below. The cause was not the RS kernel
+(#131 already put `parmesan create` ahead of parpar). The poster picked
+`slice_size` by grouping *yEnc articles* as if they could be merged across
+files, so 2000 × 256 KiB files still made 2000 slices but each slice was
+1.5–3 MiB of padding. Fixed in [#154](https://github.com/franzopl/pesto/issues/154)
+by delegating auto geometry to `parmesan::ops::calculate_geometry`. Re-measured
+on the same machine, `--scale 1.0 --reps 3 --latencies 0` (`20260818T181051Z`):
 
-**Streaming is not always a win.** On `many-small` at 0 ms it is 5.7% *slower*
-than two-phase — the only such row. When PAR2 is the bottleneck and the network
-is free, overlapping buys nothing and costs coordination. At 30 ms the same
-workload flips to streaming being 27% faster.
+| case | pesto before | pesto after | parpar+nyuu |
+|---|---:|---:|---:|
+| streaming | 56 MiB/s, 726 MiB | **209 MiB/s**, 198 MiB | — |
+| two-phase | 55 MiB/s, 710 MiB | **191 MiB/s**, 176 MiB | 166 MiB/s, 168 MiB |
+
+pesto now leads parpar+nyuu on the like-for-like two-phase row (+15%) and on
+the streaming row (+26%). RSS is in the same band as parpar (~170–200 MiB)
+instead of 700+. `slice_size` on that run is 262144.
+
+**Streaming is a small win again on `many-small` at 0 ms** after #154
+(2.39s vs 2.62s two-phase). The earlier “streaming 5.7% slower” result was
+measuring a 12×-padded encoder, not the overlap itself.
 
 Article counts differ between pesto (4 418) and parpar+nyuu (4 049) on the
 full-release rows. That is expected — implementations split recovery data into
