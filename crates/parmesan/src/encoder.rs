@@ -92,6 +92,58 @@ type Avx2Table = (
     [u16; 256],
 );
 
+/// One ALTMAP output plane's decoded dependency list: `plane_out` is XORed
+/// from `plane_ins[..n_ins]` (indices into the 16 input planes).
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy)]
+struct PlaneOutDeps {
+    plane_out: u8,
+    plane_ins: [u8; 16],
+    n_ins: u8,
+}
+
+/// Decode a coefficient's 16-bit-mask dependency matrix (`xor_dep_matrix`'s
+/// output) into a flat, branch-free-to-walk list of `(plane_out, plane_ins)`
+/// pairs, skipping any `plane_out` with an all-zero mask.
+///
+/// §148: `flush_avx2_altmap_work` used to re-test all 256 `(plane_out,
+/// plane_in)` bit positions on *every* 32-byte output vector (`n_vec` of them
+/// per recovery-chunk × input-slice pair — in the thousands for a large
+/// file). The mask only depends on the coefficient, which is fixed for the
+/// whole `vi` loop, so decoding it once up front and walking a plain index
+/// list inside the hot loop removes that redundant re-decoding without
+/// changing which XORs happen or their order (XOR is commutative/
+/// associative, so reordering by plane_out is safe).
+#[cfg(target_arch = "x86_64")]
+fn decode_plane_deps(deps: &[u16; 16]) -> ([PlaneOutDeps; 16], usize) {
+    let mut out = [PlaneOutDeps {
+        plane_out: 0,
+        plane_ins: [0; 16],
+        n_ins: 0,
+    }; 16];
+    let mut count = 0;
+    for (plane_out, &mask) in deps.iter().enumerate() {
+        if mask == 0 {
+            continue;
+        }
+        let mut plane_ins = [0u8; 16];
+        let mut n_ins = 0u8;
+        for plane_in in 0..16u8 {
+            if (mask >> plane_in) & 1 == 1 {
+                plane_ins[n_ins as usize] = plane_in;
+                n_ins += 1;
+            }
+        }
+        out[count] = PlaneOutDeps {
+            plane_out: plane_out as u8,
+            plane_ins,
+            n_ins,
+        };
+        count += 1;
+    }
+    (out, count)
+}
+
 /// Storage for recovery accumulator buffers.
 ///
 /// `Normal` holds one `Vec<u16>` per recovery block (the existing layout).
@@ -291,8 +343,13 @@ impl RecoveryEncoder {
     /// Create an encoder with the best possible performance layout for the
     /// current CPU, with fallible allocation.
     ///
-    /// Auto-selects between Normal, Shuffle2x (AVX2), and Altmap layouts based
-    /// on detected SIMD features and `slice_size` alignment.
+    /// Auto-selects between Normal and Shuffle2x (AVX2) layouts based on
+    /// detected SIMD features and `slice_size` alignment. Never selects
+    /// Altmap: measured decisively slower than Shuffle2x on the one AVX2
+    /// axis where both are available (§148, `bench/FINDINGS.md`), even
+    /// after removing its worst inefficiency — the "XOR Bit Dependencies"
+    /// technique it implements needs common-subexpression elimination to be
+    /// competitive, which this port does not have.
     ///
     /// # Errors
     ///
@@ -329,8 +386,13 @@ impl RecoveryEncoder {
     /// Create an encoder with the best possible performance layout for the
     /// current CPU.
     ///
-    /// Auto-selects between Normal, Shuffle2x (AVX2), and Altmap layouts based
-    /// on detected SIMD features and `slice_size` alignment.
+    /// Auto-selects between Normal and Shuffle2x (AVX2) layouts based on
+    /// detected SIMD features and `slice_size` alignment. Never selects
+    /// Altmap: measured decisively slower than Shuffle2x on the one AVX2
+    /// axis where both are available (§148, `bench/FINDINGS.md`), even
+    /// after removing its worst inefficiency — the "XOR Bit Dependencies"
+    /// technique it implements needs common-subexpression elimination to be
+    /// competitive, which this port does not have.
     ///
     /// # Panics
     ///
@@ -3219,6 +3281,17 @@ impl RecoveryEncoder {
                         coeffs[r] = gf.exp(log_coeff);
                     }
 
+                    // Decode each active coefficient's dependency matrix once per
+                    // (recovery-chunk, input-slice) pair — reused across every `vi`
+                    // and every tail byte below. See `decode_plane_deps`.
+                    let deps: [Option<([PlaneOutDeps; 16], usize)>; 4] = std::array::from_fn(|r| {
+                        if r >= chunk_len || coeffs[r] == 0 {
+                            None
+                        } else {
+                            Some(decode_plane_deps(&dep_tables[coeffs[r] as usize]))
+                        }
+                    });
+
                     // AVX2 path: one 256-bit vector per plane per vec-index.
                     for vi in 0..n_vec {
                         // Load 16 input planes at this vector position.
@@ -3231,23 +3304,15 @@ impl RecoveryEncoder {
                         }
 
                         for r in 0..chunk_len {
-                            let coeff = coeffs[r];
-                            if coeff == 0 {
+                            let Some((ref plane_deps, count)) = deps[r] else {
                                 continue;
-                            }
-                            let deps = &dep_tables[coeff as usize];
-                            for plane_out in 0..16usize {
-                                let mask = deps[plane_out];
-                                if mask == 0 {
-                                    continue;
-                                }
+                            };
+                            for pd in &plane_deps[..count] {
                                 let mut acc = _mm256_setzero_si256();
-                                for plane_in in 0..16usize {
-                                    if (mask >> plane_in) & 1 == 1 {
-                                        acc = _mm256_xor_si256(acc, in_planes[plane_in]);
-                                    }
+                                for &plane_in in &pd.plane_ins[..pd.n_ins as usize] {
+                                    acc = _mm256_xor_si256(acc, in_planes[plane_in as usize]);
                                 }
-                                let off = plane_out * plane_bytes + vi * 32;
+                                let off = pd.plane_out as usize * plane_bytes + vi * 32;
                                 // SAFETY: off + 32 <= plane_bytes * 16 == buf.len().
                                 let ptr = rec_chunk[r].as_mut_ptr().add(off).cast::<__m256i>();
                                 let prev = unsafe { _mm256_loadu_si256(ptr) };
@@ -3262,24 +3327,17 @@ impl RecoveryEncoder {
                     let tail_start = n_vec * 32;
                     if tail_start < plane_bytes {
                         for r in 0..chunk_len {
-                            let coeff = coeffs[r];
-                            if coeff == 0 {
+                            let Some((ref plane_deps, count)) = deps[r] else {
                                 continue;
-                            }
-                            let deps = &dep_tables[coeff as usize];
-                            for plane_out in 0..16usize {
-                                let mask = deps[plane_out];
-                                if mask == 0 {
-                                    continue;
-                                }
+                            };
+                            for pd in &plane_deps[..count] {
                                 for byte_off in tail_start..plane_bytes {
                                     let mut acc: u8 = 0;
-                                    for plane_in in 0..16usize {
-                                        if (mask >> plane_in) & 1 == 1 {
-                                            acc ^= slice_am[plane_in * plane_bytes + byte_off];
-                                        }
+                                    for &plane_in in &pd.plane_ins[..pd.n_ins as usize] {
+                                        acc ^= slice_am[plane_in as usize * plane_bytes + byte_off];
                                     }
-                                    rec_chunk[r][plane_out * plane_bytes + byte_off] ^= acc;
+                                    rec_chunk[r][pd.plane_out as usize * plane_bytes + byte_off] ^=
+                                        acc;
                                 }
                             }
                         }
@@ -4900,6 +4958,130 @@ mod tests {
              Shuffle2x+AVX2: {s2x_med_ms:.1} ms median -> {s2x_mibs:.1} MiB/s\n\
              Shuffle2x vs Normal: {:+.1}%\n",
             (s2x_mibs / normal_mibs - 1.0) * 100.0
+        );
+    }
+
+    // §148 continued: is ALTMAP (parmesan's own "XOR Bit Dependencies" kernel,
+    // `crates/parmesan/src/gf16.rs`'s `xor_dep_matrix` + `flush_avx2_altmap_work`)
+    // competitive with Shuffle2x now that its per-vector dependency-mask decode
+    // is hoisted out of the hot loop (see `decode_plane_deps`)? ParPar's own
+    // `fast-gf-multiplication.md` calls the XOR Bit Dependencies technique "the
+    // fastest technique I've found for most x86 CPUs... for w=16", ahead of the
+    // Vector Split Lookup (shuffle) technique Shuffle2x/Normal both use — and
+    // `Galois16Mul::default_method()` in ParPar's own `gf16mul.cpp` confirms
+    // this isn't just a claim: on any AVX2 x86-64 host that can JIT (`canMemWX`,
+    // `propFastJit`, not emulated), it picks `GF16_XOR_JIT_AVX2` ahead of
+    // `GF16_SHUFFLE_AVX2` — exactly this machine's class of hardware (AVX2,
+    // no GFNI). ParPar's version is JIT-compiled per coefficient (zero
+    // interpretation overhead, plus common-subexpression elimination across
+    // output bits that this fixed, non-JIT port does not attempt); this test
+    // measures how far the branch-free-but-uncompressed version lands before
+    // deciding whether investing in a real JIT (or a static CSE pass) is
+    // worthwhile. `#[ignore]`d: takes several seconds (`cargo test --release
+    // -p parmesan-par2 -- --ignored altmap_vs_shuffle2x_layout_throughput_movie_1080p`).
+    #[test]
+    #[ignore]
+    fn altmap_vs_shuffle2x_layout_throughput_movie_1080p() {
+        use std::time::Instant;
+
+        // Same geometry as the sibling Normal-vs-Shuffle2x test above.
+        const SLICE_SIZE: usize = 806_912;
+        const TOTAL_SLICES: usize = 1997;
+        const RECOVERY_COUNT: usize = 200;
+        const EXPONENT_START: u32 = 0;
+        const REPS: u32 = 5;
+
+        fn xorshift_fill(seed: u64, buf: &mut [u8]) {
+            let mut state = seed | 1;
+            for chunk in buf.chunks_mut(8) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let bytes = state.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+        }
+        let slices: Vec<Vec<u8>> = (0..TOTAL_SLICES)
+            .map(|i| {
+                let mut buf = vec![0u8; SLICE_SIZE];
+                xorshift_fill(0x9E3779B97F4A7C15 ^ (i as u64), &mut buf);
+                buf
+            })
+            .collect();
+
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            !std::is_x86_feature_detected!("gfni"),
+            "ALTMAP has no kernel on GFNI hardware (try_new_altmap falls back \
+             to Normal there), so this comparison needs a non-GFNI AVX2 host"
+        );
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            std::is_x86_feature_detected!("avx2"),
+            "need AVX2 for both the Shuffle2x and ALTMAP kernels"
+        );
+
+        let run_shuffle2x = || {
+            let mut enc = RecoveryEncoder::new_shuffle2x(
+                SLICE_SIZE,
+                TOTAL_SLICES,
+                EXPONENT_START,
+                RECOVERY_COUNT,
+            );
+            for s in &slices {
+                enc.add_slice(s.clone());
+            }
+            let _ = enc.finish();
+        };
+        let run_altmap = || {
+            let mut enc = RecoveryEncoder::new_altmap(
+                SLICE_SIZE,
+                TOTAL_SLICES,
+                EXPONENT_START,
+                RECOVERY_COUNT,
+            );
+            for s in &slices {
+                enc.add_slice(s.clone());
+            }
+            let _ = enc.finish();
+        };
+
+        // Warm-up (page-in slices, prime allocator, build the 2 MiB dep_tables
+        // once) — unmeasured.
+        run_shuffle2x();
+        run_altmap();
+
+        // Reps interleaved (Shuffle2x, ALTMAP, Shuffle2x, ...), not blocked —
+        // see the sibling GFNI test's rationale for why, on a shared machine.
+        let mut s2x_ms: Vec<f64> = Vec::with_capacity(REPS as usize);
+        let mut altmap_ms: Vec<f64> = Vec::with_capacity(REPS as usize);
+        for _ in 0..REPS {
+            let t = Instant::now();
+            run_shuffle2x();
+            s2x_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+
+            let t = Instant::now();
+            run_altmap();
+            altmap_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        fn median(mut v: Vec<f64>) -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        }
+        let input_mib = (SLICE_SIZE * TOTAL_SLICES) as f64 / (1024.0 * 1024.0);
+        let s2x_med_ms = median(s2x_ms);
+        let altmap_med_ms = median(altmap_ms);
+        let s2x_mibs = input_mib / (s2x_med_ms / 1000.0);
+        let altmap_mibs = input_mib / (altmap_med_ms / 1000.0);
+
+        eprintln!(
+            "\n== Shuffle2x vs ALTMAP (hoisted), movie-1080p geometry, {input_mib:.1} MiB, \
+             {REPS} reps ==\n\
+             Shuffle2x+AVX2: {s2x_med_ms:.1} ms median -> {s2x_mibs:.1} MiB/s\n\
+             ALTMAP+AVX2:    {altmap_med_ms:.1} ms median -> {altmap_mibs:.1} MiB/s\n\
+             ALTMAP vs Shuffle2x: {:+.1}%\n",
+            (altmap_mibs / s2x_mibs - 1.0) * 100.0
         );
     }
 

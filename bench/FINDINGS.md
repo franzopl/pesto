@@ -534,6 +534,110 @@ differential-testing before any benchmark from it would be trustworthy,
 the same discipline `width4_and_width8_avx2_kernels_produce_identical_recovery_data`
 applied to the (negative) width-8 experiment above.
 
+**That "2-shuffle" lead is now closed — it was a misreading of parpar's
+source.** Fetched and read parpar's actual upstream files (not paraphrased
+excerpts) to check the lead before building it:
+[`gf16/gf16_shuffle_x86_common.h`](https://github.com/animetosho/ParPar/blob/master/gf16/gf16_shuffle_x86_common.h)
+and
+[`gf16/gf16_shuffle_avx2.c`](https://github.com/animetosho/ParPar/blob/master/gf16/gf16_shuffle_avx2.c).
+`mul16_vec2x` (`gf16_shuffle_x86_common.h:94`) is *not* the per-input-vector
+data multiply — it's a table-construction helper, called exactly 3 times
+per flush setup (`gf16_shuffle_avx2.c:89-91`) to derive the Shuffle2x-style
+4-way lookup tables (`prodLo1..3`/`prodHi1..3`) from the coefficient's base
+table via repeated ×16 doubling, instead of parmesan's 4× scalar
+`gf.mul()` loops. The actual per-input-vector hot loop is
+`gf16_shuffle2x_muladd_round_avx2` (`gf16_shuffle_avx2.c:20-45`), and it
+uses **4** `_mm256_shuffle_epi8` calls per source vector (`shufSwapLoA`,
+`shufNormLoA`, `shufSwapHiA`, `shufNormHiA`) — the same instruction count
+as parmesan's existing Shuffle2x kernel, confirmed identical technique
+(pre-separated low/high-byte tables, one shared nibble index per byte-half).
+There is no 2-shuffle GF(2^16) multiply-by-arbitrary-coefficient kernel in
+parpar to port; the 8:4:2 ratio recorded above compared a table-setup
+helper against a data hot loop and isn't a like-for-like number. Practical
+consequence: on the AVX2-without-GFNI shuffle path, parmesan and parpar are
+already running architecturally the same kernel, so the §3 baseline gap
+(25% on `movie-1080p`, 27% on `mixed-folder`, i5-10400) is *not* explained
+by a faster available multiply algorithm — it has to be tiling, threading,
+or memory behavior instead.
+
+**Fourth lead, tested and closed: parmesan's own "XOR Bit Dependencies"
+kernel (ALTMAP) is not competitive, even after removing its worst
+inefficiency.** Prompted by parpar's own
+[`fast-gf-multiplication.md`](https://github.com/animetosho/ParPar/blob/master/fast-gf-multiplication.md),
+which calls this technique "the fastest technique I've found for most x86
+CPUs... for w=16" — ahead of the shuffle/Vector-Split-Lookup family both
+Normal and Shuffle2x use — and confirmed live in parpar's own dispatch
+(`Galois16Mul::default_method`, `gf16/gf16mul.cpp:1519-1524`): on AVX2 x86-64
+it prefers `GF16_XOR_JIT_AVX2` over `GF16_SHUFFLE_AVX2` whenever
+`propFastJit` is set. That gate turns out to be AMD-only
+(`gf16mul.cpp:100`, "*basically, AMD, prefer 256-bit XorJit over Shuffle*",
+matching Bulldozer/Jaguar/Zen family IDs) — this machine and the original
+i5-10400 §3 baseline are both Intel (`cpu family: 6`, not in that list), so
+parpar's own default here is `GF16_SHUFFLE_AVX2` too, same as the point
+above: apples-to-apples kernels on this specific hardware. Still, since
+`crates/parmesan/src/gf16.rs`'s `xor_dep_matrix` already implements the
+*math* of this technique (cited from the same doc,
+`gf16.rs:169`) and `RecoveryBufferSet::Altmap` already exists, it was worth
+actually measuring rather than leaving it as dead code `try_new_smart`
+never selects.
+
+Reading `flush_avx2_altmap_work` first found a real inefficiency unrelated
+to the algorithm itself: for every 32-byte output vector (`n_vec` of
+them — 1,576 for `movie-1080p`'s slice size), the inner loop re-tested all
+16×16 = 256 `(plane_out, plane_in)` mask bits with a branch per bit, even
+though the mask only depends on the coefficient, which is fixed for the
+entire `vi` loop. Hoisted that decode into `decode_plane_deps`, called once
+per (recovery-chunk, input-slice) pair instead of once per output vector,
+producing a flat index list the hot loop just walks — same XOR count, same
+order (XOR is commutative/associative), verified byte-identical against
+`new_altmap_produces_correct_recovery_data`. Benchmarked against Shuffle2x
+on this AVX2-without-GFNI machine (`altmap_vs_shuffle2x_layout_throughput_movie_1080p`,
+same `movie-1080p` geometry, 5 interleaved reps):
+
+| kernel | median | throughput |
+|---|---:|---:|
+| Shuffle2x+AVX2 | 3434 ms | 447.5 MiB/s |
+| ALTMAP+AVX2 (hoisted) | 32361 ms | 47.5 MiB/s |
+
+**ALTMAP is still 89% slower — essentially unchanged in kind, just no
+longer paying the branch tax on top.** This confirms the bottleneck isn't
+the branching parpar's docs complain about; it's instruction count.
+parmesan's ALTMAP does independent per-`plane_out` summation — for a
+representative coefficient with ~50% dependency-matrix density, roughly
+16 × 8 = 128 vector XORs to transform one 16-word-wide chunk, against
+Shuffle2x's 4 shuffles for the same chunk. parpar's docs are explicit that
+its *JIT* version only wins after **common-subexpression elimination**
+across the 16 output-bit computations ("the above sample implementation
+lacks optimisations such as common-expression elimination", same doc) —
+sharing partial XOR sums between output bits instead of recomputing each
+one from scratch, which a per-row independent loop (JIT or not) cannot do.
+Building that — a small compiler pass over each coefficient's dependency
+matrix producing a shared, minimal XOR sequence, then either JIT-emitting
+it or interpreting it as a portable "micro-program" — is a real, bounded
+piece of engineering, but a materially bigger one than anything tried in
+this issue so far, and needs the same differential-testing discipline
+applied here before trusting its output. Flagged as the concrete next step
+if this technique is pursued further; branch removal alone is not enough,
+so this is closed as "needs CSE, not just cleanup."
+
+**New lead, not yet tested: tiling.** parpar tunes its chunk/tile size per
+kernel (`gf16mul.cpp`'s `idealChunkSize` switch, around line 452): **8 KiB**
+for `GF16_SHUFFLE_AVX2` and `GF16_SHUFFLE2X_AVX2` ("try to target L2"), 16
+KiB for the SSSE3/AVX shuffle kernels, 128 KiB for `GF16_XOR_JIT_AVX2`.
+parmesan's `flush_avx2_work` and `flush_avx2_shuffle2x_work` both use a
+fixed **32 KiB** chunk (`encoder.rs` `chunk_size`/`chunk_size_bytes`) —
+4× parpar's tuned figure for the same kernel family, chosen without a
+documented tuning pass. Since the two kernels are now confirmed
+architecturally identical (above), and the remaining §3 gap is specifically
+worse on large single files (not `many-small`, already fixed by #131) —
+matching a cache-locality explanation better than an instruction-count
+one — this is a concrete, cheap-to-test candidate for closing real ground:
+sweep `chunk_size` toward 8 KiB on the AVX2 Shuffle2x path and re-run the
+existing `shuffle2x_vs_normal_layout_throughput_movie_1080p`-style
+methodology. Not attempted in this pass — a tiling change deserves the same
+multi-trial, interleaved-rep rigor every other number in this section got,
+which didn't fit in the same sitting as the ALTMAP experiment above.
+
 ---
 
 ## 4. Pipeline stages: where the time actually goes
@@ -1012,10 +1116,26 @@ report:
    in between) — an 8:4:2 ratio suggesting parmesan's Normal-layout kernel
    is compute-bound on instruction count, not bandwidth-bound on redundant
    reads, which is exactly consistent with widening the unroll buying
-   nothing. New lead for a future pass: a 2-shuffle kernel using parpar's
-   shared-nibble-index technique — not attempted, needs careful
-   differential testing on this correctness-critical GF(2^16) math before
-   trusting any benchmark from it. Details in §3.
+   nothing. That "2-shuffle kernel" lead is now closed as a misreading:
+   fetching and reading parpar's actual upstream source
+   (`gf16_shuffle_avx2.c`) shows `mul16_vec2x` is a table-construction
+   helper called 3×/flush-setup, not the per-vector data hot loop — the
+   real hot loop (`gf16_shuffle2x_muladd_round_avx2`) uses 4 shuffles per
+   vector, architecturally identical to parmesan's existing Shuffle2x
+   kernel. A fourth lead — whether parmesan's own "XOR Bit Dependencies"
+   kernel (ALTMAP), the technique parpar's docs call generally fastest for
+   w=16 on x86 — could compete once its worst inefficiency (256
+   branch-tested mask bits re-decoded on every output vector) was removed,
+   was implemented, correctness-verified, and closed: still 89% slower than
+   Shuffle2x even after hoisting the branchy decode out of the hot loop,
+   because the real gap is XOR instruction count (~128 vs Shuffle2x's 4 per
+   chunk), which only a common-subexpression-elimination pass (JIT or not)
+   would fix — a materially bigger undertaking than anything tried in this
+   issue so far. New lead for a future pass, not yet tested: parpar tunes
+   its tile size per kernel (8 KiB for its AVX2 shuffle kernels) while
+   parmesan uses a fixed 32 KiB chunk for the same kernel family — a
+   concrete, cheap-to-test tiling/cache-locality candidate for the
+   remaining gap. Details in §3.
 
 ---
 
