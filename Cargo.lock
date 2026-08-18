@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "parmesan-par2"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1599,7 +1599,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "penne"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1623,7 +1623,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pesto-poster"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bdinfo-rs-core",
