@@ -17,6 +17,17 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 
 const MAX_FILENAME_LEN: usize = 42;
 
+/// Truncate `name` to at most `max_bytes` UTF-8 bytes, then append `...`.
+///
+/// Must never slice inside a multi-byte character (e.g. `é` is 2 bytes).
+fn truncate_filename(name: &str, max_bytes: usize) -> String {
+    if name.len() <= max_bytes {
+        return name.to_string();
+    }
+    let end = name.floor_char_boundary(max_bytes);
+    format!("{}...", &name[..end])
+}
+
 /// Generate NFO content for `paths` (the original input paths before any compression).
 ///
 /// Runs `mediainfo` when a media file can be identified; for generic directories
@@ -1425,11 +1436,7 @@ fn walk_tree(
             walk_tree(path, &new_prefix, nfo_name, file_sizes, state);
         } else {
             state.file_count += 1;
-            let display_name = if item_name.len() > MAX_FILENAME_LEN {
-                format!("{}...", &item_name[..MAX_FILENAME_LEN])
-            } else {
-                item_name.clone()
-            };
+            let display_name = truncate_filename(&item_name, MAX_FILENAME_LEN);
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
             let size = file_sizes.get(&canonical).copied().unwrap_or(0);
             let size_str = format_size(size);
@@ -1573,6 +1580,36 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── truncate_filename ────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_filename_keeps_short_names() {
+        assert_eq!(
+            truncate_filename("short.mp4", MAX_FILENAME_LEN),
+            "short.mp4"
+        );
+    }
+
+    #[test]
+    fn truncate_filename_ascii_over_limit() {
+        let name = "a".repeat(MAX_FILENAME_LEN + 5);
+        let out = truncate_filename(&name, MAX_FILENAME_LEN);
+        assert_eq!(out, format!("{}...", "a".repeat(MAX_FILENAME_LEN)));
+    }
+
+    #[test]
+    fn truncate_filename_does_not_split_multibyte_at_limit() {
+        // Regression: pesto-rt panicked at nfo.rs walk_tree when a filename
+        // ended a 42-byte window inside `é` (bytes 41..43).
+        let prefix = "a".repeat(41);
+        let name = format!("{prefix}é-rest-of-a-very-long-filename.mp4");
+        assert!(!name.is_char_boundary(MAX_FILENAME_LEN));
+        let out = truncate_filename(&name, MAX_FILENAME_LEN);
+        assert!(out.ends_with("..."));
+        assert!(out.is_char_boundary(out.len()));
+        assert_eq!(out, format!("{prefix}..."));
+    }
 
     // ── is_series_folder ─────────────────────────────────────────────────────
 
