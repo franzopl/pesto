@@ -7,24 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-- **`calculate_geometry` no longer overflows when a set has more files than the 32 768-slice
-  spec ceiling.** Growing the slice cannot merge files; the loop now stops if the count
-  does not drop (or if `slice_size` saturates) and returns the existing "too many slices"
-  error instead of panicking.
-- **`Par2Worker` no longer drops recycled slice buffers on every Reed-Solomon flush.** The encoder
-  returns up to 128 buffers at a time; the recycle path used a bounded `sync_channel` of depth 64
-  and `try_send`, so half of each flush was discarded and the producer allocated new slice-sized
-  `Vec`s from the OS. The recycle channel is now unbounded — live buffers were already bounded by
-  the encoder queue.
+## [0.5.0] — 2026-08-18
 
 ### Added
 - **`ops::ingest_files_with`** — same ingestion as `ingest_files`, with optional cancel-at-file-boundary
   and an `after_file` hook so callers such as `pesto` can drive progress without reimplementing the reader.
-
-## [0.5.0] — 2026-08-18
-
-### Added
 - **`RecoveryDecoder::reconstruct` now parallelises across missing slices with `rayon`**, the same pattern
   `RecoveryEncoder` already used for creation. Sub-linear but real: `mac()` over a slice is bandwidth-bound, so
   threads contending for memory bandwidth don't scale linearly, but wall-clock repair still improved 20% on a
@@ -51,6 +38,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   before they time it.
 
 ### Fixed
+- **`calculate_geometry` no longer overflows when a set has more files than the 32 768-slice
+  spec ceiling.** Growing the slice cannot merge files; the loop now stops if the count
+  does not drop (or if `slice_size` saturates) and returns the existing "too many slices"
+  error instead of panicking.
+- **`Par2Worker` no longer drops recycled slice buffers on every Reed-Solomon flush.** The encoder
+  returns up to 128 buffers at a time; the recycle path used a bounded `sync_channel` of depth 64
+  and `try_send`, so half of each flush was discarded and the producer allocated new slice-sized
+  `Vec`s from the OS. The recycle channel is now unbounded — live buffers were already bounded by
+  the encoder queue.
 - **`parmesan create` could exhaust virtual address space on high-core machines independent of
   `--memory-limit`**, panicking well inside the configured budget on hosts with a restrictive `RLIMIT_AS`
   (`ulimit -v`, a real shared-host/HPC/container pattern). Not the recovery buffer itself — `ingest_files`
