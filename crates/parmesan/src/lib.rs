@@ -67,7 +67,13 @@ impl std::fmt::Display for SimdPath {
 /// Returns the name of the SIMD path that the PAR2 encoder will use at runtime.
 pub fn detect_simd() -> &'static str {
     #[cfg(target_arch = "x86_64")]
-    // Affine AVX-512 is not the auto path (c7i create slower than Affine AVX2).
+    if std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512bw")
+        && std::is_x86_feature_detected!("gfni")
+    {
+        return "AVX-512/GFNI";
+    }
+    #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
         return "AVX2/GFNI";
     }

@@ -48,7 +48,7 @@ must be complete.
 | A26 | Recovery MD5-MB 8/16-wide | AVX2 / AVX-512 | Missing | |
 | A27 | OpenCL | GPU | Missing | last; optional crate feature |
 
-`smart` today: Affine AVX2 on GFNI; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI; else Normal. yEnc `encode()`: AVX2 + VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
+`smart` today: Normal+AVX-512/GFNI on SPR (c7i create ~318); Affine AVX2 on GFNI without 512; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI. yEnc `encode()`: AVX2 + VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
 
 Target `smart` when this list is done: same priority as
 `Galois16Mul::default_method` in parpar (`gf16mul.cpp`).

@@ -521,20 +521,31 @@ impl RecoveryEncoder {
         exponent_start: u32,
         recovery_count: usize,
     ) -> Result<Self, TryReserveError> {
+        // c7i movie create: Normal + flush_avx512_gfni ~318 MiB/s; Affine AVX2
+        // and Affine512 layouts ~183–186. Keep the winner until Affine beats it.
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("gfni") && slice_size.is_multiple_of(64) {
-            // Affine AVX-512 exists (`try_new_affine512`) but c7i movie create
-            // was 186 MiB/s vs ~318 on Affine AVX2 / ~590 parpar. Do not auto-
-            // select it until the 512 kernel beats AVX2 (nibble scratch / less
-            // prepare-copy).
-            if std::is_x86_feature_detected!("avx2") {
-                return Self::try_new_affine(
-                    slice_size,
-                    total_input_slices,
-                    exponent_start,
-                    recovery_count,
-                );
-            }
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("gfni")
+        {
+            return Self::try_new(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("gfni")
+            && std::is_x86_feature_detected!("avx2")
+            && slice_size.is_multiple_of(64)
+        {
+            return Self::try_new_affine(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
         }
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx512f")
@@ -6006,10 +6017,15 @@ mod tests {
             affine_kernel_available(),
             "affine_kernel_available disagrees with new_affine"
         );
-        if affine_kernel_available() {
+        if affine512_kernel_available() {
+            assert!(
+                matches!(smart.buffers, RecoveryBufferSet::Normal(_)),
+                "try_new_smart must pick Normal+AVX512-GFNI on SPR (not Affine)"
+            );
+        } else if affine_kernel_available() {
             assert!(
                 matches!(smart.buffers, RecoveryBufferSet::Affine(_)),
-                "try_new_smart must pick Affine AVX2 on GFNI (not Affine512)"
+                "try_new_smart must pick Affine AVX2 on GFNI without 512"
             );
         }
 
