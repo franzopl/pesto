@@ -392,6 +392,8 @@ struct Shared {
     /// here after encoding so the producer and reader tasks can reuse it
     /// instead of allocating a fresh `Vec<u8>` for every article.
     pool: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Reusable yEnc *output* bodies (P3 encodeTo). Filled by `encode_part_into`.
+    encode_pool: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Total number of post attempts that failed and triggered a retry (26d).
     total_retries: std::sync::atomic::AtomicUsize,
     /// Newsgroup(s) every article in this run is posted to. When several groups
@@ -456,6 +458,23 @@ impl Shared {
     fn release_buffer(&self, buf: Vec<u8>) {
         if buf.capacity() > 0 && buf.capacity() <= self.config.article_size * 2 {
             self.pool.lock().unwrap().push(buf);
+        }
+    }
+
+    fn acquire_encode_buf(&self) -> Vec<u8> {
+        match self.encode_pool.lock().unwrap().pop() {
+            Some(mut buf) => {
+                buf.clear();
+                buf
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn release_encode_buf(&self, buf: Vec<u8>) {
+        let cap = self.config.article_size.saturating_mul(3).max(64 * 1024);
+        if buf.capacity() > 0 && buf.capacity() <= cap {
+            self.encode_pool.lock().unwrap().push(buf);
         }
     }
 }
@@ -930,6 +949,7 @@ pub async fn post_files_inner(
         resume_path: resume_path_owned,
         spool_dir: spool_dir_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
+        encode_pool: Arc::new(Mutex::new(Vec::new())),
         total_retries: std::sync::atomic::AtomicUsize::new(0),
         post_group: pick_post_group(&config.groups),
         release_prefix,
@@ -2910,7 +2930,8 @@ async fn worker(
                     .acquire()
                     .await
                     .expect("encode semaphore");
-                let encoded = yenc::encode_part(
+                let mut encode_buf = shared.acquire_encode_buf();
+                let encoded = yenc::encode_part_into(
                     &task.meta.yenc_name,
                     task.meta.size,
                     yenc::PartSpec {
@@ -2921,6 +2942,7 @@ async fn worker(
                     &task.data,
                     shared.config.line_length,
                     file_crc32,
+                    &mut encode_buf,
                 );
                 drop(_encode_permit);
                 let encode_time = t_enc.elapsed();
@@ -3095,17 +3117,19 @@ async fn worker(
                 }
             }
 
+            let wire = p.headers.len() + p.encoded.body.len();
             commit_result(
                 &shared,
                 check_tx.as_ref(),
                 p.task,
                 p.message_id,
-                p.headers.len() + p.encoded.body.len(),
+                wire,
                 posted,
                 &last_err,
                 p.date,
                 slot.server_idx(),
             );
+            shared.release_encode_buf(p.encoded.body);
         } else {
             // ── Pipelined path ───────────────────────────────────────────────
             // Send all articles back-to-back, flush once, then read all
@@ -3213,17 +3237,19 @@ async fn worker(
             for (p, result) in pending.into_iter().zip(pipe_results) {
                 let posted = pipeline_ok && result.is_ok();
                 let last_err = result.err().unwrap_or_else(|| "pipeline failed".into());
+                let wire = p.headers.len() + p.encoded.body.len();
                 commit_result(
                     &shared,
                     check_tx.as_ref(),
                     p.task,
                     p.message_id,
-                    p.headers.len() + p.encoded.body.len(),
+                    wire,
                     posted,
                     &last_err,
                     p.date,
                     batch_server_idx,
                 );
+                shared.release_encode_buf(p.encoded.body);
             }
         }
     }
@@ -4856,6 +4882,7 @@ mod tests {
             resume_path: None,
             spool_dir: None,
             pool: Arc::new(Mutex::new(Vec::new())),
+            encode_pool: Arc::new(Mutex::new(Vec::new())),
             total_retries: std::sync::atomic::AtomicUsize::new(0),
             post_group,
             release_prefix: None,

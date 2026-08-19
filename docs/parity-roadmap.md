@@ -61,15 +61,15 @@ Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still a
 
 ### P2 — Fused hasher
 
-- [ ] MD5 slice + MD5 file + CRC in one SIMD pass
+- [x] MD5 slice + CRC in one memory pass (`slice_checksum`)
+- [ ] SIMD MD5×2 (file+slice) on the input stream
 - [ ] Recovery MD5-MB (8-wide AVX2 / 16-wide AVX-512)
 
 ### P3 — Poster encode concurrency
 
 - [x] `encode_concurrency = min(connections, physical_cores)`
-- [ ] Prefer AVX2 yEnc when it is not slower than SSSE3 on the box
-      (SSSE3 remains the default: hybrid E-cores lose ~5% on AVX2)
-- [ ] Article buffer pool / in-place encode (nyuu `encodeTo`)
+- [x] Prefer AVX2 yEnc on non-hybrid CPUs (CPUID Hybrid bit); SSSE3 on P+E
+- [x] Article body pool / `encode_part_into` (nyuu `encodeTo`)
 
 Acceptance: c7i post-only movie ≥ 0.9× nyuu; medialab post-only not worse.
 

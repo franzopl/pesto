@@ -23,18 +23,24 @@ pub fn encode_avx2(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     }
 }
 
+/// CPUID.(EAX=7,ECX=0):EDX[15] — Intel hybrid (P+E). E-cores lose ~5% on
+/// AVX2 yEnc vs SSSE3; Comet Lake / Xeon (no E-cores) do not.
+fn cpu_is_hybrid() -> bool {
+    const HYBRID: u32 = 1 << 15;
+    let leaf = std::arch::x86_64::__cpuid_count(7, 0);
+    leaf.edx & HYBRID != 0
+}
+
 pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
-    // Prefer SSSE3 over AVX2 even when AVX2 is available.
-    // On hybrid CPUs (Intel 12th gen+) E-cores execute AVX2 ~5% slower than
-    // SSSE3 at line_len=128, while P-cores are within noise (<0.3% difference).
-    // SSSE3 is the safe choice across all core types with no P-core penalty.
-    // AVX2 remains available via encode_avx2() for explicit benchmarking or
-    // future multi-line strategies that would amortise per-line overhead.
-    if is_x86_feature_detected!("ssse3") {
-        unsafe { encode_ssse3_impl(out, data, line_len) }
-    } else {
-        encode_scalar(out, data, line_len)
+    if is_x86_feature_detected!("avx2") && !cpu_is_hybrid() {
+        unsafe { encode_avx2_impl(out, data, line_len) };
+        return;
     }
+    if is_x86_feature_detected!("ssse3") {
+        unsafe { encode_ssse3_impl(out, data, line_len) };
+        return;
+    }
+    encode_scalar(out, data, line_len);
 }
 
 #[target_feature(enable = "ssse3")]

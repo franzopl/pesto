@@ -291,6 +291,21 @@ pub fn encode_part(
     line_len: usize,
     file_crc32: Option<u32>,
 ) -> EncodedPart {
+    let mut body = Vec::new();
+    encode_part_into(name, file_size, spec, data, line_len, file_crc32, &mut body)
+}
+
+/// Like [`encode_part`], but writes the article body into `body` (cleared and
+/// reused). Nyuu's `encodeTo` — avoid a fresh allocation on every article.
+pub fn encode_part_into(
+    name: &str,
+    file_size: u64,
+    spec: PartSpec,
+    data: &[u8],
+    line_len: usize,
+    file_crc32: Option<u32>,
+    body: &mut Vec<u8>,
+) -> EncodedPart {
     let multipart = spec.total > 1;
     let part_crc = crc32(data);
     let begin = spec.offset + 1;
@@ -334,14 +349,15 @@ pub fn encode_part(
     let total_capacity =
         ybegin.len() + ypart.as_ref().map_or(0, |p| p.len()) + data_encoded_size + yend.len();
 
-    let mut body = Vec::with_capacity(total_capacity);
+    body.clear();
+    body.reserve(total_capacity);
 
     body.extend_from_slice(ybegin.as_bytes());
     if let Some(p) = ypart {
         body.extend_from_slice(p.as_bytes());
     }
 
-    encode(&mut body, data, line_len);
+    encode(body, data, line_len);
     body.extend_from_slice(yend.as_bytes());
 
     EncodedPart {
@@ -350,7 +366,7 @@ pub fn encode_part(
         begin,
         end,
         crc32: part_crc,
-        body,
+        body: std::mem::take(body),
     }
 }
 

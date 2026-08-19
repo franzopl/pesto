@@ -21,8 +21,7 @@ use std::arch::aarch64::poly16x8_t;
 #[cfg(target_arch = "x86_64")]
 use super::gf16::xor_dep_matrix;
 use super::gf16::{input_logbases, Gf16, ORDER};
-use super::packet::{md5, SliceChecksum};
-use crate::yenc::crc32;
+use super::packet::SliceChecksum;
 use crate::SimdPath;
 
 /// Bytes covered by the per-file 16k hash.
@@ -4654,10 +4653,22 @@ unsafe fn gf16_clmul_reduce_neon(
 }
 
 /// MD5 + CRC32 checksum of one zero-padded input slice (for the IFSC packet).
+///
+/// One walk of the buffer: the previous implementation hashed twice
+/// (separate `md5` and `crc32` passes). Parpar fuses both on the input
+/// stream; this is the portable equivalent until a SIMD MD5×2 lands.
 pub fn slice_checksum(padded_slice: &[u8]) -> SliceChecksum {
+    let mut digest = Md5::new();
+    let mut crc = crc32fast::Hasher::new();
+    for chunk in padded_slice.chunks(64 * 1024) {
+        digest.update(chunk);
+        crc.update(chunk);
+    }
+    let mut md5_out = [0u8; 16];
+    md5_out.copy_from_slice(&digest.finalize());
     SliceChecksum {
-        md5: md5(padded_slice),
-        crc32: crc32(padded_slice),
+        md5: md5_out,
+        crc32: crc.finalize(),
     }
 }
 
@@ -4867,8 +4878,8 @@ mod tests {
         hasher.update(b"world");
         let hashes = hasher.finish();
         assert_eq!(hashes.length, 11);
-        assert_eq!(hashes.md5_full, md5(b"hello world"));
-        assert_eq!(hashes.md5_16k, md5(b"hello world"));
+        assert_eq!(hashes.md5_full, crate::packet::md5(b"hello world"));
+        assert_eq!(hashes.md5_16k, crate::packet::md5(b"hello world"));
     }
 
     #[test]
@@ -4879,16 +4890,16 @@ mod tests {
         hasher.update(&data[10_000..]);
         let hashes = hasher.finish();
         assert_eq!(hashes.length as usize, data.len());
-        assert_eq!(hashes.md5_full, md5(&data));
-        assert_eq!(hashes.md5_16k, md5(&data[..HEAD_LEN]));
+        assert_eq!(hashes.md5_full, crate::packet::md5(&data));
+        assert_eq!(hashes.md5_16k, crate::packet::md5(&data[..HEAD_LEN]));
     }
 
     #[test]
     fn slice_checksum_matches_md5_and_crc32() {
         let slice = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let checksum = slice_checksum(&slice);
-        assert_eq!(checksum.md5, md5(&slice));
-        assert_eq!(checksum.crc32, crc32(&slice));
+        assert_eq!(checksum.md5, crate::packet::md5(&slice));
+        assert_eq!(checksum.crc32, crate::yenc::crc32(&slice));
     }
 
     #[test]
