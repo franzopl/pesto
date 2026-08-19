@@ -50,7 +50,7 @@ Acceptance: medialab `movie-1080p` create ≥ parpar; `many-small` not slower.
 
 - [x] Affine2x kernel exists behind `new_affine2x` only (not `smart`)
 - [x] Affine AVX2 (parpar default without 512) is the GFNI `smart` path
-- [ ] Affine AVX-512 (parpar default on c7i) — see `docs/hw-accel-roadmap.md` A12
+- [x] Affine AVX-512 (parpar default on c7i) — `smart` when 512+GFNI
 - [x] Kernel: 2× `gf2p8affine` + lane swap, `srcCount=6`, 4 KiB tiles
 - [x] Scratch = 16×4 matrices, not 65k dep tables
 

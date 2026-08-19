@@ -31,7 +31,7 @@ must be complete.
 | A9 | **Affine GFNI** (SSE) | GFNI+SSSE3 | Missing | |
 | A10 | **Affine AVX2** | GFNI+AVX2 | Have (`smart` on GFNI) | parpar default without 512 |
 | A11 | Affine AVX10 | AVX10 | Missing | detect + 256-bit EVEX |
-| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Missing | parpar **default on c7i** |
+| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (`smart` when 512+GFNI) | parpar **default on c7i** |
 | A13 | Affine2x GFNI/AVX2/AVX10/512 | GFNI… | AVX2 kernel only, not `smart` | Keep for invert/experiments |
 | A14 | XOR SSE2 | SSE2 | Missing | |
 | A15 | XOR-JIT SSE2 / AVX2 / AVX-512 | W^X + JIT | Missing | last on x86 after Affine |

@@ -170,6 +170,9 @@ pub(super) enum RecoveryBufferSet {
     /// Parpar Affine shuffle-prepare (64-byte groups). GFNI Affine kernel.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Affine(Vec<Vec<u8>>),
+    /// Affine shuffle-prepare in 128-byte groups for AVX-512 GFNI.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    Affine512(Vec<Vec<u8>>),
 }
 
 impl RecoveryBufferSet {
@@ -177,9 +180,11 @@ impl RecoveryBufferSet {
     pub(super) fn as_normal_mut(&mut self) -> &mut Vec<Vec<u16>> {
         match self {
             Self::Normal(b) => b,
-            Self::Altmap(_) | Self::Shuffle2x(_) | Self::Affine2x(_) | Self::Affine(_) => {
-                panic!("expected Normal recovery buffers")
-            }
+            Self::Altmap(_)
+            | Self::Shuffle2x(_)
+            | Self::Affine2x(_)
+            | Self::Affine(_)
+            | Self::Affine512(_) => panic!("expected Normal recovery buffers"),
         }
     }
 
@@ -188,7 +193,11 @@ impl RecoveryBufferSet {
     pub(super) fn len(&self) -> usize {
         match self {
             Self::Normal(b) => b.len(),
-            Self::Altmap(b) | Self::Shuffle2x(b) | Self::Affine2x(b) | Self::Affine(b) => b.len(),
+            Self::Altmap(b)
+            | Self::Shuffle2x(b)
+            | Self::Affine2x(b)
+            | Self::Affine(b)
+            | Self::Affine512(b) => b.len(),
         }
     }
 }
@@ -305,6 +314,20 @@ pub fn affine2x_kernel_available() -> bool {
 /// Parpar Affine (shuffle-prepare) kernel: AVX2+GFNI.
 pub fn affine_kernel_available() -> bool {
     affine2x_kernel_available()
+}
+
+/// Parpar Affine AVX-512+GFNI (default_method on Ice Lake / SPR).
+pub fn affine512_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("gfni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 /// Four 8×8 GF(2) matrices for Affine GFNI (`ll`, `lh`, `hl`, `hh`).
@@ -438,9 +461,19 @@ impl RecoveryEncoder {
         recovery_count: usize,
     ) -> Result<Self, TryReserveError> {
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx2") && slice_size.is_multiple_of(64) {
-            if std::is_x86_feature_detected!("gfni") {
-                // Parpar's default without AVX-512: Affine (not Affine2x).
+        if std::is_x86_feature_detected!("gfni") && slice_size.is_multiple_of(64) {
+            if std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw")
+                && slice_size.is_multiple_of(128)
+            {
+                return Self::try_new_affine512(
+                    slice_size,
+                    total_input_slices,
+                    exponent_start,
+                    recovery_count,
+                );
+            }
+            if std::is_x86_feature_detected!("avx2") {
                 return Self::try_new_affine(
                     slice_size,
                     total_input_slices,
@@ -448,12 +481,6 @@ impl RecoveryEncoder {
                     recovery_count,
                 );
             }
-            return Self::try_new_shuffle2x(
-                slice_size,
-                total_input_slices,
-                exponent_start,
-                recovery_count,
-            );
         }
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2")
@@ -997,6 +1024,81 @@ impl RecoveryEncoder {
         })
     }
 
+    /// Affine AVX-512+GFNI layout (128-byte prepare groups).
+    pub fn try_new_affine512(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Result<Self, TryReserveError> {
+        assert!(
+            slice_size > 0 && slice_size.is_multiple_of(128),
+            "Affine512 encoder requires slice_size multiple of 128, got {slice_size}"
+        );
+        #[cfg(not(target_arch = "x86_64"))]
+        return Self::try_new(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !affine512_kernel_available() {
+                return Self::try_new_affine(
+                    slice_size,
+                    total_input_slices,
+                    exponent_start,
+                    recovery_count,
+                );
+            }
+            let slice_words = slice_size / 2;
+            let buf_bytes = affine_buffer_size(slice_words);
+            Ok(Self {
+                gf: Gf16::new(),
+                slice_words,
+                logbases: input_logbases(total_input_slices),
+                exponent_start,
+                buffers: RecoveryBufferSet::Affine512(try_zeroed_buffers(
+                    0u8,
+                    buf_bytes,
+                    recovery_count,
+                )?),
+                next_index: 0,
+                queued_slices: Vec::with_capacity(64),
+                free_buffers: Vec::new(),
+                flush_limit_bytes: 256 * 1024 * 1024,
+                compute_checksums: false,
+                pending_checksums: Vec::new(),
+                simd_path: SimdPath::Auto,
+                #[cfg(feature = "bench-internals")]
+                forced_path: None,
+                dep_tables: None,
+            })
+        }
+    }
+
+    /// Affine AVX-512+GFNI. See [`Self::try_new_affine512`].
+    pub fn new_affine512(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Self {
+        Self::try_new_affine512(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "PAR2 recovery buffer allocation failed ({recovery_count} blocks × \
+                     {slice_size} bytes, Affine512 layout): {e}"
+            )
+        })
+    }
+
     /// Set the maximum bytes to queue before flushing.
     pub fn with_flush_limit(mut self, bytes: usize) -> Self {
         self.flush_limit_bytes = bytes;
@@ -1261,6 +1363,15 @@ impl RecoveryEncoder {
                 "Affine buffers without AVX2+GFNI — try_new_affine must fall \
                  back to the portable layout"
             );
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if matches!(self.buffers, RecoveryBufferSet::Affine512(_)) {
+            if affine512_kernel_available() {
+                unsafe { self.flush_avx512_affine() };
+                return;
+            }
+            unreachable!("Affine512 buffers without AVX-512+GFNI");
         }
 
         // When bench-internals is active a forced path overrides auto-detection.
@@ -2785,6 +2896,131 @@ impl RecoveryEncoder {
                             }
                             _mm256_storeu_si256(p, tph);
                             _mm256_storeu_si256(p.add(1), tpl);
+                        }
+                    }
+                    q += take;
+                }
+            }
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_affine(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+        let RecoveryBufferSet::Affine512(ref mut bufs) = self.buffers else {
+            unreachable!("flush_avx512_affine on non-Affine512 encoder");
+        };
+        unsafe {
+            Self::flush_avx512_affine_work(
+                bufs,
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_affine_work(
+        buffers: &mut [Vec<u8>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+        if n_queued == 0 {
+            return;
+        }
+        let all_tables: Vec<(__m512i, __m512i, __m512i, __m512i)> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+                let (m_ll, m_lh, m_hl, m_hh) = gfni_affine_u64_mats(gf, coeff);
+                (
+                    _mm512_set1_epi64(m_ll as i64),
+                    _mm512_set1_epi64(m_hl as i64),
+                    _mm512_set1_epi64(m_lh as i64),
+                    _mm512_set1_epi64(m_hh as i64),
+                )
+            })
+            .collect();
+
+        let prepared: Vec<Vec<u8>> = queued
+            .par_iter()
+            .map(|s| {
+                let mut out = vec![0u8; s.len()];
+                crate::affine::to_affine512(s, &mut out);
+                out
+            })
+            .collect();
+
+        let tile = 4096usize;
+        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+            let base = rec * n_queued;
+            let n_tiles = buf.len().div_ceil(tile);
+            for t in 0..n_tiles {
+                let off = t * tile;
+                let end = (off + tile).min(buf.len());
+                let dest = &mut buf[off..end];
+                let blocks = dest.len() / 128;
+                if blocks == 0 {
+                    continue;
+                }
+                let mut q = 0usize;
+                while q < n_queued {
+                    let take = (n_queued - q).min(6);
+                    unsafe {
+                        let dst = dest.as_mut_ptr();
+                        for b in 0..blocks {
+                            let p = dst.add(b * 128).cast::<__m512i>();
+                            let mut tph = _mm512_loadu_si512(p);
+                            let mut tpl = _mm512_loadu_si512(p.add(1));
+                            for s in 0..take {
+                                let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
+                                let sp = prepared[q + s][off..end]
+                                    .as_ptr()
+                                    .add(b * 128)
+                                    .cast::<__m512i>();
+                                let ta = _mm512_loadu_si512(sp);
+                                let tb = _mm512_loadu_si512(sp.add(1));
+                                tpl = _mm512_xor_si512(
+                                    tpl,
+                                    _mm512_xor_si512(
+                                        _mm512_gf2p8affine_epi64_epi8(ta, mlh, 0),
+                                        _mm512_gf2p8affine_epi64_epi8(tb, mll, 0),
+                                    ),
+                                );
+                                tph = _mm512_xor_si512(
+                                    tph,
+                                    _mm512_xor_si512(
+                                        _mm512_gf2p8affine_epi64_epi8(ta, mhh, 0),
+                                        _mm512_gf2p8affine_epi64_epi8(tb, mhl, 0),
+                                    ),
+                                );
+                            }
+                            _mm512_storeu_si512(p, tph);
+                            _mm512_storeu_si512(p.add(1), tpl);
                         }
                     }
                     q += take;
@@ -4803,6 +5039,18 @@ impl RecoveryEncoder {
                     }
                 })
                 .collect(),
+            RecoveryBufferSet::Affine512(bufs) => bufs
+                .into_iter()
+                .enumerate()
+                .map(|(i, af_buf)| {
+                    let mut normal = vec![0u8; af_buf.len()];
+                    super::affine::from_affine512(&af_buf, &mut normal);
+                    RecoverySlice {
+                        exponent: exponent_start + i as u32,
+                        data: normal,
+                    }
+                })
+                .collect(),
         };
         (slices, checksums)
     }
@@ -5363,6 +5611,15 @@ mod tests {
                 )),
             ),
             (
+                "affine512",
+                encode(RecoveryEncoder::new_affine512(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+            (
                 "smart",
                 encode(RecoveryEncoder::new_smart(
                     slice_size,
@@ -5429,10 +5686,20 @@ mod tests {
         );
         if affine_kernel_available() {
             assert!(
-                matches!(smart.buffers, RecoveryBufferSet::Affine(_)),
-                "try_new_smart must pick Affine on GFNI"
+                matches!(
+                    smart.buffers,
+                    RecoveryBufferSet::Affine(_) | RecoveryBufferSet::Affine512(_)
+                ),
+                "try_new_smart must pick Affine or Affine512 on GFNI"
             );
         }
+
+        let a512 = RecoveryEncoder::new_affine512(slice_size, total_slices, 0, recovery_count);
+        assert_eq!(
+            matches!(a512.buffers, RecoveryBufferSet::Affine512(_)),
+            affine512_kernel_available(),
+            "affine512_kernel_available disagrees with new_affine512"
+        );
     }
 
     /// A manual `--simd` override must never be applied to a specialized buffer
@@ -5496,6 +5763,10 @@ mod tests {
                 (
                     "affine",
                     RecoveryEncoder::new_affine(slice_size, total_slices, 0, recovery_count),
+                ),
+                (
+                    "affine512",
+                    RecoveryEncoder::new_affine512(slice_size, total_slices, 0, recovery_count),
                 ),
                 (
                     "smart",
