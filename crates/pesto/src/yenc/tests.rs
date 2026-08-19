@@ -41,6 +41,30 @@ fn crc32_incremental_matches_oneshot() {
 }
 
 #[test]
+fn encode_returns_ieee_crc_of_payload() {
+    let data: Vec<u8> = (0..=255u8).cycle().take(10_000).collect();
+    let mut out = Vec::new();
+    let crc = super::encode(&mut out, &data, 128);
+    assert_eq!(crc, crc32(&data));
+    assert_eq!(
+        crc,
+        encode_part(
+            "t.bin",
+            data.len() as u64,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0
+            },
+            &data,
+            128,
+            None
+        )
+        .crc32
+    );
+}
+
+#[test]
 fn escapes_critical_characters() {
     // 0xD6 + 42 == 0x00 (NUL) -> escaped as '=' + (0x00 + 64).
     assert_eq!(encode_s(&[0xD6], 128), vec![b'=', 0x40, b'\r', b'\n']);

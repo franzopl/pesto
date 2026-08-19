@@ -42,24 +42,26 @@ pub fn encode_avx512(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     }
 }
 
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
+    let crc = crc32fast::hash(data);
     if is_x86_feature_detected!("avx512f")
         && is_x86_feature_detected!("avx512bw")
         && is_x86_feature_detected!("avx2")
         && !cpu_is_hybrid()
     {
         unsafe { encode_avx512_impl(out, data, line_len) };
-        return;
+        return crc;
     }
     if is_x86_feature_detected!("avx2") && !cpu_is_hybrid() {
         unsafe { encode_avx2_impl(out, data, line_len) };
-        return;
+        return crc;
     }
     if is_x86_feature_detected!("ssse3") {
         unsafe { encode_ssse3_impl(out, data, line_len) };
-        return;
+        return crc;
     }
     encode_scalar(out, data, line_len);
+    crc
 }
 
 #[target_feature(enable = "ssse3")]

@@ -41,7 +41,7 @@ must be complete.
 | A19 | Shuffle-128 SVE / SVE2 / 512 SVE2 / Shuffle2x SVE2 | SVE | Missing | |
 | A20 | CLMul SVE2 | SVE2 | Missing | |
 | A21 | Shuffle-128 RVV / CLMul RVV+Zvbc | RISC-V | Missing | |
-| A22 | Packed multi-source (`srcCount` 3/6/12) | all Affine/Shuffle2x | Partial | Shuffle2x=2; Affine2x=6 |
+| A22 | Packed multi-source (`srcCount` 3/6/12) | all Affine/Shuffle2x | Partial | Affine AVX2=3; Affine512=6; Shuffle2x=2; Affine2x=6 |
 | A23 | Slice-chunk threading | — | Partial | P1b windows; not thread-split of one slice |
 | A24 | Nibble scratch (16×4) | GFNI Affine | Missing | still build 8×8 per pair |
 | A25 | MD5×2 + CRC SIMD on input | SSE/AVX/NEON | Partial | one scalar pass only |
@@ -66,7 +66,7 @@ Target `smart` when this list is done: same priority as
 | B7 | **VBMI2** | ICL / SPR | Have (`mask_expand_epi8` escape store) |
 | B8 | NEON | AArch64 | Have |
 | B9 | RVV | RISC-V | Missing |
-| B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode_part_into` skips `encoded_size`; CRC still separate) |
+| B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode()` returns CRC via crc32fast/PCLMUL then yEnc; no caller walk) |
 | B11 | Decode SSSE3/AVX2/AVX-512/NEON/RVV | — | Partial (we have a decoder; not full ISA matrix) |
 
 Default poster path stays **encode on the NNTP worker**. No encode-ahead
