@@ -422,6 +422,9 @@ pub struct RecoveryEncoder {
     /// their allocation here so the producer can pick them back up via
     /// [`take_buffer`] instead of asking the allocator for a fresh page.
     free_buffers: Vec<Vec<u8>>,
+    /// Reused Affine shuffle-prepare outputs (parpar keeps a prepare scratch
+    /// instead of allocating a full extra copy of every queued slice).
+    affine_prepare: Vec<Vec<u8>>,
     /// Maximum bytes to queue before flushing.
     flush_limit_bytes: usize,
     /// When true each flush also computes per-slice MD5+CRC32 checksums in
@@ -606,6 +609,7 @@ impl RecoveryEncoder {
             next_index: 0,
             queued_slices: Vec::with_capacity(64),
             free_buffers: Vec::new(),
+            affine_prepare: Vec::new(),
             flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
@@ -746,6 +750,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -854,6 +859,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -945,6 +951,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -1025,6 +1032,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -1100,6 +1108,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -1205,6 +1214,37 @@ impl RecoveryEncoder {
 
     /// Move consumed queue buffers into the free-list (preserving their
     /// allocations) and restore the empty queue.
+    /// Grow/reuse `affine_prepare` and shuffle-prepare each queued slice into it.
+    fn prepare_affine_inputs(queued: &[Vec<u8>], pool: &mut Vec<Vec<u8>>, wide512: bool) {
+        if queued.is_empty() {
+            return;
+        }
+        let _ = wide512;
+        let len = queued[0].len();
+        while pool.len() < queued.len() {
+            pool.push(vec![0u8; len]);
+        }
+        if pool.len() > queued.len() {
+            pool.truncate(queued.len());
+        }
+        queued
+            .par_iter()
+            .zip(pool.par_iter_mut())
+            .for_each(|(src, dst)| {
+                if dst.len() != src.len() {
+                    dst.clear();
+                    dst.resize(src.len(), 0);
+                }
+                #[cfg(target_arch = "x86_64")]
+                if wide512 {
+                    crate::affine::to_affine512(src, dst);
+                    return;
+                }
+                let _ = wide512;
+                crate::affine::to_affine(src, dst);
+            });
+    }
+
     fn recycle_queue(&mut self, mut queued: Vec<Vec<u8>>) {
         self.free_buffers.reserve(queued.len());
         for mut buf in queued.drain(..) {
@@ -3000,16 +3040,19 @@ impl RecoveryEncoder {
         let RecoveryBufferSet::Affine(ref mut bufs) = self.buffers else {
             unreachable!("flush_avx2_affine on non-Affine encoder");
         };
+        let mut prepared = std::mem::take(&mut self.affine_prepare);
+        Self::prepare_affine_inputs(&queued, &mut prepared, false);
         unsafe {
             Self::flush_avx2_affine_work(
                 bufs,
-                &queued,
+                &prepared,
                 start_index,
                 &self.logbases,
                 self.exponent_start,
                 &self.gf,
             );
         }
+        self.affine_prepare = prepared;
         self.pending_checksums.extend(new_cs);
         self.recycle_queue(queued);
     }
@@ -3048,15 +3091,6 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        let prepared: Vec<Vec<u8>> = queued
-            .par_iter()
-            .map(|s| {
-                let mut out = vec![0u8; s.len()];
-                crate::affine::to_affine(s, &mut out);
-                out
-            })
-            .collect();
-
         let tile = 4096usize;
         buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
             let base = rec * n_queued;
@@ -3080,7 +3114,7 @@ impl RecoveryEncoder {
                             let mut tpl = _mm256_loadu_si256(p.add(1));
                             for s in 0..take {
                                 let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
-                                let sp = prepared[q + s][off..end]
+                                let sp = queued[q + s][off..end]
                                     .as_ptr()
                                     .add(b * 64)
                                     .cast::<__m256i>();
@@ -3125,16 +3159,19 @@ impl RecoveryEncoder {
         let RecoveryBufferSet::Affine512(ref mut bufs) = self.buffers else {
             unreachable!("flush_avx512_affine on non-Affine512 encoder");
         };
+        let mut prepared = std::mem::take(&mut self.affine_prepare);
+        Self::prepare_affine_inputs(&queued, &mut prepared, true);
         unsafe {
             Self::flush_avx512_affine_work(
                 bufs,
-                &queued,
+                &prepared,
                 start_index,
                 &self.logbases,
                 self.exponent_start,
                 &self.gf,
             );
         }
+        self.affine_prepare = prepared;
         self.pending_checksums.extend(new_cs);
         self.recycle_queue(queued);
     }
@@ -3173,15 +3210,6 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        let prepared: Vec<Vec<u8>> = queued
-            .par_iter()
-            .map(|s| {
-                let mut out = vec![0u8; s.len()];
-                crate::affine::to_affine512(s, &mut out);
-                out
-            })
-            .collect();
-
         let tile = 4096usize;
         buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
             let base = rec * n_queued;
@@ -3205,7 +3233,7 @@ impl RecoveryEncoder {
                             let mut tpl = _mm512_loadu_si512(p.add(1));
                             for s in 0..take {
                                 let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
-                                let sp = prepared[q + s][off..end]
+                                let sp = queued[q + s][off..end]
                                     .as_ptr()
                                     .add(b * 128)
                                     .cast::<__m512i>();

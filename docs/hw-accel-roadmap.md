@@ -41,7 +41,7 @@ must be complete.
 | A19 | Shuffle-128 SVE / SVE2 / 512 SVE2 / Shuffle2x SVE2 | SVE | Missing | |
 | A20 | CLMul SVE2 | SVE2 | Missing | |
 | A21 | Shuffle-128 RVV / CLMul RVV+Zvbc | RISC-V | Missing | |
-| A22 | Packed multi-source (`srcCount` 3/6/12) | all Affine/Shuffle2x | Partial | Affine AVX2=3; Affine512=6; Shuffle2x=2; Affine2x=6 |
+| A22 | Packed multi-source (`srcCount` 3/6/12) | all Affine/Shuffle2x | Partial | Affine AVX2=3; Affine512=6; Shuffle2x=2; Affine2x=6; prepare buffers pooled |
 | A23 | Slice-chunk threading | — | Partial | P1b windows; not thread-split of one slice |
 | A24 | Nibble scratch (16×4) | GFNI Affine | Missing | still build 8×8 per pair |
 | A25 | MD5×2 + CRC SIMD on input | SSE/AVX/NEON | Partial | one scalar pass only |
