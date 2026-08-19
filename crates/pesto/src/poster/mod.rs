@@ -421,6 +421,9 @@ struct Shared {
     /// before PAR2 encoding actually starts. `0` when `config.file_counter`
     /// is off, which callers treat as "no counter" (see `FileMeta::file_index`).
     total_files: u32,
+    /// Caps parallel yEnc encodes at `min(connections, physical cores)`.
+    /// Eight SIMD encoders on four cores was the Xeon post-only loss vs nyuu.
+    encode_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl Shared {
@@ -933,6 +936,11 @@ pub async fn post_files_inner(
         release_from,
         run_id,
         total_files,
+        encode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            parmesan::performance_core_count()
+                .min(config.total_connections().max(1))
+                .max(1),
+        )),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -2897,6 +2905,11 @@ async fn worker(
             } else {
                 let t_enc = Instant::now();
                 let file_crc32 = task.file_crc32;
+                let _encode_permit = shared
+                    .encode_slots
+                    .acquire()
+                    .await
+                    .expect("encode semaphore");
                 let encoded = yenc::encode_part(
                     &task.meta.yenc_name,
                     task.meta.size,
@@ -2909,6 +2922,7 @@ async fn worker(
                     shared.config.line_length,
                     file_crc32,
                 );
+                drop(_encode_permit);
                 let encode_time = t_enc.elapsed();
                 let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
                 let (rfc_date, _ts) = &task.date;
@@ -4848,6 +4862,7 @@ mod tests {
             release_from: None,
             run_id: 0,
             total_files: 0,
+            encode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 

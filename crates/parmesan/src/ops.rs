@@ -31,6 +31,73 @@ impl Default for CreateOptions {
     }
 }
 
+/// How to fit `recovery_count × slice_size` into `memory_limit`.
+///
+/// Parpar can cut the **slice** into windows (`chunks`) so every recovery
+/// block stays in the working set; we used to only cut **recovery** into
+/// passes, which re-reads the input once per pass and never overlaps dests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryLayout {
+    /// Recovery blocks held at once.
+    pub recovery_per_pass: usize,
+    /// Bytes of each logical slice processed per encoder (equals `slice_size`
+    /// when no windowing).
+    pub slice_chunk: usize,
+}
+
+/// Byte window of each logical PAR2 slice sent to the encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliceWindow {
+    pub offset: usize,
+    pub len: usize,
+}
+
+/// File hashes and per-slice checksums collected while ingesting.
+#[derive(Debug, Default)]
+pub struct IngestHashes {
+    pub hashes: Vec<crate::encoder::FileHashes>,
+    pub checksums: Vec<packet::SliceChecksum>,
+}
+
+/// Choose recovery-pass vs slice-chunk so the RS buffers fit `memory_limit`.
+///
+/// Prefers holding **all** recovery blocks with a 4 KiB-aligned slice window
+/// when that window is at least 4 KiB. Otherwise falls back to full-slice
+/// recovery passes (the previous behaviour).
+pub fn plan_memory_layout(
+    slice_size: usize,
+    recovery_count: usize,
+    memory_limit: usize,
+) -> MemoryLayout {
+    let slice_size = slice_size.max(32);
+    if recovery_count == 0 {
+        return MemoryLayout {
+            recovery_per_pass: 0,
+            slice_chunk: slice_size,
+        };
+    }
+    let limit = memory_limit.max(slice_size);
+    if recovery_count.saturating_mul(slice_size) <= limit {
+        return MemoryLayout {
+            recovery_per_pass: recovery_count,
+            slice_chunk: slice_size,
+        };
+    }
+    let raw = (limit / recovery_count).max(32);
+    let chunk = (raw / 32) * 32;
+    if chunk < slice_size && chunk >= 4096 {
+        return MemoryLayout {
+            recovery_per_pass: recovery_count,
+            slice_chunk: chunk,
+        };
+    }
+    let per = (limit / slice_size).max(1).min(recovery_count);
+    MemoryLayout {
+        recovery_per_pass: per,
+        slice_chunk: slice_size,
+    }
+}
+
 /// Metadata for an input file to be protected by PAR2.
 #[derive(Debug, Clone)]
 pub struct InputFile {
@@ -207,12 +274,52 @@ const CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
 /// `ingest_files`'s doc comment for why). Pure and synchronous: callers doing
 /// this from async context are responsible for wrapping the call in
 /// `tokio::task::block_in_place`, since `Par2Worker::send_slice` blocks.
+struct HashSink {
+    out: IngestHashes,
+    current: crate::encoder::FileHasher,
+}
+
+fn emit_logical_slice(
+    worker: &Par2Worker,
+    logical: Vec<u8>,
+    actual_len: usize,
+    is_last: bool,
+    window: Option<SliceWindow>,
+    hash: Option<&mut HashSink>,
+) {
+    if let Some(h) = hash {
+        h.current.update(&logical[..actual_len]);
+        h.out
+            .checksums
+            .push(crate::encoder::slice_checksum(&logical));
+        if is_last {
+            let finished = std::mem::take(&mut h.current);
+            h.out.hashes.push(finished.finish());
+        }
+    }
+    if let Some(w) = window {
+        let mut part = worker.take_buffer(w.len);
+        part.clear();
+        if w.offset < logical.len() {
+            let end = (w.offset + w.len).min(logical.len());
+            part.extend_from_slice(&logical[w.offset..end]);
+        }
+        part.resize(w.len, 0);
+        let win_actual = actual_len.saturating_sub(w.offset).min(w.len);
+        worker.send_slice(part, win_actual, is_last);
+    } else {
+        worker.send_slice(logical, actual_len, is_last);
+    }
+}
+
 fn feed_chunk(
     chunk: &[u8],
     worker: &Par2Worker,
     slice_size: usize,
     slice_accum: &mut Vec<u8>,
     held: &mut Option<Vec<u8>>,
+    window: Option<SliceWindow>,
+    mut hash: Option<&mut HashSink>,
 ) {
     let mut chunk_pos = 0;
     while chunk_pos < chunk.len() {
@@ -224,10 +331,15 @@ fn feed_chunk(
         if slice_accum.len() >= slice_size {
             let next = worker.take_buffer(slice_size);
             let padded = std::mem::replace(slice_accum, next);
-            // A new full slice exists, so whatever was held is definitely
-            // not this file's last one.
             if let Some(previous) = held.replace(padded) {
-                worker.send_slice(previous, slice_size, false);
+                emit_logical_slice(
+                    worker,
+                    previous,
+                    slice_size,
+                    false,
+                    window,
+                    hash.as_deref_mut(),
+                );
             }
         }
     }
@@ -266,11 +378,33 @@ pub async fn ingest_files_with<F>(
     worker: &Par2Worker,
     slice_size: usize,
     cancelled: Option<&AtomicBool>,
-    mut after_file: F,
+    after_file: F,
 ) -> Result<()>
 where
     F: FnMut(&InputFile) -> Result<()>,
 {
+    ingest_files_ex(files, worker, slice_size, cancelled, after_file, None, None).await
+}
+
+/// Like [`ingest_files_with`], optionally sending only a window of each
+/// logical slice (P1b) and/or collecting file hashes + slice checksums in
+/// the reader so the encoder can run on chunk-sized buffers.
+pub async fn ingest_files_ex<F>(
+    files: &[InputFile],
+    worker: &Par2Worker,
+    slice_size: usize,
+    cancelled: Option<&AtomicBool>,
+    mut after_file: F,
+    window: Option<SliceWindow>,
+    mut hash_out: Option<&mut IngestHashes>,
+) -> Result<()>
+where
+    F: FnMut(&InputFile) -> Result<()>,
+{
+    let mut hash = hash_out.as_mut().map(|_| HashSink {
+        out: IngestHashes::default(),
+        current: crate::encoder::FileHasher::new(),
+    });
     for file_info in files {
         if cancelled.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Ok(());
@@ -301,7 +435,15 @@ where
             tokio::task::block_in_place(|| -> Result<()> {
                 let buf = std::fs::read(&path)
                     .with_context(|| format!("reading `{}`", path.display()))?;
-                feed_chunk(&buf, worker, slice_size, &mut slice_accum, &mut held);
+                feed_chunk(
+                    &buf,
+                    worker,
+                    slice_size,
+                    &mut slice_accum,
+                    &mut held,
+                    window,
+                    hash.as_mut(),
+                );
                 Ok(())
             })?;
         } else {
@@ -334,7 +476,15 @@ where
                     return Ok(());
                 }
                 tokio::task::block_in_place(|| {
-                    feed_chunk(&chunk, worker, slice_size, &mut slice_accum, &mut held);
+                    feed_chunk(
+                        &chunk,
+                        worker,
+                        slice_size,
+                        &mut slice_accum,
+                        &mut held,
+                        window,
+                        hash.as_mut(),
+                    );
                 });
             }
 
@@ -345,18 +495,26 @@ where
             // A partial trailing slice: it is the last one, and anything held
             // back is not.
             if let Some(previous) = held.take() {
-                tokio::task::block_in_place(|| worker.send_slice(previous, slice_size, false));
+                tokio::task::block_in_place(|| {
+                    emit_logical_slice(worker, previous, slice_size, false, window, hash.as_mut());
+                });
             }
             let actual_len = slice_accum.len();
             slice_accum.resize(slice_size, 0);
-            tokio::task::block_in_place(|| worker.send_slice(slice_accum, actual_len, true));
+            tokio::task::block_in_place(|| {
+                emit_logical_slice(worker, slice_accum, actual_len, true, window, hash.as_mut());
+            });
         } else if let Some(last) = held.take() {
-            // The file's size is an exact multiple of the slice size, so the
-            // slice held back above really is its final one.
-            tokio::task::block_in_place(|| worker.send_slice(last, slice_size, true));
+            tokio::task::block_in_place(|| {
+                emit_logical_slice(worker, last, slice_size, true, window, hash.as_mut());
+            });
         }
 
         after_file(file_info)?;
+    }
+
+    if let (Some(dst), Some(src)) = (hash_out.as_mut(), hash) {
+        **dst = src.out;
     }
 
     Ok(())
@@ -380,6 +538,34 @@ mod tests {
 
     fn opts() -> CreateOptions {
         CreateOptions::default()
+    }
+
+    #[test]
+    fn memory_layout_fits_in_one_pass() {
+        let plan = plan_memory_layout(1 << 20, 200, 1 << 30);
+        assert_eq!(plan.recovery_per_pass, 200);
+        assert_eq!(plan.slice_chunk, 1 << 20);
+    }
+
+    #[test]
+    fn memory_layout_prefers_slice_chunk_when_all_dests_fit() {
+        // 1000 × 6 MiB = 6 GiB; 1 GiB limit → 1 MiB windows, all dests.
+        let slice = 6 * 1024 * 1024;
+        let plan = plan_memory_layout(slice, 1000, 1024 * 1024 * 1024);
+        assert_eq!(plan.recovery_per_pass, 1000);
+        assert!(plan.slice_chunk < slice);
+        assert!(plan.slice_chunk >= 4096);
+        assert!(plan.slice_chunk.is_multiple_of(32));
+        assert!(1000 * plan.slice_chunk <= 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn memory_layout_falls_back_to_recovery_passes_when_chunk_tiny() {
+        // Tiny limit: cannot hold 4 KiB × all dests.
+        let plan = plan_memory_layout(1 << 20, 10_000, 8 * 1024);
+        assert_eq!(plan.slice_chunk, 1 << 20);
+        assert!(plan.recovery_per_pass < 10_000);
+        assert!(plan.recovery_per_pass >= 1);
     }
 
     #[test]

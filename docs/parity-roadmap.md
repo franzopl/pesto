@@ -56,7 +56,7 @@ Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still a
 
 ### P1b — Slice-chunk memory
 
-- [ ] When `recovery × slice > memory_limit`, cut the **slice** (re-read) like
+- [x] When `recovery × slice > memory_limit`, cut the **slice** (re-read) like
       parpar `chunks`, not only recovery `passes`
 
 ### P2 — Fused hasher
@@ -66,8 +66,9 @@ Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still a
 
 ### P3 — Poster encode concurrency
 
-- [ ] `encode_concurrency = min(connections, physical_cores)`
+- [x] `encode_concurrency = min(connections, physical_cores)`
 - [ ] Prefer AVX2 yEnc when it is not slower than SSSE3 on the box
+      (SSSE3 remains the default: hybrid E-cores lose ~5% on AVX2)
 - [ ] Article buffer pool / in-place encode (nyuu `encodeTo`)
 
 Acceptance: c7i post-only movie ≥ 0.9× nyuu; medialab post-only not worse.

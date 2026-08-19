@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use md5::{Digest, Md5};
 use parmesan::ops::{
-    calculate_geometry, ingest_files, sort_files_by_file_id, CreateOptions, InputFile,
+    calculate_geometry, ingest_files, ingest_files_ex, plan_memory_layout, sort_files_by_file_id,
+    CreateOptions, IngestHashes, InputFile, SliceWindow,
 };
 use parmesan::recovery_set::RecoverySet;
 use parmesan::repair::{self, RepairOptions};
@@ -304,7 +305,13 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
 
     let mut all_checksums: Vec<Vec<packet::SliceChecksum>> = vec![Vec::new(); input_files.len()];
 
-    let slices_per_pass = (options.memory_limit / slice_size).max(1);
+    let mem_plan = plan_memory_layout(slice_size, recovery_count, options.memory_limit);
+    if !cli.quiet && mem_plan.slice_chunk < slice_size {
+        println!(
+            "  Memory plan    : slice-chunk {} bytes × {} recovery (limit {})",
+            mem_plan.slice_chunk, mem_plan.recovery_per_pass, options.memory_limit
+        );
+    }
     // `cursor` tracks our position within the generated recovery set; the
     // on-disk exponent of each block is `recovery_offset + cursor`.
     let mut cursor = 0usize;
@@ -313,8 +320,8 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
     let mut rsid = [0u8; 16];
 
     while cursor < recovery_count {
-        let count = (recovery_count - cursor).min(slices_per_pass);
-        let pass_idx = cursor / slices_per_pass;
+        let count = (recovery_count - cursor).min(mem_plan.recovery_per_pass.max(1));
+        let pass_idx = cursor / mem_plan.recovery_per_pass.max(1);
         let first_exponent = (cli.recovery_offset + cursor) as u32;
 
         if !cli.quiet {
@@ -326,21 +333,63 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
             );
         }
 
-        let mut enc = RecoveryEncoder::new_smart(slice_size, total_slices, first_exponent, count);
-        if pass_idx == 0 {
-            enc = enc.with_checksums();
-        }
-        enc = enc.with_simd_path(options.simd);
-        enc = enc.with_flush_limit(
-            (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
-        );
-
-        let worker = Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
-
-        ingest_files(&input_files, &worker, slice_size).await?;
-
-        let (recovery_slices, slice_checksums, hashes) =
-            tokio::task::block_in_place(|| worker.finish());
+        let chunked = mem_plan.slice_chunk < slice_size;
+        let (recovery_slices, slice_checksums, hashes) = if chunked {
+            let mut ingest_h = IngestHashes::default();
+            let mut acc: Vec<Vec<u8>> = vec![Vec::new(); count];
+            let mut off = 0usize;
+            while off < slice_size {
+                let win = mem_plan.slice_chunk.min(slice_size - off);
+                let mut enc = RecoveryEncoder::new_smart(win, total_slices, first_exponent, count);
+                enc = enc.with_simd_path(options.simd);
+                enc = enc.with_flush_limit(
+                    (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
+                );
+                let worker = Par2Worker::spawn(enc, false, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
+                let hash_slot = (pass_idx == 0 && off == 0).then_some(&mut ingest_h);
+                ingest_files_ex(
+                    &input_files,
+                    &worker,
+                    slice_size,
+                    None,
+                    |_| Ok(()),
+                    Some(SliceWindow {
+                        offset: off,
+                        len: win,
+                    }),
+                    hash_slot,
+                )
+                .await?;
+                let (part, _, _) = tokio::task::block_in_place(|| worker.finish());
+                for (i, sl) in part.into_iter().enumerate() {
+                    acc[i].extend_from_slice(&sl.data);
+                }
+                off += win;
+            }
+            let slices: Vec<encoder::RecoverySlice> = acc
+                .into_iter()
+                .enumerate()
+                .map(|(i, data)| encoder::RecoverySlice {
+                    exponent: first_exponent + i as u32,
+                    data,
+                })
+                .collect();
+            (slices, ingest_h.checksums, ingest_h.hashes)
+        } else {
+            let mut enc =
+                RecoveryEncoder::new_smart(slice_size, total_slices, first_exponent, count);
+            if pass_idx == 0 {
+                enc = enc.with_checksums();
+            }
+            enc = enc.with_simd_path(options.simd);
+            enc = enc.with_flush_limit(
+                (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
+            );
+            let worker =
+                Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
+            ingest_files(&input_files, &worker, slice_size).await?;
+            tokio::task::block_in_place(|| worker.finish())
+        };
 
         if pass_idx == 0 {
             // An empty file contributes zero input slices (PAR2 spec: slice
