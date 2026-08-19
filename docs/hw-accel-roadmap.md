@@ -29,9 +29,9 @@ must be complete.
 | A7 | Shuffle2x AVX2 | AVX2 | Have | `smart` when no GFNI |
 | A8 | Shuffle2x AVX-512 | AVX-512 | Missing | |
 | A9 | **Affine GFNI** (SSE) | GFNI+SSSE3 | Missing | |
-| A10 | **Affine AVX2** | GFNI+AVX2 | Have (`smart` on GFNI) | parpar default without 512 |
+| A10 | **Affine AVX2** | GFNI+AVX2 | Have (`smart` if GFNI && !512) | parpar default without 512 |
 | A11 | Affine AVX10 | AVX10 | Missing | detect + 256-bit EVEX |
-| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (manual) | c7i create 186 vs Affine AVX2 ~318; not `smart` |
+| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (manual) | tile-pack + nibble scratch; c7i ~183, slower than Normal+GFNI ~301 |
 | A13 | Affine2x GFNI/AVX2/AVX10/512 | GFNI… | AVX2 kernel only, not `smart` | Keep for invert/experiments |
 | A14 | XOR SSE2 | SSE2 | Missing | |
 | A15 | XOR-JIT SSE2 / AVX2 / AVX-512 | W^X + JIT | Missing | last on x86 after Affine |
@@ -101,3 +101,58 @@ Not “one movie row on c7i.” For each ISA we claim:
 - `many-small` not slower than today on AVX2.
 
 Measure on medialab (AVX2), c7i (GFNI+512), and an ARM host when A17+ land.
+
+## E — Work log (stop here, 2026-08-19)
+
+Stopped after packing Affine tiles. **Do not put Affine512 or yEnc zmm on
+`smart`/`encode()` until a c7i run beats the numbers below.** Encode stays
+on the NNTP worker (no encode-ahead queue).
+
+### Default paths now
+
+| CPU | PAR2 `smart` | yEnc `encode()` |
+|---|---|---|
+| SPR / c7i (AVX-512+GFNI) | **Normal + `flush_avx512_gfni`** | AVX2 + VBMI2/`vpternlog` (ymm) |
+| GFNI, no 512 | Affine AVX2 | AVX2 (+ VBMI2 if present) |
+| AVX2, no GFNI | Shuffle2x | AVX2; SSSE3 if hybrid |
+| AVX-512, no GFNI | Normal + Shuffle AVX-512 | AVX2 (zmm yEnc is manual) |
+
+### Landed on `dev` (this push)
+
+- Affine AVX2 / Affine512 kernels, nibble scratch 16×4 (parpar
+  `gf16_affine_load_matrix`), prepare-buffer pool, tile-pack
+  (`muladd_multi_packed`) + `vpternlog` 0x96 on 512. **Not auto on SPR.**
+- Shuffle AVX-512 on Normal when 512 && !GFNI.
+- yEnc AVX-512/VBMI2 zmm path (`encode_avx512`) with 32/16 tails. **Not
+  `encode()` default.**
+- yEnc AVX2 uses nyuu `encoder_avx_base.h` VBMI2 `mask_expand` +
+  `vpternlog` 0xf8 when the CPU has it.
+- `encode()` returns IEEE CRC-32 (`crc32fast`) so `encode_part_into` does
+  not walk the payload twice.
+
+Sources used: npm `@animetosho/parpar` `gf16/`, `node_modules/yencode/src/`.
+
+### c7i.2xlarge (`movie-1080p` 6 GiB, 4 threads)
+
+| Metric | pesto/parmesan | competitor |
+|---|---|---|
+| PAR2 create, **correct** `smart` (Normal+GFNI-512) | **~301 MiB/s** | parpar **~562** |
+| PAR2 create, Affine AVX2 or Affine512 auto | ~183–186 | — **do not use** |
+| yEnc 768 KiB line=128 AVX2 (+VBMI2) | ~2312 MiB/s | node-yencode ~1855 |
+| yEnc same, zmm `encode_avx512` | ~1874 (was 1168 before 32/16 tail) | still < AVX2 |
+| yEnc `auto` (AVX2+CRC) | ~2096 | was 1100 with zmm default |
+
+Older good create ~318 vs this ~301 is one-rep noise, not Affine.
+
+### What is left to match parpar (~562 create)
+
+The SPR winner in parpar is **packed Affine AVX-512**, not our Normal+GFNI
+kernel. Ours at ~183 is still slower than ~301. Next (when work resumes):
+
+1. Make `new_affine512` **faster than 301** on c7i (packed prepare into the
+   kernel, less extra copy, their `srcScale` layout — not another LUT).
+2. Only then set `smart` to Affine512.
+3. Post-only vs nyuu (~1160 vs ~1821 last full e2e) is separate: worker
+   encode vs nyuu’s ready-article queue. Do not change the default pipeline.
+
+Exotic ISA (SVE, RVV, XOR-JIT, OpenCL) is not the c7i gap.
