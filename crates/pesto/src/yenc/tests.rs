@@ -361,6 +361,13 @@ fn encode_avx2_vec(data: &[u8], line_len: usize) -> Vec<u8> {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
+fn encode_avx512_vec(data: &[u8], line_len: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_avx512(&mut out, data, line_len);
+    out
+}
+
 #[cfg(target_arch = "aarch64")]
 fn encode_neon_vec(data: &[u8], line_len: usize) -> Vec<u8> {
     let mut out = Vec::new();
@@ -382,6 +389,7 @@ fn all_encoder_outputs(data: &[u8], line_len: usize) -> Vec<(&'static str, Vec<u
     {
         out.push(("ssse3", encode_ssse3_vec(data, line_len)));
         out.push(("avx2", encode_avx2_vec(data, line_len)));
+        out.push(("avx512", encode_avx512_vec(data, line_len)));
     }
     #[cfg(target_arch = "aarch64")]
     {

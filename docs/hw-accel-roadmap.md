@@ -62,11 +62,11 @@ Target `smart` when this list is done: same priority as
 | B3 | SSSE3 | SSSE3 | Have (hybrid default) |
 | B4 | AVX + POPCNT | AVX | Missing |
 | B5 | AVX2 | AVX2 | Have (non-hybrid default) |
-| B6 | AVX-512 VL/BW (`AVX3`) | AVX-512 | Missing |
-| B7 | **VBMI2** | ICL / SPR | Missing — nyuu default on c7i |
+| B6 | AVX-512 VL/BW (`AVX3`) | AVX-512 | Have (worker default on non-hybrid AVX-512) |
+| B7 | **VBMI2** | ICL / SPR | Have (`mask_expand_epi8` escape store) |
 | B8 | NEON | AArch64 | Have |
 | B9 | RVV | RISC-V | Missing |
-| B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode_part_into` + separate CRC) |
+| B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode_part_into` skips `encoded_size`; CRC still separate) |
 | B11 | Decode SSSE3/AVX2/AVX-512/NEON/RVV | — | Partial (we have a decoder; not full ISA matrix) |
 
 Default poster path stays **encode on the NNTP worker**. No encode-ahead

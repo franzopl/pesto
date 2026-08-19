@@ -24,7 +24,7 @@ pub use aarch64::encode_neon;
 pub use decode::{decode_part, DecodedPart};
 pub use scalar::encode_scalar;
 #[cfg(target_arch = "x86_64")]
-pub use x86::{encode_avx2, encode_ssse3};
+pub use x86::{encode_avx2, encode_avx512, encode_ssse3};
 
 /// Default yEnc line length, in source bytes per line.
 pub const DEFAULT_LINE_LENGTH: usize = 128;
@@ -345,9 +345,14 @@ pub fn encode_part_into(
         format!("=yend size={} crc32={:08x}\r\n", data.len(), part_crc)
     };
 
-    let data_encoded_size = encoded_size(data, line_len);
-    let total_capacity =
-        ybegin.len() + ypart.as_ref().map_or(0, |p| p.len()) + data_encoded_size + yend.len();
+    // Worst-case yEnc is 2× payload + CRLF per line; skip a second walk of
+    // `data` (`encoded_size`) — nyuu `encodeTo` writes into a pooled buffer
+    // the same way.
+    let total_capacity = ybegin.len()
+        + ypart.as_ref().map_or(0, |p| p.len())
+        + data.len() * 2
+        + data.len().div_ceil(line_len.max(1)) * 2
+        + yend.len();
 
     body.clear();
     body.reserve(total_capacity);
