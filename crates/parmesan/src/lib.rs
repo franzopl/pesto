@@ -43,6 +43,8 @@ pub enum SimdPath {
     Avx2Gfni,
     /// Intel Ice Lake+ / Sapphire Rapids+ AVX-512 with GFNI.
     Avx512Gfni,
+    /// AVX-512 VL/BW nibble shuffle (no GFNI — Skylake-X / Cascade Lake).
+    Avx512Shuffle,
     /// ARM NEON (AArch64 128-bit shuffles).
     Neon,
 }
@@ -56,6 +58,7 @@ impl std::fmt::Display for SimdPath {
             Self::Avx2 => write!(f, "avx2"),
             Self::Avx2Gfni => write!(f, "avx2-gfni"),
             Self::Avx512Gfni => write!(f, "avx512-gfni"),
+            Self::Avx512Shuffle => write!(f, "avx512-shuffle"),
             Self::Neon => write!(f, "neon"),
         }
     }
@@ -69,6 +72,14 @@ pub fn detect_simd() -> &'static str {
         && std::is_x86_feature_detected!("gfni")
     {
         return "AVX-512/GFNI";
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+        return "AVX-512/Shuffle";
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
+        return "AVX2/GFNI";
     }
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx2") {

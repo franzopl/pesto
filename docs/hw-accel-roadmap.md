@@ -24,7 +24,7 @@ must be complete.
 | A2 | Shuffle SSSE3 | SSSE3 | Have | `flush_ssse3` |
 | A3 | Shuffle AVX | AVX | Missing | 128-bit + VEX; rare but they have it |
 | A4 | Shuffle AVX2 | AVX2 | Have | `flush_avx2` |
-| A5 | Shuffle AVX-512 | AVX-512 VL/BW | Missing | |
+| A5 | Shuffle AVX-512 | AVX-512 VL/BW | Have (`smart` when 512 && !GFNI) | Normal layout zmm vpshufb |
 | A6 | Shuffle VBMI | AVX-512 VBMI | Missing | |
 | A7 | Shuffle2x AVX2 | AVX2 | Have | `smart` when no GFNI |
 | A8 | Shuffle2x AVX-512 | AVX-512 | Missing | |

@@ -32,6 +32,20 @@ const HEAD_LEN: usize = 16 * 1024;
 #[cfg(target_arch = "x86_64")]
 type Avx512GfniTable = (__m512i, __m512i, [u16; 256], [u16; 256]);
 
+#[cfg(target_arch = "x86_64")]
+type Avx512ShuffleTable = (
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    [u16; 256],
+    [u16; 256],
+);
+
 /// Pre-computed AVX2/GFNI coefficient table for one (recovery_block, input_slice) pair.
 /// Two 256-bit matrix registers (mat_lo, mat_hi) plus 256-entry scalar lookup tables.
 #[cfg(target_arch = "x86_64")]
@@ -298,6 +312,19 @@ pub fn shuffle2x_kernel_available() -> bool {
     }
 }
 
+/// AVX-512 BW nibble-shuffle (Normal layout). Used when AVX-512 is present
+/// without GFNI (Skylake-X / Cascade Lake).
+pub fn shuffle512_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// Whether [`RecoveryEncoder::new_affine2x`] keeps the Affine2x layout.
 /// Requires AVX2+GFNI (the kernel uses `gf2p8affine`).
 pub fn affine2x_kernel_available() -> bool {
@@ -481,6 +508,19 @@ impl RecoveryEncoder {
                     recovery_count,
                 );
             }
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && !std::is_x86_feature_detected!("gfni")
+        {
+            // Parpar Shuffle AVX-512 (no GFNI). Normal layout + zmm vpshufb.
+            return Self::try_new(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
         }
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2")
@@ -1299,6 +1339,14 @@ impl RecoveryEncoder {
                 unsafe { self.flush_avx512_gfni() };
                 return;
             }
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx512Shuffle
+                if std::is_x86_feature_detected!("avx512f")
+                    && std::is_x86_feature_detected!("avx512bw") =>
+            {
+                unsafe { self.flush_avx512_shuffle() };
+                return;
+            }
             #[cfg(target_arch = "aarch64")]
             SimdPath::Neon => {
                 unsafe { self.flush_neon_clmul() };
@@ -1438,6 +1486,14 @@ impl RecoveryEncoder {
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
             unsafe {
                 self.flush_avx2_gfni();
+            }
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            unsafe {
+                self.flush_avx512_shuffle();
             }
             return;
         }
@@ -2124,6 +2180,164 @@ impl RecoveryEncoder {
                     }
                 }
             });
+    }
+
+    /// AVX-512 BW nibble-shuffle on Normal `u16` buffers (parpar Shuffle AVX-512).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn flush_avx512_shuffle(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+        unsafe {
+            Self::flush_avx512_shuffle_work(
+                self.buffers.as_normal_mut(),
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn flush_avx512_shuffle_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let mask_f = _mm512_set1_epi8(0x0F_u8 as i8);
+        let mask_even = _mm512_set1_epi16(0x00FF_u16 as i16);
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+        if n_queued == 0 {
+            return;
+        }
+        let all_tables: Vec<Avx512ShuffleTable> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| unsafe {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+                let mut tl_l = [0u8; 16];
+                let mut tl_h = [0u8; 16];
+                let mut th_l = [0u8; 16];
+                let mut th_h = [0u8; 16];
+                let mut hl_l = [0u8; 16];
+                let mut hl_h = [0u8; 16];
+                let mut hh_l = [0u8; 16];
+                let mut hh_h = [0u8; 16];
+                for val in 0..16usize {
+                    let r0 = gf.mul(val as u16, coeff);
+                    tl_l[val] = (r0 & 0xFF) as u8;
+                    th_l[val] = (r0 >> 8) as u8;
+                    let r1 = gf.mul((val as u16) << 4, coeff);
+                    tl_h[val] = (r1 & 0xFF) as u8;
+                    th_h[val] = (r1 >> 8) as u8;
+                    let r2 = gf.mul((val as u16) << 8, coeff);
+                    hl_l[val] = (r2 & 0xFF) as u8;
+                    hh_l[val] = (r2 >> 8) as u8;
+                    let r3 = gf.mul((val as u16) << 12, coeff);
+                    hl_h[val] = (r3 & 0xFF) as u8;
+                    hh_h[val] = (r3 >> 8) as u8;
+                }
+                let bcast =
+                    |t: &[u8; 16]| _mm512_broadcast_i32x4(_mm_loadu_si128(t.as_ptr().cast()));
+                let mut table_low = [0u16; 256];
+                let mut table_high = [0u16; 256];
+                for b in 0..=255usize {
+                    table_low[b] = gf.mul(b as u16, coeff);
+                    table_high[b] = gf.mul((b as u16) << 8, coeff);
+                }
+                (
+                    bcast(&tl_l),
+                    bcast(&tl_h),
+                    bcast(&th_l),
+                    bcast(&th_h),
+                    bcast(&hl_l),
+                    bcast(&hl_h),
+                    bcast(&hh_l),
+                    bcast(&hh_h),
+                    table_low,
+                    table_high,
+                )
+            })
+            .collect();
+
+        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+            let base = rec * n_queued;
+            let byte_len = buf.len() * 2;
+            let blocks = byte_len / 64;
+            let remainder = byte_len % 64;
+            for q_idx in 0..n_queued {
+                let (tl_l, tl_h, th_l, th_h, hl_l, hl_h, hh_l, hh_h, ref tlow, ref thigh) =
+                    all_tables[base + q_idx];
+                let slice = &queued[q_idx][..byte_len];
+                unsafe {
+                    let mut pin = slice.as_ptr().cast::<__m512i>();
+                    let mut pout = buf.as_mut_ptr().cast::<__m512i>();
+                    for _ in 0..blocks {
+                        let input = _mm512_loadu_si512(pin);
+                        let n0 = _mm512_and_si512(input, mask_f);
+                        let n1 = _mm512_and_si512(_mm512_srli_epi16(input, 4), mask_f);
+                        let rle = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(tl_l, n0),
+                            _mm512_shuffle_epi8(tl_h, n1),
+                        );
+                        let rhe = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(th_l, n0),
+                            _mm512_shuffle_epi8(th_h, n1),
+                        );
+                        let rlo = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(hl_l, n0),
+                            _mm512_shuffle_epi8(hl_h, n1),
+                        );
+                        let rho = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(hh_l, n0),
+                            _mm512_shuffle_epi8(hh_h, n1),
+                        );
+                        let out = _mm512_or_si512(
+                            _mm512_and_si512(
+                                _mm512_xor_si512(rle, _mm512_srli_epi16(rlo, 8)),
+                                mask_even,
+                            ),
+                            _mm512_slli_epi16(_mm512_xor_si512(rhe, _mm512_srli_epi16(rho, 8)), 8),
+                        );
+                        _mm512_storeu_si512(pout, _mm512_xor_si512(_mm512_loadu_si512(pout), out));
+                        pin = pin.add(1);
+                        pout = pout.add(1);
+                    }
+                    if remainder > 0 {
+                        let ow = blocks * 32;
+                        let mut pw = buf[ow..].as_mut_ptr();
+                        let mut p_in = slice[blocks * 64..].as_ptr();
+                        let end = p_in.add(remainder);
+                        while p_in < end {
+                            let lo = *p_in as usize;
+                            let hi = *p_in.add(1) as usize;
+                            *pw ^= tlow[lo] ^ thigh[hi];
+                            pw = pw.add(1);
+                            p_in = p_in.add(2);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// AVX2 Shuffle2x flush: accumulates queued slices into Shuffle2x recovery buffers.
@@ -5290,6 +5504,45 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx512_shuffle_matches_scalar() {
+        if !shuffle512_kernel_available() {
+            eprintln!("avx512_shuffle_matches_scalar: skipped (no AVX-512 BW)");
+            return;
+        }
+        let slice_size = 128usize;
+        let total_slices = 5usize;
+        let recovery_count = 3usize;
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 41 + i * 19 + 3) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+        let mut enc = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count)
+            .with_simd_path(crate::SimdPath::Avx512Shuffle);
+        for s in &slices {
+            enc.add_slice(s.clone());
+        }
+        let (got, _) = enc.finish();
+        let gf = Gf16::new();
+        let logbases = input_logbases(total_slices);
+        let mut scalar_buffers = vec![vec![0u16; slice_size / 2]; recovery_count];
+        RecoveryEncoder::flush_scalar_work(&mut scalar_buffers, &slices, 0, &logbases, 0, &gf);
+        let scalar: Vec<Vec<u8>> = scalar_buffers
+            .into_iter()
+            .map(|buf| buf.into_iter().flat_map(|w| w.to_le_bytes()).collect())
+            .collect();
+        for (i, (g, s)) in got.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                g.data, *s,
+                "AVX-512 shuffle disagrees on recovery block {i}"
+            );
+        }
+    }
+
     // `simd_recovery_matches_scalar_for_larger_slices` above only exercises
     // recovery_count=4, a clean multiple of the 4-wide unrolled group size in
     // `flush_avx2_work`'s `buffers.par_chunks_mut(4)` — so it never touches the
@@ -5742,6 +5995,8 @@ mod tests {
             SimdPath::Avx2Gfni,
             #[cfg(target_arch = "x86_64")]
             SimdPath::Avx512Gfni,
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx512Shuffle,
             #[cfg(target_arch = "aarch64")]
             SimdPath::Neon,
         ];
