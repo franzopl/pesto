@@ -1775,6 +1775,33 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
+    /// Shuffle2x madd of one prepared 32-byte vector into a recovery buffer.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn s2x_contrib(
+        s: __m256i,
+        mask_f: __m256i,
+        tna: __m256i,
+        tnb: __m256i,
+        tsa: __m256i,
+        tsb: __m256i,
+    ) -> __m256i {
+        let sw = _mm256_permute2x128_si256(s, s, 0x01);
+        let lo_nib_s = _mm256_and_si256(s, mask_f);
+        let hi_nib_s = _mm256_and_si256(_mm256_srli_epi16(s, 4), mask_f);
+        let lo_nib_sw = _mm256_and_si256(sw, mask_f);
+        let hi_nib_sw = _mm256_and_si256(_mm256_srli_epi16(sw, 4), mask_f);
+        let norm = _mm256_xor_si256(
+            _mm256_shuffle_epi8(tna, lo_nib_s),
+            _mm256_shuffle_epi8(tnb, hi_nib_s),
+        );
+        let swap = _mm256_xor_si256(
+            _mm256_shuffle_epi8(tsa, lo_nib_sw),
+            _mm256_shuffle_epi8(tsb, hi_nib_sw),
+        );
+        _mm256_xor_si256(norm, swap)
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn flush_avx2_shuffle2x_work(
@@ -1785,13 +1812,6 @@ impl RecoveryEncoder {
         exponent_start: u32,
         gf: &Gf16,
     ) {
-        // Byte-separation mask: within each 128-bit lane, move even-indexed bytes
-        // (lo bytes of u16 words) to positions 0-7 and odd-indexed bytes (hi bytes)
-        // to positions 8-15.  Combined with vpermq 0xD8 this is `separate_low_high`.
-        let sep_mask = _mm256_set_epi8(
-            15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 1
-            15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 0
-        );
         let mask_f = _mm256_set1_epi8(0x0F_u8 as i8);
 
         let n_rec = buffers.len();
@@ -1880,9 +1900,20 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        // 32 KiB byte chunks per recovery buffer = 16384 words, matching the
-        // flush_avx2_work chunk granularity.
-        let chunk_size_bytes = 32768usize;
+        // Convert each input once (Normal → Shuffle2x). The inner loop used to
+        // vpshufb+vpermq every 32-byte block for every recovery group.
+        let prepared: Vec<Vec<u8>> = queued
+            .par_iter()
+            .map(|s| {
+                let mut out = vec![0u8; s.len()];
+                crate::shuffle2x::to_shuffle2x(s, &mut out);
+                out
+            })
+            .collect();
+
+        // 8 KiB tiles — ParPar's Shuffle2x idealChunkSize. 32 KiB was oversized
+        // for L2 when several recovery buffers share the same input stream.
+        let chunk_size_bytes = 8192usize;
 
         buffers
             .par_chunks_mut(4)
@@ -1907,7 +1938,9 @@ impl RecoveryEncoder {
                                     let byte_len = chunk_a.len();
                                     let blocks_32 = byte_len / 32;
 
-                                    for q_idx in 0..n_queued {
+                                    let mut q_idx = 0usize;
+                                    while q_idx < n_queued {
+                                        let pair = q_idx + 1 < n_queued;
                                         let (tna_a, tnb_a, tsa_a, tsb_a, _, _) =
                                             all_tables[base_a + q_idx];
                                         let (tna_b, tnb_b, tsa_b, tsb_b, _, _) =
@@ -1917,78 +1950,130 @@ impl RecoveryEncoder {
                                         let (tna_d, tnb_d, tsa_d, tsb_d, _, _) =
                                             all_tables[base_d + q_idx];
 
-                                        let slice_chunk =
-                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
-
-                                        let mut ptr_in =
-                                            slice_chunk.as_ptr() as *const __m256i;
+                                        let chunk0 =
+                                            &prepared[q_idx][byte_offset..byte_offset + byte_len];
+                                        let mut ptr0 = chunk0.as_ptr() as *const __m256i;
                                         let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m256i;
-                                        let end = ptr_in.add(blocks_32);
+                                        let end = ptr0.add(blocks_32);
 
-                                        while ptr_in < end {
-                                            _mm_prefetch(
-                                                ptr_in.add(4) as *const i8,
-                                                _MM_HINT_T0,
-                                            );
-                                            let input = _mm256_loadu_si256(ptr_in);
-                                            // separate_low_high: lane0 = lo bytes, lane1 = hi
-                                            let s = _mm256_permute4x64_epi64(
-                                                _mm256_shuffle_epi8(input, sep_mask),
-                                                0xD8,
-                                            );
-                                            // swap lanes for cross-lane contributions
-                                            let sw =
-                                                _mm256_permute2x128_si256(s, s, 0x01);
-
-                                            let lo_nib_s = _mm256_and_si256(s, mask_f);
-                                            let hi_nib_s = _mm256_and_si256(
-                                                _mm256_srli_epi16(s, 4),
-                                                mask_f,
-                                            );
-                                            let lo_nib_sw = _mm256_and_si256(sw, mask_f);
-                                            let hi_nib_sw = _mm256_and_si256(
-                                                _mm256_srli_epi16(sw, 4),
-                                                mask_f,
-                                            );
-
-                                            // s2x_block: 4 PSHUFB + 2 XOR = one GF(2^16) madd
-                                            // into a Shuffle2x recovery buffer.
-                                            // norm  = pshufb(tNormA, lo_nib_s)  ^ pshufb(tNormB, hi_nib_s)
-                                            // swap  = pshufb(tSwapA, lo_nib_sw) ^ pshufb(tSwapB, hi_nib_sw)
-                                            // result.lane0 = full lo-byte, result.lane1 = full hi-byte ✓
-                                            macro_rules! s2x_block {
-                                                ($ta:expr, $tb:expr, $tc:expr, $td:expr, $ptr:expr) => {{
-                                                    let norm = _mm256_xor_si256(
-                                                        _mm256_shuffle_epi8($ta, lo_nib_s),
-                                                        _mm256_shuffle_epi8($tb, hi_nib_s),
-                                                    );
-                                                    let swap = _mm256_xor_si256(
-                                                        _mm256_shuffle_epi8($tc, lo_nib_sw),
-                                                        _mm256_shuffle_epi8($td, hi_nib_sw),
-                                                    );
-                                                    _mm256_storeu_si256(
-                                                        $ptr,
-                                                        _mm256_xor_si256(
-                                                            _mm256_loadu_si256($ptr),
-                                                            _mm256_xor_si256(norm, swap),
-                                                        ),
-                                                    );
-                                                }};
+                                        if pair {
+                                            let (tna_a2, tnb_a2, tsa_a2, tsb_a2, _, _) =
+                                                all_tables[base_a + q_idx + 1];
+                                            let (tna_b2, tnb_b2, tsa_b2, tsb_b2, _, _) =
+                                                all_tables[base_b + q_idx + 1];
+                                            let (tna_c2, tnb_c2, tsa_c2, tsb_c2, _, _) =
+                                                all_tables[base_c + q_idx + 1];
+                                            let (tna_d2, tnb_d2, tsa_d2, tsb_d2, _, _) =
+                                                all_tables[base_d + q_idx + 1];
+                                            let chunk1 = &prepared[q_idx + 1]
+                                                [byte_offset..byte_offset + byte_len];
+                                            let mut ptr1 = chunk1.as_ptr() as *const __m256i;
+                                            while ptr0 < end {
+                                                _mm_prefetch(ptr0.add(4) as *const i8, _MM_HINT_T0);
+                                                let s0 = _mm256_loadu_si256(ptr0);
+                                                let s1 = _mm256_loadu_si256(ptr1);
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_a, tnb_a, tsa_a, tsb_a,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_a2, tnb_a2, tsa_a2, tsb_a2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_a,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_a),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_b, tnb_b, tsa_b, tsb_b,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_b2, tnb_b2, tsa_b2, tsb_b2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_b,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_b),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_c, tnb_c, tsa_c, tsb_c,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_c2, tnb_c2, tsa_c2, tsb_c2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_c,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_c),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_d, tnb_d, tsa_d, tsb_d,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_d2, tnb_d2, tsa_d2, tsb_d2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_d,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_d),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                ptr0 = ptr0.add(1);
+                                                ptr1 = ptr1.add(1);
+                                                ptr_a = ptr_a.add(1);
+                                                ptr_b = ptr_b.add(1);
+                                                ptr_c = ptr_c.add(1);
+                                                ptr_d = ptr_d.add(1);
                                             }
-
-                                            s2x_block!(tna_a, tnb_a, tsa_a, tsb_a, ptr_a);
-                                            s2x_block!(tna_b, tnb_b, tsa_b, tsb_b, ptr_b);
-                                            s2x_block!(tna_c, tnb_c, tsa_c, tsb_c, ptr_c);
-                                            s2x_block!(tna_d, tnb_d, tsa_d, tsb_d, ptr_d);
-
-                                            ptr_in = ptr_in.add(1);
-                                            ptr_a = ptr_a.add(1);
-                                            ptr_b = ptr_b.add(1);
-                                            ptr_c = ptr_c.add(1);
-                                            ptr_d = ptr_d.add(1);
+                                            q_idx += 2;
+                                        } else {
+                                            while ptr0 < end {
+                                                _mm_prefetch(ptr0.add(4) as *const i8, _MM_HINT_T0);
+                                                let s0 = _mm256_loadu_si256(ptr0);
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_a, tnb_a, tsa_a, tsb_a,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_a,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_a), c0),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_b, tnb_b, tsa_b, tsb_b,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_b,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_b), c0),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_c, tnb_c, tsa_c, tsb_c,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_c,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_c), c0),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_d, tnb_d, tsa_d, tsb_d,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_d,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_d), c0),
+                                                );
+                                                ptr0 = ptr0.add(1);
+                                                ptr_a = ptr_a.add(1);
+                                                ptr_b = ptr_b.add(1);
+                                                ptr_c = ptr_c.add(1);
+                                                ptr_d = ptr_d.add(1);
+                                            }
+                                            q_idx += 1;
                                         }
                                     }
                                 },
@@ -2006,67 +2091,40 @@ impl RecoveryEncoder {
                                 let byte_len = chunk_a.len();
                                 let blocks_32 = byte_len / 32;
 
-                                for q_idx in 0..n_queued {
+                                let mut q_idx = 0usize;
+                                while q_idx < n_queued {
                                     let (tna_a, tnb_a, tsa_a, tsb_a, _, _) =
                                         all_tables[base_a + q_idx];
                                     let (tna_b, tnb_b, tsa_b, tsb_b, _, _) =
                                         all_tables[base_b + q_idx];
-
                                     let slice_chunk =
-                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
-
+                                        &prepared[q_idx][byte_offset..byte_offset + byte_len];
                                     let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
                                     let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
                                     let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
                                     let end = ptr_in.add(blocks_32);
-
                                     while ptr_in < end {
                                         _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
-                                        let input = _mm256_loadu_si256(ptr_in);
-                                        let s = _mm256_permute4x64_epi64(
-                                            _mm256_shuffle_epi8(input, sep_mask),
-                                            0xD8,
+                                        let s = _mm256_loadu_si256(ptr_in);
+                                        let c = RecoveryEncoder::s2x_contrib(
+                                            s, mask_f, tna_a, tnb_a, tsa_a, tsb_a,
                                         );
-                                        let sw = _mm256_permute2x128_si256(s, s, 0x01);
-
-                                        let lo_nib_s = _mm256_and_si256(s, mask_f);
-                                        let hi_nib_s = _mm256_and_si256(
-                                            _mm256_srli_epi16(s, 4),
-                                            mask_f,
+                                        _mm256_storeu_si256(
+                                            ptr_a,
+                                            _mm256_xor_si256(_mm256_loadu_si256(ptr_a), c),
                                         );
-                                        let lo_nib_sw = _mm256_and_si256(sw, mask_f);
-                                        let hi_nib_sw = _mm256_and_si256(
-                                            _mm256_srli_epi16(sw, 4),
-                                            mask_f,
+                                        let c = RecoveryEncoder::s2x_contrib(
+                                            s, mask_f, tna_b, tnb_b, tsa_b, tsb_b,
                                         );
-
-                                        macro_rules! s2x_block {
-                                            ($ta:expr, $tb:expr, $tc:expr, $td:expr, $ptr:expr) => {{
-                                                let norm = _mm256_xor_si256(
-                                                    _mm256_shuffle_epi8($ta, lo_nib_s),
-                                                    _mm256_shuffle_epi8($tb, hi_nib_s),
-                                                );
-                                                let swap = _mm256_xor_si256(
-                                                    _mm256_shuffle_epi8($tc, lo_nib_sw),
-                                                    _mm256_shuffle_epi8($td, hi_nib_sw),
-                                                );
-                                                _mm256_storeu_si256(
-                                                    $ptr,
-                                                    _mm256_xor_si256(
-                                                        _mm256_loadu_si256($ptr),
-                                                        _mm256_xor_si256(norm, swap),
-                                                    ),
-                                                );
-                                            }};
-                                        }
-
-                                        s2x_block!(tna_a, tnb_a, tsa_a, tsb_a, ptr_a);
-                                        s2x_block!(tna_b, tnb_b, tsa_b, tsb_b, ptr_b);
-
+                                        _mm256_storeu_si256(
+                                            ptr_b,
+                                            _mm256_xor_si256(_mm256_loadu_si256(ptr_b), c),
+                                        );
                                         ptr_in = ptr_in.add(1);
                                         ptr_a = ptr_a.add(1);
                                         ptr_b = ptr_b.add(1);
                                     }
+                                    q_idx += 1;
                                 }
                             });
                     }
@@ -2080,47 +2138,21 @@ impl RecoveryEncoder {
                                     let blocks_32 = byte_len / 32;
 
                                     for q_idx in 0..n_queued {
-                                        let (tna, tnb, tsa, tsb, _, _) =
-                                            all_tables[base + q_idx];
+                                        let (tna, tnb, tsa, tsb, _, _) = all_tables[base + q_idx];
                                         let slice_chunk =
-                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
-
+                                            &prepared[q_idx][byte_offset..byte_offset + byte_len];
                                         let mut ptr_buf = chunk.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
                                         let end = ptr_in.add(blocks_32);
-
                                         while ptr_in < end {
                                             _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
-                                            let input = _mm256_loadu_si256(ptr_in);
-                                            let s = _mm256_permute4x64_epi64(
-                                                _mm256_shuffle_epi8(input, sep_mask),
-                                                0xD8,
-                                            );
-                                            let sw = _mm256_permute2x128_si256(s, s, 0x01);
-                                            let lo_nib_s = _mm256_and_si256(s, mask_f);
-                                            let hi_nib_s = _mm256_and_si256(
-                                                _mm256_srli_epi16(s, 4),
-                                                mask_f,
-                                            );
-                                            let lo_nib_sw = _mm256_and_si256(sw, mask_f);
-                                            let hi_nib_sw = _mm256_and_si256(
-                                                _mm256_srli_epi16(sw, 4),
-                                                mask_f,
-                                            );
-                                            let norm = _mm256_xor_si256(
-                                                _mm256_shuffle_epi8(tna, lo_nib_s),
-                                                _mm256_shuffle_epi8(tnb, hi_nib_s),
-                                            );
-                                            let swap = _mm256_xor_si256(
-                                                _mm256_shuffle_epi8(tsa, lo_nib_sw),
-                                                _mm256_shuffle_epi8(tsb, hi_nib_sw),
+                                            let s = _mm256_loadu_si256(ptr_in);
+                                            let c = RecoveryEncoder::s2x_contrib(
+                                                s, mask_f, tna, tnb, tsa, tsb,
                                             );
                                             _mm256_storeu_si256(
                                                 ptr_buf,
-                                                _mm256_xor_si256(
-                                                    _mm256_loadu_si256(ptr_buf),
-                                                    _mm256_xor_si256(norm, swap),
-                                                ),
+                                                _mm256_xor_si256(_mm256_loadu_si256(ptr_buf), c),
                                             );
                                             ptr_in = ptr_in.add(1);
                                             ptr_buf = ptr_buf.add(1);

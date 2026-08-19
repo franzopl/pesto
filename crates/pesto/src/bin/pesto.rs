@@ -75,7 +75,7 @@ By default pesto posts under a freshly generated random identity. Set
 #[derive(Parser, Debug)]
 #[command(
     name = "pesto",
-    version,
+    version = pesto::DISPLAY_VERSION,
     about = ABOUT,
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP
@@ -3783,7 +3783,7 @@ fn upload_summary(inputs: &[pesto::walk::InputFile]) -> (usize, usize, u64) {
 fn print_header() {
     eprintln!(
         "pesto v{} — fast, lean Usenet poster",
-        env!("CARGO_PKG_VERSION")
+        pesto::DISPLAY_VERSION
     );
     eprintln!("{}", "─".repeat(48));
 }

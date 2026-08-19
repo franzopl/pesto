@@ -3,6 +3,10 @@
 Fast, lean Usenet poster in Rust. Inspired by `nyuu`, with only the essentials.
 Each phase must leave the program in a working, testable state.
 
+**Current work (branch `dev`):** performance parity vs parpar+nyuu —
+see [`docs/parity-roadmap.md`](docs/parity-roadmap.md). `main` is frozen at
+0.8.0; binaries from `dev` report version `dev`.
+
 ---
 
 ## Completed ✅

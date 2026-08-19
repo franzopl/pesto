@@ -9,7 +9,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     name = "sugo",
-    version,
+    version = sugo::DISPLAY_VERSION,
     about = "SABnzbd-API-compatible web UI for penne",
     long_about = "SABnzbd-API-compatible web UI for penne.\n\n\
 Server credentials and the [web] section (bind address, API key, data \

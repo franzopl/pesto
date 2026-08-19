@@ -30,7 +30,7 @@ const EXIT_FATAL: i32 = 3;
 #[derive(Parser)]
 #[command(
     name = "penne",
-    version,
+    version = penne::DISPLAY_VERSION,
     about = "Fast NZB downloader",
     long_about = "Fast NZB downloader.\n\n\
 Server credentials are read from a TOML config file. If --config is not \

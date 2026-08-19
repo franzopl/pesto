@@ -18,7 +18,7 @@ use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(
     name = "parmesan",
-    version,
+    version = parmesan::DISPLAY_VERSION,
     about = "Fast, standalone PAR2 creation tool"
 )]
 struct Cli {

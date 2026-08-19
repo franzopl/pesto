@@ -117,6 +117,9 @@ fn select_latest_release(releases: Vec<GhRelease>) -> Result<(GhRelease, semver:
 }
 
 fn current_version() -> Result<semver::Version> {
+    if crate::DISPLAY_VERSION == "dev" {
+        anyhow::bail!("this is a `dev` build; `pesto --update` only applies to release binaries");
+    }
     env!("CARGO_PKG_VERSION")
         .parse()
         .context("current CARGO_PKG_VERSION is not valid semver")
