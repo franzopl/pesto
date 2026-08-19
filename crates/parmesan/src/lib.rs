@@ -1,3 +1,4 @@
+pub mod affine2x;
 pub mod altmap;
 pub mod decoder;
 pub mod encoder;
@@ -17,7 +18,7 @@ pub mod verify;
 pub mod worker;
 pub mod yenc;
 
-pub use encoder::{altmap_buffer_size, shuffle2x_buffer_size};
+pub use encoder::{affine2x_buffer_size, altmap_buffer_size, shuffle2x_buffer_size};
 
 /// Shown by `--version` and banners. `dev` on this branch; crates.io releases
 /// keep using `CARGO_PKG_VERSION` on `main`.

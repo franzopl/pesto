@@ -48,9 +48,9 @@ Acceptance: medialab `movie-1080p` create ≥ parpar; `many-small` not slower.
 
 ### P1 — Affine2x on GFNI
 
-- [ ] `try_new_smart` picks affine2x layout when `gfni` (not Normal)
-- [ ] Kernel: 2× `gf2p8affine` + lane swap, `srcCount=6`, 4 KiB tiles
-- [ ] Scratch = 16×4 matrices, not 65k dep tables
+- [x] `try_new_smart` picks affine2x layout when `gfni` (not Normal)
+- [x] Kernel: 2× `gf2p8affine` + lane swap, `srcCount=6`, 4 KiB tiles
+- [x] Scratch = 16×4 matrices, not 65k dep tables
 
 Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still ahead.
 
