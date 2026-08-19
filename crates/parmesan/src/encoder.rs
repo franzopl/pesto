@@ -425,6 +425,23 @@ impl AffineNibbleScratch {
     }
 }
 
+/// Parpar packed Affine: for each `block`-byte group, store all sources
+/// consecutively so a 6-source madd hits ~768 B of sequential reads
+/// (`gf16_muladd_multi_packed`, interleave = srcCount).
+fn pack_affine_tile(prepared: &[Vec<u8>], off: usize, tile_len: usize, block: usize) -> Vec<u8> {
+    let n = prepared.len();
+    let blocks = tile_len / block;
+    let mut out = vec![0u8; n * tile_len];
+    for b in 0..blocks {
+        for s in 0..n {
+            let src = &prepared[s][off + b * block..off + (b + 1) * block];
+            let dst = &mut out[(b * n + s) * block..(b * n + s + 1) * block];
+            dst.copy_from_slice(src);
+        }
+    }
+    out
+}
+
 /// One finished recovery slice.
 #[derive(Debug, Clone)]
 pub struct RecoverySlice {
@@ -3135,32 +3152,36 @@ impl RecoveryEncoder {
             .collect();
 
         let tile = 4096usize;
-        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
-            let base = rec * n_queued;
-            let n_tiles = buf.len().div_ceil(tile);
-            for t in 0..n_tiles {
-                let off = t * tile;
-                let end = (off + tile).min(buf.len());
+        if buffers.is_empty() {
+            return;
+        }
+        let slice_len = buffers[0].len();
+        let n_tiles = slice_len.div_ceil(tile);
+        for t in 0..n_tiles {
+            let off = t * tile;
+            let end = (off + tile).min(slice_len);
+            let tile_len = end - off;
+            if tile_len < 64 {
+                continue;
+            }
+            let packed = pack_affine_tile(queued, off, tile_len, 64);
+            let blocks = tile_len / 64;
+            buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+                let base = rec * n_queued;
                 let dest = &mut buf[off..end];
-                let blocks = dest.len() / 64;
-                if blocks == 0 {
-                    continue;
-                }
                 let mut q = 0usize;
                 while q < n_queued {
                     let take = (n_queued - q).min(3);
                     unsafe {
                         let dst = dest.as_mut_ptr();
+                        let pk = packed.as_ptr();
                         for b in 0..blocks {
                             let p = dst.add(b * 64).cast::<__m256i>();
                             let mut tph = _mm256_loadu_si256(p);
                             let mut tpl = _mm256_loadu_si256(p.add(1));
                             for s in 0..take {
                                 let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
-                                let sp = queued[q + s][off..end]
-                                    .as_ptr()
-                                    .add(b * 64)
-                                    .cast::<__m256i>();
+                                let sp = pk.add((b * n_queued + q + s) * 64).cast::<__m256i>();
                                 let ta = _mm256_loadu_si256(sp);
                                 let tb = _mm256_loadu_si256(sp.add(1));
                                 tpl = _mm256_xor_si256(
@@ -3184,8 +3205,8 @@ impl RecoveryEncoder {
                     }
                     q += take;
                 }
-            }
-        });
+            });
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -3231,7 +3252,7 @@ impl RecoveryEncoder {
     ) {
         let n_rec = buffers.len();
         let n_queued = queued.len();
-        if n_queued == 0 {
+        if n_queued == 0 || n_rec == 0 {
             return;
         }
         let scratch = AffineNibbleScratch::new(gf);
@@ -3255,47 +3276,47 @@ impl RecoveryEncoder {
             .collect();
 
         let tile = 4096usize;
-        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
-            let base = rec * n_queued;
-            let n_tiles = buf.len().div_ceil(tile);
-            for t in 0..n_tiles {
-                let off = t * tile;
-                let end = (off + tile).min(buf.len());
+        let slice_len = buffers[0].len();
+        let n_tiles = slice_len.div_ceil(tile);
+        for t in 0..n_tiles {
+            let off = t * tile;
+            let end = (off + tile).min(slice_len);
+            let tile_len = end - off;
+            if tile_len < 128 {
+                continue;
+            }
+            let packed = pack_affine_tile(queued, off, tile_len, 128);
+            let blocks = tile_len / 128;
+            buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+                let base = rec * n_queued;
                 let dest = &mut buf[off..end];
-                let blocks = dest.len() / 128;
-                if blocks == 0 {
-                    continue;
-                }
                 let mut q = 0usize;
                 while q < n_queued {
                     let take = (n_queued - q).min(6);
                     unsafe {
                         let dst = dest.as_mut_ptr();
+                        let pk = packed.as_ptr();
                         for b in 0..blocks {
                             let p = dst.add(b * 128).cast::<__m512i>();
                             let mut tph = _mm512_loadu_si512(p);
                             let mut tpl = _mm512_loadu_si512(p.add(1));
                             for s in 0..take {
                                 let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
-                                let sp = queued[q + s][off..end]
-                                    .as_ptr()
-                                    .add(b * 128)
-                                    .cast::<__m512i>();
+                                let sp = pk.add((b * n_queued + q + s) * 128).cast::<__m512i>();
                                 let ta = _mm512_loadu_si512(sp);
                                 let tb = _mm512_loadu_si512(sp.add(1));
-                                tpl = _mm512_xor_si512(
+                                // parpar gf16_affine_muladd_round: xor3 via vpternlog 0x96
+                                tpl = _mm512_ternarylogic_epi32(
+                                    _mm512_gf2p8affine_epi64_epi8(ta, mlh, 0),
+                                    _mm512_gf2p8affine_epi64_epi8(tb, mll, 0),
                                     tpl,
-                                    _mm512_xor_si512(
-                                        _mm512_gf2p8affine_epi64_epi8(ta, mlh, 0),
-                                        _mm512_gf2p8affine_epi64_epi8(tb, mll, 0),
-                                    ),
+                                    0x96,
                                 );
-                                tph = _mm512_xor_si512(
+                                tph = _mm512_ternarylogic_epi32(
+                                    _mm512_gf2p8affine_epi64_epi8(ta, mhh, 0),
+                                    _mm512_gf2p8affine_epi64_epi8(tb, mhl, 0),
                                     tph,
-                                    _mm512_xor_si512(
-                                        _mm512_gf2p8affine_epi64_epi8(ta, mhh, 0),
-                                        _mm512_gf2p8affine_epi64_epi8(tb, mhl, 0),
-                                    ),
+                                    0x96,
                                 );
                             }
                             _mm512_storeu_si512(p, tph);
@@ -3304,8 +3325,8 @@ impl RecoveryEncoder {
                     }
                     q += take;
                 }
-            }
-        });
+            });
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
