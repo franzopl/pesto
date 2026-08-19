@@ -489,17 +489,10 @@ impl RecoveryEncoder {
     ) -> Result<Self, TryReserveError> {
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("gfni") && slice_size.is_multiple_of(64) {
-            if std::is_x86_feature_detected!("avx512f")
-                && std::is_x86_feature_detected!("avx512bw")
-                && slice_size.is_multiple_of(128)
-            {
-                return Self::try_new_affine512(
-                    slice_size,
-                    total_input_slices,
-                    exponent_start,
-                    recovery_count,
-                );
-            }
+            // Affine AVX-512 exists (`try_new_affine512`) but c7i movie create
+            // was 186 MiB/s vs ~318 on Affine AVX2 / ~590 parpar. Do not auto-
+            // select it until the 512 kernel beats AVX2 (nibble scratch / less
+            // prepare-copy).
             if std::is_x86_feature_detected!("avx2") {
                 return Self::try_new_affine(
                     slice_size,
@@ -5939,11 +5932,8 @@ mod tests {
         );
         if affine_kernel_available() {
             assert!(
-                matches!(
-                    smart.buffers,
-                    RecoveryBufferSet::Affine(_) | RecoveryBufferSet::Affine512(_)
-                ),
-                "try_new_smart must pick Affine or Affine512 on GFNI"
+                matches!(smart.buffers, RecoveryBufferSet::Affine(_)),
+                "try_new_smart must pick Affine AVX2 on GFNI (not Affine512)"
             );
         }
 

@@ -44,14 +44,9 @@ pub fn encode_avx512(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
 
 pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
     let crc = crc32fast::hash(data);
-    if is_x86_feature_detected!("avx512f")
-        && is_x86_feature_detected!("avx512bw")
-        && is_x86_feature_detected!("avx2")
-        && !cpu_is_hybrid()
-    {
-        unsafe { encode_avx512_impl(out, data, line_len) };
-        return crc;
-    }
+    // AVX-512 is available via `encode_avx512` but is not the auto path:
+    // c7i article-size micro is ~2× slower than AVX2 (64 B zmm then a long
+    // scalar tail on 128-byte yEnc lines). Keep AVX2 until that kernel wins.
     if is_x86_feature_detected!("avx2") && !cpu_is_hybrid() {
         unsafe { encode_avx2_impl(out, data, line_len) };
         return crc;
@@ -695,6 +690,65 @@ unsafe fn encode_avx512_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             i += 64;
             col += 64;
             safe_rem -= 64;
+        }
+        // Remainder of a 128-byte yEnc line is typically ~62 B after one zmm.
+        // Without a 32/16-byte tail the rest was scalar (c7i AVX-512 2× slower
+        // than AVX2). `encode()` still defaults to AVX2 until this path wins.
+        let add42_256 = _mm256_set1_epi8(42i8);
+        let v_lookup_256 = _mm256_broadcastsi128_si256(lookup16);
+        while safe_rem >= 32 {
+            let chunk = _mm256_loadu_si256(data.as_ptr().add(i).cast());
+            let any = _mm256_movemask_epi8(_mm256_cmpeq_epi8(
+                _mm256_shuffle_epi8(v_lookup_256, _mm256_abs_epi8(chunk)),
+                chunk,
+            ));
+            let shifted = _mm256_add_epi8(chunk, add42_256);
+            if any == 0 {
+                _mm256_storeu_si256(out_ptr.cast(), shifted);
+                out_ptr = out_ptr.add(32);
+            } else {
+                let bytes: [u8; 32] = std::mem::transmute(shifted);
+                for (b, &e) in bytes.iter().enumerate() {
+                    if (any >> b) & 1 == 1 {
+                        *out_ptr = b'=';
+                        *out_ptr.add(1) = e.wrapping_add(64);
+                        out_ptr = out_ptr.add(2);
+                    } else {
+                        *out_ptr = e;
+                        out_ptr = out_ptr.add(1);
+                    }
+                }
+            }
+            i += 32;
+            col += 32;
+            safe_rem -= 32;
+        }
+        while safe_rem >= 16 {
+            let chunk = _mm_loadu_si128(data.as_ptr().add(i).cast());
+            let any = _mm_movemask_epi8(_mm_cmpeq_epi8(
+                _mm_shuffle_epi8(lookup16, _mm_abs_epi8(chunk)),
+                chunk,
+            ));
+            let shifted = _mm_add_epi8(chunk, _mm_set1_epi8(42i8));
+            if any == 0 {
+                _mm_storeu_si128(out_ptr.cast(), shifted);
+                out_ptr = out_ptr.add(16);
+            } else {
+                let bytes: [u8; 16] = std::mem::transmute(shifted);
+                for (b, &e) in bytes.iter().enumerate() {
+                    if (any >> b) & 1 == 1 {
+                        *out_ptr = b'=';
+                        *out_ptr.add(1) = e.wrapping_add(64);
+                        out_ptr = out_ptr.add(2);
+                    } else {
+                        *out_ptr = e;
+                        out_ptr = out_ptr.add(1);
+                    }
+                }
+            }
+            i += 16;
+            col += 16;
+            safe_rem -= 16;
         }
         while safe_rem > 0 {
             let e = data[i].wrapping_add(42);

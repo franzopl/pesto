@@ -31,7 +31,7 @@ must be complete.
 | A9 | **Affine GFNI** (SSE) | GFNI+SSSE3 | Missing | |
 | A10 | **Affine AVX2** | GFNI+AVX2 | Have (`smart` on GFNI) | parpar default without 512 |
 | A11 | Affine AVX10 | AVX10 | Missing | detect + 256-bit EVEX |
-| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (`smart` when 512+GFNI) | parpar **default on c7i** |
+| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (manual) | c7i create 186 vs Affine AVX2 ~318; not `smart` |
 | A13 | Affine2x GFNI/AVX2/AVX10/512 | GFNI… | AVX2 kernel only, not `smart` | Keep for invert/experiments |
 | A14 | XOR SSE2 | SSE2 | Missing | |
 | A15 | XOR-JIT SSE2 / AVX2 / AVX-512 | W^X + JIT | Missing | last on x86 after Affine |
@@ -48,7 +48,7 @@ must be complete.
 | A26 | Recovery MD5-MB 8/16-wide | AVX2 / AVX-512 | Missing | |
 | A27 | OpenCL | GPU | Missing | last; optional crate feature |
 
-`smart` today: Shuffle2x if AVX2 && !GFNI; else Normal + GFNI/AVX2/SSSE3/NEON.
+`smart` today: Affine AVX2 on GFNI; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI; else Normal. yEnc `encode()`: AVX2 (non-hybrid) / SSSE3 (hybrid).
 
 Target `smart` when this list is done: same priority as
 `Galois16Mul::default_method` in parpar (`gf16mul.cpp`).
@@ -62,8 +62,8 @@ Target `smart` when this list is done: same priority as
 | B3 | SSSE3 | SSSE3 | Have (hybrid default) |
 | B4 | AVX + POPCNT | AVX | Missing |
 | B5 | AVX2 | AVX2 | Have (non-hybrid default) |
-| B6 | AVX-512 VL/BW (`AVX3`) | AVX-512 | Have (worker default on non-hybrid AVX-512) |
-| B7 | **VBMI2** | ICL / SPR | Have (`mask_expand_epi8` escape store) |
+| B6 | AVX-512 VL/BW (`AVX3`) | AVX-512 | Have (manual) | c7i 768k: 1168 vs AVX2 2534; not `encode()` default |
+| B7 | **VBMI2** | ICL / SPR | Have (manual, with B6) | `mask_expand_epi8` escape store |
 | B8 | NEON | AArch64 | Have |
 | B9 | RVV | RISC-V | Missing |
 | B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode()` returns CRC via crc32fast/PCLMUL then yEnc; no caller walk) |
