@@ -394,6 +394,37 @@ fn gfni_affine_u64_mats(gf: &Gf16, coeff: u16) -> (u64, u64, u64, u64) {
     (m_ll, m_lh, m_hl, m_hh)
 }
 
+/// Parpar Affine nibble scratch: 16×4 matrices (`gf16_affine_init_avx2` /
+/// `gf16_bitdep_init256` with `genAffine=1`). A coefficient's four 8×8
+/// matrices are the XOR of the four nibble contributions instead of an 8×8
+/// rebuild per (recovery, source) pair.
+struct AffineNibbleScratch {
+    /// `mats[nibble][slot]` for `coeff` nibble `slot` (weight `1<<(4*slot)`).
+    mats: [[(u64, u64, u64, u64); 4]; 16],
+}
+
+impl AffineNibbleScratch {
+    fn new(gf: &Gf16) -> Self {
+        let mut mats = [[(0u64, 0u64, 0u64, 0u64); 4]; 16];
+        for n in 0..16u16 {
+            for slot in 0..4u16 {
+                mats[n as usize][slot as usize] = gfni_affine_u64_mats(gf, n << (4 * slot));
+            }
+        }
+        Self { mats }
+    }
+
+    fn load(&self, coeff: u16) -> (u64, u64, u64, u64) {
+        let xor = |a: (u64, u64, u64, u64), b: (u64, u64, u64, u64)| {
+            (a.0 ^ b.0, a.1 ^ b.1, a.2 ^ b.2, a.3 ^ b.3)
+        };
+        let mut m = self.mats[(coeff & 0xf) as usize][0];
+        m = xor(m, self.mats[((coeff >> 4) & 0xf) as usize][1]);
+        m = xor(m, self.mats[((coeff >> 8) & 0xf) as usize][2]);
+        xor(m, self.mats[((coeff >> 12) & 0xf) as usize][3])
+    }
+}
+
 /// One finished recovery slice.
 #[derive(Debug, Clone)]
 pub struct RecoverySlice {
@@ -3072,6 +3103,7 @@ impl RecoveryEncoder {
         if n_queued == 0 {
             return;
         }
+        let scratch = AffineNibbleScratch::new(gf);
         let all_tables: Vec<(__m256i, __m256i, __m256i, __m256i)> = (0..n_rec * n_queued)
             .into_par_iter()
             .map(|flat| {
@@ -3081,7 +3113,7 @@ impl RecoveryEncoder {
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
                 let coeff = gf.exp(log_coeff);
-                let (m_ll, m_lh, m_hl, m_hh) = gfni_affine_u64_mats(gf, coeff);
+                let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeff);
                 (
                     _mm256_set1_epi64x(m_ll as i64),
                     _mm256_set1_epi64x(m_hl as i64),
@@ -3191,6 +3223,7 @@ impl RecoveryEncoder {
         if n_queued == 0 {
             return;
         }
+        let scratch = AffineNibbleScratch::new(gf);
         let all_tables: Vec<(__m512i, __m512i, __m512i, __m512i)> = (0..n_rec * n_queued)
             .into_par_iter()
             .map(|flat| {
@@ -3200,7 +3233,7 @@ impl RecoveryEncoder {
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
                 let coeff = gf.exp(log_coeff);
-                let (m_ll, m_lh, m_hl, m_hh) = gfni_affine_u64_mats(gf, coeff);
+                let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeff);
                 (
                     _mm512_set1_epi64(m_ll as i64),
                     _mm512_set1_epi64(m_hl as i64),
@@ -5461,6 +5494,21 @@ mod tests {
         let expected: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
         assert_eq!(recovery[0].exponent, 0);
         assert_eq!(recovery[0].data, expected);
+    }
+
+    #[test]
+    fn affine_nibble_scratch_matches_full_8x8() {
+        // Same identity as parpar `gf16_affine_load_matrix`: XOR of 4 nibble
+        // contributions equals the 8×8 matrix of the full coefficient.
+        let gf = Gf16::new();
+        let scratch = AffineNibbleScratch::new(&gf);
+        for coeff in [0u16, 1, 2, 42, 0x00ff, 0xff00, 0x1234, 0x8000, 0xffff] {
+            assert_eq!(
+                scratch.load(coeff),
+                gfni_affine_u64_mats(&gf, coeff),
+                "nibble scratch mismatch for coeff={coeff:#06x}"
+            );
+        }
     }
 
     #[test]
