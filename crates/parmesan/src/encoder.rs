@@ -387,16 +387,16 @@ impl RecoveryEncoder {
         exponent_start: u32,
         recovery_count: usize,
     ) -> Result<Self, TryReserveError> {
+        // Affine2x is implemented but must not be the auto path: on the
+        // c7i GFNI box it was slower than Normal+GFNI (220 vs ~298 MiB/s
+        // movie create) and far behind parpar's Affine-AVX512 default
+        // (663 MiB/s). Keep new_affine2x for experiments; smart stays on
+        // Normal+GFNI until an Affine AVX2/512 kernel is measured.
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx2") && slice_size.is_multiple_of(32) {
-            if std::is_x86_feature_detected!("gfni") {
-                return Self::try_new_affine2x(
-                    slice_size,
-                    total_input_slices,
-                    exponent_start,
-                    recovery_count,
-                );
-            }
+        if std::is_x86_feature_detected!("avx2")
+            && !std::is_x86_feature_detected!("gfni")
+            && slice_size.is_multiple_of(32)
+        {
             return Self::try_new_shuffle2x(
                 slice_size,
                 total_input_slices,

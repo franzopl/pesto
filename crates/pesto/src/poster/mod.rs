@@ -291,17 +291,12 @@ struct FileMeta {
 
 /// How many yEnc encodes may run at once.
 ///
-/// Nyuu uses a single encode thread. On small CPUs (≤ 4 performance cores)
-/// extra parallel SIMD encodes fight over L3 and lose; match that model.
-/// On larger boxes, fill cores up to the connection count so encode is not
-/// the serial bottleneck.
+/// Cap at performance cores so extra NNTP workers do not oversubscribe SIMD.
+/// A hard "1 on ≤4 cores" (nyuu's producer) was measured on c7i at 0 ms mock
+/// as a large regression (455 vs ~1100 MiB/s): nyuu's win is `encodeTo` + a
+/// ready-article queue, not serializing encode onto the POST workers.
 fn encode_concurrency(perf_cores: usize, connections: usize) -> usize {
-    let connections = connections.max(1);
-    if perf_cores <= 4 {
-        1
-    } else {
-        perf_cores.min(connections).max(1)
-    }
+    perf_cores.min(connections.max(1)).max(1)
 }
 
 /// Fans posted articles out to per-worker channels instead of one channel
@@ -4867,17 +4862,12 @@ mod tests {
     }
 
     #[test]
-    fn encode_concurrency_is_one_on_small_cpus() {
-        assert_eq!(encode_concurrency(4, 8), 1);
-        assert_eq!(encode_concurrency(4, 50), 1);
-        assert_eq!(encode_concurrency(2, 8), 1);
+    fn encode_concurrency_is_min_of_cores_and_connections() {
+        assert_eq!(encode_concurrency(4, 8), 4);
+        assert_eq!(encode_concurrency(4, 50), 4);
+        assert_eq!(encode_concurrency(2, 8), 2);
         assert_eq!(encode_concurrency(1, 1), 1);
-    }
-
-    #[test]
-    fn encode_concurrency_tracks_cores_on_larger_cpus() {
         assert_eq!(encode_concurrency(6, 8), 6);
-        assert_eq!(encode_concurrency(8, 8), 8);
         assert_eq!(encode_concurrency(16, 8), 8);
         assert_eq!(encode_concurrency(6, 2), 2);
     }

@@ -48,7 +48,9 @@ Acceptance: medialab `movie-1080p` create ≥ parpar; `many-small` not slower.
 
 ### P1 — Affine2x on GFNI
 
-- [x] `try_new_smart` picks affine2x layout when `gfni` (not Normal)
+- [ ] `try_new_smart` stays on Normal+GFNI (Affine2x auto path reverted:
+      c7i movie create 220 vs parpar Affine-AVX512 663; worse than 0.8.0)
+- [x] Affine2x kernel exists behind `new_affine2x` only
 - [x] Kernel: 2× `gf2p8affine` + lane swap, `srcCount=6`, 4 KiB tiles
 - [x] Scratch = 16×4 matrices, not 65k dep tables
 
@@ -67,8 +69,8 @@ Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still a
 
 ### P3 — Poster encode concurrency
 
-- [x] `encode_concurrency`: 1 encode on ≤4 performance cores (nyuu model);
-      `min(cores, connections)` above that
+- [x] `encode_concurrency = min(cores, connections)` (the ≤4→1 cap
+      regressed c7i post-only 455 vs ~1100)
 - [x] Prefer AVX2 yEnc on non-hybrid CPUs (CPUID Hybrid bit); SSSE3 on P+E
 - [x] Article body pool / `encode_part_into` (nyuu `encodeTo`)
 
