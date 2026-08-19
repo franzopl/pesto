@@ -5113,6 +5113,14 @@ mod tests {
             affine2x_kernel_available(),
             "affine2x_kernel_available disagrees with the layout new_affine2x chose"
         );
+
+        // Auto path must not pick Affine2x: c7i movie create 220 vs ~298
+        // Normal+GFNI. Explicit `new_affine2x` remains for experiments.
+        let smart = RecoveryEncoder::new_smart(slice_size, total_slices, 0, recovery_count);
+        assert!(
+            !matches!(smart.buffers, RecoveryBufferSet::Affine2x(_)),
+            "try_new_smart must not select Affine2x"
+        );
     }
 
     /// A manual `--simd` override must never be applied to a specialized buffer
