@@ -48,7 +48,7 @@ must be complete.
 | A26 | Recovery MD5-MB 8/16-wide | AVX2 / AVX-512 | Missing | |
 | A27 | OpenCL | GPU | Missing | last; optional crate feature |
 
-`smart` today: Affine AVX2 on GFNI; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI; else Normal. yEnc `encode()`: AVX2 (non-hybrid) / SSSE3 (hybrid).
+`smart` today: Affine AVX2 on GFNI; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI; else Normal. yEnc `encode()`: AVX2 + VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
 
 Target `smart` when this list is done: same priority as
 `Galois16Mul::default_method` in parpar (`gf16mul.cpp`).
@@ -62,8 +62,8 @@ Target `smart` when this list is done: same priority as
 | B3 | SSSE3 | SSSE3 | Have (hybrid default) |
 | B4 | AVX + POPCNT | AVX | Missing |
 | B5 | AVX2 | AVX2 | Have (non-hybrid default) |
-| B6 | AVX-512 VL/BW (`AVX3`) | AVX-512 | Have (manual) | c7i 768k: 1168 vs AVX2 2534; not `encode()` default |
-| B7 | **VBMI2** | ICL / SPR | Have (manual, with B6) | `mask_expand_epi8` escape store |
+| B6 | AVX-512 VL/BW (`AVX3`) | AVX-512 | Have (manual) | c7i zmm 1168 vs AVX2 2534; not `encode()` default |
+| B7 | **VBMI2** | ICL / SPR | Have (`encode()` AVX2 path) | nyuu: `mask_expand` + `vpternlog` on ymm |
 | B8 | NEON | AArch64 | Have |
 | B9 | RVV | RISC-V | Missing |
 | B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode()` returns CRC via crc32fast/PCLMUL then yEnc; no caller walk) |

@@ -278,6 +278,8 @@ unsafe fn encode_ssse3_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
 #[target_feature(enable = "avx2")]
 unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     use std::arch::x86_64::*;
+    // Nyuu ISA_LEVEL_VBMI2: 256-bit path + mask_expand / vpternlog, not zmm.
+    let use_vbmi2 = cpu_has_vbmi2();
     let line_len = line_len.max(1);
     if data.is_empty() {
         return;
@@ -350,6 +352,11 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
                 _mm256_storeu_si256(out_ptr as *mut __m256i, shifted0);
                 _mm256_storeu_si256(out_ptr.add(32) as *mut __m256i, shifted1);
                 out_ptr = out_ptr.add(64);
+            } else if use_vbmi2 {
+                let e0 = ymm_or_escape_bit(shifted0, any0);
+                let e1 = ymm_or_escape_bit(shifted1, any1);
+                out_ptr = store_escaped_32(out_ptr, e0, mask0);
+                out_ptr = store_escaped_32(out_ptr, e1, mask1);
             } else {
                 for (_chunk, any, mask, shifted) in [
                     (chunk0, any0, mask0, shifted0),
@@ -431,6 +438,8 @@ unsafe fn encode_avx2_impl(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
             if mask == 0 {
                 _mm256_storeu_si256(out_ptr as *mut __m256i, shifted);
                 out_ptr = out_ptr.add(32);
+            } else if use_vbmi2 {
+                out_ptr = store_escaped_32(out_ptr, ymm_or_escape_bit(shifted, any), mask);
             } else {
                 let escaped = _mm256_add_epi8(shifted, _mm256_and_si256(any, v_add64));
                 let s_lo = _mm256_extracti128_si256(escaped, 0);
@@ -608,6 +617,62 @@ const EXPAND_K: [u16; 256] = {
     }
     t
 };
+
+fn cpu_has_vbmi2() -> bool {
+    is_x86_feature_detected!("avx512vbmi2")
+        && is_x86_feature_detected!("avx512vl")
+        && is_x86_feature_detected!("avx512bw")
+        && is_x86_feature_detected!("avx512f")
+}
+
+/// Nyuu `ISA_LEVEL_AVX3`: `data | (cmp & 64)` via `vpternlog` 0xf8.
+#[target_feature(enable = "avx2,avx512f,avx512vl")]
+unsafe fn ymm_or_escape_bit(
+    data: std::arch::x86_64::__m256i,
+    cmp: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    _mm256_ternarylogic_epi32(data, cmp, _mm256_set1_epi8(64i8), 0xf8)
+}
+
+/// Nyuu VBMI2: `mask_expand_epi8` with the 8-bit expand-k table (same as
+/// `lookupsVBMI2->expand` split into bytes).
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vbmi2")]
+unsafe fn store_escaped_16(
+    mut out_ptr: *mut u8,
+    data: std::arch::x86_64::__m128i,
+    mask: u16,
+) -> *mut u8 {
+    use std::arch::x86_64::*;
+    if mask == 0 {
+        _mm_storeu_si128(out_ptr.cast(), data);
+        return out_ptr.add(16);
+    }
+    let eq = _mm_set1_epi8(b'=' as i8);
+    let m1 = (mask & 0xff) as usize;
+    let m2 = ((mask >> 8) & 0xff) as usize;
+    let lo = _mm_mask_expand_epi8(eq, EXPAND_K[m1], data);
+    let hi = _mm_mask_expand_epi8(eq, EXPAND_K[m2], _mm_srli_si128::<8>(data));
+    _mm_storeu_si128(out_ptr.cast(), lo);
+    out_ptr = out_ptr.add(8 + m1.count_ones() as usize);
+    _mm_storeu_si128(out_ptr.cast(), hi);
+    out_ptr.add(8 + m2.count_ones() as usize)
+}
+
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx512vbmi2")]
+unsafe fn store_escaped_32(
+    out_ptr: *mut u8,
+    data: std::arch::x86_64::__m256i,
+    mask: u32,
+) -> *mut u8 {
+    use std::arch::x86_64::*;
+    let out_ptr = store_escaped_16(out_ptr, _mm256_extracti128_si256::<0>(data), mask as u16);
+    store_escaped_16(
+        out_ptr,
+        _mm256_extracti128_si256::<1>(data),
+        (mask >> 16) as u16,
+    )
+}
 
 /// AVX-512 BW encoder (nyuu `ISA_LEVEL_AVX3`). 64-byte no-escape store;
 /// VBMI2 uses `mask_expand_epi8` for escapes.
