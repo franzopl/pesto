@@ -289,6 +289,21 @@ struct FileMeta {
     file_index: u32,
 }
 
+/// How many yEnc encodes may run at once.
+///
+/// Nyuu uses a single encode thread. On small CPUs (≤ 4 performance cores)
+/// extra parallel SIMD encodes fight over L3 and lose; match that model.
+/// On larger boxes, fill cores up to the connection count so encode is not
+/// the serial bottleneck.
+fn encode_concurrency(perf_cores: usize, connections: usize) -> usize {
+    let connections = connections.max(1);
+    if perf_cores <= 4 {
+        1
+    } else {
+        perf_cores.min(connections).max(1)
+    }
+}
+
 /// Fans posted articles out to per-worker channels instead of one channel
 /// shared behind a lock — see the `tx_opt` construction site in
 /// `post_files_inner` for why. Each worker owns its `Receiver` outright, so
@@ -956,11 +971,10 @@ pub async fn post_files_inner(
         release_from,
         run_id,
         total_files,
-        encode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
-            parmesan::performance_core_count()
-                .min(config.total_connections().max(1))
-                .max(1),
-        )),
+        encode_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(encode_concurrency(
+            parmesan::performance_core_count(),
+            config.total_connections(),
+        ))),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -4850,6 +4864,22 @@ mod tests {
     #[test]
     fn physical_core_count_is_at_least_one() {
         assert!(parmesan::physical_core_count() >= 1);
+    }
+
+    #[test]
+    fn encode_concurrency_is_one_on_small_cpus() {
+        assert_eq!(encode_concurrency(4, 8), 1);
+        assert_eq!(encode_concurrency(4, 50), 1);
+        assert_eq!(encode_concurrency(2, 8), 1);
+        assert_eq!(encode_concurrency(1, 1), 1);
+    }
+
+    #[test]
+    fn encode_concurrency_tracks_cores_on_larger_cpus() {
+        assert_eq!(encode_concurrency(6, 8), 6);
+        assert_eq!(encode_concurrency(8, 8), 8);
+        assert_eq!(encode_concurrency(16, 8), 8);
+        assert_eq!(encode_concurrency(6, 2), 2);
     }
 
     // ── Shared buffer pool ────────────────────────────────────────────────────

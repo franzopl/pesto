@@ -67,7 +67,8 @@ Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still a
 
 ### P3 — Poster encode concurrency
 
-- [x] `encode_concurrency = min(connections, physical_cores)`
+- [x] `encode_concurrency`: 1 encode on ≤4 performance cores (nyuu model);
+      `min(cores, connections)` above that
 - [x] Prefer AVX2 yEnc on non-hybrid CPUs (CPUID Hybrid bit); SSSE3 on P+E
 - [x] Article body pool / `encode_part_into` (nyuu `encodeTo`)
 
