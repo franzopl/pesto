@@ -112,7 +112,12 @@ pub fn from_shuffle2x(src: &[u8], dst: &mut [u8]) {
 fn to_shuffle2x_scalar(src: &[u8], dst: &mut [u8]) {
     // Each 32-byte chunk: reorder [lo0,hi0,lo1,hi1,...,lo15,hi15]
     //   → [lo0,lo1,...,lo15, hi0,hi1,...,hi15]
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         for i in 0..16 {
             chunk_out[i] = chunk_in[i * 2]; // lo byte of word i
             chunk_out[16 + i] = chunk_in[i * 2 + 1]; // hi byte of word i
@@ -123,7 +128,12 @@ fn to_shuffle2x_scalar(src: &[u8], dst: &mut [u8]) {
 fn from_shuffle2x_scalar(src: &[u8], dst: &mut [u8]) {
     // Each 32-byte chunk: [lo0,...,lo15, hi0,...,hi15]
     //   → [lo0,hi0, lo1,hi1, ..., lo15,hi15]
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         for i in 0..16 {
             chunk_out[i * 2] = chunk_in[i]; // lo byte of word i
             chunk_out[i * 2 + 1] = chunk_in[16 + i]; // hi byte of word i
@@ -168,7 +178,12 @@ unsafe fn to_shuffle2x_avx2(src: &[u8], dst: &mut [u8]) {
         15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 0
     );
 
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         let v = _mm256_loadu_si256(chunk_in.as_ptr() as *const __m256i);
         // Step 1: separate lo/hi bytes within each 128-bit lane
         let separated = _mm256_shuffle_epi8(v, sep_mask);
@@ -195,7 +210,12 @@ unsafe fn from_shuffle2x_avx2(src: &[u8], dst: &mut [u8]) {
         15, 7, 14, 6, 13, 5, 12, 4, 11, 3, 10, 2, 9, 1, 8, 0, // lane 0
     );
 
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         let v = _mm256_loadu_si256(chunk_in.as_ptr() as *const __m256i);
         // Step 1: undo the permq — inverse of 0xD8 is 0x72
         // Original permq: out[0]=src[0], out[1]=src[2], out[2]=src[1], out[3]=src[3]

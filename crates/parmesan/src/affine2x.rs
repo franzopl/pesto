@@ -83,7 +83,12 @@ pub fn from_affine2x(src: &[u8], dst: &mut [u8]) {
 }
 
 fn to_affine2x_scalar(src: &[u8], dst: &mut [u8]) {
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         for lane in 0..2 {
             let base = lane * 16;
             for i in 0..8 {
@@ -95,7 +100,12 @@ fn to_affine2x_scalar(src: &[u8], dst: &mut [u8]) {
 }
 
 fn from_affine2x_scalar(src: &[u8], dst: &mut [u8]) {
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         for lane in 0..2 {
             let base = lane * 16;
             for i in 0..8 {
@@ -114,7 +124,12 @@ unsafe fn to_affine2x_avx2(src: &[u8], dst: &mut [u8]) {
         15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, 15, 13, 11, 9, 7, 5, 3, 1, 14, 12,
         10, 8, 6, 4, 2, 0,
     );
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         let v = _mm256_loadu_si256(chunk_in.as_ptr().cast());
         let separated = _mm256_shuffle_epi8(v, sep_mask);
         _mm256_storeu_si256(chunk_out.as_mut_ptr().cast(), separated);
@@ -129,7 +144,12 @@ unsafe fn from_affine2x_avx2(src: &[u8], dst: &mut [u8]) {
         15, 7, 14, 6, 13, 5, 12, 4, 11, 3, 10, 2, 9, 1, 8, 0, 15, 7, 14, 6, 13, 5, 12, 4, 11, 3,
         10, 2, 9, 1, 8, 0,
     );
-    for (chunk_in, chunk_out) in src.chunks_exact(32).zip(dst.chunks_exact_mut(32)) {
+    for (chunk_in, chunk_out) in src
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<32>().0)
+    {
         let v = _mm256_loadu_si256(chunk_in.as_ptr().cast());
         let result = _mm256_shuffle_epi8(v, interleave_mask);
         _mm256_storeu_si256(chunk_out.as_mut_ptr().cast(), result);

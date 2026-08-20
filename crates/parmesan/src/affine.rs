@@ -67,7 +67,12 @@ fn separate_low_high_avx2_lanes(chunk: &[u8]) -> [u8; 32] {
 }
 
 fn to_affine_scalar(src: &[u8], dst: &mut [u8]) {
-    for (cin, cout) in src.chunks_exact(64).zip(dst.chunks_exact_mut(64)) {
+    for (cin, cout) in src
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<64>().0)
+    {
         let a = separate_low_high_avx2_lanes(&cin[..32]);
         let b = separate_low_high_avx2_lanes(&cin[32..]);
         cout[..8].copy_from_slice(&a[8..16]);
@@ -82,7 +87,12 @@ fn to_affine_scalar(src: &[u8], dst: &mut [u8]) {
 }
 
 fn from_affine_scalar(src: &[u8], dst: &mut [u8]) {
-    for (cin, cout) in src.chunks_exact(64).zip(dst.chunks_exact_mut(64)) {
+    for (cin, cout) in src
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<64>().0)
+    {
         let ta = &cin[..32];
         let tb = &cin[32..];
         // unpacklo_epi8(tb, ta) then unpackhi_epi8(tb, ta), per 16-byte lane.
@@ -106,7 +116,12 @@ unsafe fn to_affine_avx2(src: &[u8], dst: &mut [u8]) {
         15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, 15, 13, 11, 9, 7, 5, 3, 1, 14, 12,
         10, 8, 6, 4, 2, 0,
     );
-    for (cin, cout) in src.chunks_exact(64).zip(dst.chunks_exact_mut(64)) {
+    for (cin, cout) in src
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<64>().0)
+    {
         let ta = _mm256_shuffle_epi8(_mm256_loadu_si256(cin.as_ptr().cast()), sep);
         let tb = _mm256_shuffle_epi8(_mm256_loadu_si256(cin.as_ptr().add(32).cast()), sep);
         _mm256_storeu_si256(cout.as_mut_ptr().cast(), _mm256_unpackhi_epi64(ta, tb));
@@ -121,7 +136,12 @@ unsafe fn to_affine_avx2(src: &[u8], dst: &mut [u8]) {
 #[target_feature(enable = "avx2")]
 unsafe fn from_affine_avx2(src: &[u8], dst: &mut [u8]) {
     use std::arch::x86_64::*;
-    for (cin, cout) in src.chunks_exact(64).zip(dst.chunks_exact_mut(64)) {
+    for (cin, cout) in src
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<64>().0)
+    {
         let ta = _mm256_loadu_si256(cin.as_ptr().cast());
         let tb = _mm256_loadu_si256(cin.as_ptr().add(32).cast());
         _mm256_storeu_si256(cout.as_mut_ptr().cast(), _mm256_unpacklo_epi8(tb, ta));
@@ -181,7 +201,12 @@ pub(crate) unsafe fn affine512_prepare_block(src: *const u8, dst: *mut u8) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn to_affine512_avx512(src: &[u8], dst: &mut [u8]) {
-    for (cin, cout) in src.chunks_exact(128).zip(dst.chunks_exact_mut(128)) {
+    for (cin, cout) in src
+        .as_chunks::<128>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<128>().0)
+    {
         affine512_prepare_block(cin.as_ptr(), cout.as_mut_ptr());
     }
 }
@@ -200,7 +225,12 @@ pub(crate) unsafe fn affine512_finish_block(src: *const u8, dst: *mut u8) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn from_affine512_avx512(src: &[u8], dst: &mut [u8]) {
-    for (cin, cout) in src.chunks_exact(128).zip(dst.chunks_exact_mut(128)) {
+    for (cin, cout) in src
+        .as_chunks::<128>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<128>().0)
+    {
         affine512_finish_block(cin.as_ptr(), cout.as_mut_ptr());
     }
 }

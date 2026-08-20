@@ -359,7 +359,7 @@ fn parse_ifsc_body(body: &[u8]) -> Result<([u8; 16], Vec<SliceChecksum>)> {
         "IFSC packet body has a partial slice-checksum entry"
     );
     let mut slices = Vec::with_capacity(rest.len() / 20);
-    for chunk in rest.chunks_exact(20) {
+    for chunk in rest.as_chunks::<20>().0 {
         let mut md5 = [0u8; 16];
         md5.copy_from_slice(&chunk[0..16]);
         let crc32 = u32::from_le_bytes(chunk[16..20].try_into().unwrap());

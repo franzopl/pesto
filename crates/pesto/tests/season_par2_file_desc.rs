@@ -211,6 +211,88 @@ async fn season_par2_verifies_and_repairs_under_the_real_episode_names() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// #110: encoder pass-splitting is not enough if every pass's recovery
+/// slices are concatenated in RAM until the end. A tiny `--par2-memory-limit`
+/// forces several passes; the volumes must still verify (and the process
+/// must not try to hold the whole recovery set at once).
+#[tokio::test(flavor = "multi_thread")]
+async fn season_par2_multi_pass_still_verifies() {
+    let root = std::env::temp_dir().join(format!(
+        "pesto_season_par2_multipass_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let episodes = [
+        ("S01E01.mkv", 0u8),
+        ("S01E02.mkv", 1u8),
+        ("S01E03.mkv", 2u8),
+    ];
+    let episode_paths: Vec<_> = episodes
+        .iter()
+        .map(|(name, seed)| {
+            let path = root.join(name);
+            std::fs::write(&path, content(*seed, 50_000)).unwrap();
+            path
+        })
+        .collect();
+
+    let mut config = season_config(4_096);
+    config.par2 = 100;
+    // 3 × 13 slices × 4 KiB ≈ 156 KiB of recovery; 32 KiB/pass → ≥5 passes.
+    config.par2_memory_limit = Some(32 * 1024);
+    config.memory_limit = Some(2_000_000);
+    let par2_dir = root.join("par2out");
+    std::fs::create_dir_all(&par2_dir).unwrap();
+
+    generate_and_write_season_par2(&episode_paths, "Season01", &par2_dir, &config)
+        .await
+        .unwrap();
+
+    let volume_files: Vec<_> = std::fs::read_dir(&par2_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("par2"))
+        .collect();
+    assert!(
+        !volume_files.is_empty(),
+        "multi-pass season PAR2 must still produce volume files"
+    );
+    for vol in &volume_files {
+        std::fs::rename(vol, root.join(vol.file_name().unwrap())).unwrap();
+    }
+    let any_volume = volume_files[0].file_name().unwrap().to_owned();
+
+    let verify = Command::new("par2")
+        .arg("verify")
+        .arg("-q")
+        .arg(&any_volume)
+        .current_dir(&root)
+        .output();
+    let verify = match verify {
+        Err(_) => {
+            eprintln!("par2cmdline not found, skipping");
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        }
+        Ok(out) if out.status.code() == Some(127) => {
+            eprintln!("par2cmdline not found (exit 127), skipping");
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        }
+        Ok(out) => out,
+    };
+    assert!(
+        verify.status.success(),
+        "par2 verify failed after multi-pass season generate: {}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
 /// Regression test: the season path shares `par2_geometry_from_sizes` with
 /// the per-file path (fixing the "ignores --par2-slice-count/
 /// --par2-recovery-count" bug), but that refactor dropped the season path's

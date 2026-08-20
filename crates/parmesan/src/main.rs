@@ -531,7 +531,7 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
         // Serialize packets in batches to exploit SIMD MD5-MB
         let recovery_packets = packet::serialize_recovery_packets(&rsid, &recovery_slices);
 
-        for (slice, pkt) in recovery_slices.iter().zip(recovery_packets.into_iter()) {
+        for (slice, pkt) in recovery_slices.iter().zip(recovery_packets) {
             let abs_exp = slice.exponent;
             // Map the absolute exponent back to a position in the layout
             // (which was planned from 0, but our exponents start at recovery_offset).
