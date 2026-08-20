@@ -95,14 +95,19 @@ fn from_affine_scalar(src: &[u8], dst: &mut [u8]) {
     {
         let ta = &cin[..32];
         let tb = &cin[32..];
-        // unpacklo_epi8(tb, ta) then unpackhi_epi8(tb, ta), per 16-byte lane.
+        // Inverse of AVX2 `_mm256_unpacklo_epi8(tb, ta)` then
+        // `_mm256_unpackhi_epi8(tb, ta)`: each 128-bit lane interleaves
+        // independently (not a 32-byte-wide unpack).
         for lane in 0..2 {
-            let base = lane * 16;
+            let src_lo = lane * 16;
+            let src_hi = src_lo + 8;
+            let dst_lo = lane * 16;
+            let dst_hi = 32 + lane * 16;
             for i in 0..8 {
-                cout[lane * 32 + i * 2] = tb[base + i];
-                cout[lane * 32 + i * 2 + 1] = ta[base + i];
-                cout[lane * 32 + 16 + i * 2] = tb[base + 8 + i];
-                cout[lane * 32 + 16 + i * 2 + 1] = ta[base + 8 + i];
+                cout[dst_lo + i * 2] = tb[src_lo + i];
+                cout[dst_lo + i * 2 + 1] = ta[src_lo + i];
+                cout[dst_hi + i * 2] = tb[src_hi + i];
+                cout[dst_hi + i * 2 + 1] = ta[src_hi + i];
             }
         }
     }
@@ -251,6 +256,13 @@ mod tests {
     fn affine_roundtrip_incrementing() {
         let bytes: Vec<u8> = (0..256).map(|i| i as u8).collect();
         roundtrip(&bytes);
+        // The dispatch path is AVX2 on x86; ARM only has scalar. Keep both
+        // inverses honest so aarch64 CI does not discover a 16-byte-lane swap.
+        let mut a = vec![0u8; bytes.len()];
+        let mut b = vec![0u8; bytes.len()];
+        to_affine_scalar(&bytes, &mut a);
+        from_affine_scalar(&a, &mut b);
+        assert_eq!(&b[..], bytes.as_slice());
     }
 
     #[test]

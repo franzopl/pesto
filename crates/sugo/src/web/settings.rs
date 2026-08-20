@@ -124,24 +124,28 @@ fn parse_mode(s: &str) -> Option<ProcessingMode> {
 /// Serializes `config` to TOML and writes it to `state.config_path` (if
 /// any was given at startup) — the shared tail every settings mutation
 /// below ends with.
-async fn persist(state: &SharedState, config: &WebConfig) -> Result<(), Response> {
+async fn persist(state: &SharedState, config: &WebConfig) -> Result<(), Box<Response>> {
     let toml_text = config.to_toml().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to serialize config: {e}"),
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to serialize config: {e}"),
+            )
+                .into_response(),
         )
-            .into_response()
     })?;
     if let Some(path) = &state.config_path {
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         tokio::fs::write(path, toml_text).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to save config: {e}"),
+            Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to save config: {e}"),
+                )
+                    .into_response(),
             )
-                .into_response()
         })?;
     }
     Ok(())
@@ -198,7 +202,7 @@ pub async fn add_server(
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }
@@ -224,7 +228,7 @@ pub async fn update_server(
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }
@@ -239,7 +243,7 @@ pub async fn delete_server(Path(index): Path<usize>, State(state): State<SharedS
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }
@@ -274,7 +278,7 @@ pub async fn update_general(
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }
@@ -306,7 +310,7 @@ pub async fn add_category(
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }
@@ -324,7 +328,7 @@ pub async fn delete_category(
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }
@@ -337,7 +341,7 @@ pub async fn regenerate_api_key(State(state): State<SharedState>) -> Response {
         config.clone()
     };
     if let Err(resp) = persist(&state, &snapshot).await {
-        return resp;
+        return *resp;
     }
     Redirect::to("/settings").into_response()
 }

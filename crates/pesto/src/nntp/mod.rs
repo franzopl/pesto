@@ -814,8 +814,6 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncWriteExt as _;
-
     use super::*;
 
     // ── Response::parse ───────────────────────────────────────────────────────
