@@ -198,3 +198,24 @@ c7i `20260820T102216Z` (3-rep median, 8 conns, encode pool `min(cores, conns)`):
 Prior run with 1 encoder: 1496 vs 1766 (0.85×). Post-only ≥ 0.9× **met** on c7i.
 
 Exotic ISA (SVE, RVV, XOR-JIT, OpenCL) is not the c7i gap.
+
+### Input Batch 12 (Cache pressure optimization)
+
+Changed `add_slice` queue limit and `DEFAULT_CHANNEL_DEPTH` from 64 to 12 to match parpar's `inputBatchSize`.
+Result:
+- **c7i (AVX-512+GFNI)**: throughput jumped from 424.0 MiB/s to **518.3 MiB/s**. RSS dropped from 1.5 GiB to 1.4 GiB.
+- **medialab (AVX2)**: throughput jumped from 226 MiB/s to **261.4 MiB/s**. RSS dropped from 1.55 GiB to 1.2 GiB.
+
+ParPar still leads (c7i: 656 MiB/s, medialab: 361 MiB/s). The next step is identifying what remains to close the gap locally on medialab (AVX2/Shuffle2x).
+
+### The remaining AVX2 (medialab) gap: Loop Inversion
+
+On medialab (i5-10400 without GFNI), Pesto automatically uses the `Shuffle2x AVX2` layout. Pesto processes 261 MiB/s while ParPar processes 361 MiB/s.
+
+Investigation revealed exactly why: **Loop order and destination memory bandwidth.**
+In `flush_avx2_shuffle2x_work`, the outer loop iterates over the source slices (`q_idx`), and the innermost loop iterates over the bytes of the slice chunk (`while ptr0 < end`). Because it unrolls only 2 source slices at a time, Pesto reads from and writes to the destination memory block `N / 2` times per batch (e.g., 6 times for a batch of 12).
+Even though this destination block (e.g. 128 KiB) fits in L2 cache, rewriting it 6 times burns massive L1/L2 bandwidth.
+
+ParPar approaches this by inverting the loops (loop tiling): it loops over small blocks of the destination (e.g. "8000 B loop tiling"), and for each 8KB block, the innermost loop accumulates the contributions of **all 12 source slices** into registers before doing a single final write to the destination memory.
+
+To close this gap, Pesto's `Shuffle2x` (and `Normal`) kernels need their innermost loops inverted so they accumulate all `n_queued` slices into a single register accumulator before issuing the `_mm256_storeu_si256`. (This is already how Pesto's `Affine512` kernel is structured, which is why it reached 518 MiB/s on c7i!).
