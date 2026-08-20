@@ -199,23 +199,22 @@ Prior run with 1 encoder: 1496 vs 1766 (0.85×). Post-only ≥ 0.9× **met** on 
 
 Exotic ISA (SVE, RVV, XOR-JIT, OpenCL) is not the c7i gap.
 
-### Input Batch 12 (Cache pressure optimization)
+### Input Batch 12 (Dynamic Cache pressure optimization)
 
-Changed `add_slice` queue limit and `DEFAULT_CHANNEL_DEPTH` from 64 to 12 to match parpar's `inputBatchSize`.
+Changed `add_slice` queue limit from 64 to 12 dynamically *only* when using `Affine512` or `Affine2x` to match parpar's `inputBatchSize`.
 Result:
 - **c7i (AVX-512+GFNI)**: throughput jumped from 424.0 MiB/s to **518.3 MiB/s**. RSS dropped from 1.5 GiB to 1.4 GiB.
-- **medialab (AVX2)**: throughput jumped from 226 MiB/s to **261.4 MiB/s**. RSS dropped from 1.55 GiB to 1.2 GiB.
+- **medialab (AVX2)**: Through testing, we verified that AVX2 (Shuffle2x and Normal) kernels *plummet* in performance if batch size is 12 (e.g. dropping from 261 MiB/s to 199 MiB/s on `movie-1080p`). This happens because Shuffle2x flushes the entire RecoveryBlock to L3/RAM 12-slices at a time, whereas Affine512 interleaves memory. Therefore, AVX2 retains the `64` batch size.
 
-ParPar still leads (c7i: 656 MiB/s, medialab: 361 MiB/s). The next step is identifying what remains to close the gap locally on medialab (AVX2/Shuffle2x).
+ParPar still leads (c7i: 656 MiB/s, medialab: 361 MiB/s). 
 
-### The remaining AVX2 (medialab) gap: Loop Inversion
+### The remaining AVX2 (medialab) gap: Instruction Latency & Data Layout
 
 On medialab (i5-10400 without GFNI), Pesto automatically uses the `Shuffle2x AVX2` layout. Pesto processes 261 MiB/s while ParPar processes 361 MiB/s.
 
-Investigation revealed exactly why: **Loop order and destination memory bandwidth.**
-In `flush_avx2_shuffle2x_work`, the outer loop iterates over the source slices (`q_idx`), and the innermost loop iterates over the bytes of the slice chunk (`while ptr0 < end`). Because it unrolls only 2 source slices at a time, Pesto reads from and writes to the destination memory block `N / 2` times per batch (e.g., 6 times for a batch of 12).
-Even though this destination block (e.g. 128 KiB) fits in L2 cache, rewriting it 6 times burns massive L1/L2 bandwidth.
+Investigation revealed exactly why: **Instruction latency of `vperm2i128`**.
+In `s2x_contrib`, Pesto executes `_mm256_permute2x128_si256` to cross data between the 128-bit lanes. This instruction has a massive 3-cycle latency on most Intel CPUs.
+We experimentally refactored the innermost loop to use Loop Tiling (accumulating multiple slices over smaller memory tiles to avoid destination memory bottleneck and register spilling). However, the performance did not change (or got slower).
+The true bottleneck is that ParPar's `GF16_SHUFFLE2X_CALC` avoids crossing the 128-bit lanes inside the loop by structuring (interleaving) the recovery block data in memory differently during `to_shuffle2x`.
 
-ParPar approaches this by inverting the loops (loop tiling): it loops over small blocks of the destination (e.g. "8000 B loop tiling"), and for each 8KB block, the innermost loop accumulates the contributions of **all 12 source slices** into registers before doing a single final write to the destination memory.
-
-To close this gap, Pesto's `Shuffle2x` (and `Normal`) kernels need their innermost loops inverted so they accumulate all `n_queued` slices into a single register accumulator before issuing the `_mm256_storeu_si256`. (This is already how Pesto's `Affine512` kernel is structured, which is why it reached 518 MiB/s on c7i!).
+To close this gap, Pesto would need a deep rewrite of `to_shuffle2x` and its Galois coefficient tables to adopt the same lane-symmetrical layout as ParPar, avoiding the `vperm2i128` instruction completely.

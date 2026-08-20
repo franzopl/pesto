@@ -1460,7 +1460,13 @@ impl RecoveryEncoder {
         // the honest, validated fix rather than a theory dressed up as one.
         // See `bench/FINDINGS.md` §3 for the full writeup.
         let queued_bytes = self.queued_slices.len() * self.slice_words * 2;
-        if self.queued_slices.len() >= 64 || queued_bytes >= self.flush_limit_bytes {
+        
+        let batch_limit = match self.buffers {
+            RecoveryBufferSet::Affine512(_) => 12,
+            _ => 64,
+        };
+
+        if self.queued_slices.len() >= batch_limit || queued_bytes >= self.flush_limit_bytes {
             self.flush();
         }
     }
