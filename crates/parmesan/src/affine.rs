@@ -162,38 +162,46 @@ pub fn from_affine512(src: &[u8], dst: &mut [u8]) {
     from_affine(src, dst);
 }
 
+/// Shuffle-prepare one 128-byte Affine512 block (parpar `gf16_shuffle_prepare_block`).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn to_affine512_avx512(src: &[u8], dst: &mut [u8]) {
+pub(crate) unsafe fn affine512_prepare_block(src: *const u8, dst: *mut u8) {
     use std::arch::x86_64::*;
     let sep = _mm512_set_epi8(
         15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, 15, 13, 11, 9, 7, 5, 3, 1, 14, 12,
         10, 8, 6, 4, 2, 0, 15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, 15, 13, 11, 9, 7,
         5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0,
     );
+    let ta = _mm512_shuffle_epi8(_mm512_loadu_si512(src.cast()), sep);
+    let tb = _mm512_shuffle_epi8(_mm512_loadu_si512(src.add(64).cast()), sep);
+    _mm512_storeu_si512(dst.cast(), _mm512_unpackhi_epi64(ta, tb));
+    _mm512_storeu_si512(dst.add(64).cast(), _mm512_unpacklo_epi64(ta, tb));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn to_affine512_avx512(src: &[u8], dst: &mut [u8]) {
     for (cin, cout) in src.chunks_exact(128).zip(dst.chunks_exact_mut(128)) {
-        let ta = _mm512_shuffle_epi8(_mm512_loadu_si512(cin.as_ptr().cast()), sep);
-        let tb = _mm512_shuffle_epi8(_mm512_loadu_si512(cin.as_ptr().add(64).cast()), sep);
-        _mm512_storeu_si512(cout.as_mut_ptr().cast(), _mm512_unpackhi_epi64(ta, tb));
-        _mm512_storeu_si512(
-            cout.as_mut_ptr().add(64).cast(),
-            _mm512_unpacklo_epi64(ta, tb),
-        );
+        affine512_prepare_block(cin.as_ptr(), cout.as_mut_ptr());
     }
+}
+
+/// Inverse of [`affine512_prepare_block`] (parpar `gf16_shuffle_finish_block`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+pub(crate) unsafe fn affine512_finish_block(src: *const u8, dst: *mut u8) {
+    use std::arch::x86_64::*;
+    let ta = _mm512_loadu_si512(src.cast());
+    let tb = _mm512_loadu_si512(src.add(64).cast());
+    _mm512_storeu_si512(dst.cast(), _mm512_unpacklo_epi8(tb, ta));
+    _mm512_storeu_si512(dst.add(64).cast(), _mm512_unpackhi_epi8(tb, ta));
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn from_affine512_avx512(src: &[u8], dst: &mut [u8]) {
-    use std::arch::x86_64::*;
     for (cin, cout) in src.chunks_exact(128).zip(dst.chunks_exact_mut(128)) {
-        let ta = _mm512_loadu_si512(cin.as_ptr().cast());
-        let tb = _mm512_loadu_si512(cin.as_ptr().add(64).cast());
-        _mm512_storeu_si512(cout.as_mut_ptr().cast(), _mm512_unpacklo_epi8(tb, ta));
-        _mm512_storeu_si512(
-            cout.as_mut_ptr().add(64).cast(),
-            _mm512_unpackhi_epi8(tb, ta),
-        );
+        affine512_finish_block(cin.as_ptr(), cout.as_mut_ptr());
     }
 }
 

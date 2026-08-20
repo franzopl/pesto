@@ -91,8 +91,21 @@ par2_create_row() {
     bench_case --suite "$SUITE" --workload "$wl" --tool parmesan \
         --version "$("$PARMESAN_BIN" --version 2>/dev/null | head -1)" \
         --variant "create-r${pct}" --input-bytes "$bytes" \
-        --extra "op=create;recovery_pct=$pct;$geom" \
+        --extra "op=create;recovery_pct=$pct;$geom;encoder=${BENCH_ENCODER:-smart}" \
         --setup "$clean" --after "$collect" -- "${P2_CMD[@]}"
+
+    # Extra Affine512 row (same kernel as `smart` on SPR) for A/B vs Normal.
+    if [[ ${BENCH_AFFINE512:-0} == 1 ]]; then
+        local saved_enc=${BENCH_ENCODER:-smart}
+        BENCH_ENCODER=affine512
+        par2_cmd_parmesan "$out" "$wl" "$@"
+        bench_case --suite "$SUITE" --workload "$wl" --tool parmesan \
+            --version "$("$PARMESAN_BIN" --version 2>/dev/null | head -1)" \
+            --variant "create-r${pct}-affine512" --input-bytes "$bytes" \
+            --extra "op=create;recovery_pct=$pct;$geom;encoder=affine512" \
+            --setup "$clean" --after "$collect" -- "${P2_CMD[@]}"
+        BENCH_ENCODER=$saved_enc
+    fi
 
     if ! skip_missing parpar; then
         par2_cmd_parpar "$out" "$wl" "$@"

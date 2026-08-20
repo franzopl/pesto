@@ -184,9 +184,17 @@ pub(super) enum RecoveryBufferSet {
     /// Parpar Affine shuffle-prepare (64-byte groups). GFNI Affine kernel.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Affine(Vec<Vec<u8>>),
-    /// Affine shuffle-prepare in 128-byte groups for AVX-512 GFNI.
+    /// Affine shuffle-prepare, dests interleaved by 4 KiB tile (parpar
+    /// `memProcessing`: `out*chunk + round*numOutputs*chunk`).
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
-    Affine512(Vec<Vec<u8>>),
+    Affine512(Affine512Acc),
+}
+
+/// Affine512 recovery accumulators: one allocation, dests packed per tile.
+pub(super) struct Affine512Acc {
+    data: Vec<u8>,
+    n_rec: usize,
+    slice_len: usize,
 }
 
 impl RecoveryBufferSet {
@@ -207,11 +215,8 @@ impl RecoveryBufferSet {
     pub(super) fn len(&self) -> usize {
         match self {
             Self::Normal(b) => b.len(),
-            Self::Altmap(b)
-            | Self::Shuffle2x(b)
-            | Self::Affine2x(b)
-            | Self::Affine(b)
-            | Self::Affine512(b) => b.len(),
+            Self::Altmap(b) | Self::Shuffle2x(b) | Self::Affine2x(b) | Self::Affine(b) => b.len(),
+            Self::Affine512(a) => a.n_rec,
         }
     }
 }
@@ -425,9 +430,6 @@ impl AffineNibbleScratch {
     }
 }
 
-/// Parpar packed Affine: for each `block`-byte group, store all sources
-/// consecutively so a 6-source madd hits ~768 B of sequential reads
-/// (`gf16_muladd_multi_packed`, interleave = srcCount).
 fn pack_affine_tile(prepared: &[Vec<u8>], off: usize, tile_len: usize, block: usize) -> Vec<u8> {
     let n = prepared.len();
     let blocks = tile_len / block;
@@ -440,6 +442,89 @@ fn pack_affine_tile(prepared: &[Vec<u8>], off: usize, tile_len: usize, block: us
         }
     }
     out
+}
+
+/// Parpar Affine AVX-512 packed: 128-byte blocks, `srcCount` 6, 4 KiB tiles.
+const AFFINE512_BLOCK: usize = 128;
+const AFFINE512_INTERLEAVE: usize = 6;
+const AFFINE512_CHUNK: usize = 4096;
+
+fn affine512_src_scale(n_queued: usize, source: usize) -> usize {
+    let il = AFFINE512_INTERLEAVE;
+    let last = n_queued - n_queued % il;
+    if !n_queued.is_multiple_of(il) && source >= last {
+        n_queued % il
+    } else {
+        il
+    }
+}
+
+/// Dest tile `tile`, recovery `rec`: `tile * n_rec * CHUNK + rec * CHUNK`.
+fn affine512_dest_off(n_rec: usize, rec: usize, tile: usize) -> usize {
+    tile * n_rec * AFFINE512_CHUNK + rec * AFFINE512_CHUNK
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn affine512_acc_to_slices(acc: Affine512Acc, exponent_start: u32) -> Vec<RecoverySlice> {
+    (0..acc.n_rec)
+        .into_par_iter()
+        .map(|i| {
+            let mut data = vec![0u8; acc.slice_len];
+            let n_tiles = acc.slice_len.div_ceil(AFFINE512_CHUNK);
+            for t in 0..n_tiles {
+                let off = t * AFFINE512_CHUNK;
+                let tile_len = (acc.slice_len - off).min(AFFINE512_CHUNK);
+                let src = acc.data.as_ptr().add(affine512_dest_off(acc.n_rec, i, t));
+                let dst = data.as_mut_ptr().add(off);
+                for b in 0..tile_len / AFFINE512_BLOCK {
+                    super::affine::affine512_finish_block(
+                        src.add(b * AFFINE512_BLOCK),
+                        dst.add(b * AFFINE512_BLOCK),
+                    );
+                }
+            }
+            RecoverySlice {
+                exponent: exponent_start + i as u32,
+                data,
+            }
+        })
+        .collect()
+}
+
+/// Byte offset of source `s`, 128-byte block `block` inside tile `tile`.
+fn affine512_packed_off(n_queued: usize, tile: usize, source: usize, block: usize) -> usize {
+    let il = AFFINE512_INTERLEAVE;
+    let b = AFFINE512_BLOCK;
+    let chunk = AFFINE512_CHUNK;
+    let group = source / il;
+    let lane = source % il;
+    let scale = affine512_src_scale(n_queued, source);
+    tile * chunk * n_queued + group * chunk * il + lane * b + block * b * scale
+}
+
+/// Shuffle-prepare raw slices into the ParPar packed Affine512 layout (once).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn prepare_packed_affine512(queued: &[Vec<u8>], packed: &mut [u8], slice_len: usize) {
+    let n = queued.len();
+    if n == 0 {
+        return;
+    }
+    let n_tiles = slice_len.div_ceil(AFFINE512_CHUNK);
+    let dst = packed.as_mut_ptr() as usize;
+    queued.par_iter().enumerate().for_each(|(s, src)| {
+        for t in 0..n_tiles {
+            let off = t * AFFINE512_CHUNK;
+            let tile_len = (slice_len - off).min(AFFINE512_CHUNK);
+            let blocks = tile_len / AFFINE512_BLOCK;
+            for b in 0..blocks {
+                let src_p = src.as_ptr().add(off + b * AFFINE512_BLOCK);
+                let dst_p = (dst as *mut u8).add(affine512_packed_off(n, t, s, b));
+                crate::affine::affine512_prepare_block(src_p, dst_p);
+            }
+        }
+    });
 }
 
 /// One finished recovery slice.
@@ -538,14 +623,11 @@ impl RecoveryEncoder {
         exponent_start: u32,
         recovery_count: usize,
     ) -> Result<Self, TryReserveError> {
-        // c7i movie create: Normal + flush_avx512_gfni ~318 MiB/s; Affine AVX2
-        // and Affine512 layouts ~183–186. Keep the winner until Affine beats it.
+        // c7i 20260820T004824Z movie-1080p median: Affine512 packed 424 MiB/s
+        // vs Normal+GFNI-512 326 (parpar 626). Enable when slice aligns.
         #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("avx512f")
-            && std::is_x86_feature_detected!("avx512bw")
-            && std::is_x86_feature_detected!("gfni")
-        {
-            return Self::try_new(
+        if affine512_kernel_available() && slice_size.is_multiple_of(128) {
+            return Self::try_new_affine512(
                 slice_size,
                 total_input_slices,
                 exponent_start,
@@ -1153,17 +1235,20 @@ impl RecoveryEncoder {
                 );
             }
             let slice_words = slice_size / 2;
-            let buf_bytes = affine_buffer_size(slice_words);
+            let n_tiles = slice_size.div_ceil(AFFINE512_CHUNK);
+            let mut data = Vec::new();
+            data.try_reserve_exact(n_tiles * AFFINE512_CHUNK * recovery_count)?;
+            data.resize(n_tiles * AFFINE512_CHUNK * recovery_count, 0u8);
             Ok(Self {
                 gf: Gf16::new(),
                 slice_words,
                 logbases: input_logbases(total_input_slices),
                 exponent_start,
-                buffers: RecoveryBufferSet::Affine512(try_zeroed_buffers(
-                    0u8,
-                    buf_bytes,
-                    recovery_count,
-                )?),
+                buffers: RecoveryBufferSet::Affine512(Affine512Acc {
+                    data,
+                    n_rec: recovery_count,
+                    slice_len: slice_size,
+                }),
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
@@ -3220,15 +3305,24 @@ impl RecoveryEncoder {
         } else {
             Vec::new()
         };
-        let RecoveryBufferSet::Affine512(ref mut bufs) = self.buffers else {
+        let RecoveryBufferSet::Affine512(ref mut acc) = self.buffers else {
             unreachable!("flush_avx512_affine on non-Affine512 encoder");
         };
         let mut prepared = std::mem::take(&mut self.affine_prepare);
-        Self::prepare_affine_inputs(&queued, &mut prepared, true);
+        let slice_len = acc.slice_len;
+        let n_tiles = slice_len.div_ceil(AFFINE512_CHUNK);
+        let packed_len = n_tiles * AFFINE512_CHUNK * queued.len();
+        if prepared.is_empty() {
+            prepared.push(vec![0u8; packed_len]);
+        } else {
+            prepared[0].resize(packed_len, 0);
+        }
         unsafe {
+            prepare_packed_affine512(&queued, &mut prepared[0], slice_len);
             Self::flush_avx512_affine_work(
-                bufs,
-                &prepared,
+                acc,
+                &prepared[0],
+                queued.len(),
                 start_index,
                 &self.logbases,
                 self.exponent_start,
@@ -3243,69 +3337,88 @@ impl RecoveryEncoder {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn flush_avx512_affine_work(
-        buffers: &mut [Vec<u8>],
-        queued: &[Vec<u8>],
+        acc: &mut Affine512Acc,
+        packed: &[u8],
+        n_queued: usize,
         start_index: usize,
         logbases: &[u32],
         exponent_start: u32,
         gf: &Gf16,
     ) {
-        let n_rec = buffers.len();
-        let n_queued = queued.len();
+        let n_rec = acc.n_rec;
         if n_queued == 0 || n_rec == 0 {
             return;
         }
+        let slice_len = acc.slice_len;
+        let n_tiles = slice_len.div_ceil(AFFINE512_CHUNK);
         let scratch = AffineNibbleScratch::new(gf);
-        let all_tables: Vec<(__m512i, __m512i, __m512i, __m512i)> = (0..n_rec * n_queued)
-            .into_par_iter()
+        let coeffs: Vec<u16> = (0..n_rec * n_queued)
             .map(|flat| {
-                let i = flat / n_queued;
+                let rec = flat / n_queued;
                 let q_idx = flat % n_queued;
-                let exponent = exponent_start + i as u32;
+                let exponent = exponent_start + rec as u32;
                 let logbase = logbases[start_index + q_idx] as u64;
                 let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
-                let coeff = gf.exp(log_coeff);
-                let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeff);
-                (
-                    _mm512_set1_epi64(m_ll as i64),
-                    _mm512_set1_epi64(m_hl as i64),
-                    _mm512_set1_epi64(m_lh as i64),
-                    _mm512_set1_epi64(m_hh as i64),
-                )
+                gf.exp(log_coeff)
             })
             .collect();
 
-        let tile = 4096usize;
-        let slice_len = buffers[0].len();
-        let n_tiles = slice_len.div_ceil(tile);
-        for t in 0..n_tiles {
-            let off = t * tile;
-            let end = (off + tile).min(slice_len);
-            let tile_len = end - off;
-            if tile_len < 128 {
-                continue;
+        let dest_base = acc.data.as_mut_ptr() as usize;
+        let packed_addr = packed.as_ptr() as usize;
+
+        (0..n_tiles).into_par_iter().for_each(|t| {
+            let off = t * AFFINE512_CHUNK;
+            let tile_len = (slice_len - off).min(AFFINE512_CHUNK);
+            let blocks = tile_len / AFFINE512_BLOCK;
+            if blocks == 0 {
+                return;
             }
-            let packed = pack_affine_tile(queued, off, tile_len, 128);
-            let blocks = tile_len / 128;
-            buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
-                let base = rec * n_queued;
-                let dest = &mut buf[off..end];
+            if t + 1 < n_tiles {
+                unsafe {
+                    _mm_prefetch::<_MM_HINT_T1>(
+                        (packed_addr as *const i8).add(affine512_packed_off(n_queued, t + 1, 0, 0)),
+                    );
+                }
+            }
+            for rec in 0..n_rec {
+                let dst = (dest_base as *mut u8).add(affine512_dest_off(n_rec, rec, t));
+                if rec + 1 < n_rec {
+                    unsafe {
+                        _mm_prefetch::<_MM_HINT_T0>(
+                            (dest_base as *const i8).add(affine512_dest_off(n_rec, rec + 1, t)),
+                        );
+                    }
+                }
                 let mut q = 0usize;
                 while q < n_queued {
-                    let take = (n_queued - q).min(6);
+                    let take = (n_queued - q).min(AFFINE512_INTERLEAVE);
+                    let mut mats = [(
+                        _mm512_setzero_si512(),
+                        _mm512_setzero_si512(),
+                        _mm512_setzero_si512(),
+                        _mm512_setzero_si512(),
+                    ); 6];
+                    let base = rec * n_queued + q;
+                    for s in 0..take {
+                        let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeffs[base + s]);
+                        mats[s] = (
+                            _mm512_set1_epi64(m_ll as i64),
+                            _mm512_set1_epi64(m_hl as i64),
+                            _mm512_set1_epi64(m_lh as i64),
+                            _mm512_set1_epi64(m_hh as i64),
+                        );
+                    }
                     unsafe {
-                        let dst = dest.as_mut_ptr();
-                        let pk = packed.as_ptr();
                         for b in 0..blocks {
-                            let p = dst.add(b * 128).cast::<__m512i>();
+                            let p = dst.add(b * AFFINE512_BLOCK).cast::<__m512i>();
                             let mut tph = _mm512_loadu_si512(p);
                             let mut tpl = _mm512_loadu_si512(p.add(1));
-                            for s in 0..take {
-                                let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
-                                let sp = pk.add((b * n_queued + q + s) * 128).cast::<__m512i>();
+                            for (s, &(mll, mhl, mlh, mhh)) in mats.iter().enumerate().take(take) {
+                                let sp = (packed_addr as *const u8)
+                                    .add(affine512_packed_off(n_queued, t, q + s, b))
+                                    .cast::<__m512i>();
                                 let ta = _mm512_loadu_si512(sp);
                                 let tb = _mm512_loadu_si512(sp.add(1));
-                                // parpar gf16_affine_muladd_round: xor3 via vpternlog 0x96
                                 tpl = _mm512_ternarylogic_epi32(
                                     _mm512_gf2p8affine_epi64_epi8(ta, mlh, 0),
                                     _mm512_gf2p8affine_epi64_epi8(tb, mll, 0),
@@ -3325,8 +3438,8 @@ impl RecoveryEncoder {
                     }
                     q += take;
                 }
-            });
-        }
+            }
+        });
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -5339,18 +5452,17 @@ impl RecoveryEncoder {
                     }
                 })
                 .collect(),
-            RecoveryBufferSet::Affine512(bufs) => bufs
-                .into_iter()
-                .enumerate()
-                .map(|(i, af_buf)| {
-                    let mut normal = vec![0u8; af_buf.len()];
-                    super::affine::from_affine512(&af_buf, &mut normal);
-                    RecoverySlice {
-                        exponent: exponent_start + i as u32,
-                        data: normal,
-                    }
-                })
-                .collect(),
+            RecoveryBufferSet::Affine512(acc) => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    unsafe { affine512_acc_to_slices(acc, exponent_start) }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    let _ = (acc, exponent_start);
+                    Vec::new()
+                }
+            }
         };
         (slices, checksums)
     }
@@ -6040,8 +6152,8 @@ mod tests {
         );
         if affine512_kernel_available() {
             assert!(
-                matches!(smart.buffers, RecoveryBufferSet::Normal(_)),
-                "try_new_smart must pick Normal+AVX512-GFNI on SPR (not Affine)"
+                matches!(smart.buffers, RecoveryBufferSet::Affine512(_)),
+                "try_new_smart must pick packed Affine512 on AVX-512+GFNI"
             );
         } else if affine_kernel_available() {
             assert!(

@@ -170,6 +170,7 @@ par2_cmd_parmesan() {
         -t "$BENCH_PAR2_THREADS"
         -m "${BENCH_PAR2_MEMORY}MiB"
         --simd "${BENCH_SIMD:-auto}"
+        --encoder "${BENCH_ENCODER:-smart}"
         -o "$out_dir" -b "$base" -O -q "$@")
 }
 

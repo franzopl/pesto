@@ -64,6 +64,32 @@ impl std::fmt::Display for SimdPath {
     }
 }
 
+/// Which recovery-buffer layout `parmesan create` builds.
+///
+/// `smart` is the auto path (Affine512 packed on AVX-512+GFNI).
+/// `affine512` forces that layout even if `smart` would pick another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum EncoderLayout {
+    #[default]
+    Smart,
+    Normal,
+    Affine,
+    Affine512,
+    Shuffle2x,
+}
+
+impl std::fmt::Display for EncoderLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Smart => write!(f, "smart"),
+            Self::Normal => write!(f, "normal"),
+            Self::Affine => write!(f, "affine"),
+            Self::Affine512 => write!(f, "affine512"),
+            Self::Shuffle2x => write!(f, "shuffle2x"),
+        }
+    }
+}
+
 /// Returns the name of the SIMD path that the PAR2 encoder will use at runtime.
 pub fn detect_simd() -> &'static str {
     #[cfg(target_arch = "x86_64")]

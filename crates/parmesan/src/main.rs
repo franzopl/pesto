@@ -11,7 +11,7 @@ use parmesan::recovery_set::RecoverySet;
 use parmesan::repair::{self, RepairOptions};
 use parmesan::verify::{self, FileStatus, VerifyReport};
 use parmesan::worker::Par2Worker;
-use parmesan::{encoder, encoder::RecoveryEncoder, layout, packet, SimdPath};
+use parmesan::{encoder, encoder::RecoveryEncoder, layout, packet, EncoderLayout, SimdPath};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use walkdir::WalkDir;
@@ -70,6 +70,11 @@ struct CreateArgs {
     /// Force a specific SIMD multiplication backend.
     #[arg(long, value_enum, default_value_t = SimdPath::Auto)]
     simd: SimdPath,
+
+    /// Recovery-buffer layout. `smart` is the production auto path.
+    /// `affine512` is the packed AVX-512+GFNI kernel (not auto on SPR yet).
+    #[arg(long, value_enum, default_value_t = EncoderLayout::Smart)]
+    encoder: EncoderLayout,
 
     /// Output directory for PAR2 files.
     #[arg(short, long)]
@@ -237,6 +242,32 @@ fn main() -> Result<()> {
     })
 }
 
+fn make_encoder(
+    layout: EncoderLayout,
+    slice_size: usize,
+    total_slices: usize,
+    first_exponent: u32,
+    count: usize,
+) -> RecoveryEncoder {
+    match layout {
+        EncoderLayout::Smart => {
+            RecoveryEncoder::new_smart(slice_size, total_slices, first_exponent, count)
+        }
+        EncoderLayout::Normal => {
+            RecoveryEncoder::new(slice_size, total_slices, first_exponent, count)
+        }
+        EncoderLayout::Affine => {
+            RecoveryEncoder::new_affine(slice_size, total_slices, first_exponent, count)
+        }
+        EncoderLayout::Affine512 => {
+            RecoveryEncoder::new_affine512(slice_size, total_slices, first_exponent, count)
+        }
+        EncoderLayout::Shuffle2x => {
+            RecoveryEncoder::new_shuffle2x(slice_size, total_slices, first_exponent, count)
+        }
+    }
+}
+
 async fn run_create(cli: CreateArgs) -> Result<()> {
     let mut input_files = collect_files(&cli.files, cli.recurse)?;
     if input_files.is_empty() {
@@ -340,7 +371,7 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
             let mut off = 0usize;
             while off < slice_size {
                 let win = mem_plan.slice_chunk.min(slice_size - off);
-                let mut enc = RecoveryEncoder::new_smart(win, total_slices, first_exponent, count);
+                let mut enc = make_encoder(cli.encoder, win, total_slices, first_exponent, count);
                 enc = enc.with_simd_path(options.simd);
                 enc = enc.with_flush_limit(
                     (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
@@ -377,7 +408,7 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
             (slices, ingest_h.checksums, ingest_h.hashes)
         } else {
             let mut enc =
-                RecoveryEncoder::new_smart(slice_size, total_slices, first_exponent, count);
+                make_encoder(cli.encoder, slice_size, total_slices, first_exponent, count);
             if pass_idx == 0 {
                 enc = enc.with_checksums();
             }
