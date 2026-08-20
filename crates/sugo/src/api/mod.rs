@@ -26,7 +26,7 @@ pub async fn get_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     if let Err(resp) = authorize(&state, &params).await {
-        return resp;
+        return *resp;
     }
     match params.get("mode").map(String::as_str).unwrap_or_default() {
         "version" => version::handle(),
@@ -45,7 +45,7 @@ pub async fn post_handler(
     multipart: Multipart,
 ) -> Response {
     if let Err(resp) = authorize(&state, &params).await {
-        return resp;
+        return *resp;
     }
     match params.get("mode").map(String::as_str).unwrap_or_default() {
         "addfile" => addfile::handle(&state, &params, multipart).await,
@@ -57,12 +57,15 @@ pub async fn post_handler(
 /// configured at all means "reject everything", never "open access" — an
 /// admin who hasn't set one up yet shouldn't get an unauthenticated
 /// downloader by accident.
-async fn authorize(state: &SharedState, params: &HashMap<String, String>) -> Result<(), Response> {
+async fn authorize(
+    state: &SharedState,
+    params: &HashMap<String, String>,
+) -> Result<(), Box<Response>> {
     let configured = { state.config.read().await.api_key().map(str::to_owned) };
     let provided = params.get("apikey").cloned().unwrap_or_default();
     match configured {
         Some(key) if !key.is_empty() && constant_time_eq(&key, &provided) => Ok(()),
-        _ => Err(unauthorized_response()),
+        _ => Err(Box::new(unauthorized_response())),
     }
 }
 

@@ -191,6 +191,7 @@ pub(super) enum RecoveryBufferSet {
 }
 
 /// Affine512 recovery accumulators: one allocation, dests packed per tile.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(super) struct Affine512Acc {
     data: Vec<u8>,
     n_rec: usize,
@@ -364,6 +365,7 @@ pub fn affine512_kernel_available() -> bool {
 
 /// Four 8×8 GF(2) matrices for Affine GFNI (`ll`, `lh`, `hl`, `hh`).
 /// Byte 7 of each u64 is row 0 of `gf2p8affine` (Intel SDM).
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn gfni_affine_u64_mats(gf: &Gf16, coeff: u16) -> (u64, u64, u64, u64) {
     let mut m_ll = 0u64;
     let mut m_lh = 0u64;
@@ -403,11 +405,13 @@ fn gfni_affine_u64_mats(gf: &Gf16, coeff: u16) -> (u64, u64, u64, u64) {
 /// `gf16_bitdep_init256` with `genAffine=1`). A coefficient's four 8×8
 /// matrices are the XOR of the four nibble contributions instead of an 8×8
 /// rebuild per (recovery, source) pair.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 struct AffineNibbleScratch {
     /// `mats[nibble][slot]` for `coeff` nibble `slot` (weight `1<<(4*slot)`).
     mats: [[(u64, u64, u64, u64); 4]; 16],
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 impl AffineNibbleScratch {
     fn new(gf: &Gf16) -> Self {
         let mut mats = [[(0u64, 0u64, 0u64, 0u64); 4]; 16];
@@ -430,6 +434,7 @@ impl AffineNibbleScratch {
     }
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn pack_affine_tile(prepared: &[Vec<u8>], off: usize, tile_len: usize, block: usize) -> Vec<u8> {
     let n = prepared.len();
     let blocks = tile_len / block;
@@ -445,10 +450,14 @@ fn pack_affine_tile(prepared: &[Vec<u8>], off: usize, tile_len: usize, block: us
 }
 
 /// Parpar Affine AVX-512 packed: 128-byte blocks, `srcCount` 6, 4 KiB tiles.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const AFFINE512_BLOCK: usize = 128;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const AFFINE512_INTERLEAVE: usize = 6;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const AFFINE512_CHUNK: usize = 4096;
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn affine512_src_scale(n_queued: usize, source: usize) -> usize {
     let il = AFFINE512_INTERLEAVE;
     let last = n_queued - n_queued % il;
@@ -460,6 +469,7 @@ fn affine512_src_scale(n_queued: usize, source: usize) -> usize {
 }
 
 /// Dest tile `tile`, recovery `rec`: `tile * n_rec * CHUNK + rec * CHUNK`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn affine512_dest_off(n_rec: usize, rec: usize, tile: usize) -> usize {
     tile * n_rec * AFFINE512_CHUNK + rec * AFFINE512_CHUNK
 }
@@ -493,6 +503,7 @@ unsafe fn affine512_acc_to_slices(acc: Affine512Acc, exponent_start: u32) -> Vec
 }
 
 /// Byte offset of source `s`, 128-byte block `block` inside tile `tile`.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn affine512_packed_off(n_queued: usize, tile: usize, source: usize, block: usize) -> usize {
     let il = AFFINE512_INTERLEAVE;
     let b = AFFINE512_BLOCK;
@@ -557,6 +568,7 @@ pub struct RecoveryEncoder {
     free_buffers: Vec<Vec<u8>>,
     /// Reused Affine shuffle-prepare outputs (parpar keeps a prepare scratch
     /// instead of allocating a full extra copy of every queued slice).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     affine_prepare: Vec<Vec<u8>>,
     /// Maximum bytes to queue before flushing.
     flush_limit_bytes: usize,
@@ -1359,6 +1371,7 @@ impl RecoveryEncoder {
     /// Move consumed queue buffers into the free-list (preserving their
     /// allocations) and restore the empty queue.
     /// Grow/reuse `affine_prepare` and shuffle-prepare each queued slice into it.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     fn prepare_affine_inputs(queued: &[Vec<u8>], pool: &mut Vec<Vec<u8>>, wide512: bool) {
         if queued.is_empty() {
             return;
