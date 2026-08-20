@@ -208,13 +208,44 @@ Result:
 
 ParPar still leads (c7i: 656 MiB/s, medialab: 361 MiB/s). 
 
-### The remaining AVX2 (medialab) gap: Instruction Latency & Data Layout
+### The remaining AVX2 (medialab) gap: 2-slice `vperm2i128` amortization
 
-On medialab (i5-10400 without GFNI), Pesto automatically uses the `Shuffle2x AVX2` layout. Pesto processes 261 MiB/s while ParPar processes 361 MiB/s.
+On medialab (i5-10400 without GFNI), Pesto uses `Shuffle2x AVX2`: **261 MiB/s** vs ParPar's **361 MiB/s** (~38% gap).
 
-Investigation revealed exactly why: **Instruction latency of `vperm2i128`**.
-In `s2x_contrib`, Pesto executes `_mm256_permute2x128_si256` to cross data between the 128-bit lanes. This instruction has a massive 3-cycle latency on most Intel CPUs.
-We experimentally refactored the innermost loop to use Loop Tiling (accumulating multiple slices over smaller memory tiles to avoid destination memory bottleneck and register spilling). However, the performance did not change (or got slower).
-The true bottleneck is that ParPar's `GF16_SHUFFLE2X_CALC` avoids crossing the 128-bit lanes inside the loop by structuring (interleaving) the recovery block data in memory differently during `to_shuffle2x`.
+**Root cause (confirmed by reading ParPar source `gf16_shuffle2x_x86.h`):**
+Both Pesto and ParPar are forced to use `_mm256_permute2x128_si256` (3-cycle latency on Intel) to cross the two 128-bit lanes inside a 256-bit AVX2 register. There is no magic memory layout that avoids this instruction.
 
-To close this gap, Pesto would need a deep rewrite of `to_shuffle2x` and its Galois coefficient tables to adopt the same lane-symmetrical layout as ParPar, avoiding the `vperm2i128` instruction completely.
+The difference: **ParPar's `gf16_shuffle2x_muladd_x_avx2` processes 2 input slices simultaneously per loop iteration** (`srcCount` parameter), accumulating the `norm` and `swap` intermediates from both slices into the same registers before issuing the single `vperm2i128`. This halves the number of expensive cross-lane instructions.
+
+Pesto's `flush_avx2_shuffle2x_work` processes 1 slice at a time across recovery blocks, so it executes `vperm2i128` once per slice. Rewriting this to process 2 slices per iteration would require refactoring the +7300-line `encoder.rs` AVX2 kernel.
+
+**Scope of the fix:** AVX2-only. This instruction does not appear in the GFNI hot path (c7i), nor in the 128-bit SSSE3 path (no cross-lane issue). Not worth the risk/effort for a single CPU generation.
+
+**Benchmark target (future work):** Close the 38% gap on AVX2-without-GFNI machines (e.g. Intel 6th-10th gen desktop without Rocket Lake, AMD Zen 1/2). Estimated effort: 2–3 weeks of careful AVX2 intrinsics refactoring.
+
+---
+
+## CPU Priority Matrix
+
+| Architecture | Representative HW | Pesto kernel | Status | Priority |
+|---|---|---|---|---|
+| AVX-512 + GFNI | AWS c7i, Intel Sapphire Rapids, Ice Lake Xeon | `Affine512 packed` | ✅ **518 MiB/s** (parpar 656, gap ~21%) | High — primary release target |
+| AVX2 (no GFNI) | Intel 6th–10th gen, AMD Zen 1/2 | `Shuffle2x AVX2` | ⚠ **261 MiB/s** (parpar 361, gap ~38%) | Medium — worth a dedicated sprint |
+| SSSE3 (legacy) | Intel Core 2, early Sandy Bridge | `Normal SSSE3` | Not benchmarked | Low — marginal install base |
+| GFNI without AVX-512 | Tremont (Atom), some Tiger Lake | Falls back to `Shuffle2x` | Not benchmarked | Low |
+| Apple Silicon (ARM) | M1/M2/M3 | No specialised kernel yet | Not benchmarked | Future |
+
+**Recommended benchmark priority for the next AWS run:** c7i (AVX-512+GFNI) — that is where we have the largest user base for a Usenet tool and where our PAR2 create is closest to matching ParPar. Closing that last 21% on c7i is higher-value than closing the 38% AVX2 gap.
+
+---
+
+## Pending items vs nyuu+parpar (critical backlog)
+
+| Item | Gap | Impact | Notes |
+|---|---|---|---|
+| **PAR2 create c7i: 518 vs 656 MiB/s** | ~21% | High | Roadmap items P2 (SIMD hasher), P3 (Affine2x srcCount=12) remain uninvestigated |
+| **movie full two-phase (local):** pesto 262 vs parpar+nyuu 292 MiB/s | ~11% | Medium | PAR2 create is the bottleneck (200 MiB/s on AVX2); closing c7i gap will likely fix this path too |
+| **AVX2 Shuffle2x 2-slice amortization** | ~38% on AVX2 | Medium | Documented above as future work |
+| ~~post-only speed~~ | — | ✅ Done | Pesto 1477 MiB/s vs nyuu 1333 (1.11×), many-small 1355 vs 475 (2.85×) |
+| ~~many-small PAR2 create~~ | — | ✅ Done | Pesto 291 vs parpar 252 (we lead) |
+
