@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-20
+
+### Performance (parmesan 0.5.1)
+
+This release is a focused performance sprint targeting PAR2 create throughput
+and yEnc encode speed. No API or on-disk format changes.
+
+#### PAR2 kernel improvements (AVX-512 + GFNI — e.g. AWS c7i, Xeon Ice Lake)
+
+- **Affine512 packed kernel** (`srcCount=6`, 4 KiB tiles) is now the `smart`
+  default on AVX-512+GFNI hardware, replacing the previous `Normal+GFNI-512`
+  path. PAR2 create throughput on `c7i.2xlarge movie-1080p`:
+  `325 → 424 MiB/s` (initial), then `424 → 518 MiB/s` after dynamic batching.
+- **Affine AVX-512+GFNI** and **Affine AVX2+GFNI** kernels added (ParPar
+  `gf16_affine` equivalent).
+- **Shuffle AVX-512 nibble** kernel added (no-GFNI fallback for AVX-512 CPUs).
+- **Affine 16×4 nibble scratch** from ParPar's dependency-table layout.
+- **Affine tile packing** (`muladd_multi_packed` equivalent): tiles are now
+  packed in source-interleaved layout, reducing L2 pressure.
+- **Dynamic batch sizing**: `add_slice` now queues 12 slices per flush on
+  Affine512 (matching ParPar's `inputBatchSize`) and 64 on Shuffle2x/Normal.
+  This alone accounts for the `424 → 518 MiB/s` jump on c7i.
+- Affine shuffle-prepare buffers are reused across flushes (avoids repeated
+  allocation in the hot path).
+- `smart` auto-selection now verifies that a kernel beats the current best
+  before promoting it — prevents regressions on mismatched ISA detection.
+
+#### yEnc encode improvements (pesto 0.8.1)
+
+- **AVX2 yEnc** (nyuu `encoder_avx_base.h` style, VBMI2 `mask_expand` +
+  `vpternlog 0xF8`) on non-hybrid CPUs. Measured ~2312 MiB/s on c7i.
+- **AVX-512 BW + VBMI2** yEnc path added (available but not default — AVX2
+  wins on current hardware).
+- **IEEE CRC-32 folded into yEnc encode**: CRC is now computed during the
+  encode pass via `crc32fast`, eliminating a second walk over the payload.
+- **encode off the POST path**: yEnc encoding now runs on a dedicated pool
+  thread with a ready-article queue, fully decoupling CPU-bound encode from
+  I/O-bound NNTP posting.
+- One yEnc encode thread on CPUs with ≤4 cores to avoid starvation.
+
+#### Hasher
+
+- **SIMD MD5-MB 8/16-wide** (`md5-many` crate): slice and file checksums now
+  use multi-buffer MD5 instead of scalar, reducing hasher overhead on the
+  input read path.
+
+### Benchmarks (vs 0.8.0 / parmesan 0.5.0)
+
+| Machine | Workload | 0.8.0 | 0.8.1 | Δ |
+|---|---|---|---|---|
+| c7i.2xlarge (AVX-512+GFNI) | movie-1080p PAR2 create | ~325 MiB/s | **518 MiB/s** | +59% |
+| medialab i5-10400 (AVX2) | movie-1080p PAR2 create | ~130 MiB/s | **200 MiB/s** | +54% |
+| medialab i5-10400 | movie post-only (0 ms) | ~1050 MiB/s | **1477 MiB/s** | +41% |
+| medialab i5-10400 | many-small PAR2 create | — | **291 MiB/s** | leads ParPar |
+
 ## [0.8.0] — 2026-08-18
 
 ### Added
