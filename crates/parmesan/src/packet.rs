@@ -91,9 +91,9 @@ pub fn serialize_recovery_packets(
 ) -> Vec<Vec<u8>> {
     use md5_many::{Md5Many, Md5State};
     let many = Md5Many::new();
-    
+
     let mut out_packets = Vec::with_capacity(slices.len());
-    
+
     // Build the packets without MD5 first
     for slice in slices {
         let body_len = 4 + slice.data.len();
@@ -108,7 +108,7 @@ pub fn serialize_recovery_packets(
         packet.extend_from_slice(&slice.data); // 68..
         out_packets.push(packet);
     }
-    
+
     // Hash them in batches
     let lanes = many.lanes();
     for chunk in out_packets.chunks_mut(lanes) {
@@ -124,7 +124,7 @@ pub fn serialize_recovery_packets(
             chunk[i][16..32].copy_from_slice(&hash);
         }
     }
-    
+
     out_packets
 }
 

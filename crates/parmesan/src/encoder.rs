@@ -1460,7 +1460,7 @@ impl RecoveryEncoder {
         // the honest, validated fix rather than a theory dressed up as one.
         // See `bench/FINDINGS.md` §3 for the full writeup.
         let queued_bytes = self.queued_slices.len() * self.slice_words * 2;
-        
+
         let batch_limit = match self.buffers {
             RecoveryBufferSet::Affine512(_) => 12,
             _ => 64,
@@ -1577,7 +1577,8 @@ impl RecoveryEncoder {
             if affine512_kernel_available() {
                 unsafe { self.flush_avx512_affine2x() };
                 return;
-            } else if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
+            } else if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni")
+            {
                 unsafe { self.flush_avx2_affine2x() };
                 return;
             }
@@ -3177,7 +3178,7 @@ impl RecoveryEncoder {
         });
     }
 
-unsafe fn flush_avx512_affine2x(&mut self) {
+    unsafe fn flush_avx512_affine2x(&mut self) {
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
@@ -3207,7 +3208,7 @@ unsafe fn flush_avx512_affine2x(&mut self) {
         self.recycle_queue(queued);
     }
 
-#[cfg(target_arch = "x86_64")]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn a2x_contrib512(data: __m512i, mat_norm: __m512i, mat_swap: __m512i) -> __m512i {
         let r1 = _mm512_gf2p8affine_epi64_epi8(data, mat_norm, 0);
@@ -3216,7 +3217,7 @@ unsafe fn flush_avx512_affine2x(&mut self) {
         _mm512_xor_si512(r1, _mm512_shuffle_epi32::<0x4E>(r2))
     }
 
-#[cfg(target_arch = "x86_64")]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,gfni")]
     unsafe fn flush_avx512_affine2x_work(
         buffers: &mut [Vec<u8>],
@@ -3285,10 +3286,26 @@ unsafe fn flush_avx512_affine2x(&mut self) {
                     m_hh |= (row_hh as u64) << shift;
                 }
 
-                let mat_norm =
-                    _mm512_set_epi64(m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64);
-                let mat_swap =
-                    _mm512_set_epi64(m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64);
+                let mat_norm = _mm512_set_epi64(
+                    m_hh as i64,
+                    m_ll as i64,
+                    m_hh as i64,
+                    m_ll as i64,
+                    m_hh as i64,
+                    m_ll as i64,
+                    m_hh as i64,
+                    m_ll as i64,
+                );
+                let mat_swap = _mm512_set_epi64(
+                    m_lh as i64,
+                    m_hl as i64,
+                    m_lh as i64,
+                    m_hl as i64,
+                    m_lh as i64,
+                    m_hl as i64,
+                    m_lh as i64,
+                    m_hl as i64,
+                );
                 (mat_norm, mat_swap)
             })
             .collect();
@@ -3438,193 +3455,589 @@ unsafe fn flush_avx512_affine2x(&mut self) {
                             },
                         ];
 
-                    macro_rules! unroll_take {
-                        ($take:expr, $src_ptrs:expr, $mats:expr, $b:expr, $acc:expr) => {
-                            match $take {
-                                1 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                        macro_rules! unroll_take {
+                            ($take:expr, $src_ptrs:expr, $mats:expr, $b:expr, $acc:expr) => {
+                                match $take {
+                                    1 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                    }
+                                    2 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                    }
+                                    3 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                    }
+                                    4 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                    }
+                                    5 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                    }
+                                    6 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                    }
+                                    7 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[6].0, $mats[6].1,
+                                            ),
+                                        );
+                                    }
+                                    8 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[6].0, $mats[6].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[7].0, $mats[7].1,
+                                            ),
+                                        );
+                                    }
+                                    9 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[6].0, $mats[6].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[7].0, $mats[7].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[8].0, $mats[8].1,
+                                            ),
+                                        );
+                                    }
+                                    10 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[6].0, $mats[6].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[7].0, $mats[7].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[8].0, $mats[8].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[9].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[9].0, $mats[9].1,
+                                            ),
+                                        );
+                                    }
+                                    11 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[6].0, $mats[6].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[7].0, $mats[7].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[8].0, $mats[8].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[9].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[9].0, $mats[9].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[10].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data,
+                                                $mats[10].0,
+                                                $mats[10].1,
+                                            ),
+                                        );
+                                    }
+                                    12 => {
+                                        let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[0].0, $mats[0].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[1].0, $mats[1].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[2].0, $mats[2].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[3].0, $mats[3].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[4].0, $mats[4].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[5].0, $mats[5].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[6].0, $mats[6].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[7].0, $mats[7].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[8].0, $mats[8].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[9].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data, $mats[9].0, $mats[9].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[10].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data,
+                                                $mats[10].0,
+                                                $mats[10].1,
+                                            ),
+                                        );
+                                        let data = _mm512_loadu_si512($src_ptrs[11].add($b));
+                                        $acc = _mm512_xor_si512(
+                                            $acc,
+                                            RecoveryEncoder::a2x_contrib512(
+                                                data,
+                                                $mats[11].0,
+                                                $mats[11].1,
+                                            ),
+                                        );
+                                    }
+                                    _ => unreachable!(),
                                 }
-                                2 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                }
-                                3 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                }
-                                4 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                }
-                                5 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                }
-                                6 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                }
-                                7 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
-                                }
-                                8 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
-                                }
-                                9 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
-                                }
-                                10 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[9].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[9].0, $mats[9].1));
-                                }
-                                11 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[9].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[9].0, $mats[9].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[10].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[10].0, $mats[10].1));
-                                }
-                                12 => {
-                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[9].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[9].0, $mats[9].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[10].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[10].0, $mats[10].1));
-                                    let data = _mm512_loadu_si512($src_ptrs[11].add($b));
-                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[11].0, $mats[11].1));
-                                }
-                                _ => unreachable!(),
-                            }
+                            };
                         }
-                    }
 
                         for b in 0..blocks {
                             let mut acc = _mm512_loadu_si512(dst_ptr.add(b));
@@ -5982,7 +6395,11 @@ impl FileHasher {
 
     /// Update the file hash with the unpadded portion of the slice,
     /// and simultaneously compute the MD5 and CRC32 of the fully padded slice.
-    pub fn update_and_hash_slice(&mut self, padded_slice: &[u8], actual_len: usize) -> SliceChecksum {
+    pub fn update_and_hash_slice(
+        &mut self,
+        padded_slice: &[u8],
+        actual_len: usize,
+    ) -> SliceChecksum {
         let mut slice_state = md5_many::Md5State::new();
         let mut crc = crc32fast::Hasher::new();
 
@@ -6019,9 +6436,10 @@ impl FileHasher {
                 // Partial chunk: simultaneously hash the unpadded part, then individually hash the rest of the padding for the slice
                 let unpadded_part = &chunk[..chunk_actual_len];
                 let padded_part = &chunk[chunk_actual_len..];
-                
+
                 let mut states = [self.full.clone(), slice_state.clone()];
-                self.many.update_many(&mut states, &[unpadded_part, unpadded_part]);
+                self.many
+                    .update_many(&mut states, &[unpadded_part, unpadded_part]);
                 self.full = states[0].clone();
                 slice_state = states[1].clone();
 

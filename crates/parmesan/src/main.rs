@@ -527,10 +527,10 @@ async fn run_create(cli: CreateArgs) -> Result<()> {
         }
 
         let volumes = layout::plan_volumes(recovery_count as u32);
-        
+
         // Serialize packets in batches to exploit SIMD MD5-MB
         let recovery_packets = packet::serialize_recovery_packets(&rsid, &recovery_slices);
-        
+
         for (slice, pkt) in recovery_slices.iter().zip(recovery_packets.into_iter()) {
             let abs_exp = slice.exponent;
             // Map the absolute exponent back to a position in the layout
