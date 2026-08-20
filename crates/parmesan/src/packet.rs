@@ -83,6 +83,51 @@ pub fn serialize_packet(
     packet
 }
 
+/// Serialize a batch of recovery slices into packets, computing their MD5 hashes
+/// in parallel using SIMD.
+pub fn serialize_recovery_packets(
+    recovery_set_id: &[u8; 16],
+    slices: &[crate::encoder::RecoverySlice],
+) -> Vec<Vec<u8>> {
+    use md5_many::{Md5Many, Md5State};
+    let many = Md5Many::new();
+    
+    let mut out_packets = Vec::with_capacity(slices.len());
+    
+    // Build the packets without MD5 first
+    for slice in slices {
+        let body_len = 4 + slice.data.len();
+        let total = HEADER_LEN + body_len;
+        let mut packet = Vec::with_capacity(total);
+        packet.extend_from_slice(&MAGIC); // 0..8
+        packet.extend_from_slice(&(total as u64).to_le_bytes()); // 8..16
+        packet.extend_from_slice(&[0u8; 16]); // 16..32 — MD5 placeholder
+        packet.extend_from_slice(recovery_set_id); // 32..48
+        packet.extend_from_slice(&TYPE_RECOVERY); // 48..64
+        packet.extend_from_slice(&slice.exponent.to_le_bytes()); // 64..68
+        packet.extend_from_slice(&slice.data); // 68..
+        out_packets.push(packet);
+    }
+    
+    // Hash them in batches
+    let lanes = many.lanes();
+    for chunk in out_packets.chunks_mut(lanes) {
+        let mut states = vec![Md5State::new(); chunk.len()];
+        let mut inputs = Vec::with_capacity(chunk.len());
+        for p in chunk.iter() {
+            inputs.push(&p[32..]);
+        }
+        many.update_many(&mut states, &inputs);
+        let mut hashes = vec![[0u8; 16]; chunk.len()];
+        many.finalize_many(&states, &mut hashes);
+        for (i, hash) in hashes.into_iter().enumerate() {
+            chunk[i][16..32].copy_from_slice(&hash);
+        }
+    }
+    
+    out_packets
+}
+
 /// Build the body of a Main packet.
 ///
 /// The recovery set contains exactly the given files (no non-recovery files).

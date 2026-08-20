@@ -37,6 +37,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
 walkdir = "2"
+md5-many = "0.1.0-alpha.4"
 
 [features]
 bench-internals = []

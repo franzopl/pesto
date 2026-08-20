@@ -5476,22 +5476,25 @@ pub struct FileHashes {
     pub length: u64,
 }
 
-/// Computes [`FileHashes`] from a file's real bytes, fed incrementally.
+/// Computes [`FileHashes`] from a file's real bytes, fed incrementally,
+/// and computes per-slice checksums simultaneously.
 pub struct FileHasher {
-    full: Md5,
+    full: md5_many::Md5State,
     head: Md5,
     head_consumed: usize,
     length: u64,
+    many: md5_many::Md5Many,
 }
 
 impl FileHasher {
     /// Start hashing a new file.
     pub fn new() -> Self {
         Self {
-            full: Md5::new(),
+            full: md5_many::Md5State::new(),
             head: Md5::new(),
             head_consumed: 0,
             length: 0,
+            many: md5_many::Md5Many::new(),
         }
     }
 
@@ -5507,14 +5510,70 @@ impl FileHasher {
         }
     }
 
+    /// Update the file hash with the unpadded portion of the slice,
+    /// and simultaneously compute the MD5 and CRC32 of the fully padded slice.
+    pub fn update_and_hash_slice(&mut self, padded_slice: &[u8], actual_len: usize) -> SliceChecksum {
+        let mut slice_state = md5_many::Md5State::new();
+        let mut crc = crc32fast::Hasher::new();
+
+        // Feed the 16k head if still needed
+        let unpadded = &padded_slice[..actual_len];
+        self.length += actual_len as u64;
+        let room = HEAD_LEN - self.head_consumed;
+        if room > 0 {
+            let take = room.min(actual_len);
+            self.head.update(&unpadded[..take]);
+            self.head_consumed += take;
+        }
+
+        // Process chunk by chunk to maintain L1 cache locality for CRC
+        for chunk_start in (0..padded_slice.len()).step_by(64 * 1024) {
+            let chunk_end = (chunk_start + 64 * 1024).min(padded_slice.len());
+            let chunk = &padded_slice[chunk_start..chunk_end];
+            crc.update(chunk);
+
+            // Compute how much of this chunk is actual unpadded data
+            let chunk_actual_len = if chunk_start >= actual_len {
+                0
+            } else {
+                (actual_len - chunk_start).min(chunk.len())
+            };
+
+            if chunk_actual_len == chunk.len() {
+                // Entire chunk is unpadded data: hash simultaneously
+                let mut states = [self.full.clone(), slice_state.clone()];
+                self.many.update_many(&mut states, &[chunk, chunk]);
+                self.full = states[0].clone();
+                slice_state = states[1].clone();
+            } else if chunk_actual_len > 0 {
+                // Partial chunk: simultaneously hash the unpadded part, then individually hash the rest of the padding for the slice
+                let unpadded_part = &chunk[..chunk_actual_len];
+                let padded_part = &chunk[chunk_actual_len..];
+                
+                let mut states = [self.full.clone(), slice_state.clone()];
+                self.many.update_many(&mut states, &[unpadded_part, unpadded_part]);
+                self.full = states[0].clone();
+                slice_state = states[1].clone();
+
+                slice_state.update(padded_part);
+            } else {
+                // Completely padding
+                slice_state.update(chunk);
+            }
+        }
+
+        SliceChecksum {
+            md5: slice_state.finalize().into(),
+            crc32: crc.finalize(),
+        }
+    }
+
     /// Finish and return the hashes.
     pub fn finish(self) -> FileHashes {
-        let mut md5_full = [0u8; 16];
-        md5_full.copy_from_slice(&self.full.finalize());
         let mut md5_16k = [0u8; 16];
         md5_16k.copy_from_slice(&self.head.finalize());
         FileHashes {
-            md5_full,
+            md5_full: self.full.finalize().into(),
             md5_16k,
             length: self.length,
         }

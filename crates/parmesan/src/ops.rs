@@ -288,10 +288,8 @@ fn emit_logical_slice(
     hash: Option<&mut HashSink>,
 ) {
     if let Some(h) = hash {
-        h.current.update(&logical[..actual_len]);
-        h.out
-            .checksums
-            .push(crate::encoder::slice_checksum(&logical));
+        let checksum = h.current.update_and_hash_slice(&logical, actual_len);
+        h.out.checksums.push(checksum);
         if is_last {
             let finished = std::mem::take(&mut h.current);
             h.out.hashes.push(finished.finish());
