@@ -31,7 +31,7 @@ must be complete.
 | A9 | **Affine GFNI** (SSE) | GFNI+SSSE3 | Missing | |
 | A10 | **Affine AVX2** | GFNI+AVX2 | Have (`smart` if GFNI && !512) | parpar default without 512 |
 | A11 | Affine AVX10 | AVX10 | Missing | detect + 256-bit EVEX |
-| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (manual) | tile-pack + nibble scratch; c7i ~183, slower than Normal+GFNI ~301 |
+| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (`smart`) | packed + dest-interleaved tiles + prefetch; was 424 vs parpar 626 |
 | A13 | Affine2x GFNI/AVX2/AVX10/512 | GFNI… | AVX2 kernel only, not `smart` | Keep for invert/experiments |
 | A14 | XOR SSE2 | SSE2 | Missing | |
 | A15 | XOR-JIT SSE2 / AVX2 / AVX-512 | W^X + JIT | Missing | last on x86 after Affine |
@@ -48,7 +48,7 @@ must be complete.
 | A26 | Recovery MD5-MB 8/16-wide | AVX2 / AVX-512 | Missing | |
 | A27 | OpenCL | GPU | Missing | last; optional crate feature |
 
-`smart` today: Normal+AVX-512/GFNI on SPR (c7i create ~318); Affine AVX2 on GFNI without 512; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI. yEnc `encode()`: AVX2 + VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
+`smart` today: **Affine512 packed** on SPR (c7i movie create **424 MiB/s** median); Affine AVX2 on GFNI without 512; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI. yEnc `encode()`: AVX2 + VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
 
 Target `smart` when this list is done: same priority as
 `Galois16Mul::default_method` in parpar (`gf16mul.cpp`).
@@ -69,9 +69,9 @@ Target `smart` when this list is done: same priority as
 | B10 | `encodeTo` one-pass + CRC fold | PCLMUL / VPCLMUL | Partial (`encode()` returns CRC via crc32fast/PCLMUL then yEnc; no caller walk) |
 | B11 | Decode SSSE3/AVX2/AVX-512/NEON/RVV | — | Partial (we have a decoder; not full ISA matrix) |
 
-Default poster path stays **encode on the NNTP worker**. No encode-ahead
-queue unless an explicit opt-in flag is added later (not in this list’s
-critical path).
+Poster path: dedicated encode workers fill a ready-article queue (nyuu
+`articleQueueBuffer`); NNTP workers only POST. Encode workers =
+`min(performance cores, connections)` (1 encoder on c7i was 0.85× nyuu).
 
 ## C — Order of work
 
@@ -112,10 +112,24 @@ on the NNTP worker (no encode-ahead queue).
 
 | CPU | PAR2 `smart` | yEnc `encode()` |
 |---|---|---|
-| SPR / c7i (AVX-512+GFNI) | **Normal + `flush_avx512_gfni`** | AVX2 + VBMI2/`vpternlog` (ymm) |
+| SPR / c7i (AVX-512+GFNI) | **Affine512 packed** | AVX2 + VBMI2/`vpternlog` (ymm) |
 | GFNI, no 512 | Affine AVX2 | AVX2 (+ VBMI2 if present) |
 | AVX2, no GFNI | Shuffle2x | AVX2; SSSE3 if hybrid |
 | AVX-512, no GFNI | Normal + Shuffle AVX-512 | AVX2 (zmm yEnc is manual) |
+
+### Affine512 packed on `smart` (c7i `20260820T004824Z`, 3-rep median)
+
+ParPar Affine AVX-512 is `prepare_packed` (shuffle-512 into interleave-6,
+4 KiB tiles, `srcScale` = 6) + slice-chunk threads + nibble scratch in-kernel.
+
+| Path | movie-1080p create | many-small create |
+|---|---|---|
+| parmesan `smart` was Normal+GFNI-512 | 325.6 MiB/s (RSD 0.8%) | 356.6 |
+| parmesan **Affine512 packed** | **424.0** (RSD 0.4%) | **371.5** |
+| parpar | **626.2** (RSD 4.3%) | 253.2 |
+
+Affine512 is `smart` on AVX-512+GFNI (slice multiple of 128). Still ~0.68×
+parpar on the large file.
 
 ### Landed on `dev` (this push)
 
@@ -136,8 +150,8 @@ Sources used: npm `@animetosho/parpar` `gf16/`, `node_modules/yencode/src/`.
 
 | Metric | pesto/parmesan | competitor |
 |---|---|---|
-| PAR2 create, **correct** `smart` (Normal+GFNI-512) | **~301 MiB/s** | parpar **~562** |
-| PAR2 create, Affine AVX2 or Affine512 auto | ~183–186 | — **do not use** |
+| PAR2 create, `smart` **Affine512 packed** (20260820) | **424.0 MiB/s** | parpar **626.2** |
+| PAR2 create, previous Normal+GFNI-512 | 325.6 | — |
 | yEnc 768 KiB line=128 AVX2 (+VBMI2) | ~2312 MiB/s | node-yencode ~1855 |
 | yEnc same, zmm `encode_avx512` | ~1874 (was 1168 before 32/16 tail) | still < AVX2 |
 | yEnc `auto` (AVX2+CRC) | ~2096 | was 1100 with zmm default |
@@ -146,13 +160,41 @@ Older good create ~318 vs this ~301 is one-rep noise, not Affine.
 
 ### What is left to match parpar (~562 create)
 
-The SPR winner in parpar is **packed Affine AVX-512**, not our Normal+GFNI
-kernel. Ours at ~183 is still slower than ~301. Next (when work resumes):
+### Dest-interleave + prefetch: no create win (c7i 1-rep, aborted)
 
-1. Make `new_affine512` **faster than 301** on c7i (packed prepare into the
-   kernel, less extra copy, their `srcScale` layout — not another LUT).
-2. Only then set `smart` to Affine512.
-3. Post-only vs nyuu (~1160 vs ~1821 last full e2e) is separate: worker
-   encode vs nyuu’s ready-article queue. Do not change the default pipeline.
+`20260820T113241Z` movie create: parmesan **425.2** vs parpar **619.3** (was
+424 vs 626). Instance `i-0857d77405a82bbeb` terminated after that row.
+
+Learned: the remaining ~0.68× gap is **not** dest tiling / `_mm_prefetch` /
+finish copies. Packed prepare + slice-split tiles already captured that.
+Dest-interleave raised RSS (~1.5 → 2.0 GiB) for no throughput. Do not spend
+another c7i run on layout tweaks of this kernel.
+
+Next create levers (same ParPar inventory, not exotic ISA):
+
+1. **P2 hasher SIMD** — MD5×2 (file+slice) + CRC on the input pass; recovery
+   MD5-MB 8/16-wide. ParPar does this in the same read that feeds RS.
+2. **P4 Affine2x AVX-512** (`srcCount` 12, stride 64) — only because P1 still
+   leaves >10% vs parpar. Keep Affine (not Affine2x) as `smart` until it wins.
+3. **Input batch 12** like parpar `inputBatchSize` (we pack whatever is queued).
+
+Medialab i5-10400, 0 ms mock, 1 rep (`20260820T051428Z`):
+
+| case | pesto | nyuu | pesto/nyuu |
+|---|---|---|---|
+| movie-1080p post-only | **1477 MiB/s** | 1333 | **1.11×** |
+| many-small post-only | **1355** | 475 | **2.85×** |
+| movie full two-phase | 262 | parpar+nyuu 292 | 0.90× |
+
+c7i `20260820T102216Z` (3-rep median, 8 conns, encode pool `min(cores, conns)`):
+
+| case | pesto | nyuu / parpar+nyuu | pesto/nyuu |
+|---|---|---|---|
+| movie post-only 0 ms | **1899** (RSD 1.2%) | 1726 | **1.10×** |
+| movie post-only 30 ms | 91.6 | 90.7 | **1.01×** |
+| many-small post-only 0 ms | **1292** | 417 | **3.10×** |
+| movie full two-phase 0 ms | 218 | **422** | 0.52× (PAR2 create) |
+
+Prior run with 1 encoder: 1496 vs 1766 (0.85×). Post-only ≥ 0.9× **met** on c7i.
 
 Exotic ISA (SVE, RVV, XOR-JIT, OpenCL) is not the c7i gap.

@@ -50,11 +50,13 @@ Acceptance: medialab `movie-1080p` create ≥ parpar; `many-small` not slower.
 
 - [x] Affine2x kernel exists behind `new_affine2x` only (not `smart`)
 - [x] Affine AVX2 (parpar default without 512) is the GFNI `smart` path
-- [x] Affine AVX-512 (parpar default on c7i) — `smart` when 512+GFNI
+- [x] Affine AVX-512 (parpar default on c7i) — `smart` when 512+GFNI (c7i movie 424 vs parpar 626)
 - [x] Kernel: 2× `gf2p8affine` + lane swap, `srcCount=6`, 4 KiB tiles
 - [x] Scratch = 16×4 matrices, not 65k dep tables
 
-Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still ahead.
+Acceptance: c7i `movie-1080p` create within ~10% of parpar — **not met**
+(424 vs 626). `many-small` still ahead. Dest-interleave+prefetch did not
+move create (425 vs 619, 1-rep); do not retry layout on this kernel.
 
 ### P1b — Slice-chunk memory
 
@@ -69,14 +71,19 @@ Acceptance: c7i `movie-1080p` create within ~10% of parpar; `many-small` still a
 
 ### P3 — Poster encode concurrency
 
-- [x] `encode_concurrency = min(cores, connections)` (the ≤4→1 cap
-      regressed c7i post-only 455 vs ~1100)
+- [x] Encode off the POST path; ready-article queue
+      (`articleQueueBuffer` = min(round(conns×0.5)+2, 25))
+- [x] Encode workers = `min(cores, connections)` (1 encoder missed 0.9× on c7i)
 - [x] Prefer AVX2 yEnc on non-hybrid CPUs (CPUID Hybrid bit); SSSE3 on P+E
 - [x] Article body pool / `encode_part_into` (nyuu `encodeTo`)
 
 Acceptance: c7i post-only movie ≥ 0.9× nyuu; medialab post-only not worse.
+Medialab: **1.11×**. c7i `20260820T102216Z`: **1.10×** (1899 vs 1726). Met.
 
 ### P4 — AVX-512 affine2x only if P1 still leaves >10%
+
+P1 still leaves ~32%. Affine2x-512 (`srcCount=12`) is the next kernel to
+try, behind `new_affine2x` until it beats Affine512 packed `smart`.
 
 ## Measure
 
