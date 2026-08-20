@@ -1,11 +1,9 @@
 //! Parallel posting: the orchestration that ties together file reading, yEnc
 //! encoding, article assembly and the NNTP client.
 //!
-//! Files are read sequentially by a single producer task which computes PAR2
-//! parity concurrently. The producer feeds segments to a pool of worker tasks
-//! via a bounded channel; workers yEnc-encode and post them. If the required
-//! PAR2 recovery data exceeds a memory limit, the producer will make multiple
-//! read passes over the files.
+//! Files are read sequentially by a producer. yEnc runs on a small encode
+//! pool (nyuu: one encoder filling a ready-article queue). NNTP workers only
+//! POST. If PAR2 recovery exceeds a memory limit, the producer re-reads.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -289,17 +287,34 @@ struct FileMeta {
     file_index: u32,
 }
 
+/// How many dedicated yEnc workers fill the ready-article queue.
+///
+/// Encode is off the POST path, so this is not one-SIMD-per-connection.
+/// Cap at performance cores. A single encoder on c7i (4c) left post-only
+/// movie at 0.85× nyuu (`20260820T091733Z`); `min(cores, conns)` is the
+/// fill rate the queue needs at 0 ms mock.
+fn encode_concurrency(perf_cores: usize, connections: usize) -> usize {
+    perf_cores.min(connections.max(1)).max(1)
+}
+
+/// Nyuu `articleQueueBuffer`: `min(round(conns*0.5)+2, 25)`.
+fn ready_queue_depth(connections: usize) -> usize {
+    let n = connections.max(1);
+    let half = n / 2 + n % 2; // round(n*0.5) for integers
+    (half + 2).clamp(4, 25)
+}
+
 /// Fans posted articles out to per-worker channels instead of one channel
 /// shared behind a lock — see the `tx_opt` construction site in
 /// `post_files_inner` for why. Each worker owns its `Receiver` outright, so
 /// dequeuing never contends with any other worker.
-struct TaskDispatcher {
-    senders: Vec<tokio::sync::mpsc::Sender<PostTask>>,
+struct TaskDispatcher<T> {
+    senders: Vec<tokio::sync::mpsc::Sender<T>>,
     next: std::sync::atomic::AtomicUsize,
 }
 
-impl TaskDispatcher {
-    fn new(senders: Vec<tokio::sync::mpsc::Sender<PostTask>>) -> Self {
+impl<T: Send> TaskDispatcher<T> {
+    fn new(senders: Vec<tokio::sync::mpsc::Sender<T>>) -> Self {
         TaskDispatcher {
             senders,
             next: std::sync::atomic::AtomicUsize::new(0),
@@ -308,13 +323,10 @@ impl TaskDispatcher {
 
     /// Offer the task to a worker that still has channel room, starting at
     /// the next round-robin index. A stalled (slow-server) worker fills its
-    /// depth-4 channel and must not pin further articles — or the producer
-    /// — while idle workers sit empty (issue #145). If every channel is
-    /// full, wait on the original target so backpressure still applies.
-    async fn send(
-        &self,
-        task: PostTask,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<PostTask>> {
+    /// channel and must not pin further articles — or the producer — while
+    /// idle workers sit empty (issue #145). If every channel is full, wait
+    /// on the original target so backpressure still applies.
+    async fn send(&self, task: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         let n = self.senders.len();
         let start = self.next.fetch_add(1, Ordering::Relaxed);
         let mut task = task;
@@ -358,6 +370,16 @@ struct PostTask {
     file_crc32: Option<u32>,
 }
 
+/// Encoded article ready for NNTP (nyuu `Post` after `generate`).
+struct ReadyArticle {
+    task: PostTask,
+    message_id: String,
+    headers: Vec<u8>,
+    encoded: yenc::EncodedPart,
+    encode_time: Duration,
+    date: (Option<String>, Option<u64>),
+}
+
 struct Shared {
     config: Config,
     /// Server list in failover order (primary first).
@@ -392,6 +414,8 @@ struct Shared {
     /// here after encoding so the producer and reader tasks can reuse it
     /// instead of allocating a fresh `Vec<u8>` for every article.
     pool: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Reusable yEnc *output* bodies (P3 encodeTo). Filled by `encode_part_into`.
+    encode_pool: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Total number of post attempts that failed and triggered a retry (26d).
     total_retries: std::sync::atomic::AtomicUsize,
     /// Newsgroup(s) every article in this run is posted to. When several groups
@@ -453,6 +477,23 @@ impl Shared {
     fn release_buffer(&self, buf: Vec<u8>) {
         if buf.capacity() > 0 && buf.capacity() <= self.config.article_size * 2 {
             self.pool.lock().unwrap().push(buf);
+        }
+    }
+
+    fn acquire_encode_buf(&self) -> Vec<u8> {
+        match self.encode_pool.lock().unwrap().pop() {
+            Some(mut buf) => {
+                buf.clear();
+                buf
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn release_encode_buf(&self, buf: Vec<u8>) {
+        let cap = self.config.article_size.saturating_mul(3).max(64 * 1024);
+        if buf.capacity() > 0 && buf.capacity() <= cap {
+            self.encode_pool.lock().unwrap().push(buf);
         }
     }
 }
@@ -927,6 +968,7 @@ pub async fn post_files_inner(
         resume_path: resume_path_owned,
         spool_dir: spool_dir_owned,
         pool: Arc::new(Mutex::new(initial_pool)),
+        encode_pool: Arc::new(Mutex::new(Vec::new())),
         total_retries: std::sync::atomic::AtomicUsize::new(0),
         post_group: pick_post_group(&config.groups),
         release_prefix,
@@ -1086,31 +1128,23 @@ pub async fn post_files_inner(
     crate::memory::set_phase(crate::memory::Phase::Posting);
     let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
+    let mut encode_handles = Vec::new();
     let tx_opt = if worker_count > 0 {
-        // Each worker gets its own dedicated channel instead of every worker
-        // sharing one `Receiver` behind a `tokio::sync::Mutex` (issue #129):
-        // fanning N workers out from a single mutex-guarded channel forces
-        // every dequeue to go through that one lock, and at low latency
-        // (nearby provider, or the mock server the benchmark suite uses)
-        // articles are encoded and posted fast enough that dequeues happen
-        // thousands of times per second — frequent enough for the lock
-        // itself to become the bottleneck past a handful of connections,
-        // which is exactly the "peaks at 4 then regresses" shape the issue
-        // describes. `TaskDispatcher` round-robins across per-worker
-        // channels so no lock sits on the hot path at all.
-        let mut senders = Vec::with_capacity(worker_count);
-        let mut receivers = Vec::with_capacity(worker_count);
+        let ready_n = ready_queue_depth(worker_count);
+        let post_depth = (ready_n / worker_count).max(2);
+        let mut post_senders = Vec::with_capacity(worker_count);
+        let mut post_receivers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let (tx, rx) = tokio::sync::mpsc::channel(4);
-            senders.push(tx);
-            receivers.push(rx);
+            let (tx, rx) = tokio::sync::mpsc::channel(post_depth);
+            post_senders.push(tx);
+            post_receivers.push(rx);
         }
-        let dispatcher = TaskDispatcher::new(senders);
+        let post_disp = Arc::new(TaskDispatcher::new(post_senders));
         let slots = match &broker {
             Some(broker) => broker.checkout(worker_count).await,
             None => ConnectionPool::build(shared.servers.clone(), worker_count).into_slots(),
         };
-        for (idx, (slot, rx)) in slots.into_iter().zip(receivers).enumerate() {
+        for (idx, (slot, rx)) in slots.into_iter().zip(post_receivers).enumerate() {
             handles.push(tokio::spawn(worker(
                 shared.clone(),
                 rx,
@@ -1120,7 +1154,29 @@ pub async fn post_files_inner(
                 broker.clone(),
             )));
         }
-        Some(dispatcher)
+
+        let n_enc = encode_concurrency(parmesan::performance_core_count(), worker_count);
+        let enc_depth = (ready_n / n_enc).max(2);
+        let mut enc_senders = Vec::with_capacity(n_enc);
+        let mut enc_receivers = Vec::with_capacity(n_enc);
+        for _ in 0..n_enc {
+            let (tx, rx) = tokio::sync::mpsc::channel(enc_depth);
+            enc_senders.push(tx);
+            enc_receivers.push(rx);
+        }
+        info!(
+            encode_workers = n_enc,
+            ready_queue = ready_n,
+            "article encode pool"
+        );
+        for rx in enc_receivers {
+            let shared = shared.clone();
+            let post_disp = post_disp.clone();
+            encode_handles.push(tokio::spawn(async move {
+                encode_worker(shared, rx, post_disp).await;
+            }));
+        }
+        Some(TaskDispatcher::new(enc_senders))
     } else {
         None
     };
@@ -1162,6 +1218,9 @@ pub async fn post_files_inner(
         }
     }
 
+    for handle in encode_handles {
+        let _ = handle.await;
+    }
     for handle in handles {
         let _ = handle.await;
     }
@@ -1827,7 +1886,7 @@ fn par2_memory_plan(
 
 async fn producer(
     metas: Vec<Arc<FileMeta>>,
-    tx_opt: Option<TaskDispatcher>,
+    tx_opt: Option<TaskDispatcher<PostTask>>,
     shared: Arc<Shared>,
     // Connections actually competing for RAM *right now*, used to size the
     // PAR2 memory budget (see `connection_overhead_reserve`) — normally
@@ -2392,7 +2451,7 @@ async fn post_pregenerated_release(
     metas: &[Arc<FileMeta>],
     par2_dir: &Path,
     recovery_count: usize,
-    tx: &TaskDispatcher,
+    tx: &TaskDispatcher<PostTask>,
     shared: &Arc<Shared>,
 ) -> Result<()> {
     if shared.cancelled.load(Ordering::Relaxed) {
@@ -2479,7 +2538,7 @@ fn spawn_double_buffered_reader(
 /// which is unnecessary here since PAR2 is already on disk.
 async fn post_data_files(
     metas: &[Arc<FileMeta>],
-    tx: &TaskDispatcher,
+    tx: &TaskDispatcher<PostTask>,
     shared: &Arc<Shared>,
 ) -> Result<()> {
     let article_size = shared.config.article_size;
@@ -2565,7 +2624,7 @@ async fn push_par2_file(
     wire_override: Option<String>,
     file_index: u32,
     shared: &Arc<Shared>,
-    tx: &TaskDispatcher,
+    tx: &TaskDispatcher<PostTask>,
 ) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     let segments = yenc::segments(size, shared.config.article_size);
@@ -2695,9 +2754,142 @@ impl RateLimiter {
     }
 }
 
-async fn worker(
+async fn encode_worker(
     shared: Arc<Shared>,
     mut rx: tokio::sync::mpsc::Receiver<PostTask>,
+    post_tx: Arc<TaskDispatcher<ReadyArticle>>,
+) {
+    while let Some(task) = rx.recv().await {
+        if shared.cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if let Some(ready) = prepare_ready(&shared, task).await {
+            if post_tx.send(ready).await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Resume skip / spool / yEnc. `None` means the segment is already done.
+async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArticle> {
+    if let Some(resume) = &shared.resume {
+        let existing = resume
+            .lock()
+            .unwrap()
+            .get(&task.meta.real_name, task.part)
+            .cloned();
+        if let Some(existing) = existing {
+            shared.results.lock().unwrap().push(PostedSegment {
+                file_name: task.meta.real_name.clone(),
+                file_path: Arc::from(task.meta.path.as_path()),
+                subject_name: Arc::from(task.meta.real_name.as_str()),
+                wire_name: Arc::from(task.subject_name.as_str()),
+                file_size: task.meta.size,
+                part: task.part,
+                total: task.total,
+                message_id: existing.message_id,
+                bytes: existing.bytes,
+                from: Arc::from(task.from.as_str()),
+                date: task.date.clone(),
+                full_crc32: task.file_crc32.unwrap_or(0),
+                server_idx: 0,
+                file_index: task.meta.file_index,
+                total_files: shared.total_files,
+            });
+            let raw_bytes = task.data.len() as u64;
+            shared.release_buffer(task.data);
+            shared.emit(ProgressEvent::SegmentDone {
+                file: task.meta.real_name.clone(),
+                bytes: raw_bytes,
+                ok: true,
+            });
+            return None;
+        }
+    }
+
+    let spooled = shared
+        .spool_dir
+        .as_ref()
+        .and_then(|dir| crate::spool::read(dir, &task.meta.real_name, task.part));
+
+    let (message_id, headers, encoded, encode_time) = if let Some(spooled) = spooled {
+        let encoded = yenc::EncodedPart {
+            number: task.part,
+            total: task.total,
+            begin: 0,
+            end: 0,
+            crc32: 0,
+            body: spooled.body,
+        };
+        (spooled.message_id, spooled.headers, encoded, Duration::ZERO)
+    } else {
+        let t_enc = Instant::now();
+        let file_crc32 = task.file_crc32;
+        let mut encode_buf = shared.acquire_encode_buf();
+        let encoded = yenc::encode_part_into(
+            &task.meta.yenc_name,
+            task.meta.size,
+            yenc::PartSpec {
+                number: task.part,
+                total: task.total,
+                offset: task.offset,
+            },
+            &task.data,
+            shared.config.line_length,
+            file_crc32,
+            &mut encode_buf,
+        );
+        let encode_time = t_enc.elapsed();
+        let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
+        let (rfc_date, _ts) = &task.date;
+        if let Some(d) = &rfc_date {
+            debug!(segment = %message_id, date = %d, "article date");
+        }
+        let article = Article {
+            message_id: message_id.clone(),
+            from: task.from.clone(),
+            newsgroups: shared.post_group.clone(),
+            subject: default_subject(
+                &task.subject_name,
+                task.part,
+                task.total,
+                (shared.total_files > 0).then_some((task.meta.file_index, shared.total_files)),
+            ),
+            date: rfc_date.clone(),
+            no_archive: shared.config.no_archive,
+        };
+        let headers = article.build_headers();
+        if let Some(dir) = &shared.spool_dir {
+            if let Err(e) = crate::spool::write(
+                dir,
+                &task.meta.real_name,
+                task.part,
+                &message_id,
+                &headers,
+                &encoded.body,
+            )
+            .await
+            {
+                warn!(error = %e, "resume: failed to write spool entry; continuing without it");
+            }
+        }
+        (message_id, headers, encoded, encode_time)
+    };
+    let date = task.date.clone();
+    Some(ReadyArticle {
+        task,
+        message_id,
+        headers,
+        encoded,
+        encode_time,
+        date,
+    })
+}
+
+async fn worker(
+    shared: Arc<Shared>,
+    mut rx: tokio::sync::mpsc::Receiver<ReadyArticle>,
     conn_id: usize,
     mut slot: ConnectionSlot,
     check_tx: Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
@@ -2741,7 +2933,7 @@ async fn worker(
     const PAUSE_POLL: Duration = Duration::from_millis(100);
     let mut last_used = Instant::now();
 
-    loop {
+    'worker: loop {
         if shared.cancelled.load(Ordering::Relaxed) {
             break;
         }
@@ -2765,200 +2957,37 @@ async fn worker(
             continue;
         }
 
-        // Send keepalive if the connection has been idle past the configured
-        // interval. This fires before competing for the receive lock so each
-        // worker sends its own keepalive independently.
-        if keepalive_enabled && last_used.elapsed() >= Duration::from_secs(keepalive_interval) {
-            slot.keepalive().await;
-            last_used = Instant::now();
-        }
-
-        // Blocking receive for the first task, with a short wakeup so the
-        // keepalive check above can fire while the channel is empty.
-        enum Recv {
-            Task(PostTask),
-            Idle,
-            Closed,
-        }
-        let recv = tokio::select! {
-            task = rx.recv() => match task {
-                Some(t) => Recv::Task(t),
-                None => Recv::Closed,
-            },
-            _ = tokio::time::sleep(IDLE_POLL), if keepalive_enabled => Recv::Idle,
-        };
-        let first = match recv {
-            Recv::Task(t) => {
+        let first = loop {
+            if keepalive_enabled && last_used.elapsed() >= Duration::from_secs(keepalive_interval) {
+                slot.keepalive().await;
                 last_used = Instant::now();
-                t
             }
-            Recv::Closed => break,
-            Recv::Idle => continue,
+            tokio::select! {
+                task = rx.recv() => match task {
+                    Some(t) => {
+                        last_used = Instant::now();
+                        break t;
+                    }
+                    None => break 'worker,
+                },
+                _ = tokio::time::sleep(IDLE_POLL), if keepalive_enabled => {}
+            }
         };
-        let mut batch = vec![first];
+        let mut pending = vec![first];
 
-        // Non-blocking: try to fill the rest of the pipeline slot.
         if effective_depth > 1 {
-            while batch.len() < effective_depth {
+            while pending.len() < effective_depth {
                 match rx.try_recv() {
-                    Ok(t) => batch.push(t),
+                    Ok(t) => pending.push(t),
                     Err(_) => break,
                 }
             }
         }
 
-        // Process each task in the batch. Tasks already in resume state are
-        // resolved immediately without touching the network.
-        //
-        // `pending` collects tasks that still need to be posted, along with
-        // their pre-computed headers and encoded bodies.
-        struct Pending {
-            task: PostTask,
-            message_id: String,
-            headers: Vec<u8>,
-            encoded: yenc::EncodedPart,
-            encode_time: Duration,
-            /// Date header as (rfc_string, unix_timestamp) for this article.
-            date: (Option<String>, Option<u64>),
-        }
-        let mut pending: Vec<Pending> = Vec::with_capacity(batch.len());
-
-        for task in batch {
+        for p in &pending {
             shared.emit(ProgressEvent::ConnectionBusy {
                 conn: conn_id,
-                file: task.meta.real_name.clone(),
-            });
-
-            if let Some(resume) = &shared.resume {
-                let existing = resume
-                    .lock()
-                    .unwrap()
-                    .get(&task.meta.real_name, task.part)
-                    .cloned();
-                if let Some(existing) = existing {
-                    shared.results.lock().unwrap().push(PostedSegment {
-                        file_name: task.meta.real_name.clone(),
-                        file_path: Arc::from(task.meta.path.as_path()),
-                        // NZB always uses the real filename for proper client-side renaming.
-                        // task.subject_name is what was posted to Usenet (may be obfuscated).
-                        subject_name: Arc::from(task.meta.real_name.as_str()),
-                        wire_name: Arc::from(task.subject_name.as_str()),
-                        file_size: task.meta.size,
-                        part: task.part,
-                        total: task.total,
-                        message_id: existing.message_id,
-                        bytes: existing.bytes,
-                        from: Arc::from(task.from.as_str()),
-                        date: task.date.clone(),
-                        full_crc32: task.file_crc32.unwrap_or(0),
-                        // Resumed from a prior run's state, not re-entered
-                        // into the check queue this run — see the field doc.
-                        server_idx: 0,
-                        file_index: task.meta.file_index,
-                        total_files: shared.total_files,
-                    });
-                    let raw_bytes = task.data.len() as u64;
-                    shared.release_buffer(task.data);
-                    shared.emit(ProgressEvent::SegmentDone {
-                        file: task.meta.real_name.clone(),
-                        bytes: raw_bytes,
-                        ok: true,
-                    });
-                    continue;
-                }
-            }
-
-            // Type-1 spool: this exact segment may already have reached the
-            // server on a prior interrupted attempt whose `240`
-            // acknowledgement was lost (e.g. the connection dropped between
-            // sending the article and reading the response) — an ambiguity
-            // the resume state above can't resolve, since it only records a
-            // segment once the response actually came back. Replaying the
-            // identical bytes under the identical Message-ID lets the
-            // server's own dedup (`435 Already exists`) settle it, instead
-            // of silently re-encoding and posting under a fresh ID, which
-            // risks a duplicate article if the original POST had in fact
-            // succeeded. See `crate::spool`.
-            let spooled = shared
-                .spool_dir
-                .as_ref()
-                .and_then(|dir| crate::spool::read(dir, &task.meta.real_name, task.part));
-
-            let (message_id, headers, encoded, encode_time) = if let Some(spooled) = spooled {
-                let encoded = yenc::EncodedPart {
-                    number: task.part,
-                    total: task.total,
-                    begin: 0,
-                    end: 0,
-                    crc32: 0,
-                    body: spooled.body,
-                };
-                (spooled.message_id, spooled.headers, encoded, Duration::ZERO)
-            } else {
-                let t_enc = Instant::now();
-                let file_crc32 = task.file_crc32;
-                let encoded = yenc::encode_part(
-                    &task.meta.yenc_name,
-                    task.meta.size,
-                    yenc::PartSpec {
-                        number: task.part,
-                        total: task.total,
-                        offset: task.offset,
-                    },
-                    &task.data,
-                    shared.config.line_length,
-                    file_crc32,
-                );
-                let encode_time = t_enc.elapsed();
-                let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
-                let (rfc_date, _ts) = &task.date;
-                if let Some(d) = &rfc_date {
-                    debug!(segment = %message_id, date = %d, "article date");
-                }
-                let article = Article {
-                    message_id: message_id.clone(),
-                    from: task.from.clone(),
-                    newsgroups: shared.post_group.clone(),
-                    subject: default_subject(
-                        &task.subject_name,
-                        task.part,
-                        task.total,
-                        (shared.total_files > 0)
-                            .then_some((task.meta.file_index, shared.total_files)),
-                    ),
-                    date: rfc_date.clone(),
-                    no_archive: shared.config.no_archive,
-                };
-                let headers = article.build_headers();
-
-                // Cache the encoded article before it goes over the wire.
-                // Best-effort: a spool write failing must never abort an
-                // otherwise successful post.
-                if let Some(dir) = &shared.spool_dir {
-                    if let Err(e) = crate::spool::write(
-                        dir,
-                        &task.meta.real_name,
-                        task.part,
-                        &message_id,
-                        &headers,
-                        &encoded.body,
-                    )
-                    .await
-                    {
-                        warn!(error = %e, "resume: failed to write spool entry; continuing without it");
-                    }
-                }
-
-                (message_id, headers, encoded, encode_time)
-            };
-            let task_date = task.date.clone();
-            pending.push(Pending {
-                task,
-                message_id,
-                headers,
-                encoded,
-                encode_time,
-                date: task_date,
+                file: p.task.meta.real_name.clone(),
             });
         }
 
@@ -3081,17 +3110,19 @@ async fn worker(
                 }
             }
 
+            let wire = p.headers.len() + p.encoded.body.len();
             commit_result(
                 &shared,
                 check_tx.as_ref(),
                 p.task,
                 p.message_id,
-                p.headers.len() + p.encoded.body.len(),
+                wire,
                 posted,
                 &last_err,
                 p.date,
                 slot.server_idx(),
             );
+            shared.release_encode_buf(p.encoded.body);
         } else {
             // ── Pipelined path ───────────────────────────────────────────────
             // Send all articles back-to-back, flush once, then read all
@@ -3199,17 +3230,19 @@ async fn worker(
             for (p, result) in pending.into_iter().zip(pipe_results) {
                 let posted = pipeline_ok && result.is_ok();
                 let last_err = result.err().unwrap_or_else(|| "pipeline failed".into());
+                let wire = p.headers.len() + p.encoded.body.len();
                 commit_result(
                     &shared,
                     check_tx.as_ref(),
                     p.task,
                     p.message_id,
-                    p.headers.len() + p.encoded.body.len(),
+                    wire,
                     posted,
                     &last_err,
                     p.date,
                     batch_server_idx,
                 );
+                shared.release_encode_buf(p.encoded.body);
             }
         }
     }
@@ -4812,6 +4845,24 @@ mod tests {
         assert!(parmesan::physical_core_count() >= 1);
     }
 
+    #[test]
+    fn encode_concurrency_is_min_of_cores_and_connections() {
+        assert_eq!(encode_concurrency(4, 8), 4);
+        assert_eq!(encode_concurrency(4, 50), 4);
+        assert_eq!(encode_concurrency(2, 8), 2);
+        assert_eq!(encode_concurrency(1, 1), 1);
+        assert_eq!(encode_concurrency(6, 8), 6);
+        assert_eq!(encode_concurrency(16, 8), 8);
+        assert_eq!(encode_concurrency(6, 2), 2);
+    }
+
+    #[test]
+    fn ready_queue_matches_nyuu_article_buffer() {
+        assert_eq!(ready_queue_depth(8), 6);
+        assert_eq!(ready_queue_depth(50), 25);
+        assert_eq!(ready_queue_depth(1), 4);
+    }
+
     // ── Shared buffer pool ────────────────────────────────────────────────────
 
     fn minimal_shared(article_size: usize) -> Arc<Shared> {
@@ -4842,6 +4893,7 @@ mod tests {
             resume_path: None,
             spool_dir: None,
             pool: Arc::new(Mutex::new(Vec::new())),
+            encode_pool: Arc::new(Mutex::new(Vec::new())),
             total_retries: std::sync::atomic::AtomicUsize::new(0),
             post_group,
             release_prefix: None,

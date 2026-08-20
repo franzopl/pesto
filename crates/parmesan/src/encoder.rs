@@ -21,8 +21,7 @@ use std::arch::aarch64::poly16x8_t;
 #[cfg(target_arch = "x86_64")]
 use super::gf16::xor_dep_matrix;
 use super::gf16::{input_logbases, Gf16, ORDER};
-use super::packet::{md5, SliceChecksum};
-use crate::yenc::crc32;
+use super::packet::SliceChecksum;
 use crate::SimdPath;
 
 /// Bytes covered by the per-file 16k hash.
@@ -32,6 +31,20 @@ const HEAD_LEN: usize = 16 * 1024;
 /// Two 512-bit matrix registers (mat_lo, mat_hi) plus 256-entry scalar lookup tables.
 #[cfg(target_arch = "x86_64")]
 type Avx512GfniTable = (__m512i, __m512i, [u16; 256], [u16; 256]);
+
+#[cfg(target_arch = "x86_64")]
+type Avx512ShuffleTable = (
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    __m512i,
+    [u16; 256],
+    [u16; 256],
+);
 
 /// Pre-computed AVX2/GFNI coefficient table for one (recovery_block, input_slice) pair.
 /// Two 256-bit matrix registers (mat_lo, mat_hi) plus 256-entry scalar lookup tables.
@@ -164,6 +177,24 @@ pub(super) enum RecoveryBufferSet {
     /// as `Altmap` above.
     #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Shuffle2x(Vec<Vec<u8>>),
+    /// Per-lane lo/hi split (Affine2x). Same footprint as Normal. Used by the
+    /// AVX2+GFNI kernel; converted back in `finish`.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    Affine2x(Vec<Vec<u8>>),
+    /// Parpar Affine shuffle-prepare (64-byte groups). GFNI Affine kernel.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    Affine(Vec<Vec<u8>>),
+    /// Affine shuffle-prepare, dests interleaved by 4 KiB tile (parpar
+    /// `memProcessing`: `out*chunk + round*numOutputs*chunk`).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    Affine512(Affine512Acc),
+}
+
+/// Affine512 recovery accumulators: one allocation, dests packed per tile.
+pub(super) struct Affine512Acc {
+    data: Vec<u8>,
+    n_rec: usize,
+    slice_len: usize,
 }
 
 impl RecoveryBufferSet {
@@ -171,7 +202,11 @@ impl RecoveryBufferSet {
     pub(super) fn as_normal_mut(&mut self) -> &mut Vec<Vec<u16>> {
         match self {
             Self::Normal(b) => b,
-            Self::Altmap(_) | Self::Shuffle2x(_) => panic!("expected Normal recovery buffers"),
+            Self::Altmap(_)
+            | Self::Shuffle2x(_)
+            | Self::Affine2x(_)
+            | Self::Affine(_)
+            | Self::Affine512(_) => panic!("expected Normal recovery buffers"),
         }
     }
 
@@ -180,7 +215,8 @@ impl RecoveryBufferSet {
     pub(super) fn len(&self) -> usize {
         match self {
             Self::Normal(b) => b.len(),
-            Self::Altmap(b) | Self::Shuffle2x(b) => b.len(),
+            Self::Altmap(b) | Self::Shuffle2x(b) | Self::Affine2x(b) | Self::Affine(b) => b.len(),
+            Self::Affine512(a) => a.n_rec,
         }
     }
 }
@@ -229,6 +265,20 @@ pub fn shuffle2x_buffer_size(slice_words: usize) -> usize {
     super::shuffle2x::shuffle2x_buffer_size(slice_words)
 }
 
+/// Byte size of one Affine2x recovery buffer. Equal to `slice_words * 2`.
+///
+/// # Panics
+///
+/// Panics if `slice_words` is not a multiple of 16.
+pub fn affine2x_buffer_size(slice_words: usize) -> usize {
+    super::affine2x::affine2x_buffer_size(slice_words)
+}
+
+/// Byte size of one Affine (shuffle-prepare) recovery buffer.
+pub fn affine_buffer_size(slice_words: usize) -> usize {
+    super::affine::affine_buffer_size(slice_words)
+}
+
 /// Whether this CPU has the `flush_avx2_altmap` kernel, i.e. whether
 /// [`RecoveryEncoder::new_altmap`] will actually keep the ALTMAP layout.
 ///
@@ -267,6 +317,216 @@ pub fn shuffle2x_kernel_available() -> bool {
     }
 }
 
+/// AVX-512 BW nibble-shuffle (Normal layout). Used when AVX-512 is present
+/// without GFNI (Skylake-X / Cascade Lake).
+pub fn shuffle512_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether [`RecoveryEncoder::new_affine2x`] keeps the Affine2x layout.
+/// Requires AVX2+GFNI (the kernel uses `gf2p8affine`).
+pub fn affine2x_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Parpar Affine (shuffle-prepare) kernel: AVX2+GFNI.
+pub fn affine_kernel_available() -> bool {
+    affine2x_kernel_available()
+}
+
+/// Parpar Affine AVX-512+GFNI (default_method on Ice Lake / SPR).
+pub fn affine512_kernel_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("gfni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Four 8×8 GF(2) matrices for Affine GFNI (`ll`, `lh`, `hl`, `hh`).
+/// Byte 7 of each u64 is row 0 of `gf2p8affine` (Intel SDM).
+fn gfni_affine_u64_mats(gf: &Gf16, coeff: u16) -> (u64, u64, u64, u64) {
+    let mut m_ll = 0u64;
+    let mut m_lh = 0u64;
+    let mut m_hl = 0u64;
+    let mut m_hh = 0u64;
+    for row in 0..8usize {
+        let mut row_ll = 0u8;
+        let mut row_lh = 0u8;
+        let mut row_hl = 0u8;
+        let mut row_hh = 0u8;
+        for j in 0..8usize {
+            let r_lo = gf.mul(1u16 << j, coeff);
+            if (r_lo >> row) & 1 == 1 {
+                row_ll |= 1 << j;
+            }
+            if (r_lo >> (row + 8)) & 1 == 1 {
+                row_hl |= 1 << j;
+            }
+            let r_hi = gf.mul(1u16 << (j + 8), coeff);
+            if (r_hi >> row) & 1 == 1 {
+                row_lh |= 1 << j;
+            }
+            if (r_hi >> (row + 8)) & 1 == 1 {
+                row_hh |= 1 << j;
+            }
+        }
+        let shift = (7 - row) * 8;
+        m_ll |= (row_ll as u64) << shift;
+        m_lh |= (row_lh as u64) << shift;
+        m_hl |= (row_hl as u64) << shift;
+        m_hh |= (row_hh as u64) << shift;
+    }
+    (m_ll, m_lh, m_hl, m_hh)
+}
+
+/// Parpar Affine nibble scratch: 16×4 matrices (`gf16_affine_init_avx2` /
+/// `gf16_bitdep_init256` with `genAffine=1`). A coefficient's four 8×8
+/// matrices are the XOR of the four nibble contributions instead of an 8×8
+/// rebuild per (recovery, source) pair.
+struct AffineNibbleScratch {
+    /// `mats[nibble][slot]` for `coeff` nibble `slot` (weight `1<<(4*slot)`).
+    mats: [[(u64, u64, u64, u64); 4]; 16],
+}
+
+impl AffineNibbleScratch {
+    fn new(gf: &Gf16) -> Self {
+        let mut mats = [[(0u64, 0u64, 0u64, 0u64); 4]; 16];
+        for n in 0..16u16 {
+            for slot in 0..4u16 {
+                mats[n as usize][slot as usize] = gfni_affine_u64_mats(gf, n << (4 * slot));
+            }
+        }
+        Self { mats }
+    }
+
+    fn load(&self, coeff: u16) -> (u64, u64, u64, u64) {
+        let xor = |a: (u64, u64, u64, u64), b: (u64, u64, u64, u64)| {
+            (a.0 ^ b.0, a.1 ^ b.1, a.2 ^ b.2, a.3 ^ b.3)
+        };
+        let mut m = self.mats[(coeff & 0xf) as usize][0];
+        m = xor(m, self.mats[((coeff >> 4) & 0xf) as usize][1]);
+        m = xor(m, self.mats[((coeff >> 8) & 0xf) as usize][2]);
+        xor(m, self.mats[((coeff >> 12) & 0xf) as usize][3])
+    }
+}
+
+fn pack_affine_tile(prepared: &[Vec<u8>], off: usize, tile_len: usize, block: usize) -> Vec<u8> {
+    let n = prepared.len();
+    let blocks = tile_len / block;
+    let mut out = vec![0u8; n * tile_len];
+    for b in 0..blocks {
+        for s in 0..n {
+            let src = &prepared[s][off + b * block..off + (b + 1) * block];
+            let dst = &mut out[(b * n + s) * block..(b * n + s + 1) * block];
+            dst.copy_from_slice(src);
+        }
+    }
+    out
+}
+
+/// Parpar Affine AVX-512 packed: 128-byte blocks, `srcCount` 6, 4 KiB tiles.
+const AFFINE512_BLOCK: usize = 128;
+const AFFINE512_INTERLEAVE: usize = 6;
+const AFFINE512_CHUNK: usize = 4096;
+
+fn affine512_src_scale(n_queued: usize, source: usize) -> usize {
+    let il = AFFINE512_INTERLEAVE;
+    let last = n_queued - n_queued % il;
+    if !n_queued.is_multiple_of(il) && source >= last {
+        n_queued % il
+    } else {
+        il
+    }
+}
+
+/// Dest tile `tile`, recovery `rec`: `tile * n_rec * CHUNK + rec * CHUNK`.
+fn affine512_dest_off(n_rec: usize, rec: usize, tile: usize) -> usize {
+    tile * n_rec * AFFINE512_CHUNK + rec * AFFINE512_CHUNK
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn affine512_acc_to_slices(acc: Affine512Acc, exponent_start: u32) -> Vec<RecoverySlice> {
+    (0..acc.n_rec)
+        .into_par_iter()
+        .map(|i| {
+            let mut data = vec![0u8; acc.slice_len];
+            let n_tiles = acc.slice_len.div_ceil(AFFINE512_CHUNK);
+            for t in 0..n_tiles {
+                let off = t * AFFINE512_CHUNK;
+                let tile_len = (acc.slice_len - off).min(AFFINE512_CHUNK);
+                let src = acc.data.as_ptr().add(affine512_dest_off(acc.n_rec, i, t));
+                let dst = data.as_mut_ptr().add(off);
+                for b in 0..tile_len / AFFINE512_BLOCK {
+                    super::affine::affine512_finish_block(
+                        src.add(b * AFFINE512_BLOCK),
+                        dst.add(b * AFFINE512_BLOCK),
+                    );
+                }
+            }
+            RecoverySlice {
+                exponent: exponent_start + i as u32,
+                data,
+            }
+        })
+        .collect()
+}
+
+/// Byte offset of source `s`, 128-byte block `block` inside tile `tile`.
+fn affine512_packed_off(n_queued: usize, tile: usize, source: usize, block: usize) -> usize {
+    let il = AFFINE512_INTERLEAVE;
+    let b = AFFINE512_BLOCK;
+    let chunk = AFFINE512_CHUNK;
+    let group = source / il;
+    let lane = source % il;
+    let scale = affine512_src_scale(n_queued, source);
+    tile * chunk * n_queued + group * chunk * il + lane * b + block * b * scale
+}
+
+/// Shuffle-prepare raw slices into the ParPar packed Affine512 layout (once).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn prepare_packed_affine512(queued: &[Vec<u8>], packed: &mut [u8], slice_len: usize) {
+    let n = queued.len();
+    if n == 0 {
+        return;
+    }
+    let n_tiles = slice_len.div_ceil(AFFINE512_CHUNK);
+    let dst = packed.as_mut_ptr() as usize;
+    queued.par_iter().enumerate().for_each(|(s, src)| {
+        for t in 0..n_tiles {
+            let off = t * AFFINE512_CHUNK;
+            let tile_len = (slice_len - off).min(AFFINE512_CHUNK);
+            let blocks = tile_len / AFFINE512_BLOCK;
+            for b in 0..blocks {
+                let src_p = src.as_ptr().add(off + b * AFFINE512_BLOCK);
+                let dst_p = (dst as *mut u8).add(affine512_packed_off(n, t, s, b));
+                crate::affine::affine512_prepare_block(src_p, dst_p);
+            }
+        }
+    });
+}
+
 /// One finished recovery slice.
 #[derive(Debug, Clone)]
 pub struct RecoverySlice {
@@ -295,6 +555,9 @@ pub struct RecoveryEncoder {
     /// their allocation here so the producer can pick them back up via
     /// [`take_buffer`] instead of asking the allocator for a fresh page.
     free_buffers: Vec<Vec<u8>>,
+    /// Reused Affine shuffle-prepare outputs (parpar keeps a prepare scratch
+    /// instead of allocating a full extra copy of every queued slice).
+    affine_prepare: Vec<Vec<u8>>,
     /// Maximum bytes to queue before flushing.
     flush_limit_bytes: usize,
     /// When true each flush also computes per-slice MD5+CRC32 checksums in
@@ -360,12 +623,47 @@ impl RecoveryEncoder {
         exponent_start: u32,
         recovery_count: usize,
     ) -> Result<Self, TryReserveError> {
+        // c7i 20260820T004824Z movie-1080p median: Affine512 packed 424 MiB/s
+        // vs Normal+GFNI-512 326 (parpar 626). Enable when slice aligns.
+        #[cfg(target_arch = "x86_64")]
+        if affine512_kernel_available() && slice_size.is_multiple_of(128) {
+            return Self::try_new_affine512(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("gfni")
+            && std::is_x86_feature_detected!("avx2")
+            && slice_size.is_multiple_of(64)
+        {
+            return Self::try_new_affine(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
+        }
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && !std::is_x86_feature_detected!("gfni")
+        {
+            // Parpar Shuffle AVX-512 (no GFNI). Normal layout + zmm vpshufb.
+            return Self::try_new(
+                slice_size,
+                total_input_slices,
+                exponent_start,
+                recovery_count,
+            );
+        }
         #[cfg(target_arch = "x86_64")]
         if std::is_x86_feature_detected!("avx2")
             && !std::is_x86_feature_detected!("gfni")
             && slice_size.is_multiple_of(32)
         {
-            // On AVX2 hardware without GFNI, Shuffle2x is the fastest known layout.
             return Self::try_new_shuffle2x(
                 slice_size,
                 total_input_slices,
@@ -452,6 +750,7 @@ impl RecoveryEncoder {
             next_index: 0,
             queued_slices: Vec::with_capacity(64),
             free_buffers: Vec::new(),
+            affine_prepare: Vec::new(),
             flush_limit_bytes: 256 * 1024 * 1024,
             compute_checksums: false,
             pending_checksums: Vec::new(),
@@ -592,6 +891,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -700,6 +1000,7 @@ impl RecoveryEncoder {
                 next_index: 0,
                 queued_slices: Vec::with_capacity(64),
                 free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
                 flush_limit_bytes: 256 * 1024 * 1024,
                 compute_checksums: false,
                 pending_checksums: Vec::new(),
@@ -739,6 +1040,247 @@ impl RecoveryEncoder {
             panic!(
                 "PAR2 recovery buffer allocation failed ({recovery_count} blocks × \
                      {slice_size} bytes, Shuffle2x layout): {e}"
+            )
+        })
+    }
+
+    /// Affine2x recovery buffers for the AVX2+GFNI kernel.
+    ///
+    /// Falls back to [`Self::try_new`] when GFNI is unavailable so `finish`
+    /// never returns unprocessed (zero) parity.
+    pub fn try_new_affine2x(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Result<Self, TryReserveError> {
+        assert!(
+            slice_size > 0 && slice_size.is_multiple_of(32),
+            "Affine2x encoder requires slice_size to be a positive multiple of 32 bytes, got {slice_size}"
+        );
+
+        #[cfg(not(target_arch = "x86_64"))]
+        return Self::try_new(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        );
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("gfni") {
+                return Self::try_new(
+                    slice_size,
+                    total_input_slices,
+                    exponent_start,
+                    recovery_count,
+                );
+            }
+            let slice_words = slice_size / 2;
+            let buf_bytes = affine2x_buffer_size(slice_words);
+            Ok(Self {
+                gf: Gf16::new(),
+                slice_words,
+                logbases: input_logbases(total_input_slices),
+                exponent_start,
+                buffers: RecoveryBufferSet::Affine2x(try_zeroed_buffers(
+                    0u8,
+                    buf_bytes,
+                    recovery_count,
+                )?),
+                next_index: 0,
+                queued_slices: Vec::with_capacity(64),
+                free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
+                flush_limit_bytes: 256 * 1024 * 1024,
+                compute_checksums: false,
+                pending_checksums: Vec::new(),
+                simd_path: SimdPath::Auto,
+                #[cfg(feature = "bench-internals")]
+                forced_path: None,
+                dep_tables: None,
+            })
+        }
+    }
+
+    /// Affine2x recovery buffers for the AVX2+GFNI kernel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slice_size` is not a positive multiple of 32, or allocation fails.
+    pub fn new_affine2x(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Self {
+        Self::try_new_affine2x(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "PAR2 recovery buffer allocation failed ({recovery_count} blocks × \
+                     {slice_size} bytes, Affine2x layout): {e}"
+            )
+        })
+    }
+
+    /// Parpar Affine layout (shuffle-prepare). Falls back to [`Self::try_new`]
+    /// without AVX2+GFNI.
+    pub fn try_new_affine(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Result<Self, TryReserveError> {
+        assert!(
+            slice_size > 0 && slice_size.is_multiple_of(64),
+            "Affine encoder requires slice_size multiple of 64, got {slice_size}"
+        );
+        #[cfg(not(target_arch = "x86_64"))]
+        return Self::try_new(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("gfni") {
+                return Self::try_new(
+                    slice_size,
+                    total_input_slices,
+                    exponent_start,
+                    recovery_count,
+                );
+            }
+            let slice_words = slice_size / 2;
+            let buf_bytes = affine_buffer_size(slice_words);
+            Ok(Self {
+                gf: Gf16::new(),
+                slice_words,
+                logbases: input_logbases(total_input_slices),
+                exponent_start,
+                buffers: RecoveryBufferSet::Affine(try_zeroed_buffers(
+                    0u8,
+                    buf_bytes,
+                    recovery_count,
+                )?),
+                next_index: 0,
+                queued_slices: Vec::with_capacity(64),
+                free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
+                flush_limit_bytes: 256 * 1024 * 1024,
+                compute_checksums: false,
+                pending_checksums: Vec::new(),
+                simd_path: SimdPath::Auto,
+                #[cfg(feature = "bench-internals")]
+                forced_path: None,
+                dep_tables: None,
+            })
+        }
+    }
+
+    /// Parpar Affine layout. See [`Self::try_new_affine`].
+    pub fn new_affine(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Self {
+        Self::try_new_affine(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "PAR2 recovery buffer allocation failed ({recovery_count} blocks × \
+                     {slice_size} bytes, Affine layout): {e}"
+            )
+        })
+    }
+
+    /// Affine AVX-512+GFNI layout (128-byte prepare groups).
+    pub fn try_new_affine512(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Result<Self, TryReserveError> {
+        assert!(
+            slice_size > 0 && slice_size.is_multiple_of(128),
+            "Affine512 encoder requires slice_size multiple of 128, got {slice_size}"
+        );
+        #[cfg(not(target_arch = "x86_64"))]
+        return Self::try_new(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !affine512_kernel_available() {
+                return Self::try_new_affine(
+                    slice_size,
+                    total_input_slices,
+                    exponent_start,
+                    recovery_count,
+                );
+            }
+            let slice_words = slice_size / 2;
+            let n_tiles = slice_size.div_ceil(AFFINE512_CHUNK);
+            let mut data = Vec::new();
+            data.try_reserve_exact(n_tiles * AFFINE512_CHUNK * recovery_count)?;
+            data.resize(n_tiles * AFFINE512_CHUNK * recovery_count, 0u8);
+            Ok(Self {
+                gf: Gf16::new(),
+                slice_words,
+                logbases: input_logbases(total_input_slices),
+                exponent_start,
+                buffers: RecoveryBufferSet::Affine512(Affine512Acc {
+                    data,
+                    n_rec: recovery_count,
+                    slice_len: slice_size,
+                }),
+                next_index: 0,
+                queued_slices: Vec::with_capacity(64),
+                free_buffers: Vec::new(),
+                affine_prepare: Vec::new(),
+                flush_limit_bytes: 256 * 1024 * 1024,
+                compute_checksums: false,
+                pending_checksums: Vec::new(),
+                simd_path: SimdPath::Auto,
+                #[cfg(feature = "bench-internals")]
+                forced_path: None,
+                dep_tables: None,
+            })
+        }
+    }
+
+    /// Affine AVX-512+GFNI. See [`Self::try_new_affine512`].
+    pub fn new_affine512(
+        slice_size: usize,
+        total_input_slices: usize,
+        exponent_start: u32,
+        recovery_count: usize,
+    ) -> Self {
+        Self::try_new_affine512(
+            slice_size,
+            total_input_slices,
+            exponent_start,
+            recovery_count,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "PAR2 recovery buffer allocation failed ({recovery_count} blocks × \
+                     {slice_size} bytes, Affine512 layout): {e}"
             )
         })
     }
@@ -816,6 +1358,37 @@ impl RecoveryEncoder {
 
     /// Move consumed queue buffers into the free-list (preserving their
     /// allocations) and restore the empty queue.
+    /// Grow/reuse `affine_prepare` and shuffle-prepare each queued slice into it.
+    fn prepare_affine_inputs(queued: &[Vec<u8>], pool: &mut Vec<Vec<u8>>, wide512: bool) {
+        if queued.is_empty() {
+            return;
+        }
+        let _ = wide512;
+        let len = queued[0].len();
+        while pool.len() < queued.len() {
+            pool.push(vec![0u8; len]);
+        }
+        if pool.len() > queued.len() {
+            pool.truncate(queued.len());
+        }
+        queued
+            .par_iter()
+            .zip(pool.par_iter_mut())
+            .for_each(|(src, dst)| {
+                if dst.len() != src.len() {
+                    dst.clear();
+                    dst.resize(src.len(), 0);
+                }
+                #[cfg(target_arch = "x86_64")]
+                if wide512 {
+                    crate::affine::to_affine512(src, dst);
+                    return;
+                }
+                let _ = wide512;
+                crate::affine::to_affine(src, dst);
+            });
+    }
+
     fn recycle_queue(&mut self, mut queued: Vec<Vec<u8>>) {
         self.free_buffers.reserve(queued.len());
         for mut buf in queued.drain(..) {
@@ -887,7 +1460,13 @@ impl RecoveryEncoder {
         // the honest, validated fix rather than a theory dressed up as one.
         // See `bench/FINDINGS.md` §3 for the full writeup.
         let queued_bytes = self.queued_slices.len() * self.slice_words * 2;
-        if self.queued_slices.len() >= 64 || queued_bytes >= self.flush_limit_bytes {
+        
+        let batch_limit = match self.buffers {
+            RecoveryBufferSet::Affine512(_) => 12,
+            _ => 64,
+        };
+
+        if self.queued_slices.len() >= batch_limit || queued_bytes >= self.flush_limit_bytes {
             self.flush();
         }
     }
@@ -943,6 +1522,14 @@ impl RecoveryEncoder {
                 unsafe { self.flush_avx512_gfni() };
                 return;
             }
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx512Shuffle
+                if std::is_x86_feature_detected!("avx512f")
+                    && std::is_x86_feature_detected!("avx512bw") =>
+            {
+                unsafe { self.flush_avx512_shuffle() };
+                return;
+            }
             #[cfg(target_arch = "aarch64")]
             SimdPath::Neon => {
                 unsafe { self.flush_neon_clmul() };
@@ -983,6 +1570,42 @@ impl RecoveryEncoder {
                 "Shuffle2x buffers without AVX2 — try_new_shuffle2x must fall \
                  back to the portable layout"
             );
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if matches!(self.buffers, RecoveryBufferSet::Affine2x(_)) {
+            if affine512_kernel_available() {
+                unsafe { self.flush_avx512_affine2x() };
+                return;
+            } else if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
+                unsafe { self.flush_avx2_affine2x() };
+                return;
+            }
+            unreachable!(
+                "Affine2x buffers without AVX2+GFNI — try_new_affine2x must fall \
+                 back to the portable layout"
+            );
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if matches!(self.buffers, RecoveryBufferSet::Affine(_)) {
+            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
+                unsafe { self.flush_avx2_affine() };
+                return;
+            }
+            unreachable!(
+                "Affine buffers without AVX2+GFNI — try_new_affine must fall \
+                 back to the portable layout"
+            );
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if matches!(self.buffers, RecoveryBufferSet::Affine512(_)) {
+            if affine512_kernel_available() {
+                unsafe { self.flush_avx512_affine() };
+                return;
+            }
+            unreachable!("Affine512 buffers without AVX-512+GFNI");
         }
 
         // When bench-internals is active a forced path overrides auto-detection.
@@ -1049,6 +1672,14 @@ impl RecoveryEncoder {
         if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
             unsafe {
                 self.flush_avx2_gfni();
+            }
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+            unsafe {
+                self.flush_avx512_shuffle();
             }
             return;
         }
@@ -1737,6 +2368,164 @@ impl RecoveryEncoder {
             });
     }
 
+    /// AVX-512 BW nibble-shuffle on Normal `u16` buffers (parpar Shuffle AVX-512).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn flush_avx512_shuffle(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+        unsafe {
+            Self::flush_avx512_shuffle_work(
+                self.buffers.as_normal_mut(),
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw")]
+    unsafe fn flush_avx512_shuffle_work(
+        buffers: &mut [Vec<u16>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let mask_f = _mm512_set1_epi8(0x0F_u8 as i8);
+        let mask_even = _mm512_set1_epi16(0x00FF_u16 as i16);
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+        if n_queued == 0 {
+            return;
+        }
+        let all_tables: Vec<Avx512ShuffleTable> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| unsafe {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+                let mut tl_l = [0u8; 16];
+                let mut tl_h = [0u8; 16];
+                let mut th_l = [0u8; 16];
+                let mut th_h = [0u8; 16];
+                let mut hl_l = [0u8; 16];
+                let mut hl_h = [0u8; 16];
+                let mut hh_l = [0u8; 16];
+                let mut hh_h = [0u8; 16];
+                for val in 0..16usize {
+                    let r0 = gf.mul(val as u16, coeff);
+                    tl_l[val] = (r0 & 0xFF) as u8;
+                    th_l[val] = (r0 >> 8) as u8;
+                    let r1 = gf.mul((val as u16) << 4, coeff);
+                    tl_h[val] = (r1 & 0xFF) as u8;
+                    th_h[val] = (r1 >> 8) as u8;
+                    let r2 = gf.mul((val as u16) << 8, coeff);
+                    hl_l[val] = (r2 & 0xFF) as u8;
+                    hh_l[val] = (r2 >> 8) as u8;
+                    let r3 = gf.mul((val as u16) << 12, coeff);
+                    hl_h[val] = (r3 & 0xFF) as u8;
+                    hh_h[val] = (r3 >> 8) as u8;
+                }
+                let bcast =
+                    |t: &[u8; 16]| _mm512_broadcast_i32x4(_mm_loadu_si128(t.as_ptr().cast()));
+                let mut table_low = [0u16; 256];
+                let mut table_high = [0u16; 256];
+                for b in 0..=255usize {
+                    table_low[b] = gf.mul(b as u16, coeff);
+                    table_high[b] = gf.mul((b as u16) << 8, coeff);
+                }
+                (
+                    bcast(&tl_l),
+                    bcast(&tl_h),
+                    bcast(&th_l),
+                    bcast(&th_h),
+                    bcast(&hl_l),
+                    bcast(&hl_h),
+                    bcast(&hh_l),
+                    bcast(&hh_h),
+                    table_low,
+                    table_high,
+                )
+            })
+            .collect();
+
+        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+            let base = rec * n_queued;
+            let byte_len = buf.len() * 2;
+            let blocks = byte_len / 64;
+            let remainder = byte_len % 64;
+            for q_idx in 0..n_queued {
+                let (tl_l, tl_h, th_l, th_h, hl_l, hl_h, hh_l, hh_h, ref tlow, ref thigh) =
+                    all_tables[base + q_idx];
+                let slice = &queued[q_idx][..byte_len];
+                unsafe {
+                    let mut pin = slice.as_ptr().cast::<__m512i>();
+                    let mut pout = buf.as_mut_ptr().cast::<__m512i>();
+                    for _ in 0..blocks {
+                        let input = _mm512_loadu_si512(pin);
+                        let n0 = _mm512_and_si512(input, mask_f);
+                        let n1 = _mm512_and_si512(_mm512_srli_epi16(input, 4), mask_f);
+                        let rle = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(tl_l, n0),
+                            _mm512_shuffle_epi8(tl_h, n1),
+                        );
+                        let rhe = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(th_l, n0),
+                            _mm512_shuffle_epi8(th_h, n1),
+                        );
+                        let rlo = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(hl_l, n0),
+                            _mm512_shuffle_epi8(hl_h, n1),
+                        );
+                        let rho = _mm512_xor_si512(
+                            _mm512_shuffle_epi8(hh_l, n0),
+                            _mm512_shuffle_epi8(hh_h, n1),
+                        );
+                        let out = _mm512_or_si512(
+                            _mm512_and_si512(
+                                _mm512_xor_si512(rle, _mm512_srli_epi16(rlo, 8)),
+                                mask_even,
+                            ),
+                            _mm512_slli_epi16(_mm512_xor_si512(rhe, _mm512_srli_epi16(rho, 8)), 8),
+                        );
+                        _mm512_storeu_si512(pout, _mm512_xor_si512(_mm512_loadu_si512(pout), out));
+                        pin = pin.add(1);
+                        pout = pout.add(1);
+                    }
+                    if remainder > 0 {
+                        let ow = blocks * 32;
+                        let mut pw = buf[ow..].as_mut_ptr();
+                        let mut p_in = slice[blocks * 64..].as_ptr();
+                        let end = p_in.add(remainder);
+                        while p_in < end {
+                            let lo = *p_in as usize;
+                            let hi = *p_in.add(1) as usize;
+                            *pw ^= tlow[lo] ^ thigh[hi];
+                            pw = pw.add(1);
+                            p_in = p_in.add(2);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// AVX2 Shuffle2x flush: accumulates queued slices into Shuffle2x recovery buffers.
     ///
     /// Input slices are in normal u16 layout. Recovery buffers are in Shuffle2x layout
@@ -1775,6 +2564,33 @@ impl RecoveryEncoder {
         self.recycle_queue(queued);
     }
 
+    /// Shuffle2x madd of one prepared 32-byte vector into a recovery buffer.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn s2x_contrib(
+        s: __m256i,
+        mask_f: __m256i,
+        tna: __m256i,
+        tnb: __m256i,
+        tsa: __m256i,
+        tsb: __m256i,
+    ) -> __m256i {
+        let sw = _mm256_permute2x128_si256(s, s, 0x01);
+        let lo_nib_s = _mm256_and_si256(s, mask_f);
+        let hi_nib_s = _mm256_and_si256(_mm256_srli_epi16(s, 4), mask_f);
+        let lo_nib_sw = _mm256_and_si256(sw, mask_f);
+        let hi_nib_sw = _mm256_and_si256(_mm256_srli_epi16(sw, 4), mask_f);
+        let norm = _mm256_xor_si256(
+            _mm256_shuffle_epi8(tna, lo_nib_s),
+            _mm256_shuffle_epi8(tnb, hi_nib_s),
+        );
+        let swap = _mm256_xor_si256(
+            _mm256_shuffle_epi8(tsa, lo_nib_sw),
+            _mm256_shuffle_epi8(tsb, hi_nib_sw),
+        );
+        _mm256_xor_si256(norm, swap)
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     unsafe fn flush_avx2_shuffle2x_work(
@@ -1785,13 +2601,6 @@ impl RecoveryEncoder {
         exponent_start: u32,
         gf: &Gf16,
     ) {
-        // Byte-separation mask: within each 128-bit lane, move even-indexed bytes
-        // (lo bytes of u16 words) to positions 0-7 and odd-indexed bytes (hi bytes)
-        // to positions 8-15.  Combined with vpermq 0xD8 this is `separate_low_high`.
-        let sep_mask = _mm256_set_epi8(
-            15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 1
-            15, 13, 11, 9, 7, 5, 3, 1, 14, 12, 10, 8, 6, 4, 2, 0, // lane 0
-        );
         let mask_f = _mm256_set1_epi8(0x0F_u8 as i8);
 
         let n_rec = buffers.len();
@@ -1880,9 +2689,20 @@ impl RecoveryEncoder {
             })
             .collect();
 
-        // 32 KiB byte chunks per recovery buffer = 16384 words, matching the
-        // flush_avx2_work chunk granularity.
-        let chunk_size_bytes = 32768usize;
+        // Convert each input once (Normal → Shuffle2x). The inner loop used to
+        // vpshufb+vpermq every 32-byte block for every recovery group.
+        let prepared: Vec<Vec<u8>> = queued
+            .par_iter()
+            .map(|s| {
+                let mut out = vec![0u8; s.len()];
+                crate::shuffle2x::to_shuffle2x(s, &mut out);
+                out
+            })
+            .collect();
+
+        // 8 KiB tiles — ParPar's Shuffle2x idealChunkSize. 32 KiB was oversized
+        // for L2 when several recovery buffers share the same input stream.
+        let chunk_size_bytes = 8192usize;
 
         buffers
             .par_chunks_mut(4)
@@ -1907,7 +2727,9 @@ impl RecoveryEncoder {
                                     let byte_len = chunk_a.len();
                                     let blocks_32 = byte_len / 32;
 
-                                    for q_idx in 0..n_queued {
+                                    let mut q_idx = 0usize;
+                                    while q_idx < n_queued {
+                                        let pair = q_idx + 1 < n_queued;
                                         let (tna_a, tnb_a, tsa_a, tsb_a, _, _) =
                                             all_tables[base_a + q_idx];
                                         let (tna_b, tnb_b, tsa_b, tsb_b, _, _) =
@@ -1917,78 +2739,130 @@ impl RecoveryEncoder {
                                         let (tna_d, tnb_d, tsa_d, tsb_d, _, _) =
                                             all_tables[base_d + q_idx];
 
-                                        let slice_chunk =
-                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
-
-                                        let mut ptr_in =
-                                            slice_chunk.as_ptr() as *const __m256i;
+                                        let chunk0 =
+                                            &prepared[q_idx][byte_offset..byte_offset + byte_len];
+                                        let mut ptr0 = chunk0.as_ptr() as *const __m256i;
                                         let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_c = chunk_c.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_d = chunk_d.as_mut_ptr() as *mut __m256i;
-                                        let end = ptr_in.add(blocks_32);
+                                        let end = ptr0.add(blocks_32);
 
-                                        while ptr_in < end {
-                                            _mm_prefetch(
-                                                ptr_in.add(4) as *const i8,
-                                                _MM_HINT_T0,
-                                            );
-                                            let input = _mm256_loadu_si256(ptr_in);
-                                            // separate_low_high: lane0 = lo bytes, lane1 = hi
-                                            let s = _mm256_permute4x64_epi64(
-                                                _mm256_shuffle_epi8(input, sep_mask),
-                                                0xD8,
-                                            );
-                                            // swap lanes for cross-lane contributions
-                                            let sw =
-                                                _mm256_permute2x128_si256(s, s, 0x01);
-
-                                            let lo_nib_s = _mm256_and_si256(s, mask_f);
-                                            let hi_nib_s = _mm256_and_si256(
-                                                _mm256_srli_epi16(s, 4),
-                                                mask_f,
-                                            );
-                                            let lo_nib_sw = _mm256_and_si256(sw, mask_f);
-                                            let hi_nib_sw = _mm256_and_si256(
-                                                _mm256_srli_epi16(sw, 4),
-                                                mask_f,
-                                            );
-
-                                            // s2x_block: 4 PSHUFB + 2 XOR = one GF(2^16) madd
-                                            // into a Shuffle2x recovery buffer.
-                                            // norm  = pshufb(tNormA, lo_nib_s)  ^ pshufb(tNormB, hi_nib_s)
-                                            // swap  = pshufb(tSwapA, lo_nib_sw) ^ pshufb(tSwapB, hi_nib_sw)
-                                            // result.lane0 = full lo-byte, result.lane1 = full hi-byte ✓
-                                            macro_rules! s2x_block {
-                                                ($ta:expr, $tb:expr, $tc:expr, $td:expr, $ptr:expr) => {{
-                                                    let norm = _mm256_xor_si256(
-                                                        _mm256_shuffle_epi8($ta, lo_nib_s),
-                                                        _mm256_shuffle_epi8($tb, hi_nib_s),
-                                                    );
-                                                    let swap = _mm256_xor_si256(
-                                                        _mm256_shuffle_epi8($tc, lo_nib_sw),
-                                                        _mm256_shuffle_epi8($td, hi_nib_sw),
-                                                    );
-                                                    _mm256_storeu_si256(
-                                                        $ptr,
-                                                        _mm256_xor_si256(
-                                                            _mm256_loadu_si256($ptr),
-                                                            _mm256_xor_si256(norm, swap),
-                                                        ),
-                                                    );
-                                                }};
+                                        if pair {
+                                            let (tna_a2, tnb_a2, tsa_a2, tsb_a2, _, _) =
+                                                all_tables[base_a + q_idx + 1];
+                                            let (tna_b2, tnb_b2, tsa_b2, tsb_b2, _, _) =
+                                                all_tables[base_b + q_idx + 1];
+                                            let (tna_c2, tnb_c2, tsa_c2, tsb_c2, _, _) =
+                                                all_tables[base_c + q_idx + 1];
+                                            let (tna_d2, tnb_d2, tsa_d2, tsb_d2, _, _) =
+                                                all_tables[base_d + q_idx + 1];
+                                            let chunk1 = &prepared[q_idx + 1]
+                                                [byte_offset..byte_offset + byte_len];
+                                            let mut ptr1 = chunk1.as_ptr() as *const __m256i;
+                                            while ptr0 < end {
+                                                _mm_prefetch(ptr0.add(4) as *const i8, _MM_HINT_T0);
+                                                let s0 = _mm256_loadu_si256(ptr0);
+                                                let s1 = _mm256_loadu_si256(ptr1);
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_a, tnb_a, tsa_a, tsb_a,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_a2, tnb_a2, tsa_a2, tsb_a2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_a,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_a),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_b, tnb_b, tsa_b, tsb_b,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_b2, tnb_b2, tsa_b2, tsb_b2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_b,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_b),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_c, tnb_c, tsa_c, tsb_c,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_c2, tnb_c2, tsa_c2, tsb_c2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_c,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_c),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_d, tnb_d, tsa_d, tsb_d,
+                                                );
+                                                let c1 = RecoveryEncoder::s2x_contrib(
+                                                    s1, mask_f, tna_d2, tnb_d2, tsa_d2, tsb_d2,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_d,
+                                                    _mm256_xor_si256(
+                                                        _mm256_loadu_si256(ptr_d),
+                                                        _mm256_xor_si256(c0, c1),
+                                                    ),
+                                                );
+                                                ptr0 = ptr0.add(1);
+                                                ptr1 = ptr1.add(1);
+                                                ptr_a = ptr_a.add(1);
+                                                ptr_b = ptr_b.add(1);
+                                                ptr_c = ptr_c.add(1);
+                                                ptr_d = ptr_d.add(1);
                                             }
-
-                                            s2x_block!(tna_a, tnb_a, tsa_a, tsb_a, ptr_a);
-                                            s2x_block!(tna_b, tnb_b, tsa_b, tsb_b, ptr_b);
-                                            s2x_block!(tna_c, tnb_c, tsa_c, tsb_c, ptr_c);
-                                            s2x_block!(tna_d, tnb_d, tsa_d, tsb_d, ptr_d);
-
-                                            ptr_in = ptr_in.add(1);
-                                            ptr_a = ptr_a.add(1);
-                                            ptr_b = ptr_b.add(1);
-                                            ptr_c = ptr_c.add(1);
-                                            ptr_d = ptr_d.add(1);
+                                            q_idx += 2;
+                                        } else {
+                                            while ptr0 < end {
+                                                _mm_prefetch(ptr0.add(4) as *const i8, _MM_HINT_T0);
+                                                let s0 = _mm256_loadu_si256(ptr0);
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_a, tnb_a, tsa_a, tsb_a,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_a,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_a), c0),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_b, tnb_b, tsa_b, tsb_b,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_b,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_b), c0),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_c, tnb_c, tsa_c, tsb_c,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_c,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_c), c0),
+                                                );
+                                                let c0 = RecoveryEncoder::s2x_contrib(
+                                                    s0, mask_f, tna_d, tnb_d, tsa_d, tsb_d,
+                                                );
+                                                _mm256_storeu_si256(
+                                                    ptr_d,
+                                                    _mm256_xor_si256(_mm256_loadu_si256(ptr_d), c0),
+                                                );
+                                                ptr0 = ptr0.add(1);
+                                                ptr_a = ptr_a.add(1);
+                                                ptr_b = ptr_b.add(1);
+                                                ptr_c = ptr_c.add(1);
+                                                ptr_d = ptr_d.add(1);
+                                            }
+                                            q_idx += 1;
                                         }
                                     }
                                 },
@@ -2006,67 +2880,40 @@ impl RecoveryEncoder {
                                 let byte_len = chunk_a.len();
                                 let blocks_32 = byte_len / 32;
 
-                                for q_idx in 0..n_queued {
+                                let mut q_idx = 0usize;
+                                while q_idx < n_queued {
                                     let (tna_a, tnb_a, tsa_a, tsb_a, _, _) =
                                         all_tables[base_a + q_idx];
                                     let (tna_b, tnb_b, tsa_b, tsb_b, _, _) =
                                         all_tables[base_b + q_idx];
-
                                     let slice_chunk =
-                                        &queued[q_idx][byte_offset..byte_offset + byte_len];
-
+                                        &prepared[q_idx][byte_offset..byte_offset + byte_len];
                                     let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
                                     let mut ptr_a = chunk_a.as_mut_ptr() as *mut __m256i;
                                     let mut ptr_b = chunk_b.as_mut_ptr() as *mut __m256i;
                                     let end = ptr_in.add(blocks_32);
-
                                     while ptr_in < end {
                                         _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
-                                        let input = _mm256_loadu_si256(ptr_in);
-                                        let s = _mm256_permute4x64_epi64(
-                                            _mm256_shuffle_epi8(input, sep_mask),
-                                            0xD8,
+                                        let s = _mm256_loadu_si256(ptr_in);
+                                        let c = RecoveryEncoder::s2x_contrib(
+                                            s, mask_f, tna_a, tnb_a, tsa_a, tsb_a,
                                         );
-                                        let sw = _mm256_permute2x128_si256(s, s, 0x01);
-
-                                        let lo_nib_s = _mm256_and_si256(s, mask_f);
-                                        let hi_nib_s = _mm256_and_si256(
-                                            _mm256_srli_epi16(s, 4),
-                                            mask_f,
+                                        _mm256_storeu_si256(
+                                            ptr_a,
+                                            _mm256_xor_si256(_mm256_loadu_si256(ptr_a), c),
                                         );
-                                        let lo_nib_sw = _mm256_and_si256(sw, mask_f);
-                                        let hi_nib_sw = _mm256_and_si256(
-                                            _mm256_srli_epi16(sw, 4),
-                                            mask_f,
+                                        let c = RecoveryEncoder::s2x_contrib(
+                                            s, mask_f, tna_b, tnb_b, tsa_b, tsb_b,
                                         );
-
-                                        macro_rules! s2x_block {
-                                            ($ta:expr, $tb:expr, $tc:expr, $td:expr, $ptr:expr) => {{
-                                                let norm = _mm256_xor_si256(
-                                                    _mm256_shuffle_epi8($ta, lo_nib_s),
-                                                    _mm256_shuffle_epi8($tb, hi_nib_s),
-                                                );
-                                                let swap = _mm256_xor_si256(
-                                                    _mm256_shuffle_epi8($tc, lo_nib_sw),
-                                                    _mm256_shuffle_epi8($td, hi_nib_sw),
-                                                );
-                                                _mm256_storeu_si256(
-                                                    $ptr,
-                                                    _mm256_xor_si256(
-                                                        _mm256_loadu_si256($ptr),
-                                                        _mm256_xor_si256(norm, swap),
-                                                    ),
-                                                );
-                                            }};
-                                        }
-
-                                        s2x_block!(tna_a, tnb_a, tsa_a, tsb_a, ptr_a);
-                                        s2x_block!(tna_b, tnb_b, tsa_b, tsb_b, ptr_b);
-
+                                        _mm256_storeu_si256(
+                                            ptr_b,
+                                            _mm256_xor_si256(_mm256_loadu_si256(ptr_b), c),
+                                        );
                                         ptr_in = ptr_in.add(1);
                                         ptr_a = ptr_a.add(1);
                                         ptr_b = ptr_b.add(1);
                                     }
+                                    q_idx += 1;
                                 }
                             });
                     }
@@ -2080,47 +2927,21 @@ impl RecoveryEncoder {
                                     let blocks_32 = byte_len / 32;
 
                                     for q_idx in 0..n_queued {
-                                        let (tna, tnb, tsa, tsb, _, _) =
-                                            all_tables[base + q_idx];
+                                        let (tna, tnb, tsa, tsb, _, _) = all_tables[base + q_idx];
                                         let slice_chunk =
-                                            &queued[q_idx][byte_offset..byte_offset + byte_len];
-
+                                            &prepared[q_idx][byte_offset..byte_offset + byte_len];
                                         let mut ptr_buf = chunk.as_mut_ptr() as *mut __m256i;
                                         let mut ptr_in = slice_chunk.as_ptr() as *const __m256i;
                                         let end = ptr_in.add(blocks_32);
-
                                         while ptr_in < end {
                                             _mm_prefetch(ptr_in.add(4) as *const i8, _MM_HINT_T0);
-                                            let input = _mm256_loadu_si256(ptr_in);
-                                            let s = _mm256_permute4x64_epi64(
-                                                _mm256_shuffle_epi8(input, sep_mask),
-                                                0xD8,
-                                            );
-                                            let sw = _mm256_permute2x128_si256(s, s, 0x01);
-                                            let lo_nib_s = _mm256_and_si256(s, mask_f);
-                                            let hi_nib_s = _mm256_and_si256(
-                                                _mm256_srli_epi16(s, 4),
-                                                mask_f,
-                                            );
-                                            let lo_nib_sw = _mm256_and_si256(sw, mask_f);
-                                            let hi_nib_sw = _mm256_and_si256(
-                                                _mm256_srli_epi16(sw, 4),
-                                                mask_f,
-                                            );
-                                            let norm = _mm256_xor_si256(
-                                                _mm256_shuffle_epi8(tna, lo_nib_s),
-                                                _mm256_shuffle_epi8(tnb, hi_nib_s),
-                                            );
-                                            let swap = _mm256_xor_si256(
-                                                _mm256_shuffle_epi8(tsa, lo_nib_sw),
-                                                _mm256_shuffle_epi8(tsb, hi_nib_sw),
+                                            let s = _mm256_loadu_si256(ptr_in);
+                                            let c = RecoveryEncoder::s2x_contrib(
+                                                s, mask_f, tna, tnb, tsa, tsb,
                                             );
                                             _mm256_storeu_si256(
                                                 ptr_buf,
-                                                _mm256_xor_si256(
-                                                    _mm256_loadu_si256(ptr_buf),
-                                                    _mm256_xor_si256(norm, swap),
-                                                ),
+                                                _mm256_xor_si256(_mm256_loadu_si256(ptr_buf), c),
                                             );
                                             ptr_in = ptr_in.add(1);
                                             ptr_buf = ptr_buf.add(1);
@@ -2132,6 +2953,963 @@ impl RecoveryEncoder {
                     }
                 }
             });
+    }
+
+    /// Affine2x + GFNI: two `gf2p8affine` + 64-bit swap, fused `srcCount=6`,
+    /// 4 KiB tiles. Inputs are prepared once (Normal → Affine2x).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,gfni")]
+    unsafe fn flush_avx2_affine2x(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+
+        let RecoveryBufferSet::Affine2x(ref mut bufs) = self.buffers else {
+            unreachable!("flush_avx2_affine2x called on non-Affine2x encoder");
+        };
+
+        unsafe {
+            Self::flush_avx2_affine2x_work(
+                bufs,
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,gfni")]
+    unsafe fn a2x_contrib(data: __m256i, mat_norm: __m256i, mat_swap: __m256i) -> __m256i {
+        let r1 = _mm256_gf2p8affine_epi64_epi8(data, mat_norm, 0);
+        let r2 = _mm256_gf2p8affine_epi64_epi8(data, mat_swap, 0);
+        // SHUFFLE(1,0,3,2): swap the two qwords of each 128-bit lane.
+        _mm256_xor_si256(r1, _mm256_shuffle_epi32::<0x4E>(r2))
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,gfni")]
+    unsafe fn flush_avx2_affine2x_work(
+        buffers: &mut [Vec<u8>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+        if n_queued == 0 {
+            return;
+        }
+        if start_index + n_queued > logbases.len() {
+            panic!(
+                "PAR2 slice index overflow: start_index({}) + n_queued({}) > logbases.len({})",
+                start_index,
+                n_queued,
+                logbases.len()
+            );
+        }
+
+        // Two ymm matrices per (recovery, input): mat_norm = [ll, hh] per lane,
+        // mat_swap = [hl, lh] per lane. Built from 16×4 bit-basis products
+        // (no 65k dep tables).
+        let all_tables: Vec<(__m256i, __m256i)> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+
+                let mut m_ll = 0u64;
+                let mut m_lh = 0u64;
+                let mut m_hl = 0u64;
+                let mut m_hh = 0u64;
+                for row in 0..8usize {
+                    let mut row_ll = 0u8;
+                    let mut row_lh = 0u8;
+                    let mut row_hl = 0u8;
+                    let mut row_hh = 0u8;
+                    for j in 0..8usize {
+                        let r_lo = gf.mul(1u16 << j, coeff);
+                        if (r_lo >> row) & 1 == 1 {
+                            row_ll |= 1 << j;
+                        }
+                        if (r_lo >> (row + 8)) & 1 == 1 {
+                            row_hl |= 1 << j;
+                        }
+                        let r_hi = gf.mul(1u16 << (j + 8), coeff);
+                        if (r_hi >> row) & 1 == 1 {
+                            row_lh |= 1 << j;
+                        }
+                        if (r_hi >> (row + 8)) & 1 == 1 {
+                            row_hh |= 1 << j;
+                        }
+                    }
+                    let shift = (7 - row) * 8;
+                    m_ll |= (row_ll as u64) << shift;
+                    m_lh |= (row_lh as u64) << shift;
+                    m_hl |= (row_hl as u64) << shift;
+                    m_hh |= (row_hh as u64) << shift;
+                }
+
+                let mat_norm =
+                    _mm256_set_epi64x(m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64);
+                let mat_swap =
+                    _mm256_set_epi64x(m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64);
+                (mat_norm, mat_swap)
+            })
+            .collect();
+
+        let prepared: Vec<Vec<u8>> = queued
+            .par_iter()
+            .map(|s| {
+                let mut out = vec![0u8; s.len()];
+                crate::affine2x::to_affine2x(s, &mut out);
+                out
+            })
+            .collect();
+
+        // ParPar affine2x ideal chunk is 4 KiB.
+        let tile = 4096usize;
+
+        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+            let base = rec * n_queued;
+            let n_tiles = buf.len().div_ceil(tile);
+            for t in 0..n_tiles {
+                let off = t * tile;
+                let end = (off + tile).min(buf.len());
+                let dest = &mut buf[off..end];
+                let blocks = dest.len() / 32;
+                if blocks == 0 {
+                    continue;
+                }
+                let mut q = 0usize;
+                while q < n_queued {
+                    let take = (n_queued - q).min(6);
+                    let mats: [(__m256i, __m256i); 6] = [
+                        all_tables[base + q],
+                        if take > 1 {
+                            all_tables[base + q + 1]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 2 {
+                            all_tables[base + q + 2]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 3 {
+                            all_tables[base + q + 3]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 4 {
+                            all_tables[base + q + 4]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 5 {
+                            all_tables[base + q + 5]
+                        } else {
+                            all_tables[base + q]
+                        },
+                    ];
+                    unsafe {
+                        let dst_ptr = dest.as_mut_ptr() as *mut __m256i;
+                        let src_ptrs: [*const __m256i; 6] = [
+                            prepared[q][off..end].as_ptr() as *const __m256i,
+                            if take > 1 {
+                                prepared[q + 1][off..end].as_ptr() as *const __m256i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 2 {
+                                prepared[q + 2][off..end].as_ptr() as *const __m256i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 3 {
+                                prepared[q + 3][off..end].as_ptr() as *const __m256i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 4 {
+                                prepared[q + 4][off..end].as_ptr() as *const __m256i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 5 {
+                                prepared[q + 5][off..end].as_ptr() as *const __m256i
+                            } else {
+                                std::ptr::null()
+                            },
+                        ];
+                        for b in 0..blocks {
+                            let mut acc = _mm256_loadu_si256(dst_ptr.add(b));
+                            for s in 0..take {
+                                let data = _mm256_loadu_si256(src_ptrs[s].add(b));
+                                acc = _mm256_xor_si256(
+                                    acc,
+                                    RecoveryEncoder::a2x_contrib(data, mats[s].0, mats[s].1),
+                                );
+                            }
+                            _mm256_storeu_si256(dst_ptr.add(b), acc);
+                        }
+                    }
+                    q += take;
+                }
+            }
+        });
+    }
+
+unsafe fn flush_avx512_affine2x(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+
+        let RecoveryBufferSet::Affine2x(ref mut bufs) = self.buffers else {
+            unreachable!("flush_avx512_affine2x called on non-Affine2x encoder");
+        };
+
+        unsafe {
+            Self::flush_avx512_affine2x_work(
+                bufs,
+                &queued,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+#[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn a2x_contrib512(data: __m512i, mat_norm: __m512i, mat_swap: __m512i) -> __m512i {
+        let r1 = _mm512_gf2p8affine_epi64_epi8(data, mat_norm, 0);
+        let r2 = _mm512_gf2p8affine_epi64_epi8(data, mat_swap, 0);
+        // SHUFFLE(1,0,3,2): swap the two qwords of each 128-bit lane.
+        _mm512_xor_si512(r1, _mm512_shuffle_epi32::<0x4E>(r2))
+    }
+
+#[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_affine2x_work(
+        buffers: &mut [Vec<u8>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+        if n_queued == 0 {
+            return;
+        }
+        if start_index + n_queued > logbases.len() {
+            panic!(
+                "PAR2 slice index overflow: start_index({}) + n_queued({}) > logbases.len({})",
+                start_index,
+                n_queued,
+                logbases.len()
+            );
+        }
+
+        // Two ymm matrices per (recovery, input): mat_norm = [ll, hh] per lane,
+        // mat_swap = [hl, lh] per lane. Built from 16×4 bit-basis products
+        // (no 65k dep tables).
+        let all_tables: Vec<(__m512i, __m512i)> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+
+                let mut m_ll = 0u64;
+                let mut m_lh = 0u64;
+                let mut m_hl = 0u64;
+                let mut m_hh = 0u64;
+                for row in 0..8usize {
+                    let mut row_ll = 0u8;
+                    let mut row_lh = 0u8;
+                    let mut row_hl = 0u8;
+                    let mut row_hh = 0u8;
+                    for j in 0..8usize {
+                        let r_lo = gf.mul(1u16 << j, coeff);
+                        if (r_lo >> row) & 1 == 1 {
+                            row_ll |= 1 << j;
+                        }
+                        if (r_lo >> (row + 8)) & 1 == 1 {
+                            row_hl |= 1 << j;
+                        }
+                        let r_hi = gf.mul(1u16 << (j + 8), coeff);
+                        if (r_hi >> row) & 1 == 1 {
+                            row_lh |= 1 << j;
+                        }
+                        if (r_hi >> (row + 8)) & 1 == 1 {
+                            row_hh |= 1 << j;
+                        }
+                    }
+                    let shift = (7 - row) * 8;
+                    m_ll |= (row_ll as u64) << shift;
+                    m_lh |= (row_lh as u64) << shift;
+                    m_hl |= (row_hl as u64) << shift;
+                    m_hh |= (row_hh as u64) << shift;
+                }
+
+                let mat_norm =
+                    _mm512_set_epi64(m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64, m_hh as i64, m_ll as i64);
+                let mat_swap =
+                    _mm512_set_epi64(m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64, m_lh as i64, m_hl as i64);
+                (mat_norm, mat_swap)
+            })
+            .collect();
+
+        let prepared: Vec<Vec<u8>> = queued
+            .par_iter()
+            .map(|s| {
+                let mut out = vec![0u8; s.len()];
+                crate::affine2x::to_affine2x(s, &mut out);
+                out
+            })
+            .collect();
+
+        // ParPar affine2x ideal chunk is 4 KiB.
+        let tile = 4096usize;
+
+        buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+            let base = rec * n_queued;
+            let n_tiles = buf.len().div_ceil(tile);
+            for t in 0..n_tiles {
+                let off = t * tile;
+                let end = (off + tile).min(buf.len());
+                let dest = &mut buf[off..end];
+                let blocks = dest.len() / 64;
+                if blocks == 0 {
+                    continue;
+                }
+                let mut q = 0usize;
+                while q < n_queued {
+                    let take = (n_queued - q).min(12);
+                    let mats: [(__m512i, __m512i); 12] = [
+                        all_tables[base + q],
+                        if take > 1 {
+                            all_tables[base + q + 1]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 2 {
+                            all_tables[base + q + 2]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 3 {
+                            all_tables[base + q + 3]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 4 {
+                            all_tables[base + q + 4]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 5 {
+                            all_tables[base + q + 5]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 6 {
+                            all_tables[base + q + 6]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 7 {
+                            all_tables[base + q + 7]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 8 {
+                            all_tables[base + q + 8]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 9 {
+                            all_tables[base + q + 9]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 10 {
+                            all_tables[base + q + 10]
+                        } else {
+                            all_tables[base + q]
+                        },
+                        if take > 11 {
+                            all_tables[base + q + 11]
+                        } else {
+                            all_tables[base + q]
+                        },
+                    ];
+                    unsafe {
+                        let dst_ptr = dest.as_mut_ptr() as *mut __m512i;
+                        let src_ptrs: [*const __m512i; 12] = [
+                            prepared[q][off..end].as_ptr() as *const __m512i,
+                            if take > 1 {
+                                prepared[q + 1][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 2 {
+                                prepared[q + 2][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 3 {
+                                prepared[q + 3][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 4 {
+                                prepared[q + 4][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 5 {
+                                prepared[q + 5][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 6 {
+                                prepared[q + 6][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 7 {
+                                prepared[q + 7][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 8 {
+                                prepared[q + 8][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 9 {
+                                prepared[q + 9][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 10 {
+                                prepared[q + 10][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                            if take > 11 {
+                                prepared[q + 11][off..end].as_ptr() as *const __m512i
+                            } else {
+                                std::ptr::null()
+                            },
+                        ];
+
+                    macro_rules! unroll_take {
+                        ($take:expr, $src_ptrs:expr, $mats:expr, $b:expr, $acc:expr) => {
+                            match $take {
+                                1 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                }
+                                2 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                }
+                                3 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                }
+                                4 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                }
+                                5 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                }
+                                6 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                }
+                                7 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
+                                }
+                                8 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
+                                }
+                                9 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
+                                }
+                                10 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[9].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[9].0, $mats[9].1));
+                                }
+                                11 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[9].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[9].0, $mats[9].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[10].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[10].0, $mats[10].1));
+                                }
+                                12 => {
+                                    let data = _mm512_loadu_si512($src_ptrs[0].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[0].0, $mats[0].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[1].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[1].0, $mats[1].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[2].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[2].0, $mats[2].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[3].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[3].0, $mats[3].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[4].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[4].0, $mats[4].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[5].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[5].0, $mats[5].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[6].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[6].0, $mats[6].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[7].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[7].0, $mats[7].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[8].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[8].0, $mats[8].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[9].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[9].0, $mats[9].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[10].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[10].0, $mats[10].1));
+                                    let data = _mm512_loadu_si512($src_ptrs[11].add($b));
+                                    $acc = _mm512_xor_si512($acc, RecoveryEncoder::a2x_contrib512(data, $mats[11].0, $mats[11].1));
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+
+                        for b in 0..blocks {
+                            let mut acc = _mm512_loadu_si512(dst_ptr.add(b));
+                            unroll_take!(take, src_ptrs, mats, b, acc);
+                            _mm512_storeu_si512(dst_ptr.add(b), acc);
+                        }
+                    }
+                    q += take;
+                }
+            }
+        });
+    }
+
+    /// Parpar Affine: shuffle-prepare inputs, 4× gf2p8affine per 64 B, up to
+    /// three sources per dest store (AVX2 `idealInputMultiple`).
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,gfni")]
+    unsafe fn flush_avx2_affine(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+        let RecoveryBufferSet::Affine(ref mut bufs) = self.buffers else {
+            unreachable!("flush_avx2_affine on non-Affine encoder");
+        };
+        let mut prepared = std::mem::take(&mut self.affine_prepare);
+        Self::prepare_affine_inputs(&queued, &mut prepared, false);
+        unsafe {
+            Self::flush_avx2_affine_work(
+                bufs,
+                &prepared,
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+        self.affine_prepare = prepared;
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,gfni")]
+    unsafe fn flush_avx2_affine_work(
+        buffers: &mut [Vec<u8>],
+        queued: &[Vec<u8>],
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let n_rec = buffers.len();
+        let n_queued = queued.len();
+        if n_queued == 0 {
+            return;
+        }
+        let scratch = AffineNibbleScratch::new(gf);
+        let all_tables: Vec<(__m256i, __m256i, __m256i, __m256i)> = (0..n_rec * n_queued)
+            .into_par_iter()
+            .map(|flat| {
+                let i = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + i as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                let coeff = gf.exp(log_coeff);
+                let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeff);
+                (
+                    _mm256_set1_epi64x(m_ll as i64),
+                    _mm256_set1_epi64x(m_hl as i64),
+                    _mm256_set1_epi64x(m_lh as i64),
+                    _mm256_set1_epi64x(m_hh as i64),
+                )
+            })
+            .collect();
+
+        let tile = 4096usize;
+        if buffers.is_empty() {
+            return;
+        }
+        let slice_len = buffers[0].len();
+        let n_tiles = slice_len.div_ceil(tile);
+        for t in 0..n_tiles {
+            let off = t * tile;
+            let end = (off + tile).min(slice_len);
+            let tile_len = end - off;
+            if tile_len < 64 {
+                continue;
+            }
+            let packed = pack_affine_tile(queued, off, tile_len, 64);
+            let blocks = tile_len / 64;
+            buffers.par_iter_mut().enumerate().for_each(|(rec, buf)| {
+                let base = rec * n_queued;
+                let dest = &mut buf[off..end];
+                let mut q = 0usize;
+                while q < n_queued {
+                    let take = (n_queued - q).min(3);
+                    unsafe {
+                        let dst = dest.as_mut_ptr();
+                        let pk = packed.as_ptr();
+                        for b in 0..blocks {
+                            let p = dst.add(b * 64).cast::<__m256i>();
+                            let mut tph = _mm256_loadu_si256(p);
+                            let mut tpl = _mm256_loadu_si256(p.add(1));
+                            for s in 0..take {
+                                let (mll, mhl, mlh, mhh) = all_tables[base + q + s];
+                                let sp = pk.add((b * n_queued + q + s) * 64).cast::<__m256i>();
+                                let ta = _mm256_loadu_si256(sp);
+                                let tb = _mm256_loadu_si256(sp.add(1));
+                                tpl = _mm256_xor_si256(
+                                    tpl,
+                                    _mm256_xor_si256(
+                                        _mm256_gf2p8affine_epi64_epi8(ta, mlh, 0),
+                                        _mm256_gf2p8affine_epi64_epi8(tb, mll, 0),
+                                    ),
+                                );
+                                tph = _mm256_xor_si256(
+                                    tph,
+                                    _mm256_xor_si256(
+                                        _mm256_gf2p8affine_epi64_epi8(ta, mhh, 0),
+                                        _mm256_gf2p8affine_epi64_epi8(tb, mhl, 0),
+                                    ),
+                                );
+                            }
+                            _mm256_storeu_si256(p, tph);
+                            _mm256_storeu_si256(p.add(1), tpl);
+                        }
+                    }
+                    q += take;
+                }
+            });
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_affine(&mut self) {
+        let start_index = self.next_index;
+        let queued = std::mem::take(&mut self.queued_slices);
+        self.next_index += queued.len();
+        let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
+            queued.par_iter().map(|s| slice_checksum(s)).collect()
+        } else {
+            Vec::new()
+        };
+        let RecoveryBufferSet::Affine512(ref mut acc) = self.buffers else {
+            unreachable!("flush_avx512_affine on non-Affine512 encoder");
+        };
+        let mut prepared = std::mem::take(&mut self.affine_prepare);
+        let slice_len = acc.slice_len;
+        let n_tiles = slice_len.div_ceil(AFFINE512_CHUNK);
+        let packed_len = n_tiles * AFFINE512_CHUNK * queued.len();
+        if prepared.is_empty() {
+            prepared.push(vec![0u8; packed_len]);
+        } else {
+            prepared[0].resize(packed_len, 0);
+        }
+        unsafe {
+            prepare_packed_affine512(&queued, &mut prepared[0], slice_len);
+            Self::flush_avx512_affine_work(
+                acc,
+                &prepared[0],
+                queued.len(),
+                start_index,
+                &self.logbases,
+                self.exponent_start,
+                &self.gf,
+            );
+        }
+        self.affine_prepare = prepared;
+        self.pending_checksums.extend(new_cs);
+        self.recycle_queue(queued);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni")]
+    unsafe fn flush_avx512_affine_work(
+        acc: &mut Affine512Acc,
+        packed: &[u8],
+        n_queued: usize,
+        start_index: usize,
+        logbases: &[u32],
+        exponent_start: u32,
+        gf: &Gf16,
+    ) {
+        let n_rec = acc.n_rec;
+        if n_queued == 0 || n_rec == 0 {
+            return;
+        }
+        let slice_len = acc.slice_len;
+        let n_tiles = slice_len.div_ceil(AFFINE512_CHUNK);
+        let scratch = AffineNibbleScratch::new(gf);
+        let coeffs: Vec<u16> = (0..n_rec * n_queued)
+            .map(|flat| {
+                let rec = flat / n_queued;
+                let q_idx = flat % n_queued;
+                let exponent = exponent_start + rec as u32;
+                let logbase = logbases[start_index + q_idx] as u64;
+                let log_coeff = ((logbase * exponent as u64) % ORDER as u64) as u32;
+                gf.exp(log_coeff)
+            })
+            .collect();
+
+        let dest_base = acc.data.as_mut_ptr() as usize;
+        let packed_addr = packed.as_ptr() as usize;
+
+        (0..n_tiles).into_par_iter().for_each(|t| {
+            let off = t * AFFINE512_CHUNK;
+            let tile_len = (slice_len - off).min(AFFINE512_CHUNK);
+            let blocks = tile_len / AFFINE512_BLOCK;
+            if blocks == 0 {
+                return;
+            }
+            if t + 1 < n_tiles {
+                unsafe {
+                    _mm_prefetch::<_MM_HINT_T1>(
+                        (packed_addr as *const i8).add(affine512_packed_off(n_queued, t + 1, 0, 0)),
+                    );
+                }
+            }
+            for rec in 0..n_rec {
+                let dst = (dest_base as *mut u8).add(affine512_dest_off(n_rec, rec, t));
+                if rec + 1 < n_rec {
+                    unsafe {
+                        _mm_prefetch::<_MM_HINT_T0>(
+                            (dest_base as *const i8).add(affine512_dest_off(n_rec, rec + 1, t)),
+                        );
+                    }
+                }
+                let mut q = 0usize;
+                while q < n_queued {
+                    let take = (n_queued - q).min(AFFINE512_INTERLEAVE);
+                    let mut mats = [(
+                        _mm512_setzero_si512(),
+                        _mm512_setzero_si512(),
+                        _mm512_setzero_si512(),
+                        _mm512_setzero_si512(),
+                    ); 6];
+                    let base = rec * n_queued + q;
+                    for s in 0..take {
+                        let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeffs[base + s]);
+                        mats[s] = (
+                            _mm512_set1_epi64(m_ll as i64),
+                            _mm512_set1_epi64(m_hl as i64),
+                            _mm512_set1_epi64(m_lh as i64),
+                            _mm512_set1_epi64(m_hh as i64),
+                        );
+                    }
+                    unsafe {
+                        for b in 0..blocks {
+                            let p = dst.add(b * AFFINE512_BLOCK).cast::<__m512i>();
+                            let mut tph = _mm512_loadu_si512(p);
+                            let mut tpl = _mm512_loadu_si512(p.add(1));
+                            for (s, &(mll, mhl, mlh, mhh)) in mats.iter().enumerate().take(take) {
+                                let sp = (packed_addr as *const u8)
+                                    .add(affine512_packed_off(n_queued, t, q + s, b))
+                                    .cast::<__m512i>();
+                                let ta = _mm512_loadu_si512(sp);
+                                let tb = _mm512_loadu_si512(sp.add(1));
+                                tpl = _mm512_ternarylogic_epi32(
+                                    _mm512_gf2p8affine_epi64_epi8(ta, mlh, 0),
+                                    _mm512_gf2p8affine_epi64_epi8(tb, mll, 0),
+                                    tpl,
+                                    0x96,
+                                );
+                                tph = _mm512_ternarylogic_epi32(
+                                    _mm512_gf2p8affine_epi64_epi8(ta, mhh, 0),
+                                    _mm512_gf2p8affine_epi64_epi8(tb, mhl, 0),
+                                    tph,
+                                    0x96,
+                                );
+                            }
+                            _mm512_storeu_si512(p, tph);
+                            _mm512_storeu_si512(p.add(1), tpl);
+                        }
+                    }
+                    q += take;
+                }
+            }
+        });
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -4120,6 +5898,41 @@ impl RecoveryEncoder {
                     }
                 })
                 .collect(),
+            RecoveryBufferSet::Affine2x(bufs) => bufs
+                .into_iter()
+                .enumerate()
+                .map(|(i, a2x_buf)| {
+                    let mut normal = vec![0u8; a2x_buf.len()];
+                    super::affine2x::from_affine2x(&a2x_buf, &mut normal);
+                    RecoverySlice {
+                        exponent: exponent_start + i as u32,
+                        data: normal,
+                    }
+                })
+                .collect(),
+            RecoveryBufferSet::Affine(bufs) => bufs
+                .into_iter()
+                .enumerate()
+                .map(|(i, af_buf)| {
+                    let mut normal = vec![0u8; af_buf.len()];
+                    super::affine::from_affine(&af_buf, &mut normal);
+                    RecoverySlice {
+                        exponent: exponent_start + i as u32,
+                        data: normal,
+                    }
+                })
+                .collect(),
+            RecoveryBufferSet::Affine512(acc) => {
+                #[cfg(target_arch = "x86_64")]
+                {
+                    unsafe { affine512_acc_to_slices(acc, exponent_start) }
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    let _ = (acc, exponent_start);
+                    Vec::new()
+                }
+            }
         };
         (slices, checksums)
     }
@@ -4133,22 +5946,25 @@ pub struct FileHashes {
     pub length: u64,
 }
 
-/// Computes [`FileHashes`] from a file's real bytes, fed incrementally.
+/// Computes [`FileHashes`] from a file's real bytes, fed incrementally,
+/// and computes per-slice checksums simultaneously.
 pub struct FileHasher {
-    full: Md5,
+    full: md5_many::Md5State,
     head: Md5,
     head_consumed: usize,
     length: u64,
+    many: md5_many::Md5Many,
 }
 
 impl FileHasher {
     /// Start hashing a new file.
     pub fn new() -> Self {
         Self {
-            full: Md5::new(),
+            full: md5_many::Md5State::new(),
             head: Md5::new(),
             head_consumed: 0,
             length: 0,
+            many: md5_many::Md5Many::new(),
         }
     }
 
@@ -4164,14 +5980,70 @@ impl FileHasher {
         }
     }
 
+    /// Update the file hash with the unpadded portion of the slice,
+    /// and simultaneously compute the MD5 and CRC32 of the fully padded slice.
+    pub fn update_and_hash_slice(&mut self, padded_slice: &[u8], actual_len: usize) -> SliceChecksum {
+        let mut slice_state = md5_many::Md5State::new();
+        let mut crc = crc32fast::Hasher::new();
+
+        // Feed the 16k head if still needed
+        let unpadded = &padded_slice[..actual_len];
+        self.length += actual_len as u64;
+        let room = HEAD_LEN - self.head_consumed;
+        if room > 0 {
+            let take = room.min(actual_len);
+            self.head.update(&unpadded[..take]);
+            self.head_consumed += take;
+        }
+
+        // Process chunk by chunk to maintain L1 cache locality for CRC
+        for chunk_start in (0..padded_slice.len()).step_by(64 * 1024) {
+            let chunk_end = (chunk_start + 64 * 1024).min(padded_slice.len());
+            let chunk = &padded_slice[chunk_start..chunk_end];
+            crc.update(chunk);
+
+            // Compute how much of this chunk is actual unpadded data
+            let chunk_actual_len = if chunk_start >= actual_len {
+                0
+            } else {
+                (actual_len - chunk_start).min(chunk.len())
+            };
+
+            if chunk_actual_len == chunk.len() {
+                // Entire chunk is unpadded data: hash simultaneously
+                let mut states = [self.full.clone(), slice_state.clone()];
+                self.many.update_many(&mut states, &[chunk, chunk]);
+                self.full = states[0].clone();
+                slice_state = states[1].clone();
+            } else if chunk_actual_len > 0 {
+                // Partial chunk: simultaneously hash the unpadded part, then individually hash the rest of the padding for the slice
+                let unpadded_part = &chunk[..chunk_actual_len];
+                let padded_part = &chunk[chunk_actual_len..];
+                
+                let mut states = [self.full.clone(), slice_state.clone()];
+                self.many.update_many(&mut states, &[unpadded_part, unpadded_part]);
+                self.full = states[0].clone();
+                slice_state = states[1].clone();
+
+                slice_state.update(padded_part);
+            } else {
+                // Completely padding
+                slice_state.update(chunk);
+            }
+        }
+
+        SliceChecksum {
+            md5: slice_state.finalize().into(),
+            crc32: crc.finalize(),
+        }
+    }
+
     /// Finish and return the hashes.
     pub fn finish(self) -> FileHashes {
-        let mut md5_full = [0u8; 16];
-        md5_full.copy_from_slice(&self.full.finalize());
         let mut md5_16k = [0u8; 16];
         md5_16k.copy_from_slice(&self.head.finalize());
         FileHashes {
-            md5_full,
+            md5_full: self.full.finalize().into(),
             md5_16k,
             length: self.length,
         }
@@ -4260,10 +6132,22 @@ unsafe fn gf16_clmul_reduce_neon(
 }
 
 /// MD5 + CRC32 checksum of one zero-padded input slice (for the IFSC packet).
+///
+/// One walk of the buffer: the previous implementation hashed twice
+/// (separate `md5` and `crc32` passes). Parpar fuses both on the input
+/// stream; this is the portable equivalent until a SIMD MD5×2 lands.
 pub fn slice_checksum(padded_slice: &[u8]) -> SliceChecksum {
+    let mut digest = Md5::new();
+    let mut crc = crc32fast::Hasher::new();
+    for chunk in padded_slice.chunks(64 * 1024) {
+        digest.update(chunk);
+        crc.update(chunk);
+    }
+    let mut md5_out = [0u8; 16];
+    md5_out.copy_from_slice(&digest.finalize());
     SliceChecksum {
-        md5: md5(padded_slice),
-        crc32: crc32(padded_slice),
+        md5: md5_out,
+        crc32: crc.finalize(),
     }
 }
 
@@ -4283,6 +6167,21 @@ mod tests {
         let expected: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
         assert_eq!(recovery[0].exponent, 0);
         assert_eq!(recovery[0].data, expected);
+    }
+
+    #[test]
+    fn affine_nibble_scratch_matches_full_8x8() {
+        // Same identity as parpar `gf16_affine_load_matrix`: XOR of 4 nibble
+        // contributions equals the 8×8 matrix of the full coefficient.
+        let gf = Gf16::new();
+        let scratch = AffineNibbleScratch::new(&gf);
+        for coeff in [0u16, 1, 2, 42, 0x00ff, 0xff00, 0x1234, 0x8000, 0xffff] {
+            assert_eq!(
+                scratch.load(coeff),
+                gfni_affine_u64_mats(&gf, coeff),
+                "nibble scratch mismatch for coeff={coeff:#06x}"
+            );
+        }
     }
 
     #[test]
@@ -4343,6 +6242,45 @@ mod tests {
             assert_eq!(
                 simd.data, *scalar,
                 "SIMD and scalar disagree on recovery block {i}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx512_shuffle_matches_scalar() {
+        if !shuffle512_kernel_available() {
+            eprintln!("avx512_shuffle_matches_scalar: skipped (no AVX-512 BW)");
+            return;
+        }
+        let slice_size = 128usize;
+        let total_slices = 5usize;
+        let recovery_count = 3usize;
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 41 + i * 19 + 3) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+        let mut enc = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count)
+            .with_simd_path(crate::SimdPath::Avx512Shuffle);
+        for s in &slices {
+            enc.add_slice(s.clone());
+        }
+        let (got, _) = enc.finish();
+        let gf = Gf16::new();
+        let logbases = input_logbases(total_slices);
+        let mut scalar_buffers = vec![vec![0u16; slice_size / 2]; recovery_count];
+        RecoveryEncoder::flush_scalar_work(&mut scalar_buffers, &slices, 0, &logbases, 0, &gf);
+        let scalar: Vec<Vec<u8>> = scalar_buffers
+            .into_iter()
+            .map(|buf| buf.into_iter().flat_map(|w| w.to_le_bytes()).collect())
+            .collect();
+        for (i, (g, s)) in got.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                g.data, *s,
+                "AVX-512 shuffle disagrees on recovery block {i}"
             );
         }
     }
@@ -4473,8 +6411,8 @@ mod tests {
         hasher.update(b"world");
         let hashes = hasher.finish();
         assert_eq!(hashes.length, 11);
-        assert_eq!(hashes.md5_full, md5(b"hello world"));
-        assert_eq!(hashes.md5_16k, md5(b"hello world"));
+        assert_eq!(hashes.md5_full, crate::packet::md5(b"hello world"));
+        assert_eq!(hashes.md5_16k, crate::packet::md5(b"hello world"));
     }
 
     #[test]
@@ -4485,16 +6423,16 @@ mod tests {
         hasher.update(&data[10_000..]);
         let hashes = hasher.finish();
         assert_eq!(hashes.length as usize, data.len());
-        assert_eq!(hashes.md5_full, md5(&data));
-        assert_eq!(hashes.md5_16k, md5(&data[..HEAD_LEN]));
+        assert_eq!(hashes.md5_full, crate::packet::md5(&data));
+        assert_eq!(hashes.md5_16k, crate::packet::md5(&data[..HEAD_LEN]));
     }
 
     #[test]
     fn slice_checksum_matches_md5_and_crc32() {
         let slice = [1u8, 2, 3, 4, 5, 6, 7, 8];
         let checksum = slice_checksum(&slice);
-        assert_eq!(checksum.md5, md5(&slice));
-        assert_eq!(checksum.crc32, crc32(&slice));
+        assert_eq!(checksum.md5, crate::packet::md5(&slice));
+        assert_eq!(checksum.crc32, crate::yenc::crc32(&slice));
     }
 
     #[test]
@@ -4650,6 +6588,33 @@ mod tests {
                 )),
             ),
             (
+                "affine2x",
+                encode(RecoveryEncoder::new_affine2x(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+            (
+                "affine",
+                encode(RecoveryEncoder::new_affine(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+            (
+                "affine512",
+                encode(RecoveryEncoder::new_affine512(
+                    slice_size,
+                    total_slices,
+                    0,
+                    recovery_count,
+                )),
+            ),
+            (
                 "smart",
                 encode(RecoveryEncoder::new_smart(
                     slice_size,
@@ -4691,6 +6656,46 @@ mod tests {
             matches!(shuffle2x.buffers, RecoveryBufferSet::Shuffle2x(_)),
             shuffle2x_kernel_available(),
             "shuffle2x_kernel_available disagrees with the layout new_shuffle2x chose"
+        );
+
+        let affine2x = RecoveryEncoder::new_affine2x(slice_size, total_slices, 0, recovery_count);
+        assert_eq!(
+            matches!(affine2x.buffers, RecoveryBufferSet::Affine2x(_)),
+            affine2x_kernel_available(),
+            "affine2x_kernel_available disagrees with the layout new_affine2x chose"
+        );
+
+        // Auto path must not pick Affine2x: c7i movie create 220 vs ~298
+        // Normal+GFNI. Explicit `new_affine2x` remains for experiments.
+        let smart = RecoveryEncoder::new_smart(slice_size, total_slices, 0, recovery_count);
+        assert!(
+            !matches!(smart.buffers, RecoveryBufferSet::Affine2x(_)),
+            "try_new_smart must not select Affine2x"
+        );
+
+        let affine = RecoveryEncoder::new_affine(slice_size, total_slices, 0, recovery_count);
+        assert_eq!(
+            matches!(affine.buffers, RecoveryBufferSet::Affine(_)),
+            affine_kernel_available(),
+            "affine_kernel_available disagrees with new_affine"
+        );
+        if affine512_kernel_available() {
+            assert!(
+                matches!(smart.buffers, RecoveryBufferSet::Affine2x(_)),
+                "try_new_smart must pick packed Affine2x on AVX-512+GFNI"
+            );
+        } else if affine_kernel_available() {
+            assert!(
+                matches!(smart.buffers, RecoveryBufferSet::Affine(_)),
+                "try_new_smart must pick Affine AVX2 on GFNI without 512"
+            );
+        }
+
+        let a512 = RecoveryEncoder::new_affine512(slice_size, total_slices, 0, recovery_count);
+        assert_eq!(
+            matches!(a512.buffers, RecoveryBufferSet::Affine512(_)),
+            affine512_kernel_available(),
+            "affine512_kernel_available disagrees with new_affine512"
         );
     }
 
@@ -4734,6 +6739,8 @@ mod tests {
             SimdPath::Avx2Gfni,
             #[cfg(target_arch = "x86_64")]
             SimdPath::Avx512Gfni,
+            #[cfg(target_arch = "x86_64")]
+            SimdPath::Avx512Shuffle,
             #[cfg(target_arch = "aarch64")]
             SimdPath::Neon,
         ];
@@ -4747,6 +6754,18 @@ mod tests {
                 (
                     "shuffle2x",
                     RecoveryEncoder::new_shuffle2x(slice_size, total_slices, 0, recovery_count),
+                ),
+                (
+                    "affine2x",
+                    RecoveryEncoder::new_affine2x(slice_size, total_slices, 0, recovery_count),
+                ),
+                (
+                    "affine",
+                    RecoveryEncoder::new_affine(slice_size, total_slices, 0, recovery_count),
+                ),
+                (
+                    "affine512",
+                    RecoveryEncoder::new_affine512(slice_size, total_slices, 0, recovery_count),
                 ),
                 (
                     "smart",
@@ -4876,6 +6895,90 @@ mod tests {
                 s2x.data, normal.data,
                 "Shuffle2x recovery slice {i} differs from normal encoder output (exponent_start={exponent_start})"
             );
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn new_affine_produces_correct_recovery_data() {
+        if !affine_kernel_available() {
+            return;
+        }
+        let slice_size = 64usize;
+        let total_slices = 7;
+        let recovery_count = 5;
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 19 + i * 7 + 11) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+        let mut enc_n = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count);
+        let mut enc_a = RecoveryEncoder::new_affine(slice_size, total_slices, 0, recovery_count);
+        for s in &slices {
+            enc_n.add_slice(s.clone());
+            enc_a.add_slice(s.clone());
+        }
+        let (n, _) = enc_n.finish();
+        let (a, _) = enc_a.finish();
+        assert_eq!(a.len(), n.len());
+        for (i, (got, want)) in a.iter().zip(n.iter()).enumerate() {
+            assert_eq!(got.data, want.data, "Affine recovery slice {i}");
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn new_affine2x_produces_correct_recovery_data() {
+        if !std::is_x86_feature_detected!("avx2") || !std::is_x86_feature_detected!("gfni") {
+            return;
+        }
+
+        let slice_size = 64usize;
+        let total_slices = 7;
+        let recovery_count = 5;
+
+        let slices: Vec<Vec<u8>> = (0..total_slices)
+            .map(|s| {
+                (0..slice_size)
+                    .map(|i| ((s * 19 + i * 7 + 11) & 0xFF) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let mut enc_normal = RecoveryEncoder::new(slice_size, total_slices, 0, recovery_count);
+        for s in &slices {
+            enc_normal.add_slice(s.clone());
+        }
+        let (normal_recovery, _) = enc_normal.finish();
+
+        let mut enc_a2x =
+            RecoveryEncoder::new_affine2x(slice_size, total_slices, 0, recovery_count);
+        for s in &slices {
+            enc_a2x.add_slice(s.clone());
+        }
+        let (a2x_recovery, _) = enc_a2x.finish();
+
+        assert_eq!(a2x_recovery.len(), normal_recovery.len());
+        for (i, (got, want)) in a2x_recovery.iter().zip(normal_recovery.iter()).enumerate() {
+            assert_eq!(
+                got.data, want.data,
+                "Affine2x recovery slice {i} differs from normal encoder output"
+            );
+        }
+
+        let mut enc_off =
+            RecoveryEncoder::new_affine2x(slice_size, total_slices, 5, recovery_count);
+        let mut enc_n2 = RecoveryEncoder::new(slice_size, total_slices, 5, recovery_count);
+        for s in &slices {
+            enc_off.add_slice(s.clone());
+            enc_n2.add_slice(s.clone());
+        }
+        let (off, _) = enc_off.finish();
+        let (n2, _) = enc_n2.finish();
+        for (i, (got, want)) in off.iter().zip(n2.iter()).enumerate() {
+            assert_eq!(got.data, want.data, "Affine2x exponent_start=5 slice {i}");
         }
     }
 

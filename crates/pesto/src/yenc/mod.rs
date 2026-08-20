@@ -24,7 +24,7 @@ pub use aarch64::encode_neon;
 pub use decode::{decode_part, DecodedPart};
 pub use scalar::encode_scalar;
 #[cfg(target_arch = "x86_64")]
-pub use x86::{encode_avx2, encode_ssse3};
+pub use x86::{encode_avx2, encode_avx512, encode_ssse3};
 
 /// Default yEnc line length, in source bytes per line.
 pub const DEFAULT_LINE_LENGTH: usize = 128;
@@ -291,8 +291,22 @@ pub fn encode_part(
     line_len: usize,
     file_crc32: Option<u32>,
 ) -> EncodedPart {
+    let mut body = Vec::new();
+    encode_part_into(name, file_size, spec, data, line_len, file_crc32, &mut body)
+}
+
+/// Like [`encode_part`], but writes the article body into `body` (cleared and
+/// reused). Nyuu's `encodeTo` — avoid a fresh allocation on every article.
+pub fn encode_part_into(
+    name: &str,
+    file_size: u64,
+    spec: PartSpec,
+    data: &[u8],
+    line_len: usize,
+    file_crc32: Option<u32>,
+    body: &mut Vec<u8>,
+) -> EncodedPart {
     let multipart = spec.total > 1;
-    let part_crc = crc32(data);
     let begin = spec.offset + 1;
     let end = spec.offset + data.len() as u64;
 
@@ -314,6 +328,24 @@ pub fn encode_part(
         None
     };
 
+    // Worst-case yEnc + a generous `=yend` (CRC is produced by `encode`, not
+    // a prior walk of `data`). Nyuu `encodeTo` writes the same way.
+    const YEND_BUDGET: usize = 80;
+    let total_capacity = ybegin.len()
+        + ypart.as_ref().map_or(0, |p| p.len())
+        + data.len() * 2
+        + data.len().div_ceil(line_len.max(1)) * 2
+        + YEND_BUDGET;
+
+    body.clear();
+    body.reserve(total_capacity);
+
+    body.extend_from_slice(ybegin.as_bytes());
+    if let Some(p) = ypart {
+        body.extend_from_slice(p.as_bytes());
+    }
+
+    let part_crc = encode(body, data, line_len);
     let yend = if multipart {
         let mut s = format!(
             "=yend size={} part={} pcrc32={:08x}",
@@ -329,19 +361,6 @@ pub fn encode_part(
     } else {
         format!("=yend size={} crc32={:08x}\r\n", data.len(), part_crc)
     };
-
-    let data_encoded_size = encoded_size(data, line_len);
-    let total_capacity =
-        ybegin.len() + ypart.as_ref().map_or(0, |p| p.len()) + data_encoded_size + yend.len();
-
-    let mut body = Vec::with_capacity(total_capacity);
-
-    body.extend_from_slice(ybegin.as_bytes());
-    if let Some(p) = ypart {
-        body.extend_from_slice(p.as_bytes());
-    }
-
-    encode(&mut body, data, line_len);
     body.extend_from_slice(yend.as_bytes());
 
     EncodedPart {
@@ -350,7 +369,7 @@ pub fn encode_part(
         begin,
         end,
         crc32: part_crc,
-        body,
+        body: std::mem::take(body),
     }
 }
 
@@ -399,18 +418,24 @@ pub fn encoded_size(data: &[u8], line_len: usize) -> usize {
 }
 
 /// Architecture-dispatched yEnc encoder. Selects the best available backend at
-/// runtime: AVX2 > SSSE3 > NEON > scalar.
+/// runtime: AVX-512 > AVX2 > SSSE3 > NEON > scalar.
+///
+/// Returns the IEEE CRC-32 of `data` (yEnc `pcrc32` / `crc32`). Computed with
+/// `crc32fast` (PCLMUL when the CPU has it) immediately before the encode
+/// loop so the payload is still cache-hot — no extra caller walk.
 #[cfg(target_arch = "x86_64")]
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
     x86::encode(out, data, line_len)
 }
 
 #[cfg(target_arch = "aarch64")]
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
     aarch64::encode(out, data, line_len)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
-    scalar::encode_scalar(out, data, line_len)
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
+    let crc = crc32(data);
+    scalar::encode_scalar(out, data, line_len);
+    crc
 }

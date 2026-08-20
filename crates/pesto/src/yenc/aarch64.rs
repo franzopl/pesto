@@ -6,8 +6,10 @@ pub fn encode_neon(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
     unsafe { encode_neon_impl(out, data, line_len) }
 }
 
-pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+pub fn encode(out: &mut Vec<u8>, data: &[u8], line_len: usize) -> u32 {
+    let crc = crc32fast::hash(data);
     unsafe { encode_neon_impl(out, data, line_len) }
+    crc
 }
 
 /// Exact encoded length of `data` under NEON, including escapes and CRLFs.

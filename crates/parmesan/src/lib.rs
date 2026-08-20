@@ -1,3 +1,5 @@
+pub mod affine;
+pub mod affine2x;
 pub mod altmap;
 pub mod decoder;
 pub mod encoder;
@@ -17,7 +19,13 @@ pub mod verify;
 pub mod worker;
 pub mod yenc;
 
-pub use encoder::{altmap_buffer_size, shuffle2x_buffer_size};
+pub use encoder::{
+    affine2x_buffer_size, affine_buffer_size, altmap_buffer_size, shuffle2x_buffer_size,
+};
+
+/// Shown by `--version` and banners. `dev` on this branch; crates.io releases
+/// keep using `CARGO_PKG_VERSION` on `main`.
+pub const DISPLAY_VERSION: &str = "dev";
 
 /// Multiplication backend for the Reed-Solomon encoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -35,6 +43,8 @@ pub enum SimdPath {
     Avx2Gfni,
     /// Intel Ice Lake+ / Sapphire Rapids+ AVX-512 with GFNI.
     Avx512Gfni,
+    /// AVX-512 VL/BW nibble shuffle (no GFNI — Skylake-X / Cascade Lake).
+    Avx512Shuffle,
     /// ARM NEON (AArch64 128-bit shuffles).
     Neon,
 }
@@ -48,7 +58,34 @@ impl std::fmt::Display for SimdPath {
             Self::Avx2 => write!(f, "avx2"),
             Self::Avx2Gfni => write!(f, "avx2-gfni"),
             Self::Avx512Gfni => write!(f, "avx512-gfni"),
+            Self::Avx512Shuffle => write!(f, "avx512-shuffle"),
             Self::Neon => write!(f, "neon"),
+        }
+    }
+}
+
+/// Which recovery-buffer layout `parmesan create` builds.
+///
+/// `smart` is the auto path (Affine512 packed on AVX-512+GFNI).
+/// `affine512` forces that layout even if `smart` would pick another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum EncoderLayout {
+    #[default]
+    Smart,
+    Normal,
+    Affine,
+    Affine512,
+    Shuffle2x,
+}
+
+impl std::fmt::Display for EncoderLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Smart => write!(f, "smart"),
+            Self::Normal => write!(f, "normal"),
+            Self::Affine => write!(f, "affine"),
+            Self::Affine512 => write!(f, "affine512"),
+            Self::Shuffle2x => write!(f, "shuffle2x"),
         }
     }
 }
@@ -61,6 +98,14 @@ pub fn detect_simd() -> &'static str {
         && std::is_x86_feature_detected!("gfni")
     {
         return "AVX-512/GFNI";
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("gfni") {
+        return "AVX2/GFNI";
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
+        return "AVX-512/Shuffle";
     }
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("avx2") {

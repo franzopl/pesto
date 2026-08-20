@@ -37,6 +37,10 @@ Used internally by [`pesto`](../../ROADMAP.md) and published as an independent c
 
 ---
 
+**Current work (branch `dev`):** close the large-file create gap vs `parpar`
+(prepare-once Shuffle2x, affine2x on GFNI, slice-chunk RAM). Full plan:
+[`docs/parity-roadmap.md`](../../docs/parity-roadmap.md).
+
 ---
 
 ## Phase 22 — Verify & Repair

@@ -7,6 +7,9 @@
 //! existing tools (Sonarr, Radarr, Prowlarr, SAB-aware mobile apps) work
 //! against it without new integration code.
 
+/// Shown by `--version` and the API `version` field. `dev` on this branch.
+pub const DISPLAY_VERSION: &str = "dev";
+
 pub mod api;
 pub mod config;
 pub mod job;

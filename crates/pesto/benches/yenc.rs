@@ -97,7 +97,9 @@ fn main() {
         128,
         NYUU_MBPS_128,
         &sizes,
-        |d, o| encode(o, d, 128),
+        |d, o| {
+            encode(o, d, 128);
+        },
         "encode(disp)   ll=128",
     );
 
@@ -134,7 +136,9 @@ fn main() {
         256,
         NYUU_MBPS_256,
         &sizes,
-        |d, o| encode(o, d, 256),
+        |d, o| {
+            encode(o, d, 256);
+        },
         "encode(disp)   ll=256",
     );
 }

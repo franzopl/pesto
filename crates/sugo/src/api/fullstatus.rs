@@ -10,7 +10,7 @@ pub async fn handle(state: &SharedState) -> Response {
     let active_count = usize::from(store.active.is_some());
     ok_response(json!({
         "status": {
-            "version": concat!("sugo-", env!("CARGO_PKG_VERSION")),
+            "version": format!("sugo-{}", crate::DISPLAY_VERSION),
             "paused": store.paused,
             "noofslots_total": store.pending.len() + active_count,
         }

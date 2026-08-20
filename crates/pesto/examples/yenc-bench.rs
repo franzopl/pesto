@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use pesto::yenc::encode_neon;
 use pesto::yenc::{encode, encode_scalar};
 #[cfg(target_arch = "x86_64")]
-use pesto::yenc::{encode_avx2, encode_ssse3};
+use pesto::yenc::{encode_avx2, encode_avx512, encode_ssse3};
 
 type EncodeFn = fn(&mut Vec<u8>, &[u8], usize);
 
@@ -55,14 +55,22 @@ fn make_data(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
+fn encode_auto(out: &mut Vec<u8>, data: &[u8], line_len: usize) {
+    let _ = encode(out, data, line_len);
+}
+
 fn resolve_path(name: &str) -> Option<EncodeFn> {
     match name {
-        "auto" => Some(encode as EncodeFn),
+        "auto" => Some(encode_auto as EncodeFn),
         "scalar" => Some(encode_scalar as EncodeFn),
         #[cfg(target_arch = "x86_64")]
         "ssse3" => std::arch::is_x86_feature_detected!("ssse3").then_some(encode_ssse3 as EncodeFn),
         #[cfg(target_arch = "x86_64")]
         "avx2" => std::arch::is_x86_feature_detected!("avx2").then_some(encode_avx2 as EncodeFn),
+        #[cfg(target_arch = "x86_64")]
+        "avx512" => (std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw"))
+        .then_some(encode_avx512 as EncodeFn),
         #[cfg(target_arch = "aarch64")]
         "neon" => Some(encode_neon as EncodeFn),
         _ => None,
@@ -80,6 +88,11 @@ fn available_paths() -> Vec<&'static str> {
         }
         if std::arch::is_x86_feature_detected!("avx2") {
             v.push("avx2");
+        }
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            v.push("avx512");
         }
     }
     #[cfg(target_arch = "aarch64")]
