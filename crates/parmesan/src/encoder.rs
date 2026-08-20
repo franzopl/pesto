@@ -3178,6 +3178,7 @@ impl RecoveryEncoder {
         });
     }
 
+    #[cfg(target_arch = "x86_64")]
     unsafe fn flush_avx512_affine2x(&mut self) {
         let start_index = self.next_index;
         let queued = std::mem::take(&mut self.queued_slices);
@@ -6242,7 +6243,8 @@ impl RecoveryEncoder {
                     let slice_chunk = &slice[byte_offset..byte_offset + byte_len];
                     let (ref table_low, ref table_high) = tables[q_idx];
 
-                    for (word, chunk) in buffer_chunk.iter_mut().zip(slice_chunk.chunks_exact(2)) {
+                    for (word, chunk) in buffer_chunk.iter_mut().zip(slice_chunk.as_chunks::<2>().0)
+                    {
                         *word ^= table_low[chunk[0] as usize] ^ table_high[chunk[1] as usize];
                     }
                 }
@@ -6428,20 +6430,20 @@ impl FileHasher {
 
             if chunk_actual_len == chunk.len() {
                 // Entire chunk is unpadded data: hash simultaneously
-                let mut states = [self.full.clone(), slice_state.clone()];
+                let mut states = [self.full, slice_state];
                 self.many.update_many(&mut states, &[chunk, chunk]);
-                self.full = states[0].clone();
-                slice_state = states[1].clone();
+                self.full = states[0];
+                slice_state = states[1];
             } else if chunk_actual_len > 0 {
                 // Partial chunk: simultaneously hash the unpadded part, then individually hash the rest of the padding for the slice
                 let unpadded_part = &chunk[..chunk_actual_len];
                 let padded_part = &chunk[chunk_actual_len..];
 
-                let mut states = [self.full.clone(), slice_state.clone()];
+                let mut states = [self.full, slice_state];
                 self.many
                     .update_many(&mut states, &[unpadded_part, unpadded_part]);
-                self.full = states[0].clone();
-                slice_state = states[1].clone();
+                self.full = states[0];
+                slice_state = states[1];
 
                 slice_state.update(padded_part);
             } else {
@@ -6451,7 +6453,7 @@ impl FileHasher {
         }
 
         SliceChecksum {
-            md5: slice_state.finalize().into(),
+            md5: slice_state.finalize(),
             crc32: crc.finalize(),
         }
     }
@@ -6461,7 +6463,7 @@ impl FileHasher {
         let mut md5_16k = [0u8; 16];
         md5_16k.copy_from_slice(&self.head.finalize());
         FileHashes {
-            md5_full: self.full.finalize().into(),
+            md5_full: self.full.finalize(),
             md5_16k,
             length: self.length,
         }

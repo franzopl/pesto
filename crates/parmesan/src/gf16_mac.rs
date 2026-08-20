@@ -62,7 +62,12 @@ pub fn mac(gf: &Gf16, dst: &mut [u8], src: &[u8], coeff: u16) {
 }
 
 fn mac_scalar(gf: &Gf16, dst: &mut [u8], src: &[u8], coeff: u16) {
-    for (d, s) in dst.chunks_exact_mut(2).zip(src.chunks_exact(2)) {
+    for (d, s) in dst
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<2>().0)
+    {
         let sv = u16::from_le_bytes([s[0], s[1]]);
         let dv = u16::from_le_bytes([d[0], d[1]]);
         let result = dv ^ gf.mul(sv, coeff);

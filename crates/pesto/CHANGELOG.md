@@ -12,6 +12,23 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-08-20
+
+### Fixed
+- **Season-mode global PAR2 no longer holds the whole recovery set in RAM (#110).** The encoder was already split into memory-budgeted read passes, but every pass's recovery slices were concatenated into one `Vec` until all volumes were written. A ~120 GB `--season` pack at `--par2 10` is ~12 GiB of recovery data — Linux overcommit allowed the allocation, then the OOM killer took the process (~17 GiB RSS) after the upload had already finished. Each pass is now appended to the volume files and dropped, matching the per-file `producer` path.
+
+## [0.8.1] — 2026-08-20
+
+### Performance
+
+- **AVX2 yEnc** (nyuu `encoder_avx_base.h` style, VBMI2 `mask_expand` + `vpternlog 0xF8`) on non-hybrid CPUs. Measured ~2312 MiB/s on c7i.
+- **AVX-512 BW + VBMI2** yEnc path added (available but not default — AVX2 wins on current hardware).
+- **IEEE CRC-32 folded into yEnc encode**: CRC is now computed during the encode pass via `crc32fast`, eliminating a second walk over the payload.
+- **encode off the POST path**: yEnc encoding now runs on a dedicated pool thread with a ready-article queue, fully decoupling CPU-bound encode from I/O-bound NNTP posting.
+- One yEnc encode thread on CPUs with ≤4 cores to avoid starvation.
+
+medialab i5-10400 post-only (0 ms): ~1050 → **1477 MiB/s** (+41%).
+
 ## [0.8.0] — 2026-08-18
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-08-20
+
+### Fixed
+- Season-mode global PAR2 streams each memory-budget pass to disk instead of concatenating the whole recovery set in RAM (#110).
+- CI: Clippy `-D warnings` and aarch64 compile of parmesan 0.5.2.
+
 ## [0.8.1] — 2026-08-20
 
 ### Performance (parmesan 0.5.1)

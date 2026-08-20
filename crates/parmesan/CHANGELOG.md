@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-08-20
+
+### Fixed
+- Clippy `-D warnings` and aarch64 build: `flush_avx512_affine2x` is gated on `x86_64` (it called a work function that only exists on that arch), `Md5State` copies no longer use `clone`, and constant-size `chunks_exact` loops use `as_chunks`.
+
+## [0.5.1] — 2026-08-20
+
+### Performance
+
+- **Affine512 packed kernel** (`srcCount=6`, 4 KiB tiles) is now the `smart` default on AVX-512+GFNI hardware. PAR2 create on `c7i.2xlarge movie-1080p`: 325 → 518 MiB/s after dynamic batching.
+- Affine AVX-512+GFNI and Affine AVX2+GFNI kernels; Shuffle AVX-512 nibble fallback; dynamic batch sizing (12 slices Affine512, 64 Shuffle2x/Normal).
+- SIMD MD5-MB 8/16-wide (`md5-many`) for slice and file checksums.
+
 ## [0.5.0] — 2026-08-18
 
 ### Added

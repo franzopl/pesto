@@ -103,7 +103,7 @@ fn to_altmap_scalar(src: &[u16], dst: &mut [u8]) {
     let n = src.len();
     let plane_bytes = n / 8; // bytes per plane section
 
-    for (g, chunk) in src.chunks_exact(16).enumerate() {
+    for (g, chunk) in src.as_chunks::<16>().0.iter().enumerate() {
         let byte_off = g * 2; // 2-byte position within each plane section
         for k in 0u32..16 {
             let mut bits: u16 = 0;
@@ -173,7 +173,7 @@ unsafe fn to_altmap_sse2(src: &[u16], dst: &mut [u8]) {
 
     let lo_mask = _mm_set1_epi16(0x00FF_u16 as i16);
 
-    for (g, chunk) in src.chunks_exact(16).enumerate() {
+    for (g, chunk) in src.as_chunks::<16>().0.iter().enumerate() {
         let byte_off = g * 2;
         let ptr = chunk.as_ptr();
 

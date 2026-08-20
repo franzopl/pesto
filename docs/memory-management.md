@@ -564,7 +564,10 @@ The budget model itself was re-derived ahead of this phase — see
    season-mode global PAR2 path (`generate_season_par2`) uses the same
    `par2_memory_plan` helper, with a connection reserve of 0 (no NNTP pool
    is open during generation), so `--memory-limit` splits the season
-   encoder into the same multi-pass schedule as a per-file run.
+   encoder into the same multi-pass schedule as a per-file run. Each pass's
+   recovery slices are appended to the volume files and dropped immediately
+   (the per-file `producer` already did this); concatenating every pass in
+   RAM until the end is what OOM-killed a 120 GB `--season` pack (#110).
 4. ⚠️ **The one correctness trap found while implementing this**:
    `Ceiling::effective` already haircuts RLIMIT_AS (`× 0.60`); naively taking
    `share_of(ceiling.effective, Par2)` and combining it with
