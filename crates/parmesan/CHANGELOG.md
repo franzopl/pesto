@@ -7,7 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.5.3] — 2026-08-21
+## [0.5.4] — 2026-08-21
 
 ### Performance
 
@@ -31,6 +31,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Published the raw c7i A/B data and the full AVX2 release-validation run in
   `bench/results/`; all nine official cross-tool correctness checks and all
   six dedicated par2cmdline compatibility tests pass.
+
+### Fixed
+
+- Restored aarch64 compilation after the encoder module split: the NEON
+  reduction helper is visible to its sibling fallback module, while x86-only
+  imports are now gated on `target_arch = "x86_64"`.
+
+## [0.5.3] — 2026-08-21 [YANKED]
+
+- Yanked because the encoder module split did not compile on aarch64. Use
+  0.5.4, which contains the same performance work and restores the ARM build.
 
 ## [0.5.2] — 2026-08-20
 

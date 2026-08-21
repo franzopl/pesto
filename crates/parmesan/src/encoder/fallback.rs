@@ -540,7 +540,7 @@ impl RecoveryEncoder {
                         }
 
                         // Barrett reduction modulo 0x1100B.
-                        gf16_clmul_reduce_neon(
+                        super::hash::gf16_clmul_reduce_neon(
                             &mut acc_l1,
                             &mut acc_l2,
                             acc_m1,

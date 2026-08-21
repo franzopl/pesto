@@ -12,11 +12,11 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
-## [0.8.3] — 2026-08-21
+## [0.8.4] — 2026-08-21
 
 ### Performance
 
-- Bundled Parmesan 0.5.3: its Affine512 packed create path adds progressive
+- Bundled Parmesan 0.5.4: its Affine512 packed create path adds progressive
   output-tile prefetch, a register-resident six-source loop, and batched SIMD
   slice MD5. On c7i.2xlarge, `movie-1080p` create reached **553.2 MiB/s**
   against ParPar 0.4.6 at 577.8 MiB/s (**4.3% gap, practical parity**), while
@@ -35,6 +35,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 - Added a publishable benchmark snapshot with committed raw data, hardware
   fingerprints, competitor versions, exact reproduction command, and all nine
   official interoperability checks passing.
+
+### Fixed
+
+- Restored aarch64 builds after the bundled Parmesan encoder module split.
+
+## [0.8.3] — 2026-08-21 [YANKED]
+
+- Yanked because bundled Parmesan 0.5.3 did not compile on aarch64. Use 0.8.4.
 
 ## [0.8.2] — 2026-08-20
 

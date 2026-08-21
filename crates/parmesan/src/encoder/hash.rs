@@ -139,7 +139,7 @@ impl Default for FileHasher {
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[inline]
-unsafe fn gf16_clmul_reduce_neon(
+pub(super) unsafe fn gf16_clmul_reduce_neon(
     low1: &mut poly16x8_t,
     low2: &mut poly16x8_t,
     mid1: poly16x8_t,
