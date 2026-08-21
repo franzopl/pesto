@@ -316,6 +316,7 @@ fn slice_checksum_matches_md5_and_crc32() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn batched_slice_checksums_match_individual_checksums() {
     let slices: Vec<Vec<u8>> = (0..17)
         .map(|i| {

@@ -220,6 +220,7 @@ pub fn slice_checksum(padded_slice: &[u8]) -> SliceChecksum {
 
 /// Compute checksums for an equal-sized encoder batch, filling independent
 /// MD5 lanes while CRC32 runs on the remaining Rayon workers.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn slice_checksums_batch(padded_slices: &[Vec<u8>]) -> Vec<SliceChecksum> {
     if padded_slices.is_empty() {
         return Vec::new();
