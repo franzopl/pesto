@@ -15,6 +15,7 @@ fn recovery_exponent_zero_is_the_xor_of_all_inputs() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn affine_nibble_scratch_matches_full_8x8() {
     // Same identity as parpar `gf16_affine_load_matrix`: XOR of 4 nibble
     // contributions equals the 8×8 matrix of the full coefficient.
