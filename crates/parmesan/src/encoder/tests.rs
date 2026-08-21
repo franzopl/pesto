@@ -316,6 +316,24 @@ fn slice_checksum_matches_md5_and_crc32() {
 }
 
 #[test]
+fn batched_slice_checksums_match_individual_checksums() {
+    let slices: Vec<Vec<u8>> = (0..17)
+        .map(|i| {
+            (0..4096)
+                .map(|offset| (offset as u8).wrapping_mul(31).wrapping_add(i))
+                .collect()
+        })
+        .collect();
+    let expected: Vec<_> = slices.iter().map(|slice| slice_checksum(slice)).collect();
+
+    let actual = slice_checksums_batch(&slices);
+    for (actual, expected) in actual.iter().zip(&expected) {
+        assert_eq!(actual.md5, expected.md5);
+        assert_eq!(actual.crc32, expected.crc32);
+    }
+}
+
+#[test]
 #[cfg(target_arch = "x86_64")]
 fn dep_tables_correctness_and_timing() {
     use std::time::Instant;

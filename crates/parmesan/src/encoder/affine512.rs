@@ -212,7 +212,7 @@ impl RecoveryEncoder {
         let queued = std::mem::take(&mut self.queued_slices);
         self.next_index += queued.len();
         let new_cs: Vec<SliceChecksum> = if self.compute_checksums {
-            queued.par_iter().map(|s| slice_checksum(s)).collect()
+            slice_checksums_batch(&queued)
         } else {
             Vec::new()
         };

@@ -217,3 +217,31 @@ pub fn slice_checksum(padded_slice: &[u8]) -> SliceChecksum {
         crc32: crc.finalize(),
     }
 }
+
+/// Compute checksums for an equal-sized encoder batch, filling independent
+/// MD5 lanes while CRC32 runs on the remaining Rayon workers.
+pub(super) fn slice_checksums_batch(padded_slices: &[Vec<u8>]) -> Vec<SliceChecksum> {
+    if padded_slices.is_empty() {
+        return Vec::new();
+    }
+
+    let inputs: Vec<&[u8]> = padded_slices.iter().map(Vec::as_slice).collect();
+    let (md5s, crc32s) = rayon::join(
+        || {
+            let mut outputs = vec![[0u8; 16]; inputs.len()];
+            md5_many::Md5Many::new().hash_many(&inputs, &mut outputs);
+            outputs
+        },
+        || {
+            padded_slices
+                .par_iter()
+                .map(|slice| crc32fast::hash(slice))
+                .collect::<Vec<_>>()
+        },
+    );
+
+    md5s.into_iter()
+        .zip(crc32s)
+        .map(|(md5, crc32)| SliceChecksum { md5, crc32 })
+        .collect()
+}

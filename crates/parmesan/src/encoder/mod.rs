@@ -44,6 +44,7 @@ pub use buffers::{
     altmap_buffer_size, altmap_kernel_available, shuffle2x_buffer_size, shuffle2x_kernel_available,
     shuffle512_kernel_available,
 };
+use hash::slice_checksums_batch;
 pub use hash::{slice_checksum, FileHasher, FileHashes};
 
 use crate::{affine, affine2x, altmap, gf16, shuffle2x};
