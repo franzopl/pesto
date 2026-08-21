@@ -28,6 +28,24 @@ pub(super) const AFFINE512_INTERLEAVE: usize = 6;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(super) const AFFINE512_CHUNK: usize = 4096;
 
+/// Prefetch one cache line from the half of the next output tile paired with
+/// this six-source group. ParPar's `prefetchDownscale=1` maps the first two
+/// groups onto the two 2 KiB halves of the next 4 KiB output tile.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn affine512_prefetch_next_output(next_dst: Option<*const i8>, source: usize, block: usize) {
+    let half = source / AFFINE512_INTERLEAVE;
+    if half < 2 {
+        if let Some(next_dst) = next_dst {
+            unsafe {
+                _mm_prefetch::<_MM_HINT_ET1>(
+                    next_dst.add(half * (AFFINE512_CHUNK / 2) + block * 64),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 type Affine512Matrices = (__m512i, __m512i, __m512i, __m512i);
 
@@ -275,13 +293,8 @@ impl RecoveryEncoder {
             }
             for rec in 0..n_rec {
                 let dst = (dest_base as *mut u8).add(affine512_dest_off(n_rec, rec, t));
-                if rec + 1 < n_rec {
-                    unsafe {
-                        _mm_prefetch::<_MM_HINT_T0>(
-                            (dest_base as *const i8).add(affine512_dest_off(n_rec, rec + 1, t)),
-                        );
-                    }
-                }
+                let next_dst = (rec + 1 < n_rec)
+                    .then(|| (dest_base as *const i8).add(affine512_dest_off(n_rec, rec + 1, t)));
                 let mut q = 0usize;
                 while q < n_queued {
                     let take = (n_queued - q).min(AFFINE512_INTERLEAVE);
@@ -327,6 +340,7 @@ impl RecoveryEncoder {
 
                         unsafe {
                             for block_idx in 0..blocks {
+                                affine512_prefetch_next_output(next_dst, q, block_idx);
                                 let p = dst.add(block_idx * AFFINE512_BLOCK).cast::<__m512i>();
                                 let sp =
                                     src.add(block_idx * AFFINE512_BLOCK * AFFINE512_INTERLEAVE);
@@ -371,6 +385,7 @@ impl RecoveryEncoder {
                     }
                     unsafe {
                         for b in 0..blocks {
+                            affine512_prefetch_next_output(next_dst, q, b);
                             let p = dst.add(b * AFFINE512_BLOCK).cast::<__m512i>();
                             let mut tph = _mm512_loadu_si512(p);
                             let mut tpl = _mm512_loadu_si512(p.add(1));
