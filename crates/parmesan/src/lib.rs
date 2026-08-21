@@ -23,9 +23,8 @@ pub use encoder::{
     affine2x_buffer_size, affine_buffer_size, altmap_buffer_size, shuffle2x_buffer_size,
 };
 
-/// Shown by `--version` and banners. `dev` on this branch; crates.io releases
-/// keep using `CARGO_PKG_VERSION` on `main`.
-pub const DISPLAY_VERSION: &str = "dev";
+/// Shown by `--version` and banners.
+pub const DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Multiplication backend for the Reed-Solomon encoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]

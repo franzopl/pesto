@@ -24,9 +24,8 @@
 //! # }
 //! ```
 
-/// Shown by `--version` and the startup banner. `dev` on this branch so a
-/// local or CI binary is never mistaken for the frozen 0.8.0 on `main`.
-pub const DISPLAY_VERSION: &str = "dev";
+/// Shown by `--version` and the startup banner.
+pub const DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod article;
 pub mod cancel;

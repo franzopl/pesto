@@ -7,7 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.5.4] — 2026-08-21
+## [0.5.5] — 2026-08-21
 
 ### Performance
 
@@ -34,9 +34,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Release binaries and library consumers now report the Cargo package version
+  instead of the development placeholder `dev`.
 - Restored aarch64 compilation after the encoder module split: the NEON
   reduction helper is visible to its sibling fallback module, while x86-only
   imports are now gated on `target_arch = "x86_64"`.
+
+## [0.5.4] — 2026-08-21 [YANKED]
+
+- Yanked because release binaries reported `dev` from `--version`. Use 0.5.5,
+  which contains the same performance and portability work with correct
+  version metadata.
 
 ## [0.5.3] — 2026-08-21 [YANKED]
 

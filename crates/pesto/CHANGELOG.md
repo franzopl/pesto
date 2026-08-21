@@ -12,11 +12,11 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
-## [0.8.4] — 2026-08-21
+## [0.8.5] — 2026-08-21
 
 ### Performance
 
-- Bundled Parmesan 0.5.4: its Affine512 packed create path adds progressive
+- Bundled Parmesan 0.5.5: its Affine512 packed create path adds progressive
   output-tile prefetch, a register-resident six-source loop, and batched SIMD
   slice MD5. On c7i.2xlarge, `movie-1080p` create reached **553.2 MiB/s**
   against ParPar 0.4.6 at 577.8 MiB/s (**4.3% gap, practical parity**), while
@@ -38,7 +38,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- Release binaries and crates.io installs now report the Cargo package version
+  instead of `dev`, restoring `pesto --update` for release builds.
 - Restored aarch64 builds after the bundled Parmesan encoder module split.
+
+## [0.8.4] — 2026-08-21 [YANKED]
+
+- Yanked because release binaries reported `dev`, which also disabled
+  `pesto --update`. Use 0.8.5.
 
 ## [0.8.3] — 2026-08-21 [YANKED]
 
