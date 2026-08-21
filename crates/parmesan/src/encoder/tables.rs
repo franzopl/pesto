@@ -173,8 +173,11 @@ pub(super) fn gfni_affine_u64_mats(gf: &Gf16, coeff: u16) -> (u64, u64, u64, u64
 /// matrices are the XOR of the four nibble contributions instead of an 8×8
 /// rebuild per (recovery, source) pair.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+#[repr(align(32))]
 pub(super) struct AffineNibbleScratch {
     /// `mats[nibble][slot]` for `coeff` nibble `slot` (weight `1<<(4*slot)`).
+    /// The physical qword order is `ll`, `hh`, `hl`, `lh`, matching ParPar's
+    /// `gf16_bitdep256_swap(..., genAffine=1)` and its AVX-512 lane shuffles.
     pub(super) mats: [[(u64, u64, u64, u64); 4]; 16],
 }
 
@@ -184,7 +187,8 @@ impl AffineNibbleScratch {
         let mut mats = [[(0u64, 0u64, 0u64, 0u64); 4]; 16];
         for n in 0..16u16 {
             for slot in 0..4u16 {
-                mats[n as usize][slot as usize] = gfni_affine_u64_mats(gf, n << (4 * slot));
+                let (ll, lh, hl, hh) = gfni_affine_u64_mats(gf, n << (4 * slot));
+                mats[n as usize][slot as usize] = (ll, hh, hl, lh);
             }
         }
         Self { mats }
@@ -197,6 +201,7 @@ impl AffineNibbleScratch {
         let mut m = self.mats[(coeff & 0xf) as usize][0];
         m = xor(m, self.mats[((coeff >> 4) & 0xf) as usize][1]);
         m = xor(m, self.mats[((coeff >> 8) & 0xf) as usize][2]);
-        xor(m, self.mats[((coeff >> 12) & 0xf) as usize][3])
+        m = xor(m, self.mats[((coeff >> 12) & 0xf) as usize][3]);
+        (m.0, m.3, m.2, m.1)
     }
 }

@@ -208,6 +208,28 @@ Result:
 
 ParPar still leads (c7i: 656 MiB/s, medialab: 361 MiB/s). 
 
+### Affine512 six-source loop parity (2026-08-21, c7i rebenchmark pending)
+
+The post-refactor comparison with ParPar found two code-generation differences
+in the common six-source group; the packed layout, 6-way interleave, 4 KiB
+tiles, 12-slice input batch, and slice-parallel scheduling already matched.
+
+- Coefficient setup now mirrors `gf16_affine_load2_matrix`: four aligned
+  256-bit nibble contributions are XORed for two coefficients at a time, then
+  expanded into the four GFNI matrices in ZMM registers. The scratch uses
+  ParPar's physical `ll, hh, hl, lh` qword order while its scalar accessor
+  preserves the existing semantic `ll, lh, hl, hh` API.
+- The full six-source path is explicit rather than an array-driven dynamic
+  loop. Release assembly changed from a 1,536-byte matrix spill area plus
+  per-source packed-offset division to register-resident matrices, six
+  unrolled GFNI rounds, and a constant 768-byte source stride per 128-byte
+  block. Remainders of one through five sources retain the generic path.
+
+Local tests and clippy are green, and an AVX-512-only test compares every lane
+of paired matrix expansion with the scalar scratch. Do not replace the
+518/656 MiB/s baseline above until `movie-1080p` and `many-small` have been
+rerun on c7i; the local i5-10400 cannot execute AVX-512/GFNI.
+
 ### The remaining AVX2 (medialab) gap: 2-slice `vperm2i128` amortization
 
 On medialab (i5-10400 without GFNI), Pesto uses `Shuffle2x AVX2`: **261 MiB/s** vs ParPar's **361 MiB/s** (~38% gap).
@@ -248,4 +270,3 @@ Pesto's `flush_avx2_shuffle2x_work` processes 1 slice at a time across recovery 
 | **AVX2 Shuffle2x 2-slice amortization** | ~38% on AVX2 | Medium | Documented above as future work |
 | ~~post-only speed~~ | — | ✅ Done | Pesto 1477 MiB/s vs nyuu 1333 (1.11×), many-small 1355 vs 475 (2.85×) |
 | ~~many-small PAR2 create~~ | — | ✅ Done | Pesto 291 vs parpar 252 (we lead) |
-

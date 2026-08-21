@@ -30,6 +30,50 @@ fn affine_nibble_scratch_matches_full_8x8() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
+fn affine512_pair_loader_matches_scalar_scratch() {
+    if !affine512_kernel_available() {
+        eprintln!("affine512_pair_loader_matches_scalar_scratch: skipped (no AVX-512+GFNI)");
+        return;
+    }
+
+    #[target_feature(enable = "avx512f")]
+    unsafe fn check() {
+        let gf = Gf16::new();
+        let scratch = AffineNibbleScratch::new(&gf);
+        let pairs = [
+            (0x0000, 0x0001),
+            (0x0002, 0x002a),
+            (0x00ff, 0xff00),
+            (0x1234, 0x8000),
+            (0xffff, 0xa55a),
+        ];
+
+        for (coeff_a, coeff_b) in pairs {
+            let matrices = unsafe { affine512_load_pair(&scratch, coeff_a, coeff_b) };
+            for (coeff, (m_ll, m_hl, m_lh, m_hh)) in
+                [(coeff_a, matrices[0]), (coeff_b, matrices[1])]
+            {
+                let expected = scratch.load(coeff);
+                let actual = [m_ll, m_lh, m_hl, m_hh];
+                for (matrix, expected) in actual
+                    .into_iter()
+                    .zip([expected.0, expected.1, expected.2, expected.3])
+                {
+                    let lanes: [u64; 8] = unsafe { std::mem::transmute(matrix) };
+                    assert_eq!(
+                        lanes, [expected; 8],
+                        "paired Affine512 matrix mismatch for coeff={coeff:#06x}"
+                    );
+                }
+            }
+        }
+    }
+
+    unsafe { check() };
+}
+
+#[test]
 fn recovery_exponent_one_scales_a_single_input_by_its_base() {
     let gf = Gf16::new();
     let slice = [0x34u8, 0x12, 0x78, 0x56]; // words 0x1234, 0x5678

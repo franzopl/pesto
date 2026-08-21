@@ -28,6 +28,71 @@ pub(super) const AFFINE512_INTERLEAVE: usize = 6;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(super) const AFFINE512_CHUNK: usize = 4096;
 
+#[cfg(target_arch = "x86_64")]
+type Affine512Matrices = (__m512i, __m512i, __m512i, __m512i);
+
+/// Load and XOR the four nibble contributions for two coefficients at once.
+///
+/// This mirrors ParPar's `gf16_affine_load2_matrix`: each 256-bit load gets
+/// the four matrices in their packed order (`ll`, `hh`, `hl`, `lh`) for one
+/// nibble contribution,
+/// and the low/high 256-bit lanes carry one coefficient each.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn affine512_load2_matrix(
+    scratch: &AffineNibbleScratch,
+    coeff_a: u16,
+    coeff_b: u16,
+) -> __m512i {
+    unsafe fn load_contribution(scratch: &AffineNibbleScratch, coeff: u16, slot: usize) -> __m256i {
+        let nibble = ((coeff >> (slot * 4)) & 0xf) as usize;
+        let ptr = (&scratch.mats[nibble][slot] as *const (u64, u64, u64, u64)).cast::<__m256i>();
+        unsafe { _mm256_load_si256(ptr) }
+    }
+
+    let load_pair = |slot| unsafe {
+        _mm512_inserti64x4::<1>(
+            _mm512_castsi256_si512(load_contribution(scratch, coeff_a, slot)),
+            load_contribution(scratch, coeff_b, slot),
+        )
+    };
+    let lo = _mm512_xor_si512(load_pair(0), load_pair(1));
+    _mm512_ternarylogic_epi32(lo, load_pair(2), load_pair(3), 0x96)
+}
+
+/// Expand the packed pair returned by [`affine512_load2_matrix`] into the
+/// broadcast matrices consumed by the six-source Affine512 loop.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn affine512_expand_pair(packed: __m512i) -> [Affine512Matrices; 2] {
+    let a_hi = _mm512_shuffle_i64x2::<0x11>(packed, packed);
+    let a = (
+        _mm512_broadcastq_epi64(_mm512_castsi512_si128(packed)),
+        _mm512_broadcastq_epi64(_mm512_castsi512_si128(a_hi)),
+        _mm512_permutex_epi64::<0x55>(a_hi),
+        _mm512_permutex_epi64::<0xff>(a_hi),
+    );
+
+    let b_hi = _mm512_shuffle_i64x2::<0xbb>(packed, packed);
+    let b = (
+        _mm512_permutex_epi64::<0xaa>(b_hi),
+        _mm512_broadcastq_epi64(_mm512_castsi512_si128(b_hi)),
+        _mm512_permutex_epi64::<0x55>(b_hi),
+        _mm512_permutex_epi64::<0xff>(b_hi),
+    );
+    [a, b]
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+pub(super) unsafe fn affine512_load_pair(
+    scratch: &AffineNibbleScratch,
+    coeff_a: u16,
+    coeff_b: u16,
+) -> [Affine512Matrices; 2] {
+    unsafe { affine512_expand_pair(affine512_load2_matrix(scratch, coeff_a, coeff_b)) }
+}
+
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub(super) fn affine512_src_scale(n_queued: usize, source: usize) -> usize {
     let il = AFFINE512_INTERLEAVE;
@@ -220,14 +285,82 @@ impl RecoveryEncoder {
                 let mut q = 0usize;
                 while q < n_queued {
                     let take = (n_queued - q).min(AFFINE512_INTERLEAVE);
+                    let base = rec * n_queued + q;
+                    // A full 12-slice queue reaches this branch twice. Keep
+                    // all six matrix sets as named values: an array plus a
+                    // dynamic source loop makes LLVM spill 24 ZMM registers
+                    // and recalculate packed offsets inside every 128-byte
+                    // block. ParPar likewise specializes its six-source call.
+                    if take == AFFINE512_INTERLEAVE {
+                        let [mat_a, mat_b] = unsafe {
+                            affine512_load_pair(&scratch, coeffs[base], coeffs[base + 1])
+                        };
+                        let [mat_c, mat_d] = unsafe {
+                            affine512_load_pair(&scratch, coeffs[base + 2], coeffs[base + 3])
+                        };
+                        let [mat_e, mat_f] = unsafe {
+                            affine512_load_pair(&scratch, coeffs[base + 4], coeffs[base + 5])
+                        };
+                        let src = unsafe {
+                            (packed_addr as *const u8).add(affine512_packed_off(n_queued, t, q, 0))
+                        };
+
+                        macro_rules! muladd_round {
+                            ($source:expr, $matrix:ident, $tpl:ident, $tph:ident) => {{
+                                let source = $source.cast::<__m512i>();
+                                let ta = _mm512_loadu_si512(source);
+                                let tb = _mm512_loadu_si512(source.add(1));
+                                $tpl = _mm512_ternarylogic_epi32(
+                                    _mm512_gf2p8affine_epi64_epi8(ta, $matrix.2, 0),
+                                    _mm512_gf2p8affine_epi64_epi8(tb, $matrix.0, 0),
+                                    $tpl,
+                                    0x96,
+                                );
+                                $tph = _mm512_ternarylogic_epi32(
+                                    _mm512_gf2p8affine_epi64_epi8(ta, $matrix.3, 0),
+                                    _mm512_gf2p8affine_epi64_epi8(tb, $matrix.1, 0),
+                                    $tph,
+                                    0x96,
+                                );
+                            }};
+                        }
+
+                        unsafe {
+                            for block_idx in 0..blocks {
+                                let p = dst.add(block_idx * AFFINE512_BLOCK).cast::<__m512i>();
+                                let sp =
+                                    src.add(block_idx * AFFINE512_BLOCK * AFFINE512_INTERLEAVE);
+                                let mut tph = _mm512_loadu_si512(p);
+                                let mut tpl = _mm512_loadu_si512(p.add(1));
+                                muladd_round!(sp, mat_a, tpl, tph);
+                                muladd_round!(sp.add(AFFINE512_BLOCK), mat_b, tpl, tph);
+                                muladd_round!(sp.add(AFFINE512_BLOCK * 2), mat_c, tpl, tph);
+                                muladd_round!(sp.add(AFFINE512_BLOCK * 3), mat_d, tpl, tph);
+                                muladd_round!(sp.add(AFFINE512_BLOCK * 4), mat_e, tpl, tph);
+                                muladd_round!(sp.add(AFFINE512_BLOCK * 5), mat_f, tpl, tph);
+                                _mm512_storeu_si512(p, tph);
+                                _mm512_storeu_si512(p.add(1), tpl);
+                            }
+                        }
+                        q += AFFINE512_INTERLEAVE;
+                        continue;
+                    }
+
                     let mut mats = [(
                         _mm512_setzero_si512(),
                         _mm512_setzero_si512(),
                         _mm512_setzero_si512(),
                         _mm512_setzero_si512(),
                     ); 6];
-                    let base = rec * n_queued + q;
-                    for s in 0..take {
+                    let paired = take - take % 2;
+                    for s in (0..paired).step_by(2) {
+                        let pair = unsafe {
+                            affine512_load_pair(&scratch, coeffs[base + s], coeffs[base + s + 1])
+                        };
+                        mats[s] = pair[0];
+                        mats[s + 1] = pair[1];
+                    }
+                    for s in paired..take {
                         let (m_ll, m_lh, m_hl, m_hh) = scratch.load(coeffs[base + s]);
                         mats[s] = (
                             _mm512_set1_epi64(m_ll as i64),
