@@ -31,7 +31,7 @@ must be complete.
 | A9 | **Affine GFNI** (SSE) | GFNI+SSSE3 | Missing | |
 | A10 | **Affine AVX2** | GFNI+AVX2 | Have (`smart` if GFNI && !512) | parpar default without 512 |
 | A11 | Affine AVX10 | AVX10 | Missing | detect + 256-bit EVEX |
-| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (`smart`) | packed + dest-interleaved tiles + prefetch; was 424 vs parpar 626 |
+| A12 | **Affine AVX-512** | GFNI+AVX512VL/BW | Have (`smart`) | packed + dest-interleaved tiles + progressive prefetch; 553 vs parpar 578 |
 | A13 | Affine2x GFNI/AVX2/AVX10/512 | GFNI… | AVX2 kernel only, not `smart` | Keep for invert/experiments |
 | A14 | XOR SSE2 | SSE2 | Missing | |
 | A15 | XOR-JIT SSE2 / AVX2 / AVX-512 | W^X + JIT | Missing | last on x86 after Affine |
@@ -42,14 +42,14 @@ must be complete.
 | A20 | CLMul SVE2 | SVE2 | Missing | |
 | A21 | Shuffle-128 RVV / CLMul RVV+Zvbc | RISC-V | Missing | |
 | A22 | Packed multi-source (`srcCount` 3/6/12) | all Affine/Shuffle2x | Partial | tile-pack like parpar `muladd_multi_packed`; 512 uses `vpternlog` 0x96 |
-| A23 | Slice-chunk threading | — | Partial | P1b windows; not thread-split of one slice |
+| A23 | Slice-chunk threading | — | Have on Affine512 | 4 KiB tiles distributed across Rayon workers |
 | A24 | Nibble scratch (16×4) | GFNI Affine | Have | parpar `gf16_affine_load_matrix`; XOR of 4 nibble mats |
-| A25 | MD5×2 + CRC SIMD on input | SSE/AVX/NEON | Partial | one scalar pass only |
+| A25 | MD5×2 + CRC SIMD on input | SSE/AVX/NEON | Partial | Affine512 batches independent slice MD5 lanes; other paths remain scalar |
 | A26 | Recovery MD5-MB 8/16-wide | AVX2 / AVX-512 | Missing | |
 | A27 | OpenCL | GPU | Missing | last; optional crate feature |
 
 `smart` today: **Affine512 packed** on SPR (latest c7i movie create
-**484.7 MiB/s** median); Affine AVX2 on GFNI without 512; Shuffle AVX-512
+**553.2 MiB/s** median); Affine AVX2 on GFNI without 512; Shuffle AVX-512
 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI. yEnc `encode()`: AVX2 +
 VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
 
@@ -253,6 +253,41 @@ The separate publishable three-repetition suite
 518.3/656 ratio but still short of the <10% target. `many-small` did not
 regress: parmesan was **412.2 MiB/s** versus ParPar at **227.3 MiB/s**.
 
+### Affine512 progressive prefetch and batched checksums (2026-08-21)
+
+The final c7i investigation followed ParPar's pipeline in order:
+
+- Thread splitting was already equivalent for the measured geometry. Both
+  implementations process 787 useful 4 KiB chunks with four workers; ParPar
+  assigns contiguous 197/197/197/196-chunk ranges, while the indexed Rayon
+  iterator produces the same balanced split. No threading patch was needed.
+- ParPar progressively prefetches every 64-byte line of the next 4 KiB output
+  tile. Its two six-source calls cover one 2 KiB half each. Commit `663846f`
+  replaced Parmesan's one-address prefetch with the same pattern. A five-run
+  same-host A/B measured **496.5 vs 487.3 MiB/s (+1.88%)** on movie and
+  418.4 vs 423.7 on many-small (-1.26%, within run dispersion).
+- The remaining create cost was the IFSC slice MD5 path. Affine512 previously
+  ran one scalar MD5 per slice across Rayon workers. Commit `bfb1842` fills
+  independent `md5-many` SIMD lanes for the whole 12-slice encoder batch while
+  CRC32 runs concurrently on the other Rayon workers. A byte-exact unit test
+  compares all MD5 and CRC32 results with the individual checksum path.
+
+The checksum patch was measured against `663846f` on one c7i.2xlarge (Xeon
+Platinum 8488C), using the standard 6 GiB `movie-1080p` and `many-small`
+corpora, 200 recovery blocks, four threads, 1 GiB, alternating run order, one
+excluded warmup, and five measured repetitions:
+
+| Workload | `663846f` median | `bfb1842` median | ParPar median | Result |
+|---|---:|---:|---:|---:|
+| movie-1080p | 497.087 MiB/s | **553.214 MiB/s** | 577.824 MiB/s | **+11.291%; 4.259% gap** |
+| many-small | 414.938 MiB/s | **464.253 MiB/s** | 234.852 MiB/s | **+11.885%; 1.98x ParPar** |
+
+The movie result is 95.74% of ParPar and therefore meets the session's <10%
+gap target without regressing many-small. Raw data:
+`bench/results/ip-172-31-71-247/20260821T102415Z-affine512-checksum-ab/raw.csv`.
+The progressive-prefetch A/B is in
+`bench/results/ip-172-31-74-33/20260821T100120Z-affine512-prefetch-ab/raw.csv`.
+
 ### The remaining AVX2 (medialab) gap: 2-slice `vperm2i128` amortization
 
 On medialab (i5-10400 without GFNI), Pesto uses `Shuffle2x AVX2`: **261 MiB/s** vs ParPar's **361 MiB/s** (~38% gap).
@@ -274,13 +309,15 @@ Pesto's `flush_avx2_shuffle2x_work` processes 1 slice at a time across recovery 
 
 | Architecture | Representative HW | Pesto kernel | Status | Priority |
 |---|---|---|---|---|
-| AVX-512 + GFNI | AWS c7i, Intel Sapphire Rapids, Ice Lake Xeon | `Affine512 packed` | ✅ **485 MiB/s** (parpar 577, gap 16%; patch A/B +9.7%) | High — primary release target |
+| AVX-512 + GFNI | AWS c7i, Intel Sapphire Rapids, Ice Lake Xeon | `Affine512 packed` | ✅ **553 MiB/s** (parpar 578, gap 4.3%; target met) | High — primary release target |
 | AVX2 (no GFNI) | Intel 6th–10th gen, AMD Zen 1/2 | `Shuffle2x AVX2` | ⚠ **261 MiB/s** (parpar 361, gap ~38%) | Medium — worth a dedicated sprint |
 | SSSE3 (legacy) | Intel Core 2, early Sandy Bridge | `Normal SSSE3` | Not benchmarked | Low — marginal install base |
 | GFNI without AVX-512 | Tremont (Atom), some Tiger Lake | Falls back to `Shuffle2x` | Not benchmarked | Low |
 | Apple Silicon (ARM) | M1/M2/M3 | No specialised kernel yet | Not benchmarked | Future |
 
-**Recommended benchmark priority for the next AWS run:** c7i (AVX-512+GFNI) — that is where we have the largest user base for a Usenet tool and where our PAR2 create is closest to matching ParPar. Closing the remaining 16% on c7i is higher-value than closing the 38% AVX2 gap.
+**Recommended benchmark priority for the next performance sprint:** AVX2
+without GFNI. The c7i Affine512 create target is met; the documented
+Shuffle2x gap remains medium priority.
 
 ---
 
@@ -288,7 +325,7 @@ Pesto's `flush_avx2_shuffle2x_work` processes 1 slice at a time across recovery 
 
 | Item | Gap | Impact | Notes |
 |---|---|---|---|
-| **PAR2 create c7i: 485 vs 577 MiB/s** | ~16% | High | Roadmap items P2 (SIMD hasher), P3 (Affine2x srcCount=12) remain uninvestigated |
+| ~~PAR2 create c7i~~ | 4.3% | ✅ Done | 553.2 vs ParPar 577.8 MiB/s; batched slice MD5 closed the target |
 | **movie full two-phase (local):** pesto 262 vs parpar+nyuu 292 MiB/s | ~11% | Medium | PAR2 create is the bottleneck (200 MiB/s on AVX2); closing c7i gap will likely fix this path too |
 | **AVX2 Shuffle2x 2-slice amortization** | ~38% on AVX2 | Medium | Documented above as future work |
 | ~~post-only speed~~ | — | ✅ Done | Pesto 1477 MiB/s vs nyuu 1333 (1.11×), many-small 1355 vs 475 (2.85×) |
