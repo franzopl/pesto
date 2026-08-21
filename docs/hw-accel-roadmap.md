@@ -105,11 +105,12 @@ Not “one movie row on c7i.” For each ISA we claim:
 
 Measure on medialab (AVX2), c7i (GFNI+512), and an ARM host when A17+ land.
 
-## E — Work log (stop here, 2026-08-19)
+## E — Work log (completed 2026-08-21)
 
-Stopped after packing Affine tiles. **Do not put Affine512 or yEnc zmm on
-`smart`/`encode()` until a c7i run beats the numbers below.** Encode stays
-on the NNTP worker (no encode-ahead queue).
+The c7i acceptance target is complete. Affine512 packed is the `smart` path
+on AVX-512+GFNI, while yEnc keeps the faster AVX2+VBMI2 path rather than using
+the slower zmm implementation by default. Dedicated encode workers feed the
+ready-article queue so NNTP workers stay on I/O.
 
 ### Default paths now
 
@@ -326,7 +327,16 @@ Shuffle2x gap remains medium priority.
 | Item | Gap | Impact | Notes |
 |---|---|---|---|
 | ~~PAR2 create c7i~~ | 4.3% | ✅ Done | 553.2 vs ParPar 577.8 MiB/s; batched slice MD5 closed the target |
-| **movie full two-phase (local):** pesto 262 vs parpar+nyuu 292 MiB/s | ~11% | Medium | PAR2 create is the bottleneck (200 MiB/s on AVX2); closing c7i gap will likely fix this path too |
+| ~~movie full two-phase (local)~~ | 6.3% | ✅ Done | Pesto 265.5 vs ParPar+Nyuu 283.4 MiB/s at 0 ms; 2.1% gap at 30 ms |
 | **AVX2 Shuffle2x 2-slice amortization** | ~38% on AVX2 | Medium | Documented above as future work |
-| ~~post-only speed~~ | — | ✅ Done | Pesto 1477 MiB/s vs nyuu 1333 (1.11×), many-small 1355 vs 475 (2.85×) |
-| ~~many-small PAR2 create~~ | — | ✅ Done | Pesto 291 vs parpar 252 (we lead) |
+| ~~post-only speed~~ | — | ✅ Done | Medialab movie 2226 vs Nyuu 1339 MiB/s (1.66x); c7i 1899 vs 1726 (1.10x) |
+| ~~many-small PAR2 create~~ | — | ✅ Done | c7i Parmesan 464.3 vs ParPar 234.9 MiB/s (1.98x) |
+
+### Release validation checkpoint (2026-08-21)
+
+The publishable local run used the official `par2 e2e correctness` suites,
+`movie-1080p` and `many-small` at scale 1.0, three repetitions, governor
+`performance`, warm page cache, and 0/30 ms mock-server latency. Pesto and
+Parmesan had no failed repetitions; all nine interoperability and wire-format
+checks passed. The complete tables, exact command, competitor versions, and
+committed raw artifacts are linked from [`bench/README.md`](../bench/README.md).

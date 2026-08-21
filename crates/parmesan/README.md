@@ -95,6 +95,22 @@ implementation. See `crates/parmesan/tests/par2cmdline_compat.rs`:
 cargo test -p parmesan-par2 --test par2cmdline_compat -- --ignored
 ```
 
+## Performance
+
+Release-validation medians on AWS c7i.2xlarge (Xeon Platinum 8488C, four
+physical cores, AVX-512+GFNI), with 200 recovery blocks, a 1 GiB memory limit,
+warm page cache, and five measured repetitions after one excluded warmup:
+
+| workload | Parmesan | ParPar 0.4.6 | result |
+|---|---:|---:|---:|
+| movie-1080p (6 GiB) | **553.2 MiB/s** | 577.8 MiB/s | 4.3% gap |
+| many-small (500 MiB, 2,000 files) | **464.3 MiB/s** | 234.9 MiB/s | **1.98x** |
+
+The movie result is practical parity with ParPar while retaining the
+small-file lead. The release suite also passed every cross-tool verification
+and byte-exact repair check. See [`bench/README.md`](../../bench/README.md) for
+the complete methodology, raw data, and the AVX2 end-to-end results.
+
 ## Building
 
 ```bash

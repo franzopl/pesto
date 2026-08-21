@@ -1,0 +1,46 @@
+suite,workload,tool,tool_version,variant,extra,runs,failures,input_bytes,wall_median_ms,wall_mean_ms,wall_stddev_ms,rsd_pct,mibps_median,cpu_ratio,max_rss_kb,articles,output_bytes
+correctness,recovery-size,par2cmdline,,size-accuracy,expected_bytes=4300800;ratio=1.06,1,0,4300800,0.000000,0.000000,0.000000,0.0,0.0,0.00,0,0,4551720
+correctness,recovery-size,parmesan,,size-accuracy,expected_bytes=4300800;ratio=1.02,1,0,4300800,0.000000,0.000000,0.000000,0.0,0.0,0.00,0,0,4386968
+correctness,recovery-size,parpar,,size-accuracy,expected_bytes=4300800;ratio=1.04,1,0,4300800,0.000000,0.000000,0.000000,0.0,0.0,0.00,0,0,4493072
+e2e,many-small,pesto,pesto dev,full-streaming-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8,3,0,524288000,1960.000000,1973.000000,22.516660,1.1,255.1,5.89,194696,4085,0
+e2e,many-small,pesto,pesto dev,full-streaming-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8,3,0,524288000,16659.000000,16660.333333,7.094599,0.0,30.0,0.63,176520,4085,0
+e2e,many-small,ngPost,v4.16,full-two-phase-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8;mode=two-phase,3,0,524288000,21408.000000,21079.666667,873.099269,4.1,23.4,9.86,99100,4402,0
+e2e,many-small,parpar+nyuu,0.4.5 / 0.4.2,full-two-phase-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8;mode=two-phase,3,0,524288000,3100.000000,3182.666667,187.228025,5.9,161.3,3.83,172488,4100,0
+e2e,many-small,pesto,pesto dev,full-two-phase-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8;mode=par2-before-upload,3,0,524288000,2049.000000,2053.000000,44.136153,2.1,244.0,5.20,173784,4088,0
+e2e,many-small,ngPost,v4.16,full-two-phase-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8;mode=two-phase,2,1,524288000,36985.000000,36985.000000,209.303607,0.6,13.5,5.58,101700,4402,0
+e2e,many-small,parpar+nyuu,0.4.5 / 0.4.2,full-two-phase-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8;mode=two-phase,3,0,524288000,18752.000000,18741.666667,20.550750,0.1,26.7,0.63,171904,4100,0
+e2e,many-small,pesto,pesto dev,full-two-phase-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8;mode=par2-before-upload,3,0,524288000,18300.000000,18329.666667,101.795547,0.6,27.3,0.62,174248,4088,0
+e2e,many-small,ngPost,v4.16,post-only-l0,scenario=post-only;latency_ms=0;connections=8,3,0,524288000,761.000000,770.333333,27.227437,3.5,657.0,4.57,61988,4000,0
+e2e,many-small,nyuu,0.4.2,post-only-l0,scenario=post-only;latency_ms=0;connections=8,3,0,524288000,989.000000,997.333333,23.629078,2.4,505.6,1.35,52856,4000,0
+e2e,many-small,pesto,pesto dev,post-only-l0,scenario=post-only;latency_ms=0;connections=8,3,0,524288000,284.000000,283.666667,5.507571,1.9,1760.6,2.95,31744,4000,0
+e2e,many-small,ngPost,v4.16,post-only-l30,scenario=post-only;latency_ms=30;connections=8,2,1,524288000,16038.500000,16038.500000,3.535534,0.0,31.2,0.18,59656,4000,0
+e2e,many-small,nyuu,0.4.2,post-only-l30,scenario=post-only;latency_ms=30;connections=8,3,0,524288000,16000.000000,16002.000000,23.065125,0.1,31.2,0.10,55456,4000,0
+e2e,many-small,pesto,pesto dev,post-only-l30,scenario=post-only;latency_ms=30;connections=8,3,0,524288000,15873.000000,15883.000000,26.457513,0.2,31.5,0.06,31872,4000,0
+e2e,movie-1080p,pesto,pesto dev,full-streaming-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8,3,0,6442450944,23548.000000,23503.000000,996.262516,4.2,260.9,6.46,2056948,9233,0
+e2e,movie-1080p,pesto,pesto dev,full-streaming-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8,3,0,6442450944,74247.000000,74205.666667,124.267185,0.2,82.8,1.71,1762768,9233,0
+e2e,movie-1080p,ngPost,v4.16,full-two-phase-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8;mode=two-phase,3,0,6442450944,182597.000000,182638.000000,252.013889,0.1,33.6,9.06,638208,9244,0
+e2e,movie-1080p,parpar+nyuu,0.4.5 / 0.4.2,full-two-phase-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8;mode=two-phase,3,0,6442450944,21681.000000,21723.333333,497.851718,2.3,283.4,5.10,788816,9244,0
+e2e,movie-1080p,pesto,pesto dev,full-two-phase-l0,scenario=full-release;latency_ms=0;par2_pct=10;connections=8;mode=par2-before-upload,3,0,6442450944,23143.000000,22955.333333,1019.537313,4.4,265.5,5.66,2004088,9246,0
+e2e,movie-1080p,ngPost,v4.16,full-two-phase-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8;mode=two-phase,3,0,6442450944,249043.000000,249009.000000,83.372657,0.0,24.7,6.56,638208,9244,0
+e2e,movie-1080p,parpar+nyuu,0.4.5 / 0.4.2,full-two-phase-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8;mode=two-phase,3,0,6442450944,90117.000000,89818.000000,539.678608,0.6,68.2,1.22,788844,9244,0
+e2e,movie-1080p,pesto,pesto dev,full-two-phase-l30,scenario=full-release;latency_ms=30;par2_pct=10;connections=8;mode=par2-before-upload,3,0,6442450944,92039.000000,92354.666667,736.142876,0.8,66.8,1.35,2000900,9246,0
+e2e,movie-1080p,ngPost,v4.16,post-only-l0,scenario=post-only;latency_ms=0;connections=8,3,0,6442450944,6508.000000,6506.000000,33.045423,0.5,944.1,6.39,195392,8390,0
+e2e,movie-1080p,nyuu,0.4.2,post-only-l0,scenario=post-only;latency_ms=0;connections=8,3,0,6442450944,4587.000000,4631.333333,103.857274,2.2,1339.4,1.25,67708,8392,0
+e2e,movie-1080p,pesto,pesto dev,post-only-l0,scenario=post-only;latency_ms=0;connections=8,3,0,6442450944,2760.000000,2758.000000,14.106736,0.5,2226.1,3.53,75224,8392,0
+e2e,movie-1080p,ngPost,v4.16,post-only-l30,scenario=post-only;latency_ms=30;connections=8,3,0,6442450944,66918.000000,66925.666667,33.171273,0.0,91.8,0.43,190512,8390,0
+e2e,movie-1080p,nyuu,0.4.2,post-only-l30,scenario=post-only;latency_ms=30;connections=8,3,0,6442450944,66784.000000,66794.666667,27.592269,0.0,92.0,0.10,65504,8392,0
+e2e,movie-1080p,pesto,pesto dev,post-only-l30,scenario=post-only;latency_ms=30;connections=8,3,0,6442450944,66646.000000,66642.333333,16.802778,0.0,92.2,0.13,155552,8392,0
+par2,many-small,par2cmdline,par2cmdline version 0.8.1,create-r10,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=6;mem_mib=1024,3,0,524288000,14526.000000,14516.666667,67.485801,0.5,34.4,5.93,67456,0,70590072
+par2,many-small,parmesan,parmesan dev,create-r10,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=6;mem_mib=1024;encoder=smart,3,0,524288000,1626.000000,1590.666667,62.939124,4.0,307.5,5.88,154160,0,56979732
+par2,many-small,parpar,0.4.5,create-r10,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=6;mem_mib=1024,3,0,524288000,1945.000000,1941.333333,19.756855,1.0,257.1,5.12,172632,0,67061684
+par2,many-small,par2cmdline,par2cmdline version 0.8.1,repair,op=repair;damaged_slices=100,3,0,524288000,7396.000000,7488.333333,191.948778,2.6,67.6,5.14,34820,0,0
+par2,many-small,parmesan,parmesan dev,repair,op=repair;damaged_slices=100,3,0,524288000,4822.000000,4838.000000,103.927860,2.1,103.7,7.53,82240,0,0
+par2,many-small,par2cmdline,par2cmdline version 0.8.1,verify,op=verify,3,0,524288000,1457.000000,1457.000000,2.000000,0.1,343.2,1.98,8196,0,0
+par2,many-small,parmesan,parmesan dev,verify,op=verify,3,0,524288000,1122.000000,1124.666667,6.429101,0.6,445.6,0.99,44464,0,0
+par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,create-r10,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=6;mem_mib=1024,3,0,6442450944,178510.000000,178554.666667,79.977080,0.0,34.4,5.23,638592,0,646176744
+par2,movie-1080p,parmesan,parmesan dev,create-r10,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=6;mem_mib=1024;encoder=smart,3,0,6442450944,19958.000000,19971.666667,628.611433,3.1,307.8,6.25,1597716,0,645087600
+par2,movie-1080p,parpar,0.4.5,create-r10,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=6;mem_mib=1024,3,0,6442450944,16574.000000,16602.666667,814.378495,4.9,370.7,6.26,785288,0,645894592
+par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,repair,op=repair;damaged_slices=100,3,0,6442450944,35381.000000,35372.000000,324.593592,0.9,173.7,1.03,12244,0,0
+par2,movie-1080p,parmesan,parmesan dev,repair,op=repair;damaged_slices=100,3,0,6442450944,14417.000000,14527.666667,239.969442,1.7,426.2,1.01,463736,0,0
+par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,verify,op=verify,3,0,6442450944,34013.000000,34064.333333,240.150647,0.7,180.6,1.04,12120,0,0
+par2,movie-1080p,parmesan,parmesan dev,verify,op=verify,3,0,6442450944,13361.000000,13427.333333,127.209800,0.9,459.8,1.00,463708,0,0

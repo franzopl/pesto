@@ -29,11 +29,77 @@ Results land in `bench/results/<host>/<UTC timestamp>/`:
 | `results.json` | `summary.csv` + the machine fingerprint, for plotting |
 | `system.json` | CPU, cores, SIMD, kernel, governor, every tool version |
 
+## Release benchmark snapshot — 2026-08-21
+
+These are the release-validation medians. The c7i run isolates PAR2 create on
+the AVX-512+GFNI release target; the medialab run covers the complete official
+`par2`, `e2e`, and `correctness` suites on AVX2. They are separate machines and
+must not be combined into a single synthetic result.
+
+### PAR2 create — c7i.2xlarge
+
+AWS c7i.2xlarge, Xeon Platinum 8488C (4 physical cores), AVX-512+GFNI,
+1 GiB encoder memory limit, 200 recovery blocks. Five measured repetitions in
+alternating order after one excluded warmup; warm page cache; governor not
+exposed by the instance. Parmesan used the `smart` Affine512 packed path.
+ParPar was 0.4.6.
+
+| workload | parmesan | ParPar | parmesan / ParPar |
+|---|---:|---:|---:|
+| movie-1080p (6 GiB) | **553.2 MiB/s** | 577.8 MiB/s | **0.957x** (4.3% gap) |
+| many-small (500 MiB, 2,000 files) | **464.3 MiB/s** | 234.9 MiB/s | **1.98x** |
+
+The tested current build was commit `bfb1842`. Raw A/B data and its
+aggregation are committed under
+[`bench/results/ip-172-31-71-247/20260821T102415Z-affine512-checksum-ab/`](results/ip-172-31-71-247/20260821T102415Z-affine512-checksum-ab/).
+
+### Posting and end-to-end — medialab
+
+Intel i5-10400 (6 physical cores), AVX2, governor `performance`, boost on,
+btrfs, warm page cache, three repetitions. Pesto/Parmesan were built from
+commit `c0fc02b` (`dev`); competitors were Nyuu 0.4.2, ParPar 0.4.5,
+par2cmdline 0.8.1, and ngPost 4.16. The mock NNTP server used eight
+connections and fixed response latencies of 0 and 30 ms.
+
+Post-only (no PAR2):
+
+| workload | latency | pesto | Nyuu | pesto / Nyuu |
+|---|---:|---:|---:|---:|
+| movie-1080p | 0 ms | **2226.1 MiB/s** | 1339.4 MiB/s | **1.66x** |
+| movie-1080p | 30 ms | **92.2 MiB/s** | 92.0 MiB/s | **1.00x** |
+| many-small | 0 ms | **1760.6 MiB/s** | 505.6 MiB/s | **3.48x** |
+| many-small | 30 ms | **31.5 MiB/s** | 31.2 MiB/s | **1.01x** |
+
+Full release (10% PAR2):
+
+| workload | latency | pesto streaming | pesto two-phase | ParPar + Nyuu two-phase | two-phase result |
+|---|---:|---:|---:|---:|---:|
+| movie-1080p | 0 ms | 260.9 MiB/s | **265.5 MiB/s** | 283.4 MiB/s | 6.3% gap |
+| movie-1080p | 30 ms | **82.8 MiB/s** | 66.8 MiB/s | 68.2 MiB/s | 2.1% gap |
+| many-small | 0 ms | **255.1 MiB/s** | **244.0 MiB/s** | 161.3 MiB/s | **1.51x** |
+| many-small | 30 ms | **30.0 MiB/s** | **27.3 MiB/s** | 26.7 MiB/s | **1.02x** |
+
+All nine official cross-tool correctness checks passed, including byte-exact
+repair in both Parmesan↔par2cmdline directions and independent reconstruction
+of Pesto's posted yEnc articles. ngPost had one failed repetition in each
+`many-small` 30 ms scenario; those rows are retained in the raw result but are
+not used above. The complete committed run is
+[`bench/results/medialab/20260821T104726Z/`](results/medialab/20260821T104726Z/).
+
+Exact reproduction command:
+
+```bash
+./bench/run.sh par2 e2e correctness \
+  --workload many-small --workload movie-1080p \
+  --scale 1.0 --reps 3 --latencies 0,30 --yes
+```
+
 ---
 
 ## Table of contents
 
 - [Why it is built this way](#why-it-is-built-this-way)
+- [Release benchmark snapshot — 2026-08-21](#release-benchmark-snapshot--2026-08-21)
 - [The four layers](#the-four-layers)
 - [Workloads](#workloads)
 - [Running it](#running-it)

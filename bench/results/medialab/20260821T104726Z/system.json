@@ -1,0 +1,31 @@
+{
+  "generated_utc": "2026-08-21T10:47:26Z",
+  "host": "medialab",
+  "os": "Linux",
+  "kernel": "6.8.0-111-generic",
+  "arch": "x86_64",
+  "cpu_model": "Intel(R) Core(TM) i5-10400 CPU @ 2.90GHz",
+  "cpu_cores_logical": 12,
+  "cpu_cores_physical": 6,
+  "cpu_governor": "performance",
+  "cpu_boost": "on",
+  "simd_flags": "ssse3 avx2",
+  "mem_total_kb": 32682180,
+  "data_filesystem": "btrfs",
+  "drop_caches": 0,
+  "reps": 3,
+  "toolchain": {
+    "rustc": "absent",
+    "cargo_profile": "release (lto=true, codegen-units=1, panic=abort)",
+    "rustflags": ""
+  },
+  "tools": {
+    "pesto": "pesto dev",
+    "parmesan": "parmesan dev",
+    "par2cmdline": "par2cmdline version 0.8.1",
+    "parpar": "0.4.5",
+    "nyuu": "0.4.2",
+    "ngPost": "v4.16",
+    "node": "v24.15.0"
+  }
+}

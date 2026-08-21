@@ -1,0 +1,43 @@
+timestamp,host,suite,workload,tool,tool_version,variant,rep,input_bytes,wall_ms,user_ms,sys_ms,max_rss_kb,exit_code,articles,output_bytes,extra
+2026-08-21T03:55:51Z,ip-172-31-82-23,par2,many-small,parmesan,parmesan dev,create-r10,1,524288000,1213,4530,340,140924,0,0,56979732,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024;encoder=smart
+2026-08-21T03:55:53Z,ip-172-31-82-23,par2,many-small,parmesan,parmesan dev,create-r10,2,524288000,1313,4770,340,147068,0,0,56979732,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024;encoder=smart
+2026-08-21T03:55:54Z,ip-172-31-82-23,par2,many-small,parmesan,parmesan dev,create-r10,3,524288000,1188,4460,320,137960,0,0,56979732,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024;encoder=smart
+2026-08-21T03:55:56Z,ip-172-31-82-23,par2,many-small,parpar,0.4.6,create-r10,1,524288000,1898,4080,390,174116,0,0,67061684,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:55:58Z,ip-172-31-82-23,par2,many-small,parpar,0.4.6,create-r10,2,524288000,2326,4090,460,174068,0,0,67061684,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:56:01Z,ip-172-31-82-23,par2,many-small,parpar,0.4.6,create-r10,3,524288000,2200,3990,500,174016,0,0,67061684,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:56:11Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,create-r10,1,524288000,9888,38780,170,67000,0,0,70590072,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:56:21Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,create-r10,2,524288000,9952,39050,150,67008,0,0,70590072,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:56:31Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,create-r10,3,524288000,9992,39190,170,67024,0,0,70590072,op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:56:40Z,ip-172-31-82-23,par2,many-small,parmesan,absent,verify,1,524288000,1335,1220,100,44196,0,0,0,op=verify
+2026-08-21T03:56:41Z,ip-172-31-82-23,par2,many-small,parmesan,absent,verify,2,524288000,1339,1220,110,44448,0,0,0,op=verify
+2026-08-21T03:56:42Z,ip-172-31-82-23,par2,many-small,parmesan,absent,verify,3,524288000,1315,1190,120,44344,0,0,0,op=verify
+2026-08-21T03:56:44Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,verify,1,524288000,1664,3160,120,8104,0,0,0,op=verify
+2026-08-21T03:56:46Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,verify,2,524288000,1684,3210,100,8220,0,0,0,op=verify
+2026-08-21T03:56:48Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,verify,3,524288000,1684,3210,100,7992,0,0,0,op=verify
+2026-08-21T03:56:52Z,ip-172-31-82-23,par2,many-small,parmesan,absent,repair,1,524288000,2850,10180,710,82496,0,0,0,op=repair;damaged_slices=100
+2026-08-21T03:56:55Z,ip-172-31-82-23,par2,many-small,parmesan,absent,repair,2,524288000,2831,10200,620,82344,0,0,0,op=repair;damaged_slices=100
+2026-08-21T03:56:59Z,ip-172-31-82-23,par2,many-small,parmesan,absent,repair,3,524288000,2842,10320,610,82592,0,0,0,op=repair;damaged_slices=100
+2026-08-21T03:57:05Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,repair,1,524288000,5231,16780,230,34856,0,0,0,op=repair;damaged_slices=100
+2026-08-21T03:57:11Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,repair,2,524288000,5224,16770,210,34664,0,0,0,op=repair;damaged_slices=100
+2026-08-21T03:57:17Z,ip-172-31-82-23,par2,many-small,par2cmdline,par2cmdline version 0.8.1,repair,3,524288000,5243,16820,220,34728,0,0,0,op=repair;damaged_slices=100
+2026-08-21T03:57:33Z,ip-172-31-82-23,par2,movie-1080p,parmesan,parmesan dev,create-r10,1,6442450944,12676,57490,2370,1794292,0,0,645087600,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024;encoder=smart
+2026-08-21T03:57:45Z,ip-172-31-82-23,par2,movie-1080p,parmesan,parmesan dev,create-r10,2,6442450944,12654,57660,2390,1756464,0,0,645087600,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024;encoder=smart
+2026-08-21T03:57:58Z,ip-172-31-82-23,par2,movie-1080p,parmesan,parmesan dev,create-r10,3,6442450944,12681,57520,2400,1801756,0,0,645087600,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024;encoder=smart
+2026-08-21T03:58:09Z,ip-172-31-82-23,par2,movie-1080p,parpar,0.4.6,create-r10,1,6442450944,10662,31730,1700,783568,0,0,645894592,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:58:18Z,ip-172-31-82-23,par2,movie-1080p,parpar,0.4.6,create-r10,2,6442450944,8715,34880,1670,783480,0,0,645894592,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T03:58:29Z,ip-172-31-82-23,par2,movie-1080p,parpar,0.4.6,create-r10,3,6442450944,10646,31950,1760,783724,0,0,645894592,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T04:00:33Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,create-r10,1,6442450944,124022,404770,1410,638524,0,0,646176744,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T04:02:37Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,create-r10,2,6442450944,124239,405390,1450,638580,0,0,646176744,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T04:04:37Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,create-r10,3,6442450944,119823,391200,1440,638620,0,0,646176744,op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024
+2026-08-21T04:05:07Z,ip-172-31-82-23,par2,movie-1080p,parmesan,absent,verify,1,6442450944,15179,13740,1420,463812,0,0,0,op=verify
+2026-08-21T04:05:22Z,ip-172-31-82-23,par2,movie-1080p,parmesan,absent,verify,2,6442450944,15160,13730,1410,463868,0,0,0,op=verify
+2026-08-21T04:05:37Z,ip-172-31-82-23,par2,movie-1080p,parmesan,absent,verify,3,6442450944,15157,13720,1420,463772,0,0,0,op=verify
+2026-08-21T04:06:14Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,verify,1,6442450944,36967,37270,950,12384,0,0,0,op=verify
+2026-08-21T04:06:51Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,verify,2,6442450944,37063,37350,970,12288,0,0,0,op=verify
+2026-08-21T04:07:29Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,verify,3,6442450944,37701,38030,980,12200,0,0,0,op=verify
+2026-08-21T04:09:03Z,ip-172-31-82-23,par2,movie-1080p,parmesan,absent,repair,1,6442450944,38261,161310,4260,948824,0,0,0,op=repair;damaged_slices=100
+2026-08-21T04:10:12Z,ip-172-31-82-23,par2,movie-1080p,parmesan,absent,repair,2,6442450944,37843,158140,4410,948972,0,0,0,op=repair;damaged_slices=100
+2026-08-21T04:11:20Z,ip-172-31-82-23,par2,movie-1080p,parmesan,absent,repair,3,6442450944,38159,161090,4290,948772,0,0,0,op=repair;damaged_slices=100
+2026-08-21T04:14:30Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,repair,1,6442450944,161871,289030,6630,144484,0,0,0,op=repair;damaged_slices=100
+2026-08-21T04:17:44Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,repair,2,6442450944,166535,305870,7030,144448,0,0,0,op=repair;damaged_slices=100
+2026-08-21T04:20:47Z,ip-172-31-82-23,par2,movie-1080p,par2cmdline,par2cmdline version 0.8.1,repair,3,6442450944,155593,288030,6400,144540,0,0,0,op=repair;damaged_slices=100

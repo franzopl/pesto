@@ -1,0 +1,50 @@
+{
+  "system": {
+  "generated_utc": "2026-08-21T03:55:00Z",
+  "host": "ip-172-31-82-23",
+  "os": "Linux",
+  "kernel": "6.17.0-1019-aws",
+  "arch": "x86_64",
+  "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+  "cpu_cores_logical": 8,
+  "cpu_cores_physical": 4,
+  "cpu_governor": "unknown",
+  "cpu_boost": "unknown",
+  "simd_flags": "ssse3 avx2 avx512f avx512bw gfni vpclmulqdq",
+  "mem_total_kb": 16078828,
+  "data_filesystem": "ext4",
+  "drop_caches": 0,
+  "reps": 3,
+  "toolchain": {
+    "rustc": "absent",
+    "cargo_profile": "release (lto=true, codegen-units=1, panic=abort)",
+    "rustflags": ""
+  },
+  "tools": {
+    "pesto": "pesto dev",
+    "parmesan": "parmesan dev",
+    "par2cmdline": "par2cmdline version 0.8.1",
+    "parpar": "0.4.6",
+    "nyuu": "0.4.2",
+    "ngPost": "absent",
+    "node": "v22.23.2"
+  }
+}
+,
+  "results": [
+    {"suite":"par2","workload":"many-small","tool":"par2cmdline","tool_version":"par2cmdline version 0.8.1","variant":"create-r10","extra":"op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":9952.000000,"wall_mean_ms":9944.000000,"wall_stddev_ms":52.459508,"rsd_pct":0.5,"mibps_median":50.2,"cpu_ratio":3.94,"max_rss_kb":67024,"articles":0,"output_bytes":70590072},
+    {"suite":"par2","workload":"many-small","tool":"parmesan","tool_version":"parmesan dev","variant":"create-r10","extra":"op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024;encoder=smart","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":1213.000000,"wall_mean_ms":1238.000000,"wall_stddev_ms":66.143783,"rsd_pct":5.3,"mibps_median":412.2,"cpu_ratio":4.06,"max_rss_kb":147068,"articles":0,"output_bytes":56979732},
+    {"suite":"par2","workload":"many-small","tool":"parpar","tool_version":"0.4.6","variant":"create-r10","extra":"op=create;recovery_pct=10;slice_size=262144;slice_count=2000;recovery_count=200;threads=4;mem_mib=1024","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":2200.000000,"wall_mean_ms":2141.333333,"wall_stddev_ms":219.948479,"rsd_pct":10.3,"mibps_median":227.3,"cpu_ratio":2.05,"max_rss_kb":174116,"articles":0,"output_bytes":67061684},
+    {"suite":"par2","workload":"many-small","tool":"par2cmdline","tool_version":"par2cmdline version 0.8.1","variant":"repair","extra":"op=repair;damaged_slices=100","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":5231.000000,"wall_mean_ms":5232.666667,"wall_stddev_ms":9.609024,"rsd_pct":0.2,"mibps_median":95.6,"cpu_ratio":3.25,"max_rss_kb":34856,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"many-small","tool":"parmesan","tool_version":"absent","variant":"repair","extra":"op=repair;damaged_slices=100","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":2842.000000,"wall_mean_ms":2841.000000,"wall_stddev_ms":9.539392,"rsd_pct":0.3,"mibps_median":175.9,"cpu_ratio":3.83,"max_rss_kb":82592,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"many-small","tool":"par2cmdline","tool_version":"par2cmdline version 0.8.1","variant":"verify","extra":"op=verify","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":1684.000000,"wall_mean_ms":1677.333333,"wall_stddev_ms":11.547005,"rsd_pct":0.7,"mibps_median":296.9,"cpu_ratio":1.96,"max_rss_kb":8220,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"many-small","tool":"parmesan","tool_version":"absent","variant":"verify","extra":"op=verify","runs":3,"failures":0,"input_bytes":524288000,"wall_median_ms":1335.000000,"wall_mean_ms":1329.666667,"wall_stddev_ms":12.858201,"rsd_pct":1.0,"mibps_median":374.5,"cpu_ratio":0.99,"max_rss_kb":44448,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"movie-1080p","tool":"par2cmdline","tool_version":"par2cmdline version 0.8.1","variant":"create-r10","extra":"op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":124022.000000,"wall_mean_ms":122694.666667,"wall_stddev_ms":2489.301977,"rsd_pct":2.0,"mibps_median":49.5,"cpu_ratio":3.24,"max_rss_kb":638620,"articles":0,"output_bytes":646176744},
+    {"suite":"par2","workload":"movie-1080p","tool":"parmesan","tool_version":"parmesan dev","variant":"create-r10","extra":"op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024;encoder=smart","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":12676.000000,"wall_mean_ms":12670.333333,"wall_stddev_ms":14.364308,"rsd_pct":0.1,"mibps_median":484.7,"cpu_ratio":4.73,"max_rss_kb":1801756,"articles":0,"output_bytes":645087600},
+    {"suite":"par2","workload":"movie-1080p","tool":"parpar","tool_version":"0.4.6","variant":"create-r10","extra":"op=create;recovery_pct=10;slice_size=3223552;slice_count=1999;recovery_count=200;threads=4;mem_mib=1024","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":10646.000000,"wall_mean_ms":10007.666667,"wall_stddev_ms":1119.510756,"rsd_pct":11.2,"mibps_median":577.1,"cpu_ratio":3.25,"max_rss_kb":783724,"articles":0,"output_bytes":645894592},
+    {"suite":"par2","workload":"movie-1080p","tool":"par2cmdline","tool_version":"par2cmdline version 0.8.1","variant":"repair","extra":"op=repair;damaged_slices=100","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":161871.000000,"wall_mean_ms":161333.000000,"wall_stddev_ms":5490.803584,"rsd_pct":3.4,"mibps_median":38.0,"cpu_ratio":1.86,"max_rss_kb":144540,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"movie-1080p","tool":"parmesan","tool_version":"absent","variant":"repair","extra":"op=repair;damaged_slices=100","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":38159.000000,"wall_mean_ms":38087.666667,"wall_stddev_ms":217.938829,"rsd_pct":0.6,"mibps_median":161.0,"cpu_ratio":4.31,"max_rss_kb":948972,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"movie-1080p","tool":"par2cmdline","tool_version":"par2cmdline version 0.8.1","variant":"verify","extra":"op=verify","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":37063.000000,"wall_mean_ms":37243.666667,"wall_stddev_ms":398.960315,"rsd_pct":1.1,"mibps_median":165.8,"cpu_ratio":1.04,"max_rss_kb":12384,"articles":0,"output_bytes":0},
+    {"suite":"par2","workload":"movie-1080p","tool":"parmesan","tool_version":"absent","variant":"verify","extra":"op=verify","runs":3,"failures":0,"input_bytes":6442450944,"wall_median_ms":15160.000000,"wall_mean_ms":15165.333333,"wall_stddev_ms":11.930353,"rsd_pct":0.1,"mibps_median":405.3,"cpu_ratio":1.00,"max_rss_kb":463868,"articles":0,"output_bytes":0}
+  ]
+}

@@ -1218,56 +1218,40 @@ disk. Not part of the internal event stream — always the very last line.
 
 ## Performance
 
-pesto dispatches automatically to the best SIMD path at runtime
-(AVX2+GFNI → SSSE3 → scalar). No flags needed.
+Release-validation medians on an i5-10400 (6 physical cores, AVX2), governor
+`performance`, three repetitions and eight mock-NNTP connections:
 
-### yEnc encoding throughput
+| workload | scenario | pesto | competitor | result |
+|---|---|---:|---:|---:|
+| movie-1080p | post-only, 0 ms | **2226.1 MiB/s** | Nyuu 1339.4 MiB/s | **1.66x** |
+| movie-1080p | post-only, 30 ms | **92.2 MiB/s** | Nyuu 92.0 MiB/s | **1.00x** |
+| movie-1080p | full two-phase, 0 ms | 265.5 MiB/s | ParPar+Nyuu 283.4 MiB/s | 6.3% gap |
+| movie-1080p | full streaming, 30 ms | **82.8 MiB/s** | ParPar+Nyuu two-phase 68.2 MiB/s | **1.21x** |
+| many-small | post-only, 0 ms | **1760.6 MiB/s** | Nyuu 505.6 MiB/s | **3.48x** |
 
-Line length 128 bytes (Usenet default). Both tools use internal timers after
-warmup + N iterations (pure CPU, data already in memory).
+Nyuu was 0.4.2 and ParPar 0.4.5. At 30 ms the pure-posting row is
+latency-limited; Pesto's default streaming pipeline overlaps PAR2 creation
+with upload, while `--par2-before-upload` provides the like-for-like
+two-phase comparison.
 
-| CPU | pesto | node-yencode |
-|-----|-------|--------------|
-| i5-10400 (Comet Lake, no E-cores) | ~2 200 MB/s | ~2 200 MB/s |
-| i5-14400 (Raptor Lake, hybrid)    | ~2 900 MB/s | ~4 500 MB/s |
-
-On homogeneous CPUs pesto and node-yencode are neck-and-neck. The gap on
-hybrid CPUs is under investigation — E-cores may favour node-yencode's SIMD
-strategy at line_len=128.
-
-### PAR2 creation throughput
-
-10% recovery, ~1 000 input slices, random data files.
-
-**i5-10400** (Comet Lake, 6c/12t, AVX2, no GFNI):
-
-| Input  | parmesan | parpar   | par2cmdline | vs parpar | vs par2cmdline |
-|--------|----------|----------|-------------|-----------|----------------|
-| 1 GB   | 425 MB/s | 493 MB/s | 63 MB/s     | -14%      | +571%          |
-| 5 GB   | 447 MB/s | 433 MB/s | 62 MB/s     | **+3%**   | +623%          |
-| 10 GB  | 426 MB/s | 412 MB/s | 53 MB/s     | **+3%**   | +700%          |
-
-**i5-14400** (Raptor Lake, 6P+4E cores, AVX2+GFNI):
-
-| Input  | parmesan | parpar   | par2cmdline | vs parpar | vs par2cmdline |
-|--------|----------|----------|-------------|-----------|----------------|
-| 1 GB   | 546 MB/s | 650 MB/s | 98 MB/s     | -16%      | +460%          |
-| 5 GB   | 569 MB/s | 606 MB/s | 98 MB/s     | -6%       | +480%          |
-| 10 GB  | 572 MB/s | 587 MB/s | 98 MB/s     | -3%       | +484%          |
-
-parmesan closes the gap to parpar as file size grows and surpasses it at
-≥5 GB on both CPUs. Both are 5–7× faster than par2cmdline.
+On c7i.2xlarge (4 physical cores, AVX-512+GFNI), five measured repetitions
+after one excluded warmup, Parmesan created the 6 GiB movie recovery set at
+**553.2 MiB/s** against ParPar 0.4.6 at 577.8 MiB/s (4.3% gap), while
+`many-small` reached **464.3 vs 234.9 MiB/s (1.98x)**. All nine official
+cross-tool correctness checks passed.
 
 ### Reproduce on your machine
 
 ```bash
 cargo build --release
-./bench/yenc.sh          # yEnc throughput vs node-yencode
-./bench/par2.sh          # PAR2 creation vs parpar / par2cmdline
-./bench/posting.sh       # end-to-end article pipeline (dry-run)
+./bench/run.sh --list
+./bench/run.sh par2 e2e correctness \
+  --workload many-small --workload movie-1080p \
+  --scale 1.0 --reps 3 --latencies 0,30 --yes
 ```
 
-See [`bench/README.md`](bench/README.md) for details.
+See [`bench/README.md`](../../bench/README.md) for the complete methodology,
+hardware fingerprints, competitor versions, raw data, and limitations.
 
 ---
 

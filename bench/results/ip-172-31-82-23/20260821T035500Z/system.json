@@ -1,0 +1,31 @@
+{
+  "generated_utc": "2026-08-21T03:55:00Z",
+  "host": "ip-172-31-82-23",
+  "os": "Linux",
+  "kernel": "6.17.0-1019-aws",
+  "arch": "x86_64",
+  "cpu_model": "Intel(R) Xeon(R) Platinum 8488C",
+  "cpu_cores_logical": 8,
+  "cpu_cores_physical": 4,
+  "cpu_governor": "unknown",
+  "cpu_boost": "unknown",
+  "simd_flags": "ssse3 avx2 avx512f avx512bw gfni vpclmulqdq",
+  "mem_total_kb": 16078828,
+  "data_filesystem": "ext4",
+  "drop_caches": 0,
+  "reps": 3,
+  "toolchain": {
+    "rustc": "absent",
+    "cargo_profile": "release (lto=true, codegen-units=1, panic=abort)",
+    "rustflags": ""
+  },
+  "tools": {
+    "pesto": "pesto dev",
+    "parmesan": "parmesan dev",
+    "par2cmdline": "par2cmdline version 0.8.1",
+    "parpar": "0.4.6",
+    "nyuu": "0.4.2",
+    "ngPost": "absent",
+    "node": "v22.23.2"
+  }
+}

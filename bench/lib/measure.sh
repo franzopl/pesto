@@ -143,7 +143,7 @@ bench_case() {
     slug=${slug//[^A-Za-z0-9._+-]/_}
     M_LOG="$logdir/$slug.log"
 
-    local rep wall_list=() failed=0
+    local rep wall_list=() failed=0 failing_exit=0
     for (( rep = 1 - BENCH_WARMUP; rep <= reps; rep++ )); do
         CASE_OUTPUT_BYTES=0
         CASE_ARTICLES=0
@@ -158,6 +158,7 @@ bench_case() {
 
         if (( M_EXIT != 0 )); then
             failed=1
+            failing_exit=$M_EXIT
         else
             wall_list+=("$M_WALL_MS")
         fi
@@ -172,7 +173,7 @@ bench_case() {
     done
 
     if (( failed )); then
-        printf "  %-28s %s\n" "$label" "$(red "FAILED (exit $M_EXIT)")"
+        printf "  %-28s %s\n" "$label" "$(red "FAILED (exit $failing_exit)")"
         if [[ -s ${M_LOG:-} ]]; then
             printf '%s\n' "$(dim "$(tail -3 "$M_LOG" | sed 's/^/      /')")"
             printf '      %s\n' "$(dim "full log: $M_LOG")"

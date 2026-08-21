@@ -228,7 +228,7 @@ impl RecoveryEncoder {
     ///
     /// The ALTMAP layout is only requested, never guaranteed: when this CPU has
     /// no kernel that can consume it — no AVX2, a GFNI machine (where
-    /// [`Self::build_dep_tables`] returns `None`), a non-x86_64 target, or a
+    /// `build_dep_tables` returns `None`), a non-x86_64 target, or a
     /// failed table allocation — the encoder falls back to the portable layout
     /// of [`Self::try_new`]. The recovery data is identical either way; only
     /// throughput differs. Without the fallback `flush` would hit its

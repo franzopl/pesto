@@ -1,0 +1,12 @@
+many-small
+  baseline: median=414.938 MiB/s values=[414.938, 412.882, 426.257, 395.883, 425.532]
+  current: median=464.253 MiB/s values=[465.116, 464.253, 486.855, 456.204, 434.405]
+  parpar: median=234.852 MiB/s values=[246.305, 234.852, 247.036, 218.723, 217.486]
+  current/baseline=+11.885%
+  gap-vs-parpar=-97.679%
+movie-1080p
+  baseline: median=497.087 MiB/s values=[494.527, 501.633, 497.087, 516.606, 493.772]
+  current: median=553.214 MiB/s values=[550.143, 505.679, 557.532, 560.942, 553.214]
+  parpar: median=577.824 MiB/s values=[567.837, 615.138, 577.824, 574.313, 694.944]
+  current/baseline=+11.291%
+  gap-vs-parpar=4.259%

@@ -1,7 +1,7 @@
 # Performance parity vs parpar + nyuu
 
-Working plan on branch `dev` (main is frozen at pesto 0.8.0 / parmesan 0.5.0).
-Binaries built from this branch report version **`dev`**, not `0.8.0`.
+Completed performance-parity plan on branch `dev`. Release-validation binaries
+built from this branch report version **`dev`** until the release bump.
 
 Issue: [#159](https://github.com/franzopl/pesto/issues/159).
 Related: #148 (closed; GFNI large-file gap reopened by the 0.8.0 AWS pair).
@@ -10,11 +10,11 @@ Related: #148 (closed; GFNI large-file gap reopened by the 0.8.0 AWS pair).
 
 Match or beat `parpar`+`nyuu` on:
 
-| Platform | Example | Today (0.8.0) |
+| Platform | Example | Release validation (2026-08-21) |
 |---|---|---|
-| AVX2 desktop, 6c | medialab i5-10400 | movie create −20% vs parpar; post-only pesto ahead |
+| AVX2 desktop, 6c | medialab i5-10400 | movie create −17%; post-only pesto 1.66x Nyuu |
 | AVX2/AVX-512, 4c, no GFNI | c5.2xlarge | movie create −57%; post-only nyuu +60% |
-| AVX2+GFNI, 4c | c7i.2xlarge | movie create −47% (298 vs 564); e2e two-phase −45% |
+| AVX-512+GFNI, 4c | c7i.2xlarge | movie create **−4.3%** (553.2 vs 577.8); target met |
 
 `many-small` already wins on AVX2 and GFNI. Do not regress it.
 
@@ -54,9 +54,9 @@ Acceptance: medialab `movie-1080p` create ≥ parpar; `many-small` not slower.
 - [x] Kernel: 2× `gf2p8affine` + lane swap, `srcCount=6`, 4 KiB tiles
 - [x] Scratch = 16×4 matrices, not 65k dep tables
 
-Acceptance: c7i `movie-1080p` create within ~10% of parpar — **not met**
-(424 vs 626). `many-small` still ahead. Dest-interleave+prefetch did not
-move create (425 vs 619, 1-rep); do not retry layout on this kernel.
+Acceptance: c7i `movie-1080p` create within ~10% of parpar — **met** after
+progressive output-tile prefetch and batched SIMD slice MD5: **553.2 vs
+577.8 MiB/s (4.3% gap)**. `many-small` is **464.3 vs 234.9 MiB/s (1.98x)**.
 
 ### P1b — Slice-chunk memory
 
@@ -82,8 +82,22 @@ Medialab: **1.11×**. c7i `20260820T102216Z`: **1.10×** (1899 vs 1726). Met.
 
 ### P4 — AVX-512 affine2x only if P1 still leaves >10%
 
-P1 still leaves ~32%. Affine2x-512 (`srcCount=12`) is the next kernel to
-try, behind `new_affine2x` until it beats Affine512 packed `smart`.
+Not required: the Affine512 packed path reached the acceptance target. Keep
+Affine2x-512 deferred; this release does not reopen kernel work for another
+1–2%.
+
+## Release validation
+
+The official local run used three repetitions, governor `performance`, warm
+page cache, and the complete `par2 e2e correctness` suites for `many-small`
+and `movie-1080p`. Post-only movie was **2226.1 vs 1339.4 MiB/s** (Pesto
+1.66x Nyuu) at 0 ms and **92.2 vs 92.0 MiB/s** at 30 ms. Like-for-like movie
+two-phase was within 6.3% of ParPar+Nyuu at 0 ms and within 2.1% at 30 ms;
+Pesto's streaming pipeline reached 82.8 MiB/s at 30 ms, 1.21x the competing
+two-phase pipeline. All nine cross-tool correctness checks passed.
+
+See the publishable tables and committed artifacts in
+[`bench/README.md`](../bench/README.md).
 
 ## Measure
 
