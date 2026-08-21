@@ -48,7 +48,10 @@ must be complete.
 | A26 | Recovery MD5-MB 8/16-wide | AVX2 / AVX-512 | Missing | |
 | A27 | OpenCL | GPU | Missing | last; optional crate feature |
 
-`smart` today: **Affine512 packed** on SPR (c7i movie create **424 MiB/s** median); Affine AVX2 on GFNI without 512; Shuffle AVX-512 if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI. yEnc `encode()`: AVX2 + VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
+`smart` today: **Affine512 packed** on SPR (latest c7i movie create
+**484.7 MiB/s** median); Affine AVX2 on GFNI without 512; Shuffle AVX-512
+if 512 && !GFNI; Shuffle2x if AVX2 && !GFNI. yEnc `encode()`: AVX2 +
+VBMI2/`vpternlog` when present (non-hybrid) / SSSE3 (hybrid).
 
 Target `smart` when this list is done: same priority as
 `Galois16Mul::default_method` in parpar (`gf16mul.cpp`).
@@ -208,7 +211,7 @@ Result:
 
 ParPar still leads (c7i: 656 MiB/s, medialab: 361 MiB/s). 
 
-### Affine512 six-source loop parity (2026-08-21, c7i rebenchmark pending)
+### Affine512 six-source loop parity (2026-08-21)
 
 The post-refactor comparison with ParPar found two code-generation differences
 in the common six-source group; the packed layout, 6-way interleave, 4 KiB
@@ -226,9 +229,29 @@ tiles, 12-slice input batch, and slice-parallel scheduling already matched.
   block. Remainders of one through five sources retain the generic path.
 
 Local tests and clippy are green, and an AVX-512-only test compares every lane
-of paired matrix expansion with the scalar scratch. Do not replace the
-518/656 MiB/s baseline above until `movie-1080p` and `many-small` have been
-rerun on c7i; the local i5-10400 cannot execute AVX-512/GFNI.
+of paired matrix expansion with the scalar scratch. The test executed rather
+than skipped on a c7i.2xlarge (Xeon Platinum 8488C).
+
+A same-host A/B used the exact `movie-1080p` geometry (6 GiB, 3,223,552-byte
+slices, 1,999 input slices, 200 recovery blocks, four threads, 1 GiB), forced
+`affine512` + `avx512-gfni`, alternated old/new order, and excluded one warmup
+per binary:
+
+| Commit | Five measured runs (MiB/s) | Median |
+|---|---|---:|
+| `a46a94a` before six-source specialization | 466.5, 467.8, 471.4, 469.0, 473.2 | **469.0** |
+| `c1a16d3` register-resident six-source loop | 511.3, 514.4, 503.7, 522.0, 520.3 | **514.4** |
+
+That is a **9.68% same-host gain**, so the code-generation change has a real
+effect beyond instance-to-instance noise. Raw data:
+`bench/results/ip-172-31-5-219/20260821T043128Z-affine512-ab/raw.csv`.
+
+The separate publishable three-repetition suite
+(`ip-172-31-82-23/20260821T035500Z`) measured `movie-1080p` create at
+**484.7 MiB/s** for parmesan (RSD 0.1%) and **577.1 MiB/s** for ParPar
+(RSD 11.2%). Parmesan is 16.0% below ParPar, improved from the historical
+518.3/656 ratio but still short of the <10% target. `many-small` did not
+regress: parmesan was **412.2 MiB/s** versus ParPar at **227.3 MiB/s**.
 
 ### The remaining AVX2 (medialab) gap: 2-slice `vperm2i128` amortization
 
@@ -251,13 +274,13 @@ Pesto's `flush_avx2_shuffle2x_work` processes 1 slice at a time across recovery 
 
 | Architecture | Representative HW | Pesto kernel | Status | Priority |
 |---|---|---|---|---|
-| AVX-512 + GFNI | AWS c7i, Intel Sapphire Rapids, Ice Lake Xeon | `Affine512 packed` | ✅ **518 MiB/s** (parpar 656, gap ~21%) | High — primary release target |
+| AVX-512 + GFNI | AWS c7i, Intel Sapphire Rapids, Ice Lake Xeon | `Affine512 packed` | ✅ **485 MiB/s** (parpar 577, gap 16%; patch A/B +9.7%) | High — primary release target |
 | AVX2 (no GFNI) | Intel 6th–10th gen, AMD Zen 1/2 | `Shuffle2x AVX2` | ⚠ **261 MiB/s** (parpar 361, gap ~38%) | Medium — worth a dedicated sprint |
 | SSSE3 (legacy) | Intel Core 2, early Sandy Bridge | `Normal SSSE3` | Not benchmarked | Low — marginal install base |
 | GFNI without AVX-512 | Tremont (Atom), some Tiger Lake | Falls back to `Shuffle2x` | Not benchmarked | Low |
 | Apple Silicon (ARM) | M1/M2/M3 | No specialised kernel yet | Not benchmarked | Future |
 
-**Recommended benchmark priority for the next AWS run:** c7i (AVX-512+GFNI) — that is where we have the largest user base for a Usenet tool and where our PAR2 create is closest to matching ParPar. Closing that last 21% on c7i is higher-value than closing the 38% AVX2 gap.
+**Recommended benchmark priority for the next AWS run:** c7i (AVX-512+GFNI) — that is where we have the largest user base for a Usenet tool and where our PAR2 create is closest to matching ParPar. Closing the remaining 16% on c7i is higher-value than closing the 38% AVX2 gap.
 
 ---
 
@@ -265,7 +288,7 @@ Pesto's `flush_avx2_shuffle2x_work` processes 1 slice at a time across recovery 
 
 | Item | Gap | Impact | Notes |
 |---|---|---|---|
-| **PAR2 create c7i: 518 vs 656 MiB/s** | ~21% | High | Roadmap items P2 (SIMD hasher), P3 (Affine2x srcCount=12) remain uninvestigated |
+| **PAR2 create c7i: 485 vs 577 MiB/s** | ~16% | High | Roadmap items P2 (SIMD hasher), P3 (Affine2x srcCount=12) remain uninvestigated |
 | **movie full two-phase (local):** pesto 262 vs parpar+nyuu 292 MiB/s | ~11% | Medium | PAR2 create is the bottleneck (200 MiB/s on AVX2); closing c7i gap will likely fix this path too |
 | **AVX2 Shuffle2x 2-slice amortization** | ~38% on AVX2 | Medium | Documented above as future work |
 | ~~post-only speed~~ | — | ✅ Done | Pesto 1477 MiB/s vs nyuu 1333 (1.11×), many-small 1355 vs 475 (2.85×) |
