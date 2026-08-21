@@ -7,6 +7,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-08-21
+
+### Performance
+
+- **Affine512 packed reached practical parity with ParPar on c7i.** The
+  AVX-512+GFNI path now uses register-resident six-source groups, progressively
+  prefetches every cache line of the next output tile, and batches independent
+  slice MD5 checksums through `md5-many` while CRC32 runs on other Rayon
+  workers. On c7i.2xlarge, five measured repetitions after one warmup produced
+  **553.2 MiB/s** for `movie-1080p` against ParPar 0.4.6 at 577.8 MiB/s, a
+  **4.3% gap**.
+- **The same checksum work improved `many-small` without regressing the
+  small-file path:** **464.3 MiB/s** against ParPar at 234.9 MiB/s
+  (**1.98x**). Both results used 200 recovery blocks, four physical cores, a
+  1 GiB memory limit, and warm page cache.
+
+### Changed
+
+- Split the encoder implementation into focused API, flush, portable,
+  AVX2/GFNI, AVX-512/GFNI, and ARM modules. This is an internal refactor; the
+  public API and byte-exact PAR2 output remain unchanged.
+- Published the raw c7i A/B data and the full AVX2 release-validation run in
+  `bench/results/`; all nine official cross-tool correctness checks and all
+  six dedicated par2cmdline compatibility tests pass.
+
 ## [0.5.2] — 2026-08-20
 
 ### Fixed

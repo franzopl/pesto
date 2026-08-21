@@ -12,6 +12,30 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-08-21
+
+### Performance
+
+- Bundled Parmesan 0.5.3: its Affine512 packed create path adds progressive
+  output-tile prefetch, a register-resident six-source loop, and batched SIMD
+  slice MD5. On c7i.2xlarge, `movie-1080p` create reached **553.2 MiB/s**
+  against ParPar 0.4.6 at 577.8 MiB/s (**4.3% gap, practical parity**), while
+  `many-small` reached **464.3 vs 234.9 MiB/s (1.98x)**.
+- Posting remains ahead of Nyuu in the release-validation CPU-bound rows. On
+  an i5-10400 with three repetitions and governor `performance`, movie
+  post-only reached **2226.1 vs 1339.4 MiB/s (1.66x)** and `many-small`
+  reached **1760.6 vs 505.6 MiB/s (3.48x)**. At 30 ms simulated latency,
+  movie posting was effectively tied at 92.2 vs 92.0 MiB/s.
+- Like-for-like movie two-phase end-to-end is within **6.3%** of ParPar+Nyuu
+  at 0 ms and **2.1%** at 30 ms. Pesto's default streaming pipeline reached
+  82.8 MiB/s at 30 ms, **1.21x** the competing two-phase pipeline.
+
+### Changed
+
+- Added a publishable benchmark snapshot with committed raw data, hardware
+  fingerprints, competitor versions, exact reproduction command, and all nine
+  official interoperability checks passing.
+
 ## [0.8.2] — 2026-08-20
 
 ### Fixed
