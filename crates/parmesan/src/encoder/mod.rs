@@ -27,12 +27,14 @@ use crate::SimdPath;
 /// Bytes covered by the per-file 16k hash.
 const HEAD_LEN: usize = 16 * 1024;
 
+mod affine2x_kernels;
 mod affine512;
 mod affine_kernels;
 mod api;
 mod buffers;
 mod fallback;
 mod flush;
+mod gfni_kernels;
 mod hash;
 mod shuffle_kernels;
 mod tables;
