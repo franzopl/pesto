@@ -524,6 +524,9 @@ CPU feature detection:
 The dispatch happens in `RecoveryEncoder::flush()` (`src/par2/encoder.rs`).
 Measured throughput on an i5-14400 at 10 % redundancy, 256 MiB workload:
 
+> **Benchmark context:** these are historical microbenchmark results. CPU governor
+> and boost settings affect absolute throughput; do not compare these values directly with measurements taken under different conditions.
+
 | Path | PAR2 encode speed |
 |------|----------------:|
 | Scalar | 317 MiB/s |
@@ -538,6 +541,8 @@ pesto features a world-class yEnc encoder utilizing SIMD expansion tables
 memory bandwidth of modern CPUs.
 
 Measured throughput on an Intel i5-10400 (line length 128):
+
+> **Benchmark context:** this historical result does not record a performance-governor run. CPU governor and boost settings affect absolute throughput.
 
 | Tool | yEnc throughput |
 |------|----------------:|

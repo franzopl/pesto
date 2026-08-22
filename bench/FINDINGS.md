@@ -1269,6 +1269,22 @@ report:
    than the cache-overflow theory that motivated the sweep — flagged
    honestly as open. Details in §3.
 
+## 2026-08-21 release validation: GFNI large-file parity (#159)
+
+This supersedes the older GFNI conclusion above as the current c7i result. Release-validation runs used the performance governor, warm page cache, the standard scale-1.0 corpora, and official cross-tool correctness checks.
+
+| machine | SIMD | movie-1080p create result |
+|---|---|---|
+| medialab i5-10400, 6 cores | AVX2 | 17% behind ParPar; separate AVX2 work remains |
+| c5.2xlarge, 4 cores | AVX-512 without GFNI | 57% behind ParPar; not a primary target |
+| c7i.2xlarge, 4 cores | AVX-512 + GFNI | 553.2 MiB/s vs ParPar 577.8 MiB/s, 4.3% gap |
+
+The c7i target is met: movie-1080p is within 10% of ParPar, while many-small remains ahead at 464.3 versus 234.9 MiB/s.
+
+The proposed two-shuffle lead is closed: upstream ParPar uses four shuffles in its vector hot loop, matching Parmesan Shuffle2x. The shipped Affine512 packing, progressive prefetch, and batched SIMD checksum work reached parity without adding a misleading kernel.
+
+Raw release artifacts, methodology, and the matching end-to-end measurements are documented in docs/parity-roadmap.md and docs/hw-accel-roadmap.md.
+
 ---
 
 *Generated from `bench/results/medialab/20260817T015113Z/`. Reproduce with
