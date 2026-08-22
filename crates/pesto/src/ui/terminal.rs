@@ -99,15 +99,11 @@ async fn render_loop(mut rx: ProgressReceiver, opts: RendererOptions) {
                 None | Some(ProgressEvent::Finished) => {
                     state.finished = true;
                     if tty {
-                        if opts.quiet {
-                            state.draw_quiet(true);
-                        } else {
-                            // Replace the live panel with a compact two-line
-                            // summary rather than leaving the full frame —
-                            // idle dot row, empty par2 lines and all — frozen
-                            // in the scrollback.
-                            state.draw_summary();
-                        }
+                        // Replace either live display with the same compact
+                        // final summary. Quiet remains a single line while
+                        // work is active, but completion must never truncate
+                        // the outcome or an automatically recovered retry.
+                        state.draw_summary();
                     } else {
                         state.draw_plain(true);
                     }
@@ -998,7 +994,10 @@ impl RenderState {
         let eta_str = if final_draw {
             let recovered = self.recovered_retries();
             let recovered_note = if recovered > 0 {
-                format!(" · {recovered} retries recovered")
+                format!(
+                    " · {recovered} {} recovered automatically",
+                    if recovered == 1 { "retry" } else { "retries" }
+                )
             } else {
                 String::new()
             };
@@ -1200,8 +1199,10 @@ impl RenderState {
         let _ = err.flush();
     }
 
-    /// The two-line run summary that replaces the live panel once the run is
-    /// over. Deliberately small: the binary follows it with the `wrote
+    /// The compact run summary that replaces the live panel once the run is
+    /// over. A recovered retry gets its own optional third line so the primary
+    /// success message stays readable at ordinary terminal widths. The binary
+    /// follows it with the `wrote
     /// nzb`/`wrote nfo` paths, so this covers only what the renderer itself
     /// knows — outcome, throughput and verification.
     fn summary_lines(&self, width: usize) -> Vec<String> {
@@ -1225,64 +1226,30 @@ impl RenderState {
                     format_duration(self.elapsed_secs())
                 ),
             ],
-            RunMode::Post if ok && self.checks_enabled => {
-                let recovered = self.recovered_retries();
-                let recovered_note = if recovered > 0 {
-                    format!(
-                        "; {}",
-                        ansi(
-                            &format!(
-                                "{recovered} transient {} recovered",
-                                if recovered == 1 { "retry" } else { "retries" }
-                            ),
-                            "33"
-                        )
-                    )
-                } else {
-                    String::new()
-                };
-                vec![
-                    format!(
-                        "{glyph} Upload complete — {}/{} articles confirmed{recovered_note}.",
-                        self.confirmed_articles(),
-                        self.total_segments
-                    ),
-                    format!(
-                        "  {} in {} · avg {}/s",
-                        format_size(self.done_bytes),
-                        format_duration(self.elapsed_secs()),
-                        format_size((self.done_bytes as f64 / self.elapsed_secs()) as u64)
-                    ),
-                ]
-            }
-            RunMode::Post if ok => {
-                let recovered = self.recovered_retries();
-                let recovered_note = if recovered > 0 {
-                    format!(
-                        " · {}",
-                        ansi(
-                            &format!(
-                                "{recovered} transient {} recovered",
-                                if recovered == 1 { "retry" } else { "retries" }
-                            ),
-                            "33"
-                        )
-                    )
-                } else {
-                    String::new()
-                };
-                vec![
-                    format!(
-                        "{glyph} Upload complete — {}/{} articles accepted by the server{recovered_note}.",
-                        self.accepted_articles(),
-                        self.total_segments
-                    ),
-                    format!(
-                        "  Not independently verified · elapsed {}",
-                        format_duration(self.elapsed_secs())
-                    ),
-                ]
-            }
+            RunMode::Post if ok && self.checks_enabled => vec![
+                format!(
+                    "{glyph} Upload complete — {}/{} articles confirmed",
+                    self.confirmed_articles(),
+                    self.total_segments
+                ),
+                format!(
+                    "  {} in {} · avg {}/s",
+                    format_size(self.done_bytes),
+                    format_duration(self.elapsed_secs()),
+                    format_size((self.done_bytes as f64 / self.elapsed_secs()) as u64)
+                ),
+            ],
+            RunMode::Post if ok => vec![
+                format!(
+                    "{glyph} Upload complete — {}/{} articles accepted by the server",
+                    self.accepted_articles(),
+                    self.total_segments
+                ),
+                format!(
+                    "  Not independently verified · elapsed {}",
+                    format_duration(self.elapsed_secs())
+                ),
+            ],
             RunMode::Post => {
                 let count_note = if self.checks_enabled {
                     format!(
@@ -1336,12 +1303,34 @@ impl RenderState {
             ],
         };
 
+        if ok && self.mode == RunMode::Post {
+            let recovered = self.recovered_retries();
+            if recovered > 0 {
+                lines.push(format!(
+                    "  {}",
+                    ansi(
+                        &format!(
+                            "↻ Recovered automatically after {recovered} temporary {}",
+                            if recovered == 1 { "retry" } else { "retries" }
+                        ),
+                        "33"
+                    )
+                ));
+            }
+        }
+
         if let Some(desc) = &self.failed_description {
             lines.push(format!("  {}", ansi(&format!("⚠ {desc}"), "33")));
         }
         lines
             .into_iter()
-            .map(|line| truncate(&line, width))
+            .flat_map(|line| {
+                if visible_len(&line) <= width {
+                    vec![line]
+                } else {
+                    wrap(&line, width)
+                }
+            })
             .collect()
     }
 
@@ -1567,11 +1556,21 @@ impl RenderState {
                 // Reposts had no counter at all before — the only trace was
                 // a `Status` line shared (and instantly overwritten) by
                 // every other kind of status message in the app.
-                if self.check_reposted > 0 {
+                let retries_awaiting_confirmation = self
+                    .check_reposted
+                    .saturating_sub(self.recovered_check_retries);
+                if retries_awaiting_confirmation > 0 {
                     line1.push_str(&format!(
                         " · {}",
                         ansi(
-                            &format!("{} temporarily retried", self.check_reposted),
+                            &format!(
+                                "{retries_awaiting_confirmation} {} awaiting confirmation",
+                                if retries_awaiting_confirmation == 1 {
+                                    "retry"
+                                } else {
+                                    "retries"
+                                }
+                            ),
                             "33",
                         )
                     ));
@@ -1721,21 +1720,6 @@ impl RenderState {
             lines.push(format!(
                 "files  done {done}/{total_files}  uploading {in_flight}  waiting {pending}{failures_str}{active_file}"
             ));
-            if self.recovered_retries() > 0 {
-                lines.push(ansi(
-                    &format!(
-                        "issues  {} transient {} recovered",
-                        self.recovered_retries(),
-                        if self.recovered_retries() == 1 {
-                            "retry"
-                        } else {
-                            "retries"
-                        }
-                    ),
-                    "33",
-                ));
-            }
-
             // --- buffer pool visualizer (phase 21h, shown under pressure) -
             if self.buf_total > 0 && self.buf_free * 4 < self.buf_total {
                 let frac_free = self.buf_free as f64 / self.buf_total as f64;
@@ -1996,8 +1980,13 @@ impl RenderState {
                 " · availability: {verified} confirmed/{} missing/{pending} pending",
                 self.check_failed
             );
-            if self.check_reposted > 0 {
-                suffix.push_str(&format!("/{} temporarily retried", self.check_reposted));
+            let retries_awaiting_confirmation = self
+                .check_reposted
+                .saturating_sub(self.recovered_check_retries);
+            if retries_awaiting_confirmation > 0 {
+                suffix.push_str(&format!(
+                    "/{retries_awaiting_confirmation} awaiting confirmation"
+                ));
             }
             // Unlike the boxed panel, plain mode has no dedicated retry line
             // — append it here so a connection-error backoff isn't silently
@@ -2027,11 +2016,6 @@ impl RenderState {
         } else {
             let transient = if self.post_retry_pending > 0 {
                 format!(" · {} temporarily retrying", self.post_retry_pending)
-            } else if self.recovered_retries() > 0 {
-                format!(
-                    " · {} transient retries recovered",
-                    self.recovered_retries()
-                )
             } else {
                 String::new()
             };
@@ -2741,16 +2725,25 @@ mod tests {
             ok: true,
         });
         state.apply(ProgressEvent::CheckDone { failed: 0 });
-        let summary = state.summary_lines(100);
-        assert_eq!(summary.len(), 2, "summary is a compact two lines");
-        assert!(summary[0].contains('✓'), "clean run gets a check glyph");
-        assert!(
-            summary[0].contains("articles confirmed"),
-            "a fully-confirmed run should say so: {:?}",
-            summary[0]
-        );
-        // No frozen box borders in the summary.
-        assert!(!summary.iter().any(|l| l.contains('│')));
+        for width in [60, 80, 100] {
+            let summary = state.summary_lines(width);
+            assert_eq!(summary.len(), 2, "clean summary stays at two lines");
+            assert!(summary[0].contains('✓'), "clean run gets a check glyph");
+            assert!(
+                summary[0].contains("articles confirmed"),
+                "a fully-confirmed run should say so: {:?}",
+                summary[0]
+            );
+            assert!(!summary.iter().any(|line| line.contains('…')));
+            assert!(summary.iter().all(|line| visible_len(line) <= width));
+            // No frozen box borders in the summary.
+            assert!(!summary.iter().any(|line| line.contains('│')));
+        }
+
+        let narrow = state.summary_lines(40);
+        assert!(!narrow.iter().any(|line| line.contains('…')));
+        assert!(narrow.iter().all(|line| visible_len(line) <= 40));
+        assert!(narrow.join(" ").contains("articles confirmed"));
     }
 
     #[test]
@@ -2801,10 +2794,17 @@ mod tests {
         });
         state.apply(ProgressEvent::CheckDone { failed: 0 });
 
-        let summary = state.summary_lines(120).join("\n");
-        assert!(summary.contains("Upload complete"));
-        assert!(summary.contains("1 transient retry recovered"));
-        assert!(!summary.contains("\x1b[31m"));
+        for width in [60, 80] {
+            let lines = state.summary_lines(width);
+            assert_eq!(lines.len(), 3, "a recovered retry gets one extra line");
+            assert!(lines[0].contains("Upload complete"));
+            assert!(lines[0].contains("articles confirmed"));
+            assert!(!lines[0].contains("retry"));
+            assert!(lines[2].contains("↻ Recovered automatically after 1 temporary retry"));
+            assert!(!lines.iter().any(|line| line.contains('…')));
+            assert!(lines.iter().all(|line| visible_len(line) <= width));
+            assert!(!lines.join("\n").contains("\x1b[31m"));
+        }
         assert_eq!(state.failures, 0);
     }
 
@@ -2813,18 +2813,24 @@ mod tests {
         let mut state = upload_done_check_running();
         state.apply(ProgressEvent::CheckReposted { reposted: 1 });
         assert_eq!(state.recovered_retries(), 0);
+        let pending_panel = state.panel_lines(false, 100).join("\n");
+        assert!(pending_panel.contains("1 retry awaiting confirmation"));
 
         state.apply(ProgressEvent::CheckRetryRecovered);
+        let recovered_panel = state.panel_lines(false, 100).join("\n");
+        assert!(!recovered_panel.contains("awaiting confirmation"));
+        assert!(!recovered_panel.contains("issues"));
         state.apply(ProgressEvent::CheckProgress {
             checked: state.total_segments,
             ok: true,
         });
         state.apply(ProgressEvent::CheckDone { failed: 0 });
 
-        let summary = state.summary_lines(120).join("\n");
+        let summary = state.summary_lines(80).join("\n");
         assert!(summary.contains("Upload complete"));
-        assert!(summary.contains("1 transient retry recovered"));
+        assert!(summary.contains("Recovered automatically after 1 temporary retry"));
         assert!(summary.contains("articles confirmed"));
+        assert!(!summary.contains('…'));
     }
 
     #[test]

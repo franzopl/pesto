@@ -307,7 +307,7 @@ fn a_second_repost_attempt_recovers_an_article_the_first_missed() {
     // appearing as a terminal failure.
     assert!(
         stderr.contains("1/1 articles confirmed")
-            && stderr.contains("1 transient retry recovered")
+            && stderr.contains("Recovered automatically after 1 temporary retry")
             && !stderr.contains("missing after every repost"),
         "stderr did not report a successful recovery:\n{stderr}"
     );
