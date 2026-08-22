@@ -12,6 +12,34 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.8.6] — 2026-08-22
+
+### Added
+
+- Rich terminal progress for season PAR2 generation and recovery-volume uploads,
+  including explicit reading, computing, writing, and uploading phases.
+- Frequent, monotonic multi-pass PAR2 source-reading progress with pass labels.
+- Compact terminal acceptance tests covering clean success, recovered POST retries,
+  recovered availability checks, narrow terminals, and unresolved failures.
+
+### Changed
+
+- Recovered transient retries now appear as a secondary amber summary line:
+  `Recovered automatically after N temporary retries`.
+- Final success summaries keep the confirmation and throughput information in the
+  foreground and wrap instead of truncating on narrow terminals.
+- Quiet and plain output use the same final success/recovery semantics as the full
+  terminal panel.
+
+### Fixed
+
+- `--season` no longer suppresses progress while generating or uploading PAR2
+  volumes.
+- Recovered 440 responses and STAT misses no longer count as permanent failures or
+  leave duplicate `issues`/retry messages in the live panel.
+- Terminal summaries now reserve red for unresolved failures and never claim
+  articles are confirmed when availability checks are disabled.
+
 ## [0.8.5] — 2026-08-21
 
 ### Performance
