@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-08-22
+
+### Added
+
+- Added byte-level `ingest_files_with_progress` callbacks so library users can report responsive progress while PAR2 sources are read.
+
+### Fixed
+
+- Kept the progress-aware ingestion API available to published pesto consumers.
+
 ## [0.5.5] — 2026-08-21
 
 ### Performance
