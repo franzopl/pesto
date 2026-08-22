@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Keep local commits subject to the same Rust quality gates as CI.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all

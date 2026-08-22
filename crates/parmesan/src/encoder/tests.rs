@@ -580,8 +580,8 @@ fn kernel_availability_predicates_match_the_layout_constructors() {
     );
     if affine512_kernel_available() {
         assert!(
-            matches!(smart.buffers, RecoveryBufferSet::Affine2x(_)),
-            "try_new_smart must pick packed Affine2x on AVX-512+GFNI"
+            matches!(smart.buffers, RecoveryBufferSet::Affine512(_)),
+            "try_new_smart must pick Affine512 on AVX-512+GFNI"
         );
     } else if affine_kernel_available() {
         assert!(
