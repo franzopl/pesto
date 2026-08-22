@@ -14,6 +14,15 @@ conventions we follow.
 - `cargo fmt` and `cargo clippy` must pass before a PR is merged (the CI
   enforces both)
 
+Enable the repository's versioned pre-commit hook once after cloning:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It runs the same format, Clippy, and test gates as CI. To run those checks
+without committing, use `scripts/pre-commit`.
+
 ### Optional tools (for specific features)
 
 | Tool | Required for |

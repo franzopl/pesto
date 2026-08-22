@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Install once per clone with: git config core.hooksPath .githooks
+set -euo pipefail
+
+exec "$(git rev-parse --show-toplevel)/scripts/pre-commit"
