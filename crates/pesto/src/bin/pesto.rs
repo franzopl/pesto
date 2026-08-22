@@ -2103,7 +2103,34 @@ async fn post_season_par2_volumes(
         return Ok(Vec::new());
     }
 
-    println!("generating season PAR2 volumes...");
+    let (progress_tx, renderer) = if params.json_mode {
+        pesto::progress::spawn_json_emitter()
+    } else {
+        pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
+    };
+    let result = post_season_par2_volumes_with_progress(
+        episode_paths,
+        release_name,
+        params,
+        cancel,
+        progress_tx,
+    )
+    .await;
+    let _ = renderer.await;
+    result
+}
+
+async fn post_season_par2_volumes_with_progress(
+    episode_paths: &[PathBuf],
+    release_name: &str,
+    params: &Arc<UploadParams>,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    progress_tx: pesto::progress::ProgressSender,
+) -> Result<Vec<PostedSegment>> {
+    if episode_paths.is_empty() || params.config.par2 == 0 {
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::Finished);
+        return Ok(Vec::new());
+    }
 
     // Create a persistent directory for PAR2 volumes (not temp).
     let par2_output_dir =
@@ -2111,13 +2138,21 @@ async fn post_season_par2_volumes(
     let par2_dir_path = par2_output_dir.path().to_path_buf();
 
     // Generate the PAR2 volumes.
-    pesto::poster::generate_and_write_season_par2(
+    let generation = pesto::poster::generate_and_write_season_par2_with_progress(
         episode_paths,
         release_name,
         &par2_dir_path,
         &params.config,
+        Some(&progress_tx),
     )
-    .await?;
+    .await;
+    if let Err(error) = generation {
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::Failed {
+            description: format!("season PAR2 generation failed: {error:#}"),
+        });
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::Finished);
+        return Err(error);
+    }
 
     // Read the generated `.par2` files.
     let par2_files: Vec<PathBuf> = std::fs::read_dir(&par2_dir_path)?
@@ -2134,10 +2169,13 @@ async fn post_season_par2_volumes(
         .collect();
 
     if par2_files.is_empty() {
+        let _ = progress_tx.send(pesto::progress::ProgressEvent::Finished);
         return Ok(Vec::new());
     }
 
-    println!("posting {} PAR2 volume(s)...", par2_files.len());
+    let _ = progress_tx.send(pesto::progress::ProgressEvent::Status {
+        text: format!("Uploading {} season recovery volume(s)", par2_files.len()),
+    });
 
     // Post the PAR2 volumes using the standard upload pipeline.
     // Create a config copy with PAR2 disabled to prevent recursive PAR2 generation.
@@ -2177,22 +2215,23 @@ async fn post_season_par2_volumes(
     // `TempDir` drops at the end of this function.
     let par2_nzb_path = par2_dir_path.join("season-par2.nzb");
 
-    let outcome = pesto::upload::run_upload(
+    let upload_result = pesto::upload::run_upload(
         &par2_config,
         &par2_files,
         "season-par2",
-        None, // no progress reporting for PAR2 volumes
+        Some(progress_tx),
         Some(cancel.clone()),
         Some(par2_nzb_path), // write NZB to temp (discarded after)
         false,               // don't write history for PAR2 volumes
         None,                // no pause support for PAR2 volume posting
     )
-    .await?;
+    .await;
+    let outcome = upload_result?;
 
-    println!(
-        "✓ posted {} PAR2 segments from {} volume(s)",
-        outcome.segments.len(),
-        par2_files.len()
+    info!(
+        par2_segments = outcome.segments.len(),
+        par2_volumes = par2_files.len(),
+        "season PAR2 upload complete"
     );
 
     Ok(outcome.segments)
@@ -4246,6 +4285,76 @@ mod tests {
             ext_filter: Vec::new(),
             cleanup_mode: CleanupMode::Leave,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn season_par2_reports_generation_and_volume_upload_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let episode_a = dir.path().join("S01E01.bin");
+        let episode_b = dir.path().join("S01E02.bin");
+        std::fs::write(&episode_a, vec![0x11; 1024 * 1024]).unwrap();
+        std::fs::write(&episode_b, vec![0x22; 1024 * 1024]).unwrap();
+
+        let mut config = test_config(64 * 1024, ObfuscateMode::None, None, 10);
+        config.dry_run = true;
+        config.check = false;
+        let params = Arc::new(test_upload_params(config));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let segments = post_season_par2_volumes_with_progress(
+            &[episode_a, episode_b],
+            "Season01",
+            &params,
+            &cancel,
+            tx,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !segments.is_empty(),
+            "dry-run volume upload should produce segments"
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pesto::progress::ProgressEvent::Par2EncodeStarted { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pesto::progress::ProgressEvent::Par2PassStarted { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pesto::progress::ProgressEvent::Par2InputProgress { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            pesto::progress::ProgressEvent::Par2ComputeStarted { .. }
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, pesto::progress::ProgressEvent::Par2SliceWritten)));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                pesto::progress::ProgressEvent::Started {
+                    mode: pesto::progress::RunMode::DryRun,
+                    ..
+                }
+            )),
+            "the generated volume upload must start the normal rich progress path"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, pesto::progress::ProgressEvent::SegmentDone { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, pesto::progress::ProgressEvent::Finished)));
     }
 
     // ── force_season_group ───────────────────────────────────────────────────

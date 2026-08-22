@@ -84,8 +84,25 @@ pub enum ProgressEvent {
     },
     /// A short human-readable status note (empty string clears it).
     Status { text: String },
-    /// A segment failed permanently after exhausting its retries.
+    /// A detailed failure from a producer or a segment that exhausted the
+    /// main posting retry budget. Segment failures may still be recovered by
+    /// the bounded end-of-run rescue pass.
     Failed { description: String },
+    /// A segment exhausted the main worker's retry budget and is queued for
+    /// the automatic end-of-run rescue pass. The built-in terminal uses this
+    /// to keep the condition amber while existing JSON diagnostics continue
+    /// to receive the following `Failed` event unchanged.
+    PostRetryQueued,
+    /// One or more articles that encountered a transient POST error were
+    /// subsequently accepted. `previously_failed` is true when they had
+    /// already exhausted the main worker's retry budget (and therefore
+    /// emitted `Failed`/`SegmentDone { ok: false }`) before the bounded
+    /// end-of-run rescue pass recovered them.
+    ///
+    /// This is additive terminal-UX metadata. Existing `Failed` and
+    /// `SegmentDone` events are deliberately retained unchanged for JSON and
+    /// embedding consumers that rely on their diagnostic semantics.
+    PostRetryRecovered { count: u64, previously_failed: bool },
     /// Ctrl-C was received; the run is winding down.
     Interrupted,
     /// An external pause flag was set: every posting worker is suspended at
@@ -129,6 +146,16 @@ pub enum ProgressEvent {
     /// Progress update for PAR2 input pass. `done` is the number of slices
     /// processed so far.
     Par2InputProgress { done: usize, total: usize },
+    /// The encoder started reading source data for an explicit input pass.
+    /// Older consumers can continue inferring pass rollover from
+    /// `Par2InputProgress`; the built-in renderer uses this signal to make
+    /// multi-pass progress monotonic even if adjacent passes report the same
+    /// first counter value.
+    Par2PassStarted { pass: usize, passes: usize },
+    /// All source slices for this pass have been read and the encoder is
+    /// computing recovery data. This phase may be long even though no input
+    /// counter changes.
+    Par2ComputeStarted { pass: usize, passes: usize },
     /// PAR2 recovery volume write phase has started. `total` is the number of
     /// recovery slices to be written.
     Par2WriteStarted { total: u32 },
@@ -160,6 +187,10 @@ pub enum ProgressEvent {
     /// its original copy exhausted its STAT attempts. `reposted` is a
     /// running count of reposts so far this run.
     CheckReposted { reposted: u64 },
+    /// A verification miss that required a repost was later confirmed
+    /// available. Unlike `CheckReposted`, this only fires after STAT succeeds,
+    /// so it is safe to include in a recovered-transient success summary.
+    CheckRetryRecovered,
     /// The one-time final recovery pass (see `poster::check::recover_missing`)
     /// has started, for a small stubborn tail of articles the streaming
     /// check queue couldn't confirm after every `check_post_retries` round.
@@ -435,7 +466,12 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         );
                     }
                     // Connection and pool events are noisy and not useful to consumers.
-                    ProgressEvent::ConnectionBusy { .. }
+                    ProgressEvent::PostRetryQueued
+                    | ProgressEvent::PostRetryRecovered { .. }
+                    | ProgressEvent::Par2PassStarted { .. }
+                    | ProgressEvent::Par2ComputeStarted { .. }
+                    | ProgressEvent::CheckRetryRecovered
+                    | ProgressEvent::ConnectionBusy { .. }
                     | ProgressEvent::ConnectionIdle { .. }
                     | ProgressEvent::ConnectionAuth { .. }
                     | ProgressEvent::ConnectionRetrying { .. }

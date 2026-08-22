@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::article::{default_subject, generate_message_id, Article};
 use crate::config::Config;
@@ -428,6 +428,9 @@ async fn process_item(
 
     match stat_result {
         Ok(true) => {
+            if item.repost_count > 0 {
+                inner.emit(ProgressEvent::CheckRetryRecovered);
+            }
             if is_first_attempt {
                 inner.first_checks.fetch_add(1, Ordering::Relaxed);
             }
@@ -535,6 +538,13 @@ async fn handle_confirmed_miss(
             inner.emit(ProgressEvent::CheckReposted {
                 reposted: reposted as u64,
             });
+            info!(
+                old_id = %item.seg.message_id,
+                new_id = %new_seg.message_id,
+                attempt = item.repost_count + 1,
+                max_attempts = max_post_retries,
+                "check: repost accepted; waiting for confirmation"
+            );
             inner.emit(ProgressEvent::Status {
                 text: format!(
                     "check: reposted {} (attempt {}/{})",

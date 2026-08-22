@@ -384,6 +384,28 @@ where
     ingest_files_ex(files, worker, slice_size, cancelled, after_file, None, None).await
 }
 
+/// [`ingest_files_with`] plus a callback after every input chunk is read.
+///
+/// The callback is intentionally byte-based: it stays responsive even when a
+/// single logical PAR2 slice is very large.
+pub async fn ingest_files_with_progress<F, P>(
+    files: &[InputFile],
+    worker: &Par2Worker,
+    slice_size: usize,
+    cancelled: Option<&AtomicBool>,
+    after_file: F,
+    on_read: P,
+) -> Result<()>
+where
+    F: FnMut(&InputFile) -> Result<()>,
+    P: FnMut(usize) -> Result<()>,
+{
+    ingest_files_ex_impl(
+        files, worker, slice_size, cancelled, after_file, None, None, on_read,
+    )
+    .await
+}
+
 /// Like [`ingest_files_with`], optionally sending only a window of each
 /// logical slice (P1b) and/or collecting file hashes + slice checksums in
 /// the reader so the encoder can run on chunk-sized buffers.
@@ -392,12 +414,40 @@ pub async fn ingest_files_ex<F>(
     worker: &Par2Worker,
     slice_size: usize,
     cancelled: Option<&AtomicBool>,
-    mut after_file: F,
+    after_file: F,
     window: Option<SliceWindow>,
-    mut hash_out: Option<&mut IngestHashes>,
+    hash_out: Option<&mut IngestHashes>,
 ) -> Result<()>
 where
     F: FnMut(&InputFile) -> Result<()>,
+{
+    ingest_files_ex_impl(
+        files,
+        worker,
+        slice_size,
+        cancelled,
+        after_file,
+        window,
+        hash_out,
+        |_| Ok(()),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ingest_files_ex_impl<F, P>(
+    files: &[InputFile],
+    worker: &Par2Worker,
+    slice_size: usize,
+    cancelled: Option<&AtomicBool>,
+    mut after_file: F,
+    window: Option<SliceWindow>,
+    mut hash_out: Option<&mut IngestHashes>,
+    mut on_read: P,
+) -> Result<()>
+where
+    F: FnMut(&InputFile) -> Result<()>,
+    P: FnMut(usize) -> Result<()>,
 {
     let mut hash = hash_out.as_mut().map(|_| HashSink {
         out: IngestHashes::default(),
@@ -433,6 +483,7 @@ where
             tokio::task::block_in_place(|| -> Result<()> {
                 let buf = std::fs::read(&path)
                     .with_context(|| format!("reading `{}`", path.display()))?;
+                on_read(buf.len())?;
                 feed_chunk(
                     &buf,
                     worker,
@@ -473,6 +524,7 @@ where
                     let _ = reader_handle.await;
                     return Ok(());
                 }
+                on_read(chunk.len())?;
                 tokio::task::block_in_place(|| {
                     feed_chunk(
                         &chunk,

@@ -167,6 +167,14 @@ struct RenderState {
     done_segments: u64,
     done_bytes: u64,
     failures: u64,
+    /// POST failures still eligible for the automatic end-of-run rescue pass.
+    post_retry_pending: u64,
+    /// Articles accepted after a transient POST failure.
+    recovered_post_retries: u64,
+    /// Verification misses whose repost was later confirmed available.
+    recovered_check_retries: u64,
+    /// Number of typed retry-queue signals awaiting their detailed `Failed` event.
+    post_retry_queued_events: u64,
     interrupted: bool,
     /// Set by `ProgressEvent::Failed` (e.g. a producer error such as the
     /// `--memory-limit` address-space check bailing). Printed alongside the
@@ -192,6 +200,8 @@ struct RenderState {
     /// value on `CheckPoolScaledUp` (see `check::CheckCoordinatorHandle::
     /// scale_up`), so this is always the pool's *current* size.
     check_connections: usize,
+    /// Whether independent availability checks were enabled for this run.
+    checks_enabled: bool,
     /// Busy/idle state of each check-pool connection, indexed the same way
     /// as `conn_state` but in the check pool's own numbering — a connection
     /// is `Busy` only while actually doing a STAT or repost, `Idle`
@@ -270,6 +280,12 @@ struct RenderState {
     /// `Par2InputProgress.done` going backwards (the event carries no pass
     /// number of its own).
     par2_pass_index: usize,
+    /// True once `Par2PassStarted` supplies an authoritative pass index.
+    par2_explicit_pass: bool,
+    /// Source reading has finished for the current pass and recovery math is running.
+    par2_compute_active: bool,
+    /// Recovery packets from the current pass are being flushed to volumes.
+    par2_writing_active: bool,
     /// `par2_write_done` at the last tick and a smoothed (EMA) slices/sec
     /// rate derived from it — see `par2_write_remaining_secs` for why a
     /// recent rate is used instead of the cumulative since-start average.
@@ -326,6 +342,10 @@ impl RenderState {
             done_segments: 0,
             done_bytes: 0,
             failures: 0,
+            post_retry_pending: 0,
+            recovered_post_retries: 0,
+            recovered_check_retries: 0,
+            post_retry_queued_events: 0,
             interrupted: false,
             failed_description: None,
             status: String::new(),
@@ -334,6 +354,7 @@ impl RenderState {
             plain_failed_printed: false,
             plain_connections_printed: false,
             check_connections: 0,
+            checks_enabled: false,
             check_conn_state: Vec::new(),
             conn_files: Vec::new(),
             files: HashMap::new(),
@@ -352,6 +373,9 @@ impl RenderState {
             par2_recovery_total: 0,
             par2_passes: 1,
             par2_pass_index: 0,
+            par2_explicit_pass: false,
+            par2_compute_active: false,
+            par2_writing_active: false,
             check_active: false,
             check_checked: 0,
             check_failed: 0,
@@ -403,6 +427,7 @@ impl RenderState {
                 self.target = target;
                 self.start = Instant::now();
                 self.check_connections = check_connections;
+                self.checks_enabled = check_connections > 0;
                 self.conn_files = vec![None; connections];
                 self.conn_state = vec![ConnState::Idle; connections];
                 self.check_conn_state = vec![ConnState::Idle; check_connections];
@@ -453,6 +478,11 @@ impl RenderState {
                 self.done_bytes += bytes;
                 if !ok {
                     self.failures += 1;
+                    self.post_retry_pending += 1;
+                    // Legacy/manual streams may omit PostRetryQueued; clear
+                    // the just-received segment detail once the typed
+                    // SegmentDone outcome proves it is rescue-eligible.
+                    self.failed_description.take();
                 }
                 if let Some(entry) = self.files.get_mut(&file) {
                     entry.0 += 1;
@@ -487,14 +517,40 @@ impl RenderState {
                 self.files.entry(file).or_insert((0, 0)).1 += segments;
             }
             ProgressEvent::Status { text } => {
-                if text.is_empty() {
+                let display_text = if text.starts_with("retry:") {
+                    "Temporarily retried an article; continuing upload".to_string()
+                } else if text.starts_with("check: reposted ") {
+                    "Temporarily retried an article; confirming availability".to_string()
+                } else {
+                    text
+                };
+                if display_text.is_empty() {
                     self.status_since = None;
-                } else if self.status.is_empty() || self.status != text {
+                } else if self.status.is_empty() || self.status != display_text {
                     self.status_since = Some(Instant::now());
                 }
-                self.status = text;
+                self.status = display_text;
             }
-            ProgressEvent::Failed { description } => self.failed_description = Some(description),
+            ProgressEvent::PostRetryQueued => {
+                self.post_retry_queued_events += 1;
+            }
+            ProgressEvent::Failed { description } => {
+                if self.post_retry_queued_events > 0 {
+                    self.post_retry_queued_events -= 1;
+                } else {
+                    self.failed_description = Some(description);
+                }
+            }
+            ProgressEvent::PostRetryRecovered {
+                count,
+                previously_failed,
+            } => {
+                self.recovered_post_retries += count;
+                if previously_failed {
+                    self.failures = self.failures.saturating_sub(count);
+                    self.post_retry_pending = self.post_retry_pending.saturating_sub(count);
+                }
+            }
             ProgressEvent::Interrupted => self.interrupted = true,
             // No CLI flag drives external_pause yet (embedder-only, see
             // ROADMAP.new.md Phase 2) — reuse the existing status line so a
@@ -543,17 +599,42 @@ impl RenderState {
                 self.par2_recovery_total = recovery_slices;
                 self.par2_passes = passes.max(1);
                 self.par2_pass_index = 0;
+                self.par2_explicit_pass = false;
+                self.par2_compute_active = false;
+                self.par2_writing_active = false;
+                self.started = true;
+            }
+            ProgressEvent::Par2PassStarted { pass, passes } => {
+                self.par2_passes = passes.max(1);
+                self.par2_pass_index = pass.saturating_sub(1).min(self.par2_passes - 1);
+                self.par2_encode_done = 0;
+                self.par2_explicit_pass = true;
+                self.par2_compute_active = false;
+                self.par2_writing_active = false;
+                self.started = true;
+            }
+            ProgressEvent::Par2ComputeStarted { pass, passes } => {
+                self.par2_passes = passes.max(1);
+                self.par2_pass_index = pass.saturating_sub(1).min(self.par2_passes - 1);
+                self.par2_compute_active = true;
+                self.par2_writing_active = false;
+                self.started = true;
             }
             ProgressEvent::Par2InputProgress { done, total } => {
-                // `done` restarting below the last value means the encoder
-                // moved on to the next input pass (the event carries no pass
-                // number). Count the completed pass so the panel's progress
-                // keeps climbing instead of snapping back to zero.
-                if done < self.par2_encode_done {
-                    self.par2_pass_index =
-                        (self.par2_pass_index + 1).min(self.par2_passes.saturating_sub(1));
+                // Keep the legacy rollover inference for embedding callers
+                // that do not emit the additive Par2PassStarted signal.
+                if !self.par2_explicit_pass && done < self.par2_encode_done {
+                    let next = (self.par2_pass_index + 1).min(self.par2_passes.saturating_sub(1));
+                    if next > self.par2_pass_index {
+                        self.par2_pass_index = next;
+                        self.par2_encode_done = done;
+                    }
+                } else if self.par2_explicit_pass {
+                    self.par2_encode_done = self.par2_encode_done.max(done);
+                } else {
+                    self.par2_encode_done = done;
                 }
-                self.par2_encode_done = done;
+                self.par2_compute_active = false;
                 self.par2_encode_total = total;
             }
             ProgressEvent::Par2WriteStarted { total } => {
@@ -565,9 +646,12 @@ impl RenderState {
                 self.par2_write_rate_ema = 0.0;
             }
             ProgressEvent::Par2SliceWritten => {
+                self.par2_compute_active = false;
+                self.par2_writing_active = true;
                 self.par2_write_done = self.par2_write_done.saturating_add(1);
                 if self.par2_write_done >= self.par2_write_total {
                     self.par2_write_active = false;
+                    self.par2_writing_active = false;
                 }
             }
             ProgressEvent::CheckProgress { checked, ok } => {
@@ -589,15 +673,18 @@ impl RenderState {
                 attempt,
                 max_attempts,
                 delay_secs,
-                reason,
+                reason: _,
             } => {
                 self.check_retry = Some((
-                    format!("{reason} — retry {attempt}/{max_attempts}"),
+                    format!("temporarily retrying availability check ({attempt}/{max_attempts})"),
                     Instant::now() + Duration::from_secs(delay_secs),
                 ));
             }
             ProgressEvent::CheckReposted { reposted } => {
                 self.check_reposted = reposted;
+            }
+            ProgressEvent::CheckRetryRecovered => {
+                self.recovered_check_retries += 1;
             }
             ProgressEvent::CheckDone { failed } => {
                 self.check_active = false;
@@ -626,6 +713,7 @@ impl RenderState {
                     // coordinator has already shut down.
                     self.check_failed = self.check_failed.saturating_sub(1);
                     self.check_reposted += 1;
+                    self.recovered_check_retries += 1;
                 } else {
                     self.recover_failed += 1;
                 }
@@ -800,6 +888,18 @@ impl RenderState {
         self.par2_passes.max(1) * self.par2_encode_total
     }
 
+    fn recovered_retries(&self) -> u64 {
+        self.recovered_post_retries + self.recovered_check_retries
+    }
+
+    fn confirmed_articles(&self) -> u64 {
+        self.check_checked.saturating_sub(self.check_failed)
+    }
+
+    fn accepted_articles(&self) -> u64 {
+        self.done_segments.saturating_sub(self.failures)
+    }
+
     /// Projected remaining seconds for the PAR2 encode phase, if it's active
     /// and has a usable rate estimate. PAR2 encoding runs concurrently with
     /// posting and can outlast it (e.g. a slow encode on a fast link, or
@@ -877,10 +977,12 @@ impl RenderState {
         }
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let spinner = if final_draw {
-            // A run that failed before posting anything (producer error) or
-            // was cancelled still set `final_draw`, so a bare '✓' here would
-            // claim success even when it isn't — see issue #57.
-            if self.interrupted || self.failed_description.is_some() || self.failures > 0 {
+            // Reserve the red-style cross for unresolved upload/availability
+            // failures. Cancellation remains a warning rather than looking
+            // like a server rejected data.
+            if self.failures > 0 || self.check_failed > 0 {
+                '✗'
+            } else if self.interrupted || self.failed_description.is_some() {
                 '⚠'
             } else {
                 '✓'
@@ -894,14 +996,60 @@ impl RenderState {
         let pct = (self.progress_frac() * 100.0).round() as u64;
 
         let eta_str = if final_draw {
-            format!("done {}", format_duration(self.elapsed_secs()))
+            let recovered = self.recovered_retries();
+            let recovered_note = if recovered > 0 {
+                format!(" · {recovered} retries recovered")
+            } else {
+                String::new()
+            };
+            if self.failures + self.check_failed > 0 {
+                format!(
+                    "upload incomplete · {} unresolved",
+                    self.failures + self.check_failed
+                )
+            } else if self.mode == RunMode::Post && self.checks_enabled {
+                format!(
+                    "complete · {}/{} confirmed{recovered_note}",
+                    self.confirmed_articles(),
+                    self.total_segments
+                )
+            } else if self.mode == RunMode::Post {
+                format!(
+                    "complete · {}/{} accepted · not verified{recovered_note}",
+                    self.accepted_articles(),
+                    self.total_segments
+                )
+            } else {
+                format!("done {}", format_duration(self.elapsed_secs()))
+            }
         } else if self.recover_active {
             // `pct` is already 100% here (it tracks upload segments, and the
             // recovery pass only starts once every one of those is done),
             // so without this the quiet line reads "100% · ETA —" for
             // however long the sequential recovery batch takes — visually
             // indistinguishable from a hang.
-            format!("recovering {}/{}", self.recover_done, self.recover_total)
+            format!(
+                "recovering availability {}/{}",
+                self.recover_done, self.recover_total
+            )
+        } else if self.par2_compute_active {
+            format!(
+                "computing recovery data · pass {}/{}",
+                self.par2_pass_index + 1,
+                self.par2_passes
+            )
+        } else if self.par2_writing_active {
+            format!(
+                "writing recovery volumes · pass {}/{}",
+                self.par2_pass_index + 1,
+                self.par2_passes
+            )
+        } else if self.par2_encode_units_done() < self.par2_encode_units_total() {
+            format!(
+                "reading sources · pass {}/{}",
+                self.par2_pass_index + 1,
+                self.par2_passes
+            )
         } else if let Some((secs, unstable)) = self.overall_eta_secs() {
             let mark = if unstable { "~" } else { "" };
             format!("ETA {mark}{}", format_duration(secs))
@@ -1057,10 +1205,8 @@ impl RenderState {
     /// nzb`/`wrote nfo` paths, so this covers only what the renderer itself
     /// knows — outcome, throughput and verification.
     fn summary_lines(&self, width: usize) -> Vec<String> {
-        let ok = self.failures == 0
-            && self.check_failed == 0
-            && !self.interrupted
-            && self.failed_description.is_none();
+        let unresolved = self.failures + self.check_failed;
+        let ok = unresolved == 0 && !self.interrupted && self.failed_description.is_none();
         let glyph = if self.interrupted || self.failed_description.is_some() {
             ansi("⚠", "33")
         } else if ok {
@@ -1068,50 +1214,135 @@ impl RenderState {
         } else {
             ansi("✗", "31")
         };
-        let avg = self.done_bytes as f64 / self.elapsed_secs();
-        let mode_note = match self.mode {
-            RunMode::Post => String::new(),
-            RunMode::DryRun => format!(" · {}", ansi("dry run", "33")),
-            RunMode::Par2Only => format!(" · {}", ansi("par2 only", "36")),
-        };
-        let line1 = format!(
-            "{glyph} {} in {} · avg {}/s{mode_note}",
-            format_size(self.done_bytes),
-            format_duration(self.elapsed_secs()),
-            format_size(avg as u64),
-        );
 
-        let mut parts = vec![format!(
-            "{}/{} seg",
-            self.done_segments, self.total_segments
-        )];
-        if self.failures > 0 {
-            parts.push(ansi(&format!("{} failed", self.failures), "31"));
-        }
-        if self.check_checked > 0 || self.check_failed > 0 {
-            if self.check_failed > 0 {
-                parts.push(ansi(&format!("{} missing", self.check_failed), "31"));
-            } else {
-                parts.push(ansi("all verified", CHECK_BAND_COLOR));
+        let mut lines = match self.mode {
+            RunMode::Post if self.interrupted || self.failed_description.is_some() => vec![
+                format!("{glyph} Upload stopped before completion."),
+                format!(
+                    "  {}/{} articles accepted · elapsed {}",
+                    self.accepted_articles(),
+                    self.total_segments,
+                    format_duration(self.elapsed_secs())
+                ),
+            ],
+            RunMode::Post if ok && self.checks_enabled => {
+                let recovered = self.recovered_retries();
+                let recovered_note = if recovered > 0 {
+                    format!(
+                        "; {}",
+                        ansi(
+                            &format!(
+                                "{recovered} transient {} recovered",
+                                if recovered == 1 { "retry" } else { "retries" }
+                            ),
+                            "33"
+                        )
+                    )
+                } else {
+                    String::new()
+                };
+                vec![
+                    format!(
+                        "{glyph} Upload complete — {}/{} articles confirmed{recovered_note}.",
+                        self.confirmed_articles(),
+                        self.total_segments
+                    ),
+                    format!(
+                        "  {} in {} · avg {}/s",
+                        format_size(self.done_bytes),
+                        format_duration(self.elapsed_secs()),
+                        format_size((self.done_bytes as f64 / self.elapsed_secs()) as u64)
+                    ),
+                ]
             }
-        }
-        if self.check_reposted > 0 {
-            parts.push(format!("{} reposted", self.check_reposted));
-        }
-        let line2 = format!("  {}", parts.join(" · "));
+            RunMode::Post if ok => {
+                let recovered = self.recovered_retries();
+                let recovered_note = if recovered > 0 {
+                    format!(
+                        " · {}",
+                        ansi(
+                            &format!(
+                                "{recovered} transient {} recovered",
+                                if recovered == 1 { "retry" } else { "retries" }
+                            ),
+                            "33"
+                        )
+                    )
+                } else {
+                    String::new()
+                };
+                vec![
+                    format!(
+                        "{glyph} Upload complete — {}/{} articles accepted by the server{recovered_note}.",
+                        self.accepted_articles(),
+                        self.total_segments
+                    ),
+                    format!(
+                        "  Not independently verified · elapsed {}",
+                        format_duration(self.elapsed_secs())
+                    ),
+                ]
+            }
+            RunMode::Post => {
+                let count_note = if self.checks_enabled {
+                    format!(
+                        "{}/{} articles uploaded; {}/{} confirmed available",
+                        self.accepted_articles(),
+                        self.total_segments,
+                        self.confirmed_articles(),
+                        self.accepted_articles()
+                    )
+                } else {
+                    format!(
+                        "{}/{} articles accepted",
+                        self.accepted_articles(),
+                        self.total_segments
+                    )
+                };
+                vec![
+                    format!(
+                        "{glyph} Upload incomplete — {count_note}; {}.",
+                        ansi(
+                            &format!(
+                                "{unresolved} unresolved {}",
+                                if unresolved == 1 {
+                                    "failure"
+                                } else {
+                                    "failures"
+                                }
+                            ),
+                            "31"
+                        )
+                    ),
+                    "  Retry with --resume; use -v or the session log for server details."
+                        .to_string(),
+                ]
+            }
+            RunMode::DryRun => vec![
+                format!(
+                    "{glyph} Dry run complete — {}/{} articles prepared.",
+                    self.accepted_articles(),
+                    self.total_segments
+                ),
+                format!("  elapsed {}", format_duration(self.elapsed_secs())),
+            ],
+            RunMode::Par2Only => vec![
+                format!(
+                    "{glyph} PAR2 generation complete — {}/{} source segments processed.",
+                    self.accepted_articles(),
+                    self.total_segments
+                ),
+                format!("  elapsed {}", format_duration(self.elapsed_secs())),
+            ],
+        };
 
-        let mut lines = vec![line1, line2];
-        // Surface *why* a run stopped early — without this, a run that fails
-        // before posting anything (e.g. a PAR2 geometry or memory-budget
-        // error in `producer`) printed a bare green checkmark here, because
-        // `ok`/`glyph` above were the only signal and `failed_description`
-        // was otherwise only ever shown in the live panel, which this summary
-        // replaces once the run ends (issue #57).
         if let Some(desc) = &self.failed_description {
             lines.push(format!("  {}", ansi(&format!("⚠ {desc}"), "33")));
         }
-
-        lines.into_iter().map(|l| truncate(&l, width)).collect()
+        lines
+            .into_iter()
+            .map(|line| truncate(&line, width))
+            .collect()
     }
 
     /// Erase the live panel and print the compact final summary in its place.
@@ -1161,24 +1392,23 @@ impl RenderState {
         // phase had been announced.
         let uploading = !self.files.is_empty() && self.done_segments < self.total_segments;
         let phase = if self.compress_active && self.files.is_empty() {
-            ansi("compressing", "33") // yellow
+            ansi("compressing", "33") // amber
         } else if uploading && self.posting_par2 {
-            ansi("posting PAR2", "35") // magenta
+            ansi("uploading PAR2", "35")
         } else if uploading {
-            ansi("posting data", "32") // green
+            ansi("uploading", "32")
         } else if self.check_active {
-            ansi("verifying", "34") // blue — matches the check bar's band
+            ansi("verifying availability", "34")
         } else if self.recover_active {
-            // Must come before the "writing PAR2" fallback below: once the
-            // upload and streaming check are both done, that fallback's
-            // `!self.files.is_empty() && !self.finished` condition is true
-            // for the *entire* recovery pass too (nothing else distinguishes
-            // them), so without this branch the header lied about "writing
-            // PAR2" while pesto was actually reposting stubborn misses one
-            // at a time.
-            ansi("recovering", "31") // red — a handful of articles needed reposting
+            ansi("recovering availability", "33")
+        } else if self.par2_compute_active {
+            ansi("computing recovery data", "36")
+        } else if self.par2_writing_active {
+            ansi("writing recovery volumes", "36")
+        } else if self.par2_encode_units_done() < self.par2_encode_units_total() {
+            ansi("reading sources", "36")
         } else if self.par2_write_active || (!self.files.is_empty() && !self.finished) {
-            ansi("writing PAR2", "36") // cyan
+            ansi("writing PAR2", "36")
         } else if self.finished {
             ansi("done", "32")
         } else {
@@ -1318,15 +1548,19 @@ impl RenderState {
                 // checked band's colour, "pending" in the upload band's —
                 // a legend for the bar that lives right next to the numbers
                 // it explains instead of a separate line or header colouring.
-                let verified_str = ansi(&format!("{verified} verified"), CHECK_BAND_COLOR);
-                let pending_str = ansi(&format!("{pending} pending"), UPLOAD_BAND_COLOR);
+                let verified_str =
+                    ansi(&format!("{verified} confirmed available"), CHECK_BAND_COLOR);
+                let pending_str = ansi(
+                    &format!("{pending} pending confirmation"),
+                    UPLOAD_BAND_COLOR,
+                );
                 let mut line1 = if self.check_failed > 0 {
                     format!(
                         "{verified_str} · {pending_str} · {}",
                         ansi(&format!("{} missing", self.check_failed), "31")
                     )
                 } else if !self.check_active {
-                    format!("{verified_str} · all confirmed")
+                    format!("{verified_str} · all confirmed available")
                 } else {
                     format!("{verified_str} · {pending_str}")
                 };
@@ -1336,7 +1570,10 @@ impl RenderState {
                 if self.check_reposted > 0 {
                     line1.push_str(&format!(
                         " · {}",
-                        ansi(&format!("{} reposted", self.check_reposted), "33")
+                        ansi(
+                            &format!("{} temporarily retried", self.check_reposted),
+                            "33",
+                        )
                     ));
                 }
                 // No ETA here: the check's throughput jumps once the upload
@@ -1349,7 +1586,7 @@ impl RenderState {
                 } else {
                     format!("elapsed {}", format_duration(elapsed))
                 };
-                lines.push(box_top("check", body_w));
+                lines.push(box_top("availability", body_w));
                 lines.push(box_line(&line1, body_w));
                 lines.push(box_line(&line2, body_w));
                 lines.push(box_bottom(body_w));
@@ -1377,7 +1614,7 @@ impl RenderState {
                     self.recover_done, self.recover_total
                 );
                 let ok_count = self.recover_done.saturating_sub(self.recover_failed);
-                let mut line2 = ansi(&format!("{ok_count} recovered"), CHECK_BAND_COLOR);
+                let mut line2 = ansi(&format!("{ok_count} recovered"), "33");
                 if self.recover_failed > 0 {
                     line2.push_str(&format!(
                         " · {}",
@@ -1447,7 +1684,10 @@ impl RenderState {
                     String::new()
                 };
                 let retry_str = if retrying > 0 {
-                    format!(" · {}", ansi(&format!("{retrying} retrying"), "31"))
+                    format!(
+                        " · {}",
+                        ansi(&format!("{retrying} temporarily retrying"), "33")
+                    )
                 } else {
                     String::new()
                 };
@@ -1467,14 +1707,34 @@ impl RenderState {
                 .find_map(|f| f.as_deref())
                 .map(|name| format!("  ▸ {}", truncate(name, 28)))
                 .unwrap_or_default();
-            let failures_str = if self.failures > 0 {
-                format!("  {}", ansi(&format!("{} failed", self.failures), "31"))
+            let failures_str = if self.post_retry_pending > 0 {
+                format!(
+                    "  {}",
+                    ansi(
+                        &format!("{} temporarily retrying", self.post_retry_pending),
+                        "33"
+                    )
+                )
             } else {
                 String::new()
             };
             lines.push(format!(
                 "files  done {done}/{total_files}  uploading {in_flight}  waiting {pending}{failures_str}{active_file}"
             ));
+            if self.recovered_retries() > 0 {
+                lines.push(ansi(
+                    &format!(
+                        "issues  {} transient {} recovered",
+                        self.recovered_retries(),
+                        if self.recovered_retries() == 1 {
+                            "retry"
+                        } else {
+                            "retries"
+                        }
+                    ),
+                    "33",
+                ));
+            }
 
             // --- buffer pool visualizer (phase 21h, shown under pressure) -
             if self.buf_total > 0 && self.buf_free * 4 < self.buf_total {
@@ -1523,16 +1783,28 @@ impl RenderState {
                 // With several passes the per-pass counter alone is confusing
                 // ("encode 12/655" three separate times), so name the pass.
                 let pass_note = if self.par2_passes > 1 {
-                    format!(" (pass {}/{})", self.par2_pass_index + 1, self.par2_passes)
+                    format!(" — pass {}/{}", self.par2_pass_index + 1, self.par2_passes)
                 } else {
                     String::new()
                 };
-                format!(
-                    "encode {}/{}{pass_note}",
-                    self.par2_encode_done, self.par2_encode_total
-                )
+                if self.par2_compute_active {
+                    format!("Computing recovery data{pass_note}")
+                } else if self.par2_writing_active {
+                    format!(
+                        "Writing recovery volumes{pass_note} · {}/{} slices",
+                        self.par2_write_done, self.par2_write_total
+                    )
+                } else {
+                    format!(
+                        "Reading sources{pass_note} · {}/{} slices",
+                        self.par2_encode_done, self.par2_encode_total
+                    )
+                }
             } else {
-                format!("write {}/{}", self.par2_write_done, self.par2_write_total)
+                format!(
+                    "Writing recovery volumes · {}/{}",
+                    self.par2_write_done, self.par2_write_total
+                )
             };
             lines.push(ansi(&format!("  par2  [{bar}] {pct:>3}%  {stage}"), "2"));
         }
@@ -1566,7 +1838,12 @@ impl RenderState {
                 String::new()
             };
             let full = format!("{}{}", self.status, elapsed_str);
-            lines.extend(wrapped_note("▸ ", &full, width));
+            let marker = if self.status.starts_with("Temporarily retried") {
+                ansi("⚠ ", "33")
+            } else {
+                "▸ ".to_string()
+            };
+            lines.extend(wrapped_note(&marker, &full, width));
         }
 
         lines
@@ -1640,10 +1917,47 @@ impl RenderState {
             return;
         }
 
+        if self.par2_compute_active {
+            let _ = writeln!(
+                err,
+                "PAR2: computing recovery data — pass {}/{}",
+                self.par2_pass_index + 1,
+                self.par2_passes,
+            );
+            let _ = err.flush();
+            return;
+        }
+
+        if self.par2_writing_active {
+            let _ = writeln!(
+                err,
+                "PAR2: writing recovery volumes — pass {}/{} · {}/{} slices",
+                self.par2_pass_index + 1,
+                self.par2_passes,
+                self.par2_write_done,
+                self.par2_write_total,
+            );
+            let _ = err.flush();
+            return;
+        }
+
+        if self.par2_encode_units_done() < self.par2_encode_units_total() {
+            let _ = writeln!(
+                err,
+                "PAR2: Reading sources — pass {}/{} · {}/{} slices",
+                self.par2_pass_index + 1,
+                self.par2_passes,
+                self.par2_encode_done,
+                self.par2_encode_total,
+            );
+            let _ = err.flush();
+            return;
+        }
+
         if self.par2_write_active {
             let _ = writeln!(
                 err,
-                "par2: {}/{} slices",
+                "PAR2: writing recovery volumes · {}/{} slices",
                 self.par2_write_done, self.par2_write_total,
             );
             let _ = err.flush();
@@ -1665,7 +1979,7 @@ impl RenderState {
             };
             let _ = writeln!(
                 err,
-                "recovering: {}/{} article(s) · {ok_count} recovered{missing_str}",
+                "recovering availability: {}/{} article(s) · {ok_count} recovered{missing_str}",
                 self.recover_done, self.recover_total,
             );
             let _ = err.flush();
@@ -1679,11 +1993,11 @@ impl RenderState {
             let verified = self.check_checked.saturating_sub(self.check_failed);
             let pending = self.done_segments.saturating_sub(self.check_checked);
             let mut suffix = format!(
-                " · check {verified} verified/{} missing/{pending} pending",
+                " · availability: {verified} confirmed/{} missing/{pending} pending",
                 self.check_failed
             );
             if self.check_reposted > 0 {
-                suffix.push_str(&format!("/{} reposted", self.check_reposted));
+                suffix.push_str(&format!("/{} temporarily retried", self.check_reposted));
             }
             // Unlike the boxed panel, plain mode has no dedicated retry line
             // — append it here so a connection-error backoff isn't silently
@@ -1707,19 +2021,23 @@ impl RenderState {
 
         let rate = self.rate();
         if final_draw {
-            let _ = writeln!(
-                err,
-                "done: {}/{} segments · {} · {} failures · {}{check_suffix}",
-                self.done_segments,
-                self.total_segments,
-                format_size(self.done_bytes),
-                self.failures,
-                format_duration(self.elapsed_secs()),
-            );
+            for line in self.summary_lines(usize::MAX) {
+                let _ = writeln!(err, "{}", strip_ansi_for_plain(&line));
+            }
         } else {
+            let transient = if self.post_retry_pending > 0 {
+                format!(" · {} temporarily retrying", self.post_retry_pending)
+            } else if self.recovered_retries() > 0 {
+                format!(
+                    " · {} transient retries recovered",
+                    self.recovered_retries()
+                )
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 err,
-                "posting: {}/{} segments · {} · {}/s{check_suffix}",
+                "uploading: {}/{} articles · {} · {}/s{transient}{check_suffix}",
                 self.done_segments,
                 self.total_segments,
                 format_size(self.done_bytes),
@@ -1736,6 +2054,25 @@ impl RenderState {
 /// remainder is dropped with a trailing `…` on the last line rather than
 /// letting one bad status push the rest of the panel off screen.
 const STATUS_MAX_LINES: usize = 4;
+
+/// Remove SGR color sequences from a summary reused by append-only plain mode.
+fn strip_ansi_for_plain(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if code == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
 
 /// Word-wrap `text` (via [`wrap`]) into panel lines prefixed with `marker` on
 /// the first line and matching indentation on the rest, capped at
@@ -1768,7 +2105,7 @@ fn conn_dot(state: ConnState) -> String {
     match state {
         ConnState::Busy => ansi("●", "32"),     // green — posting
         ConnState::Auth => ansi("●", "33"),     // yellow — authenticating
-        ConnState::Retrying => ansi("●", "31"), // red — retrying
+        ConnState::Retrying => ansi("●", "33"), // amber — temporarily retrying
         ConnState::Idle => ansi("○", "2"),      // dim — drained
     }
 }
@@ -2003,7 +2340,9 @@ mod tests {
         state.proc_rss_bytes = 200 << 20;
         let panel = state.panel_lines(false, 100).join("\n");
         assert!(
-            panel.contains("par2  [") && panel.contains("encode 0/785"),
+            panel.contains("par2  [")
+                && panel.contains("Reading sources")
+                && panel.contains("0/785 slices"),
             "the combined par2 progress bar itself must stay:\n{panel}"
         );
         for noise in [
@@ -2105,6 +2444,7 @@ mod tests {
         };
 
         let mut last = 0.0_f64;
+        let mut last_pass_panel = String::new();
         for pass in 0..PASSES {
             for done in (0..=SLICES).step_by(20) {
                 state.apply(ProgressEvent::Par2InputProgress {
@@ -2117,6 +2457,9 @@ mod tests {
                     "bar reset on pass {pass} at done={done}: {f} < {last}"
                 );
                 last = f;
+                if pass == PASSES - 1 && done == 20 {
+                    last_pass_panel = state.panel_lines(false, 100).join("\n");
+                }
             }
         }
         assert_eq!(
@@ -2129,14 +2472,9 @@ mod tests {
         assert_eq!(state.par2_encode_units_done(), SLICES * PASSES);
 
         // And the panel names the pass while multi-pass encoding is running.
-        state.apply(ProgressEvent::Par2InputProgress {
-            done: 10,
-            total: SLICES,
-        });
-        let panel = state.panel_lines(false, 100).join("\n");
         assert!(
-            panel.contains("pass 3/3"),
-            "multi-pass encode should name the current pass:\n{panel}"
+            last_pass_panel.contains("pass 3/3"),
+            "multi-pass encode should name the current pass:\n{last_pass_panel}"
         );
     }
 
@@ -2237,7 +2575,7 @@ mod tests {
         let panel = state.panel_lines(false, 100);
         let tally = panel
             .iter()
-            .find(|l| l.contains("verified"))
+            .find(|l| l.contains("confirmed available"))
             .expect("check box tally line drawn");
         assert!(
             !tally.contains('%'),
@@ -2407,9 +2745,9 @@ mod tests {
         assert_eq!(summary.len(), 2, "summary is a compact two lines");
         assert!(summary[0].contains('✓'), "clean run gets a check glyph");
         assert!(
-            summary[1].contains("all verified"),
+            summary[0].contains("articles confirmed"),
             "a fully-confirmed run should say so: {:?}",
-            summary[1]
+            summary[0]
         );
         // No frozen box borders in the summary.
         assert!(!summary.iter().any(|l| l.contains('│')));
@@ -2425,7 +2763,141 @@ mod tests {
         });
         let summary = state.summary_lines(100);
         assert!(summary[0].contains('✗'), "a failed run gets a cross glyph");
-        assert!(summary[1].contains("failed"));
+        assert!(summary[0].contains("unresolved failure"));
+    }
+
+    #[test]
+    fn recovered_post_rejection_is_a_success_with_an_amber_counter() {
+        let mut state = started_state(false);
+        let remaining = state.total_segments - state.done_segments;
+        for _ in 1..remaining {
+            state.apply(ProgressEvent::SegmentDone {
+                file: "Movie.2026/movie.mkv".to_string(),
+                bytes: 768_000,
+                ok: true,
+            });
+        }
+        state.apply(ProgressEvent::PostRetryQueued);
+        state.apply(ProgressEvent::Failed {
+            description: "Movie.2026/movie.mkv part 785/785: 440 Posting Not Allowed".to_string(),
+        });
+        state.apply(ProgressEvent::SegmentDone {
+            file: "Movie.2026/movie.mkv".to_string(),
+            bytes: 768_000,
+            ok: false,
+        });
+
+        let retrying_panel = state.panel_lines(false, 100).join("\n");
+        assert!(retrying_panel.contains("temporarily retrying"));
+        assert!(!retrying_panel.contains("\x1b[31m"));
+
+        state.apply(ProgressEvent::PostRetryRecovered {
+            count: 1,
+            previously_failed: true,
+        });
+        state.apply(ProgressEvent::CheckProgress {
+            checked: state.total_segments,
+            ok: true,
+        });
+        state.apply(ProgressEvent::CheckDone { failed: 0 });
+
+        let summary = state.summary_lines(120).join("\n");
+        assert!(summary.contains("Upload complete"));
+        assert!(summary.contains("1 transient retry recovered"));
+        assert!(!summary.contains("\x1b[31m"));
+        assert_eq!(state.failures, 0);
+    }
+
+    #[test]
+    fn recovered_verification_miss_is_counted_only_after_confirmation() {
+        let mut state = upload_done_check_running();
+        state.apply(ProgressEvent::CheckReposted { reposted: 1 });
+        assert_eq!(state.recovered_retries(), 0);
+
+        state.apply(ProgressEvent::CheckRetryRecovered);
+        state.apply(ProgressEvent::CheckProgress {
+            checked: state.total_segments,
+            ok: true,
+        });
+        state.apply(ProgressEvent::CheckDone { failed: 0 });
+
+        let summary = state.summary_lines(120).join("\n");
+        assert!(summary.contains("Upload complete"));
+        assert!(summary.contains("1 transient retry recovered"));
+        assert!(summary.contains("articles confirmed"));
+    }
+
+    #[test]
+    fn unrecoverable_verification_miss_is_red_and_actionable() {
+        let mut state = upload_done_check_running();
+        state.apply(ProgressEvent::CheckProgress {
+            checked: state.total_segments,
+            ok: false,
+        });
+        state.apply(ProgressEvent::CheckDone { failed: 1 });
+
+        let summary = state.summary_lines(160).join("\n");
+        assert!(summary.contains("Upload incomplete"));
+        assert!(summary.contains("1 unresolved failure"));
+        assert!(
+            summary.contains('✗'),
+            "unresolved failures use the error glyph"
+        );
+        assert!(summary.contains("Retry with --resume"));
+        assert!(!summary.contains("Upload complete"));
+    }
+
+    #[test]
+    fn checks_disabled_never_claims_articles_were_confirmed() {
+        let mut state = started_state(false);
+        state.checks_enabled = false;
+        state.check_connections = 0;
+        let remaining = state.total_segments - state.done_segments;
+        for _ in 0..remaining {
+            state.apply(ProgressEvent::SegmentDone {
+                file: "Movie.2026/movie.mkv".to_string(),
+                bytes: 768_000,
+                ok: true,
+            });
+        }
+
+        let summary = state.summary_lines(120).join("\n");
+        assert!(summary.contains("accepted by the server"));
+        assert!(summary.contains("Not independently verified"));
+        assert!(!summary.contains("articles confirmed"));
+    }
+
+    #[test]
+    fn explicit_par2_pass_events_keep_equal_counters_monotonic_and_name_compute() {
+        let mut state = started_state(false);
+        state.apply(ProgressEvent::Par2EncodeStarted {
+            input_bytes: 600_000_000,
+            input_slices: 100,
+            input_files: 1,
+            recovery_slices: 20,
+            slice_size: 768_000,
+            passes: 2,
+            chunk_size: 32_768,
+            simd_method: "avx2".to_string(),
+            threads: 6,
+            memory_limit: 1 << 30,
+        });
+        state.apply(ProgressEvent::Par2PassStarted { pass: 1, passes: 2 });
+        state.apply(ProgressEvent::Par2InputProgress {
+            done: 1,
+            total: 100,
+        });
+        let first = state.par2_encode_units_done();
+        state.apply(ProgressEvent::Par2PassStarted { pass: 2, passes: 2 });
+        state.apply(ProgressEvent::Par2InputProgress {
+            done: 1,
+            total: 100,
+        });
+        assert!(state.par2_encode_units_done() > first);
+
+        state.apply(ProgressEvent::Par2ComputeStarted { pass: 2, passes: 2 });
+        let panel = state.panel_lines(false, 120).join("\n");
+        assert!(panel.contains("Computing recovery data — pass 2/2"));
     }
 
     // Issue #57: a run that dies to a `producer` error (bad PAR2 geometry, a

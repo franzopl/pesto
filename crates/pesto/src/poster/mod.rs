@@ -30,7 +30,7 @@ use parmesan::layout;
 use parmesan::packet::{self, SliceChecksum};
 
 use parmesan::ops::{
-    calculate_geometry, ingest_files_with, CreateOptions as Par2CreateOptions,
+    calculate_geometry, ingest_files_with_progress, CreateOptions as Par2CreateOptions,
     InputFile as Par2InputFile,
 };
 use parmesan::worker::Par2Worker;
@@ -1574,15 +1574,20 @@ async fn par2_only_ingest(
         })
         .collect();
 
-    ingest_files_with(
+    let slices_fed = std::sync::atomic::AtomicUsize::new(*par2_slices_fed);
+    let file_bytes_read = std::sync::atomic::AtomicUsize::new(0usize);
+    ingest_files_with_progress(
         &files,
         worker,
         par2_slice_size,
         Some(&shared.cancelled),
         |file| {
-            *par2_slices_fed += (file.size as usize).div_ceil(par2_slice_size);
+            let exact =
+                slices_fed.load(Ordering::Relaxed) + (file.size as usize).div_ceil(par2_slice_size);
+            slices_fed.store(exact.min(total_slices), Ordering::Relaxed);
+            file_bytes_read.store(0, Ordering::Relaxed);
             shared.emit(ProgressEvent::Par2InputProgress {
-                done: *par2_slices_fed,
+                done: slices_fed.load(Ordering::Relaxed),
                 total: total_slices,
             });
             if shared.config.par2_only {
@@ -1607,8 +1612,20 @@ async fn par2_only_ingest(
             }
             Ok(())
         },
+        |bytes| {
+            let read = file_bytes_read.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            let done =
+                (slices_fed.load(Ordering::Relaxed) + read / par2_slice_size).min(total_slices);
+            shared.emit(ProgressEvent::Par2InputProgress {
+                done,
+                total: total_slices,
+            });
+            Ok(())
+        },
     )
-    .await
+    .await?;
+    *par2_slices_fed = slices_fed.load(Ordering::Relaxed);
+    Ok(())
 }
 
 fn par2_base(name: &str) -> &str {
@@ -2047,6 +2064,12 @@ async fn producer(
     let mut rsid = [0u8; 16];
 
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
+        if rec_count > 0 {
+            shared.emit(ProgressEvent::Par2PassStarted {
+                pass: pass_idx + 1,
+                passes: passes.len(),
+            });
+        }
         let worker_opt: Option<Par2Worker> = if rec_count > 0 {
             let enc =
                 RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, exp_start, rec_count)
@@ -2250,6 +2273,10 @@ async fn producer(
         } // end else (standard posting path)
 
         if let Some(worker) = worker_opt {
+            shared.emit(ProgressEvent::Par2ComputeStarted {
+                pass: pass_idx + 1,
+                passes: passes.len(),
+            });
             shared.emit(ProgressEvent::Status {
                 text: "computing PAR2 recovery data".to_string(),
             });
@@ -3042,6 +3069,7 @@ async fn worker(
             let mut p = pending.remove(0);
             let mut posted = false;
             let mut last_err = String::from("unknown error");
+            let mut transient_attempts = 0u64;
 
             for attempt in 1..=max_attempts {
                 let conn = match slot.ensure_connected().await {
@@ -3051,7 +3079,9 @@ async fn worker(
                         warn!(segment = %p.message_id, attempt, max_attempts,
                               error = %last_err, "connection failed; will retry");
                         shared.total_retries.fetch_add(1, Ordering::Relaxed);
+                        transient_attempts += 1;
                         if attempt < max_attempts {
+                            shared.emit(ProgressEvent::ConnectionRetrying { conn: conn_id });
                             tokio::time::sleep(slot.retry_delay()).await;
                         }
                         continue;
@@ -3102,6 +3132,10 @@ async fn worker(
                         warn!(segment = %p.message_id, attempt, max_attempts,
                               error = %last_err, "post failed; rotating server");
                         shared.total_retries.fetch_add(1, Ordering::Relaxed);
+                        transient_attempts += 1;
+                        if attempt < max_attempts {
+                            shared.emit(ProgressEvent::ConnectionRetrying { conn: conn_id });
+                        }
                         slot.invalidate("post_err");
                     }
                 }
@@ -3110,6 +3144,16 @@ async fn worker(
                 }
             }
 
+            if posted && transient_attempts > 0 {
+                shared.emit(ProgressEvent::PostRetryRecovered {
+                    count: 1,
+                    previously_failed: false,
+                });
+                shared.emit(ProgressEvent::ConnectionBusy {
+                    conn: conn_id,
+                    file: p.task.meta.real_name.clone(),
+                });
+            }
             let wire = p.headers.len() + p.encoded.body.len();
             commit_result(
                 &shared,
@@ -3133,6 +3177,7 @@ async fn worker(
             // satisfying the borrow checker (conn borrows slot mutably).
             let n = pending.len();
             let mut pipeline_ok = false;
+            let mut pipeline_retried = false;
             let mut pipe_results: Vec<Result<(), String>> = (0..n).map(|_| Ok(())).collect();
 
             'pipeline: for attempt in 1..=max_attempts {
@@ -3145,7 +3190,9 @@ async fn worker(
                             warn!(attempt, max_attempts, error = %e,
                                   "connection failed during pipeline; will retry");
                             shared.total_retries.fetch_add(1, Ordering::Relaxed);
+                            pipeline_retried = true;
                             if attempt < max_attempts {
+                                shared.emit(ProgressEvent::ConnectionRetrying { conn: conn_id });
                                 tokio::time::sleep(slot.retry_delay()).await;
                             }
                             continue 'pipeline;
@@ -3213,6 +3260,10 @@ async fn worker(
                     warn!(attempt, max_attempts, error = %pipe_err,
                           "pipeline failed; rotating server");
                     shared.total_retries.fetch_add(1, Ordering::Relaxed);
+                    pipeline_retried = true;
+                    if attempt < max_attempts {
+                        shared.emit(ProgressEvent::ConnectionRetrying { conn: conn_id });
+                    }
                     slot.invalidate("post_err");
                     if attempt < max_attempts {
                         tokio::time::sleep(slot.retry_delay()).await;
@@ -3222,6 +3273,19 @@ async fn worker(
 
                 pipeline_ok = true;
                 break;
+            }
+
+            if pipeline_ok && pipeline_retried {
+                shared.emit(ProgressEvent::PostRetryRecovered {
+                    count: n as u64,
+                    previously_failed: false,
+                });
+                if let Some(article) = pending.first() {
+                    shared.emit(ProgressEvent::ConnectionBusy {
+                        conn: conn_id,
+                        file: article.task.meta.real_name.clone(),
+                    });
+                }
             }
 
             // The whole batch shares one connection/flush, so every article in
@@ -3508,6 +3572,7 @@ fn record_failure(
         "{} part {}/{}: {error}",
         meta.real_name, task.part, task.total
     );
+    shared.emit(ProgressEvent::PostRetryQueued);
     shared.emit(ProgressEvent::Failed {
         description: description.clone(),
     });
@@ -3687,6 +3752,10 @@ pub async fn repost_failed_tasks(
                 total_files: task.total_files,
             });
             if let Some(tx) = events {
+                let _ = tx.send(ProgressEvent::PostRetryRecovered {
+                    count: 1,
+                    previously_failed: true,
+                });
                 let _ = tx.send(ProgressEvent::Status {
                     text: format!("retry: {}/{} segment(s) recovered", recovered.len(), i + 1),
                 });
@@ -3792,6 +3861,7 @@ async fn append_season_recovery_slices(
     output_dir: &Path,
     rsid: &[u8; 16],
     base_packets: &[u8],
+    events: Option<&ProgressSender>,
 ) -> Result<()> {
     for slice in slices {
         let vol = volumes
@@ -3819,6 +3889,9 @@ async fn append_season_recovery_slices(
             &packet::recovery_body(slice.exponent, &slice.data),
         );
         file.write_all(&pkt).await?;
+        if let Some(tx) = events {
+            let _ = tx.send(ProgressEvent::Par2SliceWritten);
+        }
     }
     Ok(())
 }
@@ -3830,6 +3903,8 @@ async fn feed_season_episodes(
     ordered: &[(PathBuf, String, u64)],
     worker: &Par2Worker,
     par2_slice_size: usize,
+    total_slices: usize,
+    events: Option<&ProgressSender>,
 ) -> Result<(Vec<String>, Vec<usize>, usize)> {
     let mut episode_names = Vec::with_capacity(ordered.len());
     let mut slices_per_episode = Vec::with_capacity(ordered.len());
@@ -3849,17 +3924,36 @@ async fn feed_season_episodes(
             display_name: name.clone(),
             size: file_size,
         };
-        ingest_files_with(
+        let slices_for_episode = (file_size as usize).div_ceil(par2_slice_size);
+        let bytes_read = std::sync::atomic::AtomicUsize::new(0usize);
+        let completed_before = total_slices_added;
+        ingest_files_with_progress(
             std::slice::from_ref(&input),
             worker,
             par2_slice_size,
             None,
             |_| Ok(()),
+            |bytes| {
+                let read = bytes_read.fetch_add(bytes, Ordering::Relaxed) + bytes;
+                let current = (read / par2_slice_size).min(slices_for_episode);
+                if let Some(tx) = events {
+                    let _ = tx.send(ProgressEvent::Par2InputProgress {
+                        done: (completed_before + current).min(total_slices),
+                        total: total_slices,
+                    });
+                }
+                Ok(())
+            },
         )
         .await?;
 
-        let slices_for_episode = (file_size as usize).div_ceil(par2_slice_size);
         total_slices_added += slices_for_episode;
+        if let Some(tx) = events {
+            let _ = tx.send(ProgressEvent::Par2InputProgress {
+                done: total_slices_added.min(total_slices),
+                total: total_slices,
+            });
+        }
         slices_per_episode.push(slices_for_episode);
         debug!(
             episode_idx = ep_idx + 1,
@@ -3899,6 +3993,7 @@ async fn generate_season_par2(
     config: &Config,
     release_name: &str,
     output_dir: &Path,
+    events: Option<&ProgressSender>,
 ) -> Result<SeasonPar2Set> {
     if episode_paths.is_empty() {
         return Ok(SeasonPar2Set::empty());
@@ -3989,6 +4084,34 @@ async fn generate_season_par2(
         "season PAR2 memory plan"
     );
 
+    if let Some(tx) = events {
+        let simd_method = if config.simd != parmesan::SimdPath::Auto {
+            config.simd.to_string()
+        } else {
+            parmesan::detect_simd().to_string()
+        };
+        let threads = if config.threads > 0 {
+            config.threads
+        } else {
+            parmesan::performance_core_count()
+        };
+        let _ = tx.send(ProgressEvent::Par2EncodeStarted {
+            input_bytes: sizes.iter().sum(),
+            input_slices: total_slices,
+            input_files: ordered.len(),
+            recovery_slices: recovery_count,
+            slice_size: par2_slice_size,
+            passes: passes.len(),
+            chunk_size: 32 * 1024,
+            simd_method,
+            threads,
+            memory_limit,
+        });
+        let _ = tx.send(ProgressEvent::Par2WriteStarted {
+            total: recovery_count as u32,
+        });
+    }
+
     let volumes = layout::plan_volumes(recovery_count as u32);
     let mut files = Vec::new();
     let mut rsid = [0u8; 16];
@@ -4003,6 +4126,12 @@ async fn generate_season_par2(
         if rec_count == 0 {
             continue;
         }
+        if let Some(tx) = events {
+            let _ = tx.send(ProgressEvent::Par2PassStarted {
+                pass: pass_idx + 1,
+                passes: passes.len(),
+            });
+        }
         let mut enc =
             RecoveryEncoder::try_new_smart(par2_slice_size, total_slices, exp_start, rec_count)
                 .context("allocating season PAR2 recovery buffers")?
@@ -4015,7 +4144,7 @@ async fn generate_season_par2(
         let worker = Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
 
         let (names, slices, added) =
-            feed_season_episodes(&ordered, &worker, par2_slice_size).await?;
+            feed_season_episodes(&ordered, &worker, par2_slice_size, total_slices, events).await?;
         debug!(
             pass = pass_idx,
             calculated_total_slices = total_slices,
@@ -4023,6 +4152,12 @@ async fn generate_season_par2(
             "season PAR2 pass fed"
         );
 
+        if let Some(tx) = events {
+            let _ = tx.send(ProgressEvent::Par2ComputeStarted {
+                pass: pass_idx + 1,
+                passes: passes.len(),
+            });
+        }
         let (recovery, checksums, pass_hashes) = tokio::task::block_in_place(|| worker.finish());
         written += recovery.len();
 
@@ -4066,6 +4201,7 @@ async fn generate_season_par2(
             output_dir,
             &rsid,
             &base_packets,
+            events,
         )
         .await?;
     }
@@ -4098,13 +4234,32 @@ pub async fn generate_and_write_season_par2(
     output_dir: &Path,
     config: &Config,
 ) -> Result<PathBuf> {
+    generate_and_write_season_par2_with_progress(
+        episode_paths,
+        release_name,
+        output_dir,
+        config,
+        None,
+    )
+    .await
+}
+
+/// Generate season PAR2 volumes while reporting read/compute/write progress.
+pub async fn generate_and_write_season_par2_with_progress(
+    episode_paths: &[PathBuf],
+    release_name: &str,
+    output_dir: &Path,
+    config: &Config,
+    events: Option<&ProgressSender>,
+) -> Result<PathBuf> {
     if episode_paths.is_empty() || config.par2 == 0 {
         return Ok(output_dir.to_path_buf());
     }
 
     debug!(episodes = episode_paths.len(), "generating season PAR2");
 
-    let season = generate_season_par2(episode_paths, config, release_name, output_dir).await?;
+    let season =
+        generate_season_par2(episode_paths, config, release_name, output_dir, events).await?;
 
     if season.recovery_count == 0 {
         return Ok(output_dir.to_path_buf());
