@@ -2210,9 +2210,19 @@ fn derive_season_nzb_path(
     if let Some(out) = explicit_out {
         return out.to_path_buf();
     }
+    // `Path::file_name()` deliberately returns `None` for paths ending in
+    // `.` or `..`. Resolve those paths first so `pesto . --season` names the
+    // pack after its input directory.
     let name = entry
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|name| name.to_owned())
+        .or_else(|| {
+            entry
+                .canonicalize()
+                .ok()
+                .and_then(|resolved| resolved.file_name().map(|name| name.to_owned()))
+        })
+        .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "season".to_string());
     let stem = format!("{name}.nzb");
     match nzb_dir {
@@ -4721,6 +4731,22 @@ mod tests {
     fn derive_season_nzb_path_names_after_entry_under_nzb_dir() {
         let path = derive_season_nzb_path(None, Path::new("/downloads/Show.S01"), Some("/nzbs"));
         assert_eq!(path, PathBuf::from("/nzbs/Show.S01.nzb"));
+    }
+
+    #[test]
+    fn derive_season_nzb_path_names_dot_after_current_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let expected_name = cwd
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "season".to_string());
+
+        let path = derive_season_nzb_path(None, Path::new("."), Some("/nzbs"));
+
+        assert_eq!(
+            path,
+            PathBuf::from("/nzbs").join(format!("{expected_name}.nzb"))
+        );
     }
 
     #[test]
