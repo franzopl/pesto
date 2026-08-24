@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-24
+
 ### Changed
 
 - `--tmdb`, `--imdb`, `--tvdb`, and `--mal` now emit conventional repeated
