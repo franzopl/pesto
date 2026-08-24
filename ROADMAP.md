@@ -812,6 +812,156 @@ ALTMAP heading. So the table now asks the encoder which kernels are live and pri
 
 ---
 
+## Phase 50 — Nyuu Gap Analysis: Observability and Interoperability (Proposed)
+
+This is a deliberately narrow comparison with Nyuu. Pesto already covers the
+important posting path: TLS, parallel NNTP connections, yEnc, recursive input,
+single-pass posting/PAR2 where possible, retry/backoff, resumable uploads, and
+streaming STAT verification. It must not copy Nyuu's large option surface merely
+for parity. New work here needs a concrete automation or compatibility benefit
+and must preserve Pesto's hot-path focus.
+
+### 50a — Optional live status endpoint *(high value for headless automation)*
+
+**Problem:** the terminal UI, saved logs, and JSON-lines stdout are useful to a
+human or a directly supervising process, but a service running unattended has
+no stable endpoint that a dashboard, health check, or monitoring collector can
+poll.
+
+**Scope:** expose the existing structured upload progress as an *optional*,
+read-only local HTTP status service. Do not put an HTTP server on the normal
+posting path and do not bind it to a non-loopback address by default.
+
+- [ ] Decide the boundary: Pesto should publish a stable `UploadStatus`/progress
+      snapshot API; the listener should be either an opt-in Pesto component or,
+      preferably, an UpaPasta-facing adapter so the minimal Pesto CLI does not
+      acquire a mandatory web-service role.
+- [ ] Add explicit `--status-listen 127.0.0.1:PORT` and configuration equivalent;
+      disabled by default. Reject public binds unless an explicit unsafe/expose
+      option is supplied.
+- [ ] Provide a small, versioned JSON response containing run id, phase
+      (prepare/compress/PAR2/post/check), bytes and segments done/total,
+      instantaneous and rolling rate, ETA, active/idle connections, check
+      counts, retry counts, and the most recent non-sensitive error.
+- [ ] Provide `/healthz` (process available) and `/status` (current or most
+      recent upload). Never expose server passwords, raw article data, input
+      paths unless explicitly requested, or complete verbose logs.
+- [ ] Make snapshot collection lock-light: workers update atomics/counters;
+      HTTP serialization reads a snapshot and never blocks encoding, socket
+      writes, or PAR2 computation.
+- [ ] Tests: disabled-by-default behavior, loopback bind, schema stability,
+      concurrent polling during a mock upload, and redaction of credentials.
+
+**Why this outranks Nyuu-style extra knobs:** it enables Prometheus exporters,
+container health checks, and a remote UI without changing how an upload works.
+Pesto's existing JSON-lines mode remains the zero-dependency choice for local
+shell automation.
+
+### 50b — Compressed NZB output *(medium priority; valuable for NZB vaults and distribution)*
+
+An NZB is XML containing one `Message-ID` and size for every article. The XML
+element names and attributes repeat thousands of times, so it compresses very
+well. This is **not** media/archive compression and does not change what is
+posted to Usenet: it only stores or transfers the local download map in less
+space. A downloader decompresses it and sees the identical XML and Message-IDs.
+
+For one ordinary release the saving is usually unimportant. For a vault,
+indexer hand-off, or a user producing many large NZBs (many files × many
+segments), gzip can reduce cumulative storage and transfer substantially. It
+also reduces the cost of copying/syncing NZBs to another machine. It does *not*
+reduce upload bandwidth, article count, retention, or the size of the original
+release.
+
+**Compatibility decision:** start with gzip only, written as `name.nzb.gz`.
+Gzip is broadly supported by NZB consumers; SABnzbd explicitly accepts
+compressed NZBs including `.gz`, and current NZBGet releases support importing
+compressed incoming archives. Do not start with zstd: its compression may be
+better, but it is not a safe interchange default for download clients.
+
+- [ ] Add `--nzb-compress none|gzip` and `output.nzb_compression`; default
+      remains `none` for exact backward compatibility.
+- [ ] When gzip is selected, stream the existing XML writer into a gzip encoder
+      and write `*.nzb.gz`; never build a second full XML copy in memory.
+- [ ] Keep output atomic: write to a sibling temporary path, finish and close
+      the gzip trailer successfully, then rename. A watched NZB directory must
+      never observe a half-written `.nzb.gz`.
+- [ ] Define `--out` rules clearly. A gzip run appends `.gz` to a supplied
+      `.nzb` name; a supplied `.gz` name is accepted; incompatible names are
+      rejected rather than silently producing misleading files.
+- [ ] Preserve current `--nzb-conflict` behavior for the final compressed
+      filename and keep NZB metadata, obfuscation, and resume semantics
+      byte-for-byte equivalent after decompression.
+- [ ] Tests: decompress generated output and compare it to the uncompressed
+      NZB for identical XML; validate extension/conflict/atomic-write behavior;
+      test a very large synthetic segment list to prove bounded memory.
+
+**Minification is not a separate first step.** Removing optional whitespace
+from XML saves a little, but gzip already compresses repeated whitespace and
+tags efficiently. Producing canonical compact XML plus gzip is acceptable if
+the current writer can do it without a second buffer; implementing an elaborate
+minifier first is not worth the complexity.
+
+### 50c — Process pipelines and stream duplication *(medium priority, high complexity)*
+
+Pesto accepts stdin today, but it does not offer Nyuu's general process
+pipeline: accept data from another program, name it deterministically, and tee
+the same input to another process without a second disk read. This would help
+advanced workflows such as `producer | pesto`, streaming a transform directly
+to posting, or feeding a checksum/archive process from the same read stream.
+
+- [ ] First define a library-level abstraction (`AsyncRead` plus known/logical
+      length and stable identity) rather than shell-specific flags.
+- [ ] Support one stdin input with `--stdin-name`; reject or explicitly stage
+      combinations that require random access (resume, full PAR2 metadata,
+      compression, and multi-pass recovery generation) instead of promising
+      behavior that cannot be correct for a non-seekable stream.
+- [ ] Design an opt-in tee sink with bounded buffering and back-pressure. A
+      slow child process must not cause unbounded RAM growth or silently lose
+      bytes; failure policy must be explicit.
+- [ ] Keep shell execution out of the core by default. Prefer file descriptors
+      or a library callback; any convenience `--pipe-*` command needs careful
+      quoting, cancellation, exit-status propagation, and Windows semantics.
+- [ ] Tests: a synthetic non-seekable reader, a slow tee consumer, consumer
+      failure, cancellation, and proof that the source reader is consumed once.
+
+**Rationale for not making this first:** it creates difficult interactions with
+Pesto's reliability features. The current disk-based route is predictable,
+resumable, and compatible with PAR2; process pipelines should improve a known
+workflow, not weaken that default.
+
+### 50d — Evidence-based server compatibility profiles *(medium-low priority)*
+
+Nyuu offers optional workarounds for individual NNTP server bugs. Pesto should
+not add speculative flags. When a provider-specific defect is reproducible,
+capture it in a mock-server regression test and add the smallest named profile
+or narrowly scoped switch necessary to work around it.
+
+- [ ] Establish `server.compatibility_profile` with `standard` as the default;
+      profiles must be named after behavior, not providers, where possible
+      (for example, a documented response-timing or pipeline limitation).
+- [ ] Every workaround needs: affected response transcript, reference issue,
+      default-off justification, mock regression test, documentation of the
+      performance/reliability trade-off, and a removal/re-evaluation condition.
+- [ ] Prefer existing generic controls (retry delay, pipeline depth, article
+      size, line length, TLS on/off, and failover) when they solve the problem.
+
+### Non-goals from the Nyuu comparison
+
+- **No "no disk writes except NZB" promise.** Pesto's session logs, resume
+  state, and spool for sent-but-unconfirmed articles are intentional reliability
+  features. Compression also necessarily stages an archive.
+- **No broad "ignore arbitrary errors" mode.** It can quietly create unusable
+  releases. Keep failures explicit; narrowly allow an incomplete NZB only when
+  the user has chosen that policy.
+- **No unbounded SSL/header knob collection.** Add TLS or header controls only
+  for a concrete interoperability need. Arbitrary header injection also needs
+  validation to prevent malformed articles.
+- **No performance work solely to match a marketing claim.** Pesto already has
+  buffered/pipelined I/O and SIMD yEnc/PAR2 paths; changes need measurement on
+  the real hot path.
+
+---
+
 References:
 - yEnc draft v1.3: <http://www.yenc.org/yenc-draft.1.3.txt>
 - Mirror: <https://github.com/caronc/newsreap/blob/master/docs/yenc-draft.1.3.txt>
