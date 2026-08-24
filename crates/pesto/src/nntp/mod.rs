@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
+use tokio_socks::tcp::Socks5Stream;
 use tracing::{debug, trace};
 
 /// Monotonic timer for per-command latency logging (26b).
@@ -173,23 +174,31 @@ impl Connection {
         tls: bool,
         timeout_secs: u64,
     ) -> Result<Connection> {
+        Self::connect_with_proxy(host, port, tls, timeout_secs, None).await
+    }
+
+    /// Open a connection and optionally route it through SOCKS5 before TLS.
+    pub async fn connect_with_proxy(
+        host: &str,
+        port: u16,
+        tls: bool,
+        timeout_secs: u64,
+        proxy: Option<&crate::config::Socks5Proxy>,
+    ) -> Result<Connection> {
         debug!(host = "<redacted>", port, tls, "connecting");
         let read_timeout = Duration::from_secs(timeout_secs);
-
-        let stream = tokio::time::timeout(read_timeout, Self::connect_stream(host, port, tls))
-            .await
-            .with_context(|| {
-                format!("connecting to {host}:{port} timed out after {timeout_secs}s")
-            })??;
-
+        let stream =
+            tokio::time::timeout(read_timeout, Self::connect_stream(host, port, tls, proxy))
+                .await
+                .with_context(|| {
+                    format!("connecting to {host}:{port} timed out after {timeout_secs}s")
+                })??;
         let mut conn = Connection {
             stream: BufReader::new(BufWriter::new(stream)),
             read_timeout,
             bytes_written: 0,
             bytes_read: 0,
         };
-
-        // 200 = posting allowed, 201 = posting prohibited.
         let greeting = conn.read_response().await?;
         if greeting.code != 200 && greeting.code != 201 {
             let base = format!(
@@ -202,17 +211,41 @@ impl Connection {
         Ok(conn)
     }
 
-    /// The TCP connect + (optional) TLS handshake piece of [`Self::connect`],
-    /// factored out so the caller can wrap the whole thing in one
-    /// `tokio::time::timeout` — seeing this file take an `&str`/`u16`/`bool`
-    /// rather than borrowing straight from `connect`'s own params is just
-    /// that split, not a change in what gets connected to.
-    async fn connect_stream(host: &str, port: u16, tls: bool) -> Result<Box<dyn Stream>> {
-        let tcp = TcpStream::connect((host, port))
-            .await
-            .with_context(|| format!("connecting to {host}:{port}"))?;
+    async fn connect_stream(
+        host: &str,
+        port: u16,
+        tls: bool,
+        proxy: Option<&crate::config::Socks5Proxy>,
+    ) -> Result<Box<dyn Stream>> {
+        let tcp = match proxy {
+            Some(proxy) => {
+                debug!(proxy = %proxy.address(), "connecting through SOCKS5 proxy");
+                let target = format!("{host}:{port}");
+                let stream = match (&proxy.username, &proxy.password) {
+                    (Some(username), Some(password)) => {
+                        Socks5Stream::connect_with_password(
+                            proxy.address(),
+                            target.as_str(),
+                            username,
+                            password,
+                        )
+                        .await
+                    }
+                    _ => Socks5Stream::connect(proxy.address(), target.as_str()).await,
+                }
+                .with_context(|| {
+                    format!(
+                        "SOCKS5 proxy {} refused connection to {host}:{port}",
+                        proxy.address()
+                    )
+                })?;
+                stream.into_inner()
+            }
+            None => TcpStream::connect((host, port))
+                .await
+                .with_context(|| format!("connecting to {host}:{port}"))?,
+        };
         tcp.set_nodelay(true).ok();
-
         if tls {
             let connector = TlsConnector::from(tls_config());
             let server_name = ServerName::try_from(host.to_string())
@@ -228,7 +261,7 @@ impl Connection {
         }
     }
 
-    /// Authenticate with `AUTHINFO USER` / `AUTHINFO PASS`.
+    /// Authenticate
     ///
     /// Neither the username nor the password is logged or included in error messages.
     pub async fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
@@ -796,6 +829,50 @@ fn tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
+/// Validate the SOCKS5 and NNTP authentication path before posting articles.
+pub(crate) async fn validate_proxy(server: &crate::config::ServerEntry) -> Result<()> {
+    let Some(proxy) = server.proxy.as_ref() else {
+        return Ok(());
+    };
+    let mut conn = Connection::connect_with_proxy(
+        &server.host,
+        server.port,
+        server.ssl,
+        server.timeout,
+        Some(proxy),
+    )
+    .await
+    .with_context(|| format!("validating SOCKS5 proxy {}", proxy.address()))?;
+    if let Some(username) = &server.username {
+        conn.authenticate(username, server.password.as_deref().unwrap_or(""))
+            .await
+            .context("NNTP authentication through SOCKS5 proxy failed")?;
+    }
+    conn.quit().await;
+    Ok(())
+}
+
+/// Query the public exit IP through SOCKS5. This optional check contacts api.ipify.org.
+pub(crate) async fn proxy_exit_ip(proxy: &crate::config::Socks5Proxy) -> Result<String> {
+    let url = match (&proxy.username, &proxy.password) {
+        (Some(user), Some(password)) => format!("socks5h://{user}:{password}@{}", proxy.address()),
+        _ => format!("socks5h://{}", proxy.address()),
+    };
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(url)?)
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    Ok(client
+        .get("https://api.ipify.org")
+        .send()
+        .await
+        .context("checking SOCKS5 proxy exit IP")?
+        .error_for_status()?
+        .text()
+        .await?
+        .trim()
+        .to_owned())
+}
 #[cfg(test)]
 impl Connection {
     /// Construct a `Connection` from any bidirectional stream. Used in tests to

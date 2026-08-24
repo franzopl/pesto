@@ -192,6 +192,7 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     }
 }
 

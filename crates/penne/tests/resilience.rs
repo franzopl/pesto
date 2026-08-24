@@ -42,6 +42,7 @@ fn server_entry(addr: SocketAddr) -> ServerEntry {
         password: None,
         retry_delay: 0, // tests run fast; a real deployment would set this higher
         timeout: 5,
+        proxy: None,
     }
 }
 
