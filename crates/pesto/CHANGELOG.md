@@ -12,6 +12,13 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Changed
+
+- `--tmdb`, `--imdb`, `--tvdb`, and `--mal` now emit conventional repeated
+  NZB `<meta type="tag">` values (`tmdb:<kind>:<id>`, `imdb:<id>`,
+  `tvdb:<kind>:<id>`, and `mal:<id>`) instead of undocumented custom meta
+  types.
+
 ## [0.8.7] — 2026-08-24
 
 ### Added

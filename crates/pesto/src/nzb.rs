@@ -235,10 +235,6 @@ pub fn generate(
         ("title", meta.name.as_deref()),
         ("password", meta.password.as_deref()),
         ("category", meta.category.as_deref()),
-        ("tmdbid", meta.tmdb_id.as_deref()),
-        ("imdbid", meta.imdb_id.as_deref()),
-        ("tvdbid", meta.tvdb_id.as_deref()),
-        ("malid", meta.mal_id.as_deref()),
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|s| (k, s)))
@@ -247,6 +243,32 @@ pub fn generate(
     out.push_str("  <head>\n");
     for (k, v) in &metas {
         out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
+    }
+    if let Some(tmdb_id) = &meta.tmdb_id {
+        out.push_str(&format!(
+            "    <meta type=\"tag\">tmdb:{}</meta>\n",
+            escape(&tmdb_id.replace('/', ":"))
+        ));
+    }
+    if let Some(imdb_id) = &meta.imdb_id {
+        out.push_str(&format!(
+            "    <meta type=\"tag\">imdb:{}</meta>\n",
+            escape(imdb_id)
+        ));
+    }
+    if let Some(tvdb_id) = &meta.tvdb_id {
+        let tag = match tvdb_id.split_once('/') {
+            Some((kind @ ("movie" | "series"), id)) => format!("tvdb:{kind}:{id}"),
+            Some(("tv", id)) => format!("tvdb:series:{id}"),
+            _ => format!("tvdb:series:{tvdb_id}"),
+        };
+        out.push_str(&format!("    <meta type=\"tag\">{}</meta>\n", escape(&tag)));
+    }
+    if let Some(mal_id) = &meta.mal_id {
+        out.push_str(&format!(
+            "    <meta type=\"tag\">mal:{}</meta>\n",
+            escape(mal_id)
+        ));
     }
     for tag in &meta.tags {
         out.push_str(&format!("    <meta type=\"tag\">{}</meta>\n", escape(tag)));
@@ -874,7 +896,7 @@ mod tests {
             category: Some("TV > HD".into()),
             tmdb_id: Some("tv/12345".into()),
             imdb_id: Some("tt1234567".into()),
-            tvdb_id: Some("321".into()),
+            tvdb_id: Some("series/321".into()),
             mal_id: Some("654".into()),
             tags: Vec::new(),
         };
@@ -882,10 +904,10 @@ mod tests {
         assert!(xml.contains("<meta type=\"title\">My Upload</meta>"));
         assert!(xml.contains("<meta type=\"password\">s3cr3t</meta>"));
         assert!(xml.contains("<meta type=\"category\">TV &gt; HD</meta>"));
-        assert!(xml.contains("<meta type=\"tmdbid\">tv/12345</meta>"));
-        assert!(xml.contains("<meta type=\"imdbid\">tt1234567</meta>"));
-        assert!(xml.contains("<meta type=\"tvdbid\">321</meta>"));
-        assert!(xml.contains("<meta type=\"malid\">654</meta>"));
+        assert!(xml.contains("<meta type=\"tag\">tmdb:tv:12345</meta>"));
+        assert!(xml.contains("<meta type=\"tag\">imdb:tt1234567</meta>"));
+        assert!(xml.contains("<meta type=\"tag\">tvdb:series:321</meta>"));
+        assert!(xml.contains("<meta type=\"tag\">mal:654</meta>"));
     }
 
     #[test]

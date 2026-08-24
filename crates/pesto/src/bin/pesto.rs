@@ -1707,7 +1707,15 @@ async fn run_single_upload(
                     category: config.nzb_category.clone(),
                     tmdb_id: config.tmdb_id.clone(),
                     imdb_id: config.imdb_id.clone(),
-                    tvdb_id: config.tvdb_id.clone(),
+                    tvdb_id: config.tvdb_id.as_deref().map(|id| {
+                        format!(
+                            "{}/{id}",
+                            config
+                                .tvdb_kind
+                                .unwrap_or(pesto::nzb::TvdbKind::Series)
+                                .as_str()
+                        )
+                    }),
                     mal_id: config.mal_id.clone(),
                     tags: nzb_tags,
                 };
@@ -2588,7 +2596,15 @@ async fn run_batch(
                 category: config.nzb_category.clone(),
                 tmdb_id: config.tmdb_id.clone(),
                 imdb_id: config.imdb_id.clone(),
-                tvdb_id: config.tvdb_id.clone(),
+                tvdb_id: config.tvdb_id.as_deref().map(|id| {
+                    format!(
+                        "{}/{id}",
+                        config
+                            .tvdb_kind
+                            .unwrap_or(pesto::nzb::TvdbKind::Series)
+                            .as_str()
+                    )
+                }),
                 mal_id: config.mal_id.clone(),
                 tags: nzb_tags,
             };
