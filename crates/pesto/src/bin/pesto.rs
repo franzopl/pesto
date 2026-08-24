@@ -109,14 +109,17 @@ struct Cli {
     #[arg(short = 'n', long, value_name = "N")]
     connections: Option<usize>,
 
+    /// Route NNTP connections through a SOCKS5 proxy; only SOCKS5 is supported.
+    #[arg(short = 'p', long, value_name = "URL")]
+    proxy: Option<String>,
+
     /// Authentication username [config: auth.username].
     #[arg(short = 'u', long, value_name = "USER")]
     username: Option<String>,
 
     /// Authentication password for the NNTP server [config: auth.password].
-    #[arg(short = 'p', long = "auth-password", value_name = "PASS")]
+    #[arg(long = "auth-password", value_name = "PASS")]
     password: Option<String>,
-
     /// `From` header for posted articles; omitted means a random identity
     /// [config: posting.from].
     #[arg(short = 'f', long, value_name = "ADDRESS")]
@@ -653,6 +656,7 @@ impl Cli {
             host: self.host.clone(),
             port: self.port,
             // `--no-ssl` is the only TLS flag; absent means "defer to config".
+            proxy: self.proxy.clone(),
             ssl: if self.no_ssl { Some(false) } else { None },
             connections: self.connections,
             username: self.username.clone(),

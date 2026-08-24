@@ -126,6 +126,7 @@ fn config(addr: SocketAddr) -> Config {
         retries: 1,
         retry_delay: 0,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
         obfuscate: ObfuscateMode::Full,
         dry_run: false,
         par2: 0,

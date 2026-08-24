@@ -110,6 +110,7 @@ fn par2_config(port: u16) -> Config {
         retries: 1,
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 10,

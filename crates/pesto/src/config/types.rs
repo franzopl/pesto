@@ -1,7 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::ValueEnum;
 use parmesan::SimdPath;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 
 /// Default NNTP-over-TLS port.
@@ -51,8 +52,81 @@ pub struct ServerEntry {
     pub retry_delay: u64,
     /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
     pub timeout: u64,
+    pub proxy: Option<Socks5Proxy>,
 }
 
+/// A validated SOCKS5 proxy endpoint. Credentials are never displayed.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Socks5Proxy {
+    pub(crate) address: String,
+    pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
+}
+impl fmt::Debug for Socks5Proxy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Socks5Proxy")
+            .field("address", &self.address)
+            .field(
+                "authentication",
+                &self.username.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+impl Socks5Proxy {
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        let value = if value.contains("://") {
+            value.to_owned()
+        } else {
+            format!("socks5://{value}")
+        };
+        let (scheme, authority) = value
+            .split_once("://")
+            .ok_or_else(|| anyhow!("invalid SOCKS5 proxy URL"))?;
+        if !matches!(scheme.to_ascii_lowercase().as_str(), "socks5" | "socks5h") {
+            bail!("unsupported proxy scheme `{scheme}`; only SOCKS5 is supported");
+        }
+        let (creds, host_port) = authority
+            .rsplit_once('@')
+            .map_or((None, authority), |(c, h)| (Some(c), h));
+        let (username, password) = match creds {
+            Some(c) => {
+                let (u, p) = c.split_once(':').ok_or_else(|| {
+                    anyhow!("SOCKS5 proxy credentials must use user:password@host:port")
+                })?;
+                (Some(u.to_owned()), Some(p.to_owned()))
+            }
+            None => (None, None),
+        };
+        let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
+            let (h, p) = rest.split_once("]:").ok_or_else(|| {
+                anyhow!("invalid SOCKS5 IPv6 proxy address; expected [host]:port")
+            })?;
+            (format!("[{h}]"), p)
+        } else {
+            let (h, p) = host_port
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow!("SOCKS5 proxy is missing a port; expected host:port"))?;
+            (h.to_owned(), p)
+        };
+        if host.is_empty() {
+            bail!("SOCKS5 proxy host must not be empty");
+        }
+        let port: u16 = port.parse().with_context(|| "invalid SOCKS5 proxy port")?;
+        if port == 0 {
+            bail!("SOCKS5 proxy port must be between 1 and 65535");
+        }
+        Ok(Self {
+            address: format!("{host}:{port}"),
+            username,
+            password,
+        })
+    }
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+}
 /// What to do when the NZB user-destination already exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -137,6 +211,7 @@ pub struct ServerSection {
     pub retry_delay: Option<u64>,
     /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
     pub timeout: Option<u64>,
+    pub proxy: Option<String>,
     /// Keepalive interval in seconds. A `MODE READER` command is sent on idle
     /// connections every this many seconds to prevent the server from closing
     /// them silently during long PAR2 computations or check-phase waits.
@@ -343,6 +418,8 @@ pub struct NotifySection {
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
     pub server: ServerSection,
     #[serde(default)]
     pub auth: AuthSection,
@@ -367,6 +444,7 @@ pub struct Overrides {
     pub connections: Option<usize>,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub proxy: Option<String>,
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
@@ -444,6 +522,7 @@ pub struct Config {
     pub retry_delay: u64,
     /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
     pub timeout: u64,
+    pub proxy: Option<Socks5Proxy>,
     pub extra_servers: Vec<ServerEntry>,
     pub from: String,
     pub groups: Vec<String>,
@@ -544,6 +623,7 @@ impl Config {
             password: self.password.clone(),
             retry_delay: self.retry_delay,
             timeout: self.timeout,
+            proxy: self.proxy.clone(),
         })
         .chain(self.extra_servers.iter().cloned())
     }

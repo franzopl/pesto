@@ -128,6 +128,7 @@ async fn last_segment_of_a_multipart_file_carries_the_whole_file_crc32() {
         retries: 1,
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 0,

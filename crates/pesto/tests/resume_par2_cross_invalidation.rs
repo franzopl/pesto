@@ -89,6 +89,7 @@ fn test_config(port: u16) -> Config {
         retries: 3,
         retry_delay: 0,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 100,

@@ -4412,6 +4412,7 @@ mod tests {
             password: None,
             retry_delay: 1,
             timeout: 60,
+            proxy: None,
         }
     }
 
