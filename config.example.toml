@@ -31,6 +31,7 @@ host = "news.example.com"
 # retry_delay = 1     # Seconds to wait between failed post attempts. Default: 1.
 # timeout = 120       # Per-command read timeout in seconds. Aborts a silently
 # proxy = "socks5://127.0.0.1:1080" # Optional SOCKS5 proxy; socks5h is also accepted.
+# Use --proxy-check-ip to display the optional public exit-IP check (api.ipify.org).
                       # dead connection instead of hanging until the OS keepalive
                       # fires (minutes on Windows, hours on Linux). Keep it well
                       # above the time a slow link needs to acknowledge one

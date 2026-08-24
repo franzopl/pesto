@@ -132,6 +132,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
+        proxy_check_ip: false,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 10,

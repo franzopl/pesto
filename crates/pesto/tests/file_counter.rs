@@ -29,6 +29,7 @@ fn dry_run_config(file_counter: bool, par2_recovery_count: Option<usize>) -> Con
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
+        proxy_check_ip: false,
         obfuscate: ObfuscateMode::None,
         dry_run: true,
         par2: 10,

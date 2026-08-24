@@ -144,6 +144,7 @@ impl Config {
             .map(Socks5Proxy::parse)
             .transpose()
             .context("parsing SOCKS5 proxy")?;
+        let proxy_check_ip = cli.proxy_check_ip.unwrap_or(false);
 
         let tmdb = cli
             .tmdb
@@ -271,6 +272,7 @@ impl Config {
             username,
             password,
             proxy,
+            proxy_check_ip,
             retry_delay,
             timeout,
             extra_servers,

@@ -445,6 +445,7 @@ pub struct Overrides {
     pub username: Option<String>,
     pub password: Option<String>,
     pub proxy: Option<String>,
+    pub proxy_check_ip: Option<bool>,
     pub from: Option<String>,
     pub groups: Option<Vec<String>>,
     pub article_size: Option<usize>,
@@ -523,6 +524,7 @@ pub struct Config {
     /// Per-command read timeout, in seconds. See [`DEFAULT_TIMEOUT_SECS`].
     pub timeout: u64,
     pub proxy: Option<Socks5Proxy>,
+    pub proxy_check_ip: bool,
     pub extra_servers: Vec<ServerEntry>,
     pub from: String,
     pub groups: Vec<String>,

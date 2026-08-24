@@ -829,6 +829,50 @@ fn tls_config() -> Arc<ClientConfig> {
         .clone()
 }
 
+/// Validate the SOCKS5 and NNTP authentication path before posting articles.
+pub(crate) async fn validate_proxy(server: &crate::config::ServerEntry) -> Result<()> {
+    let Some(proxy) = server.proxy.as_ref() else {
+        return Ok(());
+    };
+    let mut conn = Connection::connect_with_proxy(
+        &server.host,
+        server.port,
+        server.ssl,
+        server.timeout,
+        Some(proxy),
+    )
+    .await
+    .with_context(|| format!("validating SOCKS5 proxy {}", proxy.address()))?;
+    if let Some(username) = &server.username {
+        conn.authenticate(username, server.password.as_deref().unwrap_or(""))
+            .await
+            .context("NNTP authentication through SOCKS5 proxy failed")?;
+    }
+    conn.quit().await;
+    Ok(())
+}
+
+/// Query the public exit IP through SOCKS5. This optional check contacts api.ipify.org.
+pub(crate) async fn proxy_exit_ip(proxy: &crate::config::Socks5Proxy) -> Result<String> {
+    let url = match (&proxy.username, &proxy.password) {
+        (Some(user), Some(password)) => format!("socks5h://{user}:{password}@{}", proxy.address()),
+        _ => format!("socks5h://{}", proxy.address()),
+    };
+    let client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(url)?)
+        .timeout(Duration::from_secs(15))
+        .build()?;
+    Ok(client
+        .get("https://api.ipify.org")
+        .send()
+        .await
+        .context("checking SOCKS5 proxy exit IP")?
+        .error_for_status()?
+        .text()
+        .await?
+        .trim()
+        .to_owned())
+}
 #[cfg(test)]
 impl Connection {
     /// Construct a `Connection` from any bidirectional stream. Used in tests to

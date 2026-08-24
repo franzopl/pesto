@@ -24,6 +24,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
+        proxy_check_ip: false,
         obfuscate,
         dry_run: true,
         par2: 0,

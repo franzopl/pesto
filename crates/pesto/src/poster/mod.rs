@@ -897,6 +897,28 @@ pub async fn post_files_inner(
     );
 
     let servers: Arc<Vec<crate::config::ServerEntry>> = Arc::new(config.all_servers().collect());
+    // This validation intentionally happens before workers exist, so a bad
+    // SOCKS5 credential can never send an article. Keep the resulting status
+    // until after `Started`, because the terminal resets its panel then.
+    let proxy_status = if let Some(proxy) = config.proxy.as_ref() {
+        for server in servers.iter() {
+            crate::nntp::validate_proxy(server).await?;
+        }
+        Some(if config.proxy_check_ip {
+            format!(
+                "SOCKS5 proxy active via {}; exit IP {}",
+                proxy.address(),
+                crate::nntp::proxy_exit_ip(proxy).await?
+            )
+        } else {
+            format!(
+                "SOCKS5 proxy active via {}; remote DNS enabled",
+                proxy.address()
+            )
+        })
+    } else {
+        None
+    };
     let total_conns = config.total_connections();
 
     let check_enabled = config.check && !config.dry_run && !config.par2_only;
@@ -1035,6 +1057,9 @@ pub async fn post_files_inner(
 
     // Warn when the release contains 0-byte files: download clients identify
     // obfuscated files by their md5_16k hash and cannot match empty files,
+    if let Some(text) = proxy_status {
+        shared.emit(ProgressEvent::ProxyStatus { text });
+    }
     // so they end up misplaced after download.  Compression (--compress=rar
     // or --compress=7z) avoids the issue entirely.
     let zero_byte_names: Vec<&str> = metas

@@ -112,6 +112,9 @@ struct Cli {
     /// Route NNTP connections through a SOCKS5 proxy; only SOCKS5 is supported.
     #[arg(short = 'p', long, value_name = "URL")]
     proxy: Option<String>,
+    /// Display the public exit IP through --proxy before posting (contacts api.ipify.org).
+    #[arg(long)]
+    proxy_check_ip: bool,
 
     /// Authentication username [config: auth.username].
     #[arg(short = 'u', long, value_name = "USER")]
@@ -657,6 +660,11 @@ impl Cli {
             port: self.port,
             // `--no-ssl` is the only TLS flag; absent means "defer to config".
             proxy: self.proxy.clone(),
+            proxy_check_ip: if self.proxy_check_ip {
+                Some(true)
+            } else {
+                None
+            },
             ssl: if self.no_ssl { Some(false) } else { None },
             connections: self.connections,
             username: self.username.clone(),

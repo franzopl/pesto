@@ -1791,6 +1791,7 @@ fn build_dry_run_config() -> Config {
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
+        proxy_check_ip: false,
         extra_servers: vec![],
         from: "upapasta@local".into(),
         groups: vec!["alt.binaries.test".into()],

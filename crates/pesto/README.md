@@ -24,6 +24,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Basic usage](#basic-usage)
+- [SOCKS5 proxy](#socks5-proxy)
   - [Post a single file](#post-a-single-file)
   - [Post a directory](#post-a-directory)
   - [Multiple files](#multiple-files)
@@ -141,6 +142,7 @@ host        = "news.example.com"
 port        = 563          # default; 119 for plaintext
 ssl         = true         # default
 connections = 10           # parallel NNTP connections
+proxy       = "socks5://127.0.0.1:1080" # optional; socks5h:// and bare host:port also work
 
 [auth]
 username = "your_username"
@@ -155,7 +157,28 @@ par2    = 10               # % of PAR2 recovery data (0 = disabled)
 nzb_dir = "/home/user/nzbs"   # where .nzb files are saved
 ```
 
+
 Any config field can be overridden by a CLI flag for a single run.
+
+
+### SOCKS5 proxy
+Route every NNTP connection through a SOCKS5 proxy with `--proxy` / `-p`, or
+set `proxy` at the top level or in `[server]`. Proxy credentials are supported,
+and Pesto sends the NNTP hostname to SOCKS5 for remote DNS resolution.
+
+```bash
+# Local dynamic proxy via SSH
+ssh -D 1080 user@jump-host
+pesto -p 127.0.0.1:1080 movie.mkv
+
+# Authenticated commercial proxy
+pesto -p 'socks5://user:password@proxy.example:1080' movie.mkv
+```
+
+Before posting, Pesto verifies the SOCKS5 connection, proxy authentication, and
+NNTP authentication. The live terminal panel keeps a dedicated `proxy` box
+visible throughout the upload; it never prints proxy credentials. Add
+`--proxy-check-ip` to show the public exit IP (it contacts `api.ipify.org`).
 
 With more than one entry, `groups` is a pool of alternatives: one is picked
 at random each run to spread posts across the pool over time — it does not

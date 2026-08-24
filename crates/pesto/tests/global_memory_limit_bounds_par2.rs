@@ -43,6 +43,7 @@ async fn tiny_global_memory_limit_rejects_an_oversized_par2_memory_limit() {
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
+        proxy_check_ip: false,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 10,
