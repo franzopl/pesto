@@ -12,7 +12,7 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
-## [0.8.7] — 2026-08-23
+## [0.8.7] — 2026-08-24
 
 ### Added
 
