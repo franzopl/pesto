@@ -23,8 +23,14 @@ pub struct DownloadClient {
 impl DownloadClient {
     /// Connect and authenticate (if credentials are set) against `server`.
     pub async fn connect(server: &ServerEntry) -> Result<Self> {
-        let mut conn =
-            Connection::connect(&server.host, server.port, server.ssl, server.timeout).await?;
+        let mut conn = Connection::connect_with_proxy(
+            &server.host,
+            server.port,
+            server.ssl,
+            server.timeout,
+            server.proxy.as_ref(),
+        )
+        .await?;
         if let (Some(user), Some(pass)) = (&server.username, &server.password) {
             conn.authenticate(user, pass).await?;
         }

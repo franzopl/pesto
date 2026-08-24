@@ -135,6 +135,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     };
 
     let started = std::time::Instant::now();

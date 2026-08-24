@@ -178,6 +178,8 @@ struct RenderState {
     /// leave the user with no clue why.
     failed_description: Option<String>,
     status: String,
+    /// Persistent SOCKS5 route indicator, independent of transient status notes.
+    proxy_status: Option<String>,
     /// When the current non-empty status text was first set.
     status_since: Option<Instant>,
     /// Last `status` text printed by `draw_plain` — lets it print each new
@@ -345,6 +347,7 @@ impl RenderState {
             interrupted: false,
             failed_description: None,
             status: String::new(),
+            proxy_status: None,
             status_since: None,
             plain_status_printed: String::new(),
             plain_failed_printed: false,
@@ -526,6 +529,9 @@ impl RenderState {
                     self.status_since = Some(Instant::now());
                 }
                 self.status = display_text;
+            }
+            ProgressEvent::ProxyStatus { text } => {
+                self.proxy_status = Some(text);
             }
             ProgressEvent::PostRetryQueued => {
                 self.post_retry_queued_events += 1;
@@ -1417,6 +1423,14 @@ impl RenderState {
         lines.push(format!(
             "pesto  {phase}  {file_count} file(s){target_str}{verb_suffix}{elapsed_hdr}"
         ));
+
+        // Keep proxy routing visible for the entire run instead of sharing the
+        // transient status line used by retries and preparation phases.
+        if let Some(proxy_status) = &self.proxy_status {
+            lines.push(box_top("proxy", body_w));
+            lines.push(box_line(&ansi(proxy_status, "36"), body_w));
+            lines.push(box_bottom(body_w));
+        }
 
         // --- compression box (shown while compressing) -------------------
         if self.compress_active || (final_draw && self.compress_total > 0 && self.files.is_empty())
@@ -2497,6 +2511,27 @@ mod tests {
         assert!(
             !panel.contains("100%"),
             "par2 must not read 100% with slices left:\n{panel}"
+        );
+    }
+
+    #[test]
+    fn proxy_status_has_a_dedicated_persistent_panel() {
+        let mut state = started_state(false);
+        state.apply(ProgressEvent::ProxyStatus {
+            text: "SOCKS5 proxy active via 127.0.0.1:1080; remote DNS enabled".to_string(),
+        });
+        state.apply(ProgressEvent::Status {
+            text: "computing recovery data".to_string(),
+        });
+        let panel = state.panel_lines(false, 100).join("\n");
+        assert!(panel.contains("proxy"), "proxy area missing:\n{panel}");
+        assert!(
+            panel.contains("SOCKS5 proxy active via 127.0.0.1:1080"),
+            "proxy route missing:\n{panel}"
+        );
+        assert!(
+            panel.contains("computing recovery data"),
+            "status missing:\n{panel}"
         );
     }
 

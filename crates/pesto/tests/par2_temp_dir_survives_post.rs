@@ -119,6 +119,8 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         retries: 1,
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
+        proxy_check_ip: false,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 10,

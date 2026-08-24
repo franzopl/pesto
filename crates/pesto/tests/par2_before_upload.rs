@@ -123,6 +123,8 @@ fn config(addr: SocketAddr, par2_before_upload: bool) -> Config {
         retries: 1,
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
+        proxy_check_ip: false,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 20,

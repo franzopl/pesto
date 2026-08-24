@@ -52,6 +52,8 @@ fn season_config(par2_slice_size: usize) -> Config {
         retries: 1,
         retry_delay: 1,
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
+        proxy: None,
+        proxy_check_ip: false,
         obfuscate: ObfuscateMode::None,
         dry_run: false,
         par2: 100,

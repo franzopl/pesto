@@ -175,6 +175,18 @@ nzb_dir = "/home/user/nzbs"   # where .nzb files are saved
 
 Any config field can be overridden by a CLI flag for a single run.
 
+### SOCKS5 proxy
+
+Route every NNTP connection (including failover and verification connections) through SOCKS5 with `--proxy` / `-p`, or set `proxy = "socks5://host:port"` at the top level or under `[server]`. Bare `host:port` and `socks5h://` are accepted. The NNTP hostname is sent to the proxy for remote DNS resolution.
+
+Before any article is posted, pesto validates the SOCKS5 connection, proxy authentication, and NNTP connection. The active proxy remains visible in a dedicated `proxy` panel throughout the upload. Add `--proxy-check-ip` to display the public exit IP through the proxy; this optional check contacts `api.ipify.org`.
+
+```bash
+ssh -D 1080 user@jump-host
+pesto -p 127.0.0.1:1080 movie.mkv
+# authenticated commercial proxy: --proxy socks5://user:pass@proxy.example:1080
+```
+
 ### Multiple servers with automatic failover
 
 ```toml
@@ -1043,6 +1055,8 @@ picked up automatically — no config change needed.
 | `--port <PORT>` | `server.port` | `563` | NNTP server port |
 | `--no-ssl` | `server.ssl` | TLS on | Disable TLS (plaintext) |
 | `--connections <N>` | `server.connections` | `4` | Parallel NNTP connections |
+| `-p`, `--proxy <URL>` | `proxy` or `server.proxy` | — | Route NNTP through SOCKS5 only (`socks5://host:port`) |
+| `--proxy-check-ip` | — | off | Display public exit IP through the SOCKS5 proxy (contacts api.ipify.org) |
 | `--retry-delay <SECS>` | `server.retry_delay` | `1` | Seconds between retries |
 | `--username <USER>` | `auth.username` | — | NNTP username |
 | `--auth-password <PASS>` | `auth.password` | — | NNTP password |

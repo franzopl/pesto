@@ -189,6 +189,7 @@ async fn multiple_connections_to_one_server_run_concurrently() {
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     };
     let dest_dir = tempfile::tempdir().unwrap();
 
@@ -285,6 +286,7 @@ async fn two_pooled_servers_are_drained_concurrently_as_one_tier() {
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     };
     let tier = ServerTier {
         members: vec![member(addr_a), member(addr_b)],
@@ -350,6 +352,7 @@ async fn progress_events_arrive_while_the_download_is_still_running() {
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     };
     let dest_dir = tempfile::tempdir().unwrap();
     let dest_path = dest_dir.path().to_path_buf();
@@ -428,6 +431,7 @@ async fn missing_progress_events_arrive_while_the_download_is_still_running() {
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     };
     let dest_dir = tempfile::tempdir().unwrap();
     let dest_path = dest_dir.path().to_path_buf();
@@ -520,6 +524,7 @@ async fn a_file_that_finishes_early_is_assembled_before_the_rest_of_the_queue() 
         password: None,
         retry_delay: 0,
         timeout: 5,
+        proxy: None,
     };
     let dest_dir = tempfile::tempdir().unwrap();
     let dest_path = dest_dir.path().to_path_buf();

@@ -306,8 +306,14 @@ impl ConnectionBroker {
 /// Open a connection to `server` and authenticate when credentials are
 /// configured.
 pub(crate) async fn connect_and_auth(server: &ServerEntry) -> Result<Connection> {
-    let mut conn =
-        Connection::connect(&server.host, server.port, server.ssl, server.timeout).await?;
+    let mut conn = Connection::connect_with_proxy(
+        &server.host,
+        server.port,
+        server.ssl,
+        server.timeout,
+        server.proxy.as_ref(),
+    )
+    .await?;
     if let Some(username) = &server.username {
         let password = server.password.as_deref().unwrap_or("");
         conn.authenticate(username, password).await?;
@@ -354,6 +360,7 @@ mod tests {
             password: None,
             retry_delay: 1,
             timeout: crate::config::DEFAULT_TIMEOUT_SECS,
+            proxy: None,
         }
     }
 

@@ -84,6 +84,9 @@ pub enum ProgressEvent {
     },
     /// A short human-readable status note (empty string clears it).
     Status { text: String },
+    /// Persistent SOCKS5 routing information shown separately from transient
+    /// upload status notes. The text must never contain proxy credentials.
+    ProxyStatus { text: String },
     /// A detailed failure from a producer or a segment that exhausted the
     /// main posting retry budget. Segment failures may still be recovered by
     /// the bounded end-of-run rescue pass.
@@ -366,6 +369,10 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     ProgressEvent::Status { text } => {
                         let text_esc = text.replace('\\', "\\\\").replace('"', "\\\"");
                         let _ = writeln!(out, r#"{{"type":"status","text":"{text_esc}"}}"#);
+                    }
+                    ProgressEvent::ProxyStatus { text } => {
+                        let text_esc = text.replace('\\', "\\\\").replace('"', "\\\"");
+                        let _ = writeln!(out, r#"{{"type":"proxy_status","text":"{text_esc}"}}"#);
                     }
                     ProgressEvent::Failed { description } => {
                         let desc_esc = description.replace('\\', "\\\\").replace('"', "\\\"");

@@ -2,7 +2,7 @@
 name = "pesto-poster"
 # pesto is versioned, published, and released independently of the rest of
 # the workspace (own CHANGELOG.md, own `pesto-v*` tag) — see RELEASING.md.
-version = "0.8.6"
+version = "0.8.7"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation. Also provides the core library used by upapasta."
@@ -31,10 +31,11 @@ serde_json = "1"
 toml = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "fs", "signal", "sync"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-socks = "0.5.3"
 webpki-roots = "0.26"
 rayon = "1.12.0"
 crc32fast = "1.4"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "json", "socks"] }
 sha2 = "0.10"
 tempfile = "3"
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }

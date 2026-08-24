@@ -136,6 +136,15 @@ impl Config {
     pub fn resolve(file: FileConfig, cli: Overrides) -> Result<Self> {
         let dry_run = cli.dry_run.unwrap_or(false);
         let par2_only = cli.par2_only.unwrap_or(false);
+        let proxy = cli
+            .proxy
+            .or(file.proxy)
+            .or(file.server.proxy.clone())
+            .as_deref()
+            .map(Socks5Proxy::parse)
+            .transpose()
+            .context("parsing SOCKS5 proxy")?;
+        let proxy_check_ip = cli.proxy_check_ip.unwrap_or(false);
 
         let tmdb = cli
             .tmdb
@@ -198,6 +207,7 @@ impl Config {
                             password: e.password,
                             retry_delay: e.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
                             // Per-entry timeout, falling back to the primary's.
+                            proxy: proxy.clone(),
                             timeout: e.timeout.unwrap_or(timeout),
                         })
                     })
@@ -261,6 +271,8 @@ impl Config {
             connections,
             username,
             password,
+            proxy,
+            proxy_check_ip,
             retry_delay,
             timeout,
             extra_servers,

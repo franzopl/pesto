@@ -283,6 +283,7 @@ impl RawConfig {
                 password: s.password,
                 retry_delay: s.retry_delay.unwrap_or(DEFAULT_RETRY_DELAY),
                 timeout: 120,
+                proxy: None,
             };
             let joins_current_tier =
                 matches!((s.group, current_group), (Some(g), Some(cg)) if g == cg);

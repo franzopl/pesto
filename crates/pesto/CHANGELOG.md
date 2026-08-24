@@ -12,6 +12,13 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-08-23
+
+### Added
+
+- Native SOCKS5 proxy support for every NNTP connection via `--proxy` / `-p` and `proxy` configuration, including username/password authentication and proxy-side DNS resolution.
+- Pre-upload SOCKS5 and NNTP authentication validation, an optional `--proxy-check-ip` exit-IP check, and a persistent dedicated proxy panel in terminal progress output.
+
 ## [0.8.6] — 2026-08-22
 
 ### Added
