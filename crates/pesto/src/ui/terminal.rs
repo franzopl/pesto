@@ -294,8 +294,13 @@ struct RenderState {
     check_active: bool,
     check_checked: u64,
     check_failed: u64,
+    /// Articles whose STAT path failed (transport/timeout/unexpected code)
+    /// rather than a confirmed 430. Distinct from `check_failed`.
+    check_inconclusive: u64,
     check_reposted: u64,
     check_start: Instant,
+    /// Latest fast-repost heuristic snapshot, shown until the run ends.
+    check_fast_repost: Option<(u64, u64)>,
     /// Most recent retry backoff still in its window: (label without the
     /// countdown, e.g. "connection error — retry 1/3", deadline). Cleared
     /// once the deadline passes (`expire_check_retry`) rather than on every
@@ -378,9 +383,11 @@ impl RenderState {
             check_active: false,
             check_checked: 0,
             check_failed: 0,
+            check_inconclusive: 0,
             check_reposted: 0,
             check_start: Instant::now(),
             check_retry: None,
+            check_fast_repost: None,
             recover_active: false,
             recover_done: 0,
             recover_total: 0,
@@ -670,6 +677,25 @@ impl RenderState {
                 if !ok {
                     self.check_failed += 1;
                 }
+            }
+            ProgressEvent::CheckInconclusive { count, .. } => {
+                if !self.check_active {
+                    self.started = true;
+                    self.check_active = true;
+                    self.check_start = Instant::now();
+                }
+                self.check_inconclusive = count;
+            }
+            ProgressEvent::CheckFastRepost {
+                first_checks,
+                first_misses,
+            } => {
+                if !self.check_active {
+                    self.started = true;
+                    self.check_active = true;
+                    self.check_start = Instant::now();
+                }
+                self.check_fast_repost = Some((first_checks, first_misses));
             }
             ProgressEvent::CheckRetrying {
                 attempt,
@@ -1008,8 +1034,13 @@ impl RenderState {
                 String::new()
             };
             if self.failures + self.check_failed > 0 {
+                let inconclusive_note = if self.check_inconclusive > 0 {
+                    format!(" · {}", inconclusive_label(self.check_inconclusive))
+                } else {
+                    String::new()
+                };
                 format!(
-                    "upload incomplete · {} unresolved",
+                    "upload incomplete · {} unresolved{inconclusive_note}",
                     self.failures + self.check_failed
                 )
             } else if self.mode == RunMode::Post && self.checks_enabled {
@@ -1325,6 +1356,12 @@ impl RenderState {
             }
         }
 
+        if self.check_inconclusive > 0 {
+            lines.push(format!(
+                "  {}",
+                ansi(&inconclusive_label(self.check_inconclusive), "33")
+            ));
+        }
         if let Some(desc) = &self.failed_description {
             lines.push(format!("  {}", ansi(&format!("⚠ {desc}"), "33")));
         }
@@ -1602,6 +1639,15 @@ impl RenderState {
                 lines.push(box_top("availability", body_w));
                 lines.push(box_line(&line1, body_w));
                 lines.push(box_line(&line2, body_w));
+                if self.check_inconclusive > 0 {
+                    lines.push(box_line(
+                        &ansi(&inconclusive_label(self.check_inconclusive), "33"),
+                        body_w,
+                    ));
+                }
+                if let Some((n, m)) = self.check_fast_repost {
+                    lines.push(box_line(&fast_repost_label(n, m), body_w));
+                }
                 lines.push(box_bottom(body_w));
             }
 
@@ -2009,6 +2055,15 @@ impl RenderState {
                 let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
                 suffix.push_str(&format!(" · {label} in {remaining}s"));
             }
+            if self.check_inconclusive > 0 {
+                suffix.push_str(&format!(
+                    " · {}",
+                    inconclusive_label(self.check_inconclusive)
+                ));
+            }
+            if let Some((n, m)) = self.check_fast_repost {
+                suffix.push_str(&format!(" · {}", fast_repost_label(n, m)));
+            }
             suffix
         } else {
             String::new()
@@ -2178,6 +2233,17 @@ fn render_dual_bar(checked_frac: f64, total_frac: f64, width: usize) -> String {
         s.push('░');
     }
     s
+}
+
+/// Inconclusive STAT-path failures: not a confirmed 430 gap.
+fn inconclusive_label(count: u64) -> String {
+    format!("{count} inconclusive (check path failed — not a confirmed gap)")
+}
+
+/// Fast-repost heuristic snapshot for the availability box / plain suffix.
+fn fast_repost_label(first_checks: u64, first_misses: u64) -> String {
+    let pct = (first_misses as f64 / first_checks.max(1) as f64 * 100.0).round() as u64;
+    format!("fast-repost: isolated miss (miss rate {pct}% of {first_checks} first checks)")
 }
 
 /// Human-readable byte size with binary (IEC) units.
@@ -2906,6 +2972,59 @@ mod tests {
         assert!(summary.contains("accepted by the server"));
         assert!(summary.contains("Not independently verified"));
         assert!(!summary.contains("articles confirmed"));
+    }
+
+    #[test]
+    fn inconclusive_is_shown_distinctly_from_missing() {
+        let mut state = upload_done_check_running();
+        state.apply(ProgressEvent::CheckInconclusive {
+            count: 2,
+            reason: "connection error",
+        });
+        state.apply(ProgressEvent::CheckProgress {
+            checked: state.total_segments,
+            ok: false,
+        });
+        state.apply(ProgressEvent::CheckDone { failed: 1 });
+
+        let panel = state.panel_lines(true, 160).join("\n");
+        assert!(
+            panel.contains("2 inconclusive (check path failed — not a confirmed gap)"),
+            "availability box should name inconclusive distinctly:\n{panel}"
+        );
+        assert!(
+            panel.contains("1 missing"),
+            "confirmed-missing tally must still appear alongside inconclusive:\n{panel}"
+        );
+        assert!(
+            !panel.contains("2 missing"),
+            "inconclusive count must not be labelled as missing:\n{panel}"
+        );
+
+        let summary = state.summary_lines(160).join("\n");
+        assert!(
+            summary.contains("2 inconclusive (check path failed — not a confirmed gap)"),
+            "final summary should name inconclusive:\n{summary}"
+        );
+        assert!(
+            summary.contains("unresolved failure"),
+            "NZB-policy missing count stays in the summary:\n{summary}"
+        );
+        assert!(summary.contains('✗'));
+    }
+
+    #[test]
+    fn fast_repost_is_shown_when_it_fires() {
+        let mut state = upload_done_check_running();
+        state.apply(ProgressEvent::CheckFastRepost {
+            first_checks: 20,
+            first_misses: 1,
+        });
+        let panel = state.panel_lines(false, 160).join("\n");
+        assert!(
+            panel.contains("fast-repost: isolated miss (miss rate 5% of 20 first checks)"),
+            "availability box should report the fast-repost heuristic:\n{panel}"
+        );
     }
 
     #[test]

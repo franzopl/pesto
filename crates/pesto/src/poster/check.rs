@@ -132,6 +132,8 @@ struct Inner {
     /// simplicity.
     first_checks: AtomicUsize,
     first_misses: AtomicUsize,
+    /// Articles whose STAT path exhausted retries with `Err`, not 430.
+    inconclusive_count: AtomicUsize,
 }
 
 impl Inner {
@@ -300,6 +302,7 @@ pub fn spawn_check_coordinator(
         reposted_count: AtomicUsize::new(0),
         first_checks: AtomicUsize::new(0),
         first_misses: AtomicUsize::new(0),
+        inconclusive_count: AtomicUsize::new(0),
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<PostedSegment>();
@@ -454,6 +457,15 @@ async fn process_item(
                     // simply behind on indexing, so skip the remaining
                     // patient retries (which would just delay an
                     // already-correct verdict) and repost right away.
+                    inner.emit(ProgressEvent::CheckFastRepost {
+                        first_checks: checks as u64,
+                        first_misses: misses as u64,
+                    });
+                    info!(
+                        first_checks = checks,
+                        first_misses = misses,
+                        "check: fast-repost of isolated miss"
+                    );
                     handle_confirmed_miss(inner, slot, worker_idx, item).await;
                     return;
                 }
@@ -501,6 +513,12 @@ async fn process_item(
                 });
                 return;
             }
+            // Distinct from a 430 miss: STAT itself never completed.
+            let count = inner.inconclusive_count.fetch_add(1, Ordering::Relaxed) + 1;
+            inner.emit(ProgressEvent::CheckInconclusive {
+                count: count as u64,
+                reason: "connection error",
+            });
             handle_confirmed_miss(inner, slot, worker_idx, item).await;
         }
     }

@@ -169,7 +169,23 @@ pub enum ProgressEvent {
     /// (verified, or given up on after every repost attempt); `ok` is true
     /// if this particular article was confirmed. Fires continuously,
     /// concurrently with the upload — there is no separate "check phase".
+    /// Shape is load-bearing: embedding matchers (UpaPasta) bind
+    /// `{ checked, ok }` without `..`.
     CheckProgress { checked: u64, ok: bool },
+    /// STAT itself failed (timeout, transport, 480/502, unexpected code)
+    /// until `check_retries` ran out, without ever seeing a 430. `count` is
+    /// how many articles have taken this path so far this run; `reason`
+    /// matches [`Self::CheckRetrying`] (`"connection error"` today).
+    /// Distinct from a confirmed gap — do not conflate with
+    /// [`Self::CheckProgress`] `{ ok: false }`.
+    CheckInconclusive { count: u64, reason: &'static str },
+    /// An isolated first-copy 430 skipped the remaining patient STAT
+    /// retries and went straight to repost. `first_checks` / `first_misses`
+    /// are the running totals that satisfied the fast-repost heuristic.
+    CheckFastRepost {
+        first_checks: u64,
+        first_misses: u64,
+    },
     /// The streaming check queue has fully drained (all articles resolved).
     /// `failed` is the number of articles that were never confirmed even
     /// after every repost attempt.
@@ -435,6 +451,22 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                         let _ = writeln!(
                             out,
                             r#"{{"type":"check_progress","checked":{checked},"ok":{ok_str}}}"#
+                        );
+                    }
+                    ProgressEvent::CheckInconclusive { count, reason } => {
+                        let reason_esc = reason.replace('\\', "\\\\").replace('"', "\\\"");
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_inconclusive","count":{count},"reason":"{reason_esc}"}}"#
+                        );
+                    }
+                    ProgressEvent::CheckFastRepost {
+                        first_checks,
+                        first_misses,
+                    } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_fast_repost","first_checks":{first_checks},"first_misses":{first_misses}}}"#
                         );
                     }
                     ProgressEvent::CheckDone { failed } => {
