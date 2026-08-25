@@ -267,6 +267,10 @@ impl CheckCoordinatorHandle {
     /// or given up on. Returns the Message-IDs that could never be confirmed
     /// and the slots every worker held, still in budget, for the caller to
     /// hand to [`recover_missing`] or check in as a single set.
+    ///
+    /// A panicking worker's `JoinError` drops its slot; if that slot was
+    /// broker-checked-out, [`ConnectionSlot`]'s Drop replenishes the idle
+    /// pool so `--jobs` cannot deadlock on a leaked permit.
     pub async fn finish_and_drain(mut self) -> (Vec<String>, Vec<ConnectionSlot>) {
         drop(self.tx.take());
         let _ = self.feeder.await;
@@ -469,7 +473,9 @@ async fn process_item(
             inner.in_flight.fetch_sub(1, Ordering::AcqRel);
         }
         Ok(false) => {
-            slot.invalidate("stat_430");
+            // 430 is a definitive miss on this connection, not a dead
+            // socket. Invalidating here would open a replacement TCP per
+            // miss and break the process-wide connection budget.
             item.stat_attempts += 1;
             if is_first_attempt {
                 let checks = inner.first_checks.fetch_add(1, Ordering::Relaxed) + 1;

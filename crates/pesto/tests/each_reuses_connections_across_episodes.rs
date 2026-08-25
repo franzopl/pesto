@@ -10,36 +10,53 @@
 //! near the connection budget (2) instead of scaling with the episode count
 //! (which would show up as ~10).
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-fn spawn_counting_server(accepted: Arc<AtomicUsize>) -> SocketAddr {
-    spawn_counting_server_with_post_delay(accepted, Duration::ZERO)
+/// First STAT per article Subject reports missing; later STATs (the
+/// `recover_missing` pass's own Message-ID) succeed. Shared across every
+/// accepted TCP so overlapping `--jobs` episodes still count per-article.
+struct FirstStatMiss {
+    subject_by_id: Mutex<HashMap<String, String>>,
+    attempts_by_subject: Mutex<HashMap<String, u32>>,
 }
 
-fn spawn_counting_server_with_post_delay(
+fn spawn_counting_server(accepted: Arc<AtomicUsize>) -> SocketAddr {
+    spawn_counting_server_with_options(accepted, Duration::ZERO, false)
+}
+
+fn spawn_counting_server_with_options(
     accepted: Arc<AtomicUsize>,
     post_delay: Duration,
+    first_stat_miss: bool,
 ) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let miss = first_stat_miss.then(|| {
+        Arc::new(FirstStatMiss {
+            subject_by_id: Mutex::new(HashMap::new()),
+            attempts_by_subject: Mutex::new(HashMap::new()),
+        })
+    });
 
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             accepted.fetch_add(1, Ordering::SeqCst);
-            std::thread::spawn(move || handle_connection(stream, post_delay));
+            let miss = miss.clone();
+            std::thread::spawn(move || handle_connection(stream, post_delay, miss));
         }
     });
 
     addr
 }
 
-fn handle_connection(stream: TcpStream, post_delay: Duration) {
+fn handle_connection(stream: TcpStream, post_delay: Duration, miss: Option<Arc<FirstStatMiss>>) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -62,6 +79,8 @@ fn handle_connection(stream: TcpStream, post_delay: Duration) {
             if writer.write_all(b"340 send article\r\n").is_err() {
                 return;
             }
+            let mut message_id = String::new();
+            let mut subject = String::new();
             let mut raw = Vec::new();
             loop {
                 raw.clear();
@@ -72,6 +91,23 @@ fn handle_connection(stream: TcpStream, post_delay: Duration) {
                 if raw == b".\r\n" {
                     break;
                 }
+                if miss.is_some() {
+                    if let Ok(text) = std::str::from_utf8(&raw) {
+                        if let Some(v) = text.strip_prefix("Message-ID: ") {
+                            message_id = v.trim_end().to_string();
+                        } else if let Some(v) = text.strip_prefix("Subject: ") {
+                            subject = v.trim_end().to_string();
+                        }
+                    }
+                }
+            }
+            if let Some(miss) = &miss {
+                if !message_id.is_empty() && !subject.is_empty() {
+                    miss.subject_by_id
+                        .lock()
+                        .unwrap()
+                        .insert(message_id, subject);
+                }
             }
             if !post_delay.is_zero() {
                 std::thread::sleep(post_delay);
@@ -79,8 +115,25 @@ fn handle_connection(stream: TcpStream, post_delay: Duration) {
             if writer.write_all(b"240 article received\r\n").is_err() {
                 return;
             }
-        } else if command.starts_with("STAT ") {
-            if writer.write_all(b"223 0 article exists\r\n").is_err() {
+        } else if let Some(id) = command.strip_prefix("STAT ") {
+            let found = if let Some(miss) = &miss {
+                let subject = miss.subject_by_id.lock().unwrap().get(id).cloned();
+                let attempt = subject.map(|s| {
+                    let mut attempts = miss.attempts_by_subject.lock().unwrap();
+                    let n = attempts.entry(s).or_insert(0);
+                    *n += 1;
+                    *n
+                });
+                attempt.is_some_and(|n| n > 1)
+            } else {
+                true
+            };
+            let resp: &[u8] = if found {
+                b"223 0 article exists\r\n"
+            } else {
+                b"430 no such article found\r\n"
+            };
+            if writer.write_all(resp).is_err() {
                 return;
             }
         } else if command.starts_with("MODE READER") {
@@ -155,22 +208,34 @@ fn each_batch_reuses_connections_instead_of_one_pool_per_episode() {
 /// second peak of sockets for check workers / `scale_up` / `recover_missing`.
 /// Episode B blocks on the broker until A has drained+recovered and
 /// checkined the whole set.
+///
+/// Geometry: auto `-n 4` is 1 check + 3 upload. Three segments per episode
+/// so `worker_count == upload_conns` and every budgeted post slot connects.
+/// First STAT per article misses and `--check-post-retries 0` skips the
+/// streaming repost, so `recover_missing` runs on the drained slots.
 #[test]
 fn each_jobs_check_overlapping_start_honors_connection_budget() {
     const CONNECTIONS: usize = 4;
     const EPISODES: usize = 2;
+    const ARTICLE_SIZE: usize = 4096;
+    const SEGMENTS: usize = 3;
 
     let accepted = Arc::new(AtomicUsize::new(0));
     // Slow POSTs so episode B is already waiting on checkout while A still
-    // holds the full budget (check + upload + drain), not two sequential
-    // `--each` runs that would never overlap.
-    let addr = spawn_counting_server_with_post_delay(accepted.clone(), Duration::from_millis(200));
+    // holds the full budget (check + upload + drain + recover), not two
+    // sequential `--each` runs that would never overlap.
+    let addr =
+        spawn_counting_server_with_options(accepted.clone(), Duration::from_millis(200), true);
 
     let dir = tempfile::tempdir().unwrap();
     for i in 0..EPISODES {
         let entry_dir = dir.path().join(format!("episode_{i:02}"));
         std::fs::create_dir_all(&entry_dir).unwrap();
-        std::fs::write(entry_dir.join("movie.bin"), vec![0xABu8; 4096]).unwrap();
+        std::fs::write(
+            entry_dir.join("movie.bin"),
+            vec![0xABu8; ARTICLE_SIZE * SEGMENTS],
+        )
+        .unwrap();
     }
     let out = dir.path().join("out.nzb");
     let xdg_home = tempfile::tempdir().unwrap();
@@ -182,11 +247,14 @@ fn each_jobs_check_overlapping_start_honors_connection_budget() {
         .args(["-P", &addr.port().to_string()])
         .args(["-g", "alt.binaries.test"])
         .args(["-n", &CONNECTIONS.to_string()])
-        .args(["--article-size", "4096"])
+        .args(["--article-size", &ARTICLE_SIZE.to_string()])
         .args(["--par2", "0"])
         .arg("--no-hooks")
         .arg("--check")
         .args(["--check-delay", "0"])
+        .args(["--check-retries", "1"])
+        .args(["--check-post-retries", "0"])
+        .args(["--check-recover-percent", "100"])
         .arg("--each")
         .args(["--jobs", "2"])
         .args(["-o", out.to_str().unwrap()])
@@ -202,10 +270,11 @@ fn each_jobs_check_overlapping_start_honors_connection_budget() {
 
     let total = accepted.load(Ordering::SeqCst);
     assert!(
-        total <= CONNECTIONS + 1,
-        "expected accept() ≤ {CONNECTIONS} (not 2×) with overlapping --jobs 2 --check, \
-         but the mock server accepted {total} connections — check workers or \
-         scale_up/recover_missing opened sockets outside the broker budget"
+        total <= CONNECTIONS,
+        "expected accept() ≤ {CONNECTIONS} (not 2×, and not N+1 extra-socket slack) \
+         with overlapping --jobs 2 --check, but the mock server accepted {total} \
+         connections — check workers, scale_up, or recover_missing opened sockets \
+         outside the broker budget"
     );
 }
 
