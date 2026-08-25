@@ -345,9 +345,15 @@ impl ConnectionBroker {
     /// Return a checked-out connection to the idle pool instead of closing
     /// it, so a later `checkout` (the next episode, or another concurrent
     /// one) can reuse it without reconnecting.
+    ///
+    /// The Drop lease stays armed until the slot is in `idle`. Cancelling
+    /// this call at `idle.lock()` therefore still replenishes via Drop,
+    /// instead of leaking a `--jobs` permit.
     pub async fn checkin(&self, mut slot: ConnectionSlot) {
+        let mut idle = self.idle.lock().await;
         slot.broker = None;
-        self.idle.lock().await.push_back((slot, Instant::now()));
+        idle.push_back((slot, Instant::now()));
+        drop(idle);
         self.permits.add_permits(1);
     }
 
@@ -571,6 +577,32 @@ mod tests {
         assert!(
             resumed.is_ok(),
             "dropping a checked-out slot must replenish the broker so --jobs cannot deadlock"
+        );
+        keepalive.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_checkin_still_returns_capacity() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(1)]), 1, 0);
+        let mut slots = broker.checkout(1).await;
+        let slot = slots.pop().unwrap();
+
+        // Hold idle so checkin blocks on the mutex; aborting then drops the
+        // slot while the lease is still armed.
+        let hold = broker.idle.lock().await;
+        let broker_for_checkin = broker.clone();
+        let checkin_task = tokio::spawn(async move {
+            broker_for_checkin.checkin(slot).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        checkin_task.abort();
+        let _ = checkin_task.await;
+        drop(hold);
+
+        let resumed = tokio::time::timeout(Duration::from_millis(200), broker.checkout(1)).await;
+        assert!(
+            resumed.is_ok(),
+            "aborting checkin while idle is locked must still replenish via Drop"
         );
         keepalive.abort();
     }
