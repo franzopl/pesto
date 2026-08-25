@@ -2,7 +2,7 @@
 //!
 //! Mock NNTP only — never a real provider.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -140,6 +140,105 @@ async fn spawn_mock(stat: StatBehaviour, post_already_exists: bool) -> (u16, Moc
         });
     }
     (addr.port(), counts)
+}
+
+/// POST 240, STAT 430, then AUTH 481 on the reconnect that `repost_one` does
+/// after `handle_confirmed_miss`. AUTH 48x must be Inconclusive, not a 4xx
+/// article refusal.
+async fn spawn_430_then_auth_481() -> (u16, MockStats) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let counts = MockStats::default();
+    let seen_stat = Arc::new(AtomicBool::new(false));
+    {
+        let counts = counts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let counts = counts.clone();
+                let seen_stat = seen_stat.clone();
+                tokio::spawn(async move {
+                    handle_430_then_auth_481(stream, counts, seen_stat).await;
+                });
+            }
+        });
+    }
+    (addr.port(), counts)
+}
+
+async fn handle_430_then_auth_481(
+    stream: TcpStream,
+    counts: MockStats,
+    seen_stat: Arc<AtomicBool>,
+) {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    write_half
+        .write_all(b"200 pesto mock ready\r\n")
+        .await
+        .unwrap();
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await.unwrap() == 0 {
+            return;
+        }
+        let command = line.trim_end();
+
+        if command.starts_with("AUTHINFO USER") {
+            write_half
+                .write_all(b"381 password required\r\n")
+                .await
+                .unwrap();
+        } else if command.starts_with("AUTHINFO PASS") {
+            if seen_stat.load(Ordering::Relaxed) {
+                write_half
+                    .write_all(b"481 Authentication failed\r\n")
+                    .await
+                    .unwrap();
+            } else {
+                write_half
+                    .write_all(b"281 authenticated\r\n")
+                    .await
+                    .unwrap();
+            }
+        } else if command == "POST" {
+            write_half.write_all(b"340 send article\r\n").await.unwrap();
+            let mut body = Vec::new();
+            loop {
+                body.clear();
+                if reader.read_until(b'\n', &mut body).await.unwrap() == 0 {
+                    return;
+                }
+                if body == b".\r\n" {
+                    break;
+                }
+            }
+            counts.posts.fetch_add(1, Ordering::Relaxed);
+            write_half
+                .write_all(b"240 article received\r\n")
+                .await
+                .unwrap();
+        } else if command.starts_with("STAT ") {
+            counts.stats.fetch_add(1, Ordering::Relaxed);
+            seen_stat.store(true, Ordering::Relaxed);
+            write_half
+                .write_all(b"430 No such article\r\n")
+                .await
+                .unwrap();
+        } else if command.starts_with("MODE READER") {
+            write_half.write_all(b"200 reader mode\r\n").await.unwrap();
+        } else if command == "QUIT" {
+            write_half.write_all(b"205 bye\r\n").await.unwrap();
+            return;
+        } else {
+            write_half
+                .write_all(b"500 unknown command\r\n")
+                .await
+                .unwrap();
+        }
+    }
 }
 
 fn test_config(port: u16) -> Config {
@@ -441,4 +540,43 @@ async fn t21_run_upload_refuses_nzb_on_inconclusive() {
     assert!(!nzb.exists());
     let state_path = nzb.with_extension("pesto-state");
     assert!(state_path.exists());
+}
+
+/// AUTH 481 on the reconnect after a STAT 430 must be Inconclusive, not a
+/// 4xx article refusal. `handle_confirmed_miss` invalidates the slot and
+/// `repost_one` re-AUTHs; 48x is the AUTH class, not MissingConfirmed.
+#[tokio::test(flavor = "multi_thread")]
+async fn auth_481_on_repost_after_430_is_inconclusive() {
+    let (port, _) = spawn_430_then_auth_481().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = input(dir.path(), "movie.bin", 80);
+    let state_path = dir.path().join("movie.bin.pesto-state");
+    let mut config = test_config(port);
+    config.check_post_retries = 1;
+
+    let outcome = post_files_with_progress(
+        &config,
+        std::slice::from_ref(&file),
+        None,
+        Some(&state_path),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        outcome.still_missing.is_empty(),
+        "AUTH 481 on repost must not become MissingConfirmed: {:?}",
+        outcome.still_missing
+    );
+    assert!(
+        !outcome.inconclusive.is_empty(),
+        "AUTH 481 on repost must be Inconclusive"
+    );
+    assert!(state_path.exists());
+    let state = ResumeState::load(&state_path).unwrap();
+    assert!(
+        state.get("movie.bin", 1).is_some(),
+        "Inconclusive must not strip the stored id"
+    );
 }

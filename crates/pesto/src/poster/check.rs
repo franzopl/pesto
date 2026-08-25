@@ -802,10 +802,15 @@ fn nntp_error_code(err: &anyhow::Error) -> Option<u16> {
 }
 
 /// True when a repost failed because the server refused the article (441 or
-/// other 4xx except AUTH 480). Connect/timeout/5xx/AUTH are Inconclusive.
+/// other 4xx except the AUTH 48x class). Connect/timeout/5xx/AUTH 480–489
+/// are Inconclusive.
 fn is_post_refusal(err: &anyhow::Error) -> bool {
+    let s = err.to_string();
+    if s.contains("authentication rejected by server") {
+        return false;
+    }
     match nntp_error_code(err) {
-        Some(480) => false,
+        Some(480..=489) => false,
         Some(code) if (400..500).contains(&code) => true,
         _ => false,
     }
@@ -1035,7 +1040,16 @@ mod tests {
             "authentication rejected by server (code 502); check the configured username and password"
         )));
         assert!(!is_post_refusal(&err(
+            "authentication rejected by server (code 481); check the configured username and password"
+        )));
+        assert!(!is_post_refusal(&err(
+            "authentication rejected by server (code 482); check the configured username and password"
+        )));
+        assert!(!is_post_refusal(&err(
             "POST not permitted: 480 Authentication required"
+        )));
+        assert!(!is_post_refusal(&err(
+            "unexpected POST response: 481 Authentication failed"
         )));
         assert!(!is_post_refusal(&err(
             "unexpected POST response: 502 Permission denied"
