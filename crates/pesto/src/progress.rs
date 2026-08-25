@@ -52,8 +52,8 @@ pub enum ProgressEvent {
         /// (0 for `--par2-only`) — does not include `check_connections`.
         connections: usize,
         /// Number of NNTP connections dedicated to the streaming STAT check
-        /// (`poster::check`), carved out of (or additive to) `connections` —
-        /// see `split_connections`. 0 when checking is disabled.
+        /// (`poster::check`), carved out of `connections` — see
+        /// `split_connections`. 0 when checking is disabled.
         check_connections: usize,
         /// `host:port` of the NNTP server, or `None` when not posting.
         target: Option<String>,

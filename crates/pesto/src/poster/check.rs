@@ -22,7 +22,7 @@
 //! answered by flooding an already-struggling server with reposts.
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -227,7 +227,7 @@ pub struct CheckCoordinatorHandle {
     tx: Option<mpsc::UnboundedSender<PostedSegment>>,
     inner: Arc<Inner>,
     feeder: tokio::task::JoinHandle<()>,
-    workers: Vec<tokio::task::JoinHandle<()>>,
+    workers: Vec<tokio::task::JoinHandle<ConnectionSlot>>,
 }
 
 impl CheckCoordinatorHandle {
@@ -238,20 +238,17 @@ impl CheckCoordinatorHandle {
         self.tx.clone().expect("sender available before drain")
     }
 
-    /// Spawn `additional` more check workers on the same queue, reusing
-    /// connections that just freed up — e.g. once the upload's own worker
-    /// pool has finished and would otherwise sit idle while a small
-    /// dedicated check pool drains whatever backlog is left. Safe to call
-    /// any time, including when the queue is already empty or draining has
-    /// finished: idle workers just poll harmlessly and exit once there's
-    /// nothing left, without ever opening a connection (connections are
-    /// opened lazily, only when a worker actually has an article to check).
-    pub fn scale_up(&mut self, additional: usize) {
+    /// Move idle post slots that just finished posting onto the check
+    /// queue. Already in the connection budget — never opens TCP, never
+    /// checkins to the broker. Safe to call when the queue is already
+    /// empty: idle workers poll and exit without connecting.
+    pub fn scale_up(&mut self, slots: Vec<ConnectionSlot>) {
+        let additional = slots.len();
         let base_idx = self.workers.len();
-        for i in 0..additional {
+        for (i, slot) in slots.into_iter().enumerate() {
             let inner = Arc::clone(&self.inner);
             self.workers.push(tokio::spawn(async move {
-                check_worker(inner, base_idx + i).await;
+                check_worker(inner, base_idx + i, slot).await
             }));
         }
         if additional > 0 {
@@ -267,40 +264,42 @@ impl CheckCoordinatorHandle {
 
     /// Close the input (no more segments will be queued) and wait for every
     /// queued/in-flight article to resolve — verified, reposted-and-verified,
-    /// or given up on. Returns the Message-IDs that could never be confirmed.
-    pub async fn finish_and_drain(mut self) -> Vec<String> {
+    /// or given up on. Returns the Message-IDs that could never be confirmed
+    /// and the slots every worker held, still in budget, for the caller to
+    /// hand to [`recover_missing`] or check in as a single set.
+    pub async fn finish_and_drain(mut self) -> (Vec<String>, Vec<ConnectionSlot>) {
         drop(self.tx.take());
         let _ = self.feeder.await;
+        let mut slots = Vec::with_capacity(self.workers.len());
         for w in self.workers {
-            let _ = w.await;
+            if let Ok(slot) = w.await {
+                slots.push(slot);
+            }
         }
         let still_missing = self.inner.still_missing.lock().unwrap().clone();
         self.inner.emit(ProgressEvent::CheckDone {
             failed: still_missing.len() as u64,
         });
-        still_missing
+        (still_missing, slots)
     }
 }
 
 /// Spawn the streaming check coordinator: a feeder task that queues incoming
-/// segments with a per-article delay, and `check_connections` worker tasks
-/// that drain the queue via dedicated NNTP connections. `check_connections`
-/// is the caller's responsibility to size — see
-/// `post_files_with_progress_and_cancel`, which carves it out of the
-/// configured total connection count so the run never exceeds what the user
-/// asked for (e.g. `-n 50` means 50 connections total, split between
-/// posting and checking, not 50 + a check pool on top).
+/// segments with a per-article delay, and one worker per already-checked-out
+/// slot. The caller carves those slots out of the configured total (see
+/// `post_files_with_progress_and_cancel`) so the run never exceeds what the
+/// user asked for — workers never open their own TCP.
 pub fn spawn_check_coordinator(
     config: Config,
     groups: Vec<String>,
     results: Arc<Mutex<Vec<PostedSegment>>>,
     events: Option<ProgressSender>,
     cancel: Option<Arc<AtomicBool>>,
-    check_connections: usize,
+    check_slots: Vec<ConnectionSlot>,
     resume: Option<Arc<Mutex<ResumeState>>>,
 ) -> CheckCoordinatorHandle {
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
-    let n_workers = check_connections;
+    let n_workers = check_slots.len();
     let n_heaps = servers.len().max(1);
 
     let inner = Arc::new(Inner {
@@ -342,10 +341,10 @@ pub fn spawn_check_coordinator(
     });
 
     let mut workers = Vec::with_capacity(n_workers);
-    for worker_idx in 0..n_workers {
+    for (worker_idx, slot) in check_slots.into_iter().enumerate() {
         let inner = Arc::clone(&inner);
         workers.push(tokio::spawn(async move {
-            check_worker(inner, worker_idx).await;
+            check_worker(inner, worker_idx, slot).await
         }));
     }
 
@@ -357,22 +356,22 @@ pub fn spawn_check_coordinator(
     }
 }
 
-async fn check_worker(inner: Arc<Inner>, worker_idx: usize) {
-    // Each worker has a "home" server whose queue it drains preferentially,
-    // spread round-robin across the configured servers so every server gets
-    // a fair share of home workers regardless of how the check pool size
-    // relates to the server count (the pool is often smaller than the
-    // server count, since it's deliberately kept small — see
-    // `effective_check_connections`). A worker only steals from another
-    // server's queue (`Inner::try_pop_ready`) once its own is empty, which
-    // keeps the connection on one server for as long as there's real work
-    // there instead of retargeting on every item.
+async fn check_worker(
+    inner: Arc<Inner>,
+    worker_idx: usize,
+    mut slot: ConnectionSlot,
+) -> ConnectionSlot {
+    // Prefer the queue matching the slot's current server so a worker that
+    // was assigned (or just posted on) one host doesn't retarget on every
+    // item. Stealing from another server's queue (`Inner::try_pop_ready`)
+    // still happens once the home queue is empty; that can concentrate
+    // every live socket on one `[[servers]]` host even though the process
+    // total stays in budget — a documented limitation, not a new knob.
     let home_idx = if inner.servers.is_empty() {
         0
     } else {
-        worker_idx % inner.servers.len()
+        slot.server_idx().min(inner.servers.len() - 1)
     };
-    let mut slot = ConnectionSlot::with_id(Arc::clone(&inner.servers), home_idx, worker_idx);
 
     loop {
         if inner.is_cancelled() {
@@ -415,7 +414,7 @@ async fn check_worker(inner: Arc<Inner>, worker_idx: usize) {
         inner.emit(ProgressEvent::CheckConnectionIdle { conn: worker_idx });
     }
 
-    slot.quit().await;
+    slot
 }
 
 async fn process_item(
@@ -743,25 +742,29 @@ async fn repost_one(
 /// after `check_delay_secs` — one round trip per article, not the full
 /// `check_retries`-attempt cycle.
 ///
-/// Runs the batch across up to `config.effective_check_connections()` worker
-/// tasks pulling from a shared queue — the same connection budget the
-/// streaming check itself uses, never more than there is work to do. This
-/// used to be a strict one-article-at-a-time loop: with `check_recover_max`
-/// defaulting to 50 and each article costing a repost round trip plus
-/// `check_delay_secs`, a stubborn batch could take minutes with the upload
-/// already at 100% and every upload connection sitting idle — the exact
-/// "why is this frozen" case the recovery pass exists to resolve *quickly*.
+/// Runs the batch across the supplied slots (already in the connection
+/// budget — typically those returned by
+/// [`CheckCoordinatorHandle::finish_and_drain`]), never more workers than
+/// there is work or slots. Unused slots stay held so `--jobs` cannot start
+/// the next episode until this pass is done. This used to be a strict
+/// one-article-at-a-time loop: with `check_recover_max` defaulting to 50
+/// and each article costing a repost round trip plus `check_delay_secs`, a
+/// stubborn batch could take minutes with the upload already at 100% and
+/// every upload connection sitting idle — the exact "why is this frozen"
+/// case the recovery pass exists to resolve *quickly*.
 ///
 /// Returns the subset of `segments` that got reposted *and* confirmed
-/// present; anything not in the returned list is still genuinely missing.
+/// present, plus the same slots (caller checkins the whole set). Anything
+/// not in the recovered list is still genuinely missing.
 pub(crate) async fn recover_missing(
     config: &Config,
     groups: &[String],
     segments: Vec<PostedSegment>,
     events: Option<&ProgressSender>,
-) -> Vec<PostedSegment> {
-    if segments.is_empty() {
-        return Vec::new();
+    mut slots: Vec<ConnectionSlot>,
+) -> (Vec<PostedSegment>, Vec<ConnectionSlot>) {
+    if segments.is_empty() || slots.is_empty() {
+        return (Vec::new(), slots);
     }
 
     let total = segments.len() as u64;
@@ -769,42 +772,30 @@ pub(crate) async fn recover_missing(
         let _ = tx.send(ProgressEvent::CheckRecoverStarted { total });
     }
 
-    let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
-    let n_workers = config
-        .effective_check_connections()
-        .max(1)
-        .min(segments.len());
+    let n_workers = slots.len().min(segments.len());
+    let work_slots: Vec<_> = slots.drain(..n_workers).collect();
 
     let queue = Arc::new(Mutex::new(segments));
     let done = Arc::new(AtomicUsize::new(0));
     let recovered = Arc::new(Mutex::new(Vec::with_capacity(total as usize)));
 
     let mut workers = Vec::with_capacity(n_workers);
-    for _ in 0..n_workers {
+    for mut slot in work_slots {
         let config = config.clone();
         let groups = groups.to_vec();
-        let servers = Arc::clone(&servers);
         let queue = Arc::clone(&queue);
         let done = Arc::clone(&done);
         let recovered = Arc::clone(&recovered);
         let events = events.cloned();
 
         workers.push(tokio::spawn(async move {
-            // One connection per distinct server this worker happens to
-            // draw a segment for, reused across whatever it pulls from the
-            // shared queue instead of reconnecting per article.
-            let mut slots: HashMap<usize, ConnectionSlot> = HashMap::new();
-
             loop {
                 let seg = queue.lock().unwrap().pop();
                 let Some(seg) = seg else { break };
 
-                let idx = seg.server_idx.min(servers.len().saturating_sub(1));
-                let slot = slots
-                    .entry(idx)
-                    .or_insert_with(|| ConnectionSlot::new(Arc::clone(&servers), idx));
+                slot.retarget(seg.server_idx);
 
-                let ok = match repost_one(&config, slot, &seg, &groups).await {
+                let ok = match repost_one(&config, &mut slot, &seg, &groups).await {
                     Ok(new_seg) => {
                         tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
                         let confirmed = match slot.ensure_connected().await {
@@ -843,21 +834,21 @@ pub(crate) async fn recover_missing(
                     });
                 }
             }
-
-            for (_, mut slot) in slots {
-                slot.quit().await;
-            }
+            slot
         }));
     }
 
     for w in workers {
-        let _ = w.await;
+        if let Ok(slot) = w.await {
+            slots.push(slot);
+        }
     }
 
-    Arc::try_unwrap(recovered)
+    let recovered = Arc::try_unwrap(recovered)
         .expect("every worker task has finished by now")
         .into_inner()
-        .unwrap()
+        .unwrap();
+    (recovered, slots)
 }
 
 #[cfg(test)]

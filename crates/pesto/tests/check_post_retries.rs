@@ -238,7 +238,7 @@ fn run_pesto_with_args(
         .args(["-s", "127.0.0.1"])
         .args(["-P", &port.to_string()])
         .args(["-g", "alt.binaries.test"])
-        .args(["-n", "1"])
+        .args(["-n", "2"])
         .args(["--par2", "0"])
         .arg("--check")
         .args(["--check-delay", "0"])

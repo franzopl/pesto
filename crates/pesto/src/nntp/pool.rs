@@ -38,10 +38,6 @@ pub struct ConnectionSlot {
 }
 
 impl ConnectionSlot {
-    pub(crate) fn new(servers: Arc<Vec<ServerEntry>>, primary_idx: usize) -> Self {
-        ConnectionSlot::with_id(servers, primary_idx, 0)
-    }
-
     pub(crate) fn with_id(
         servers: Arc<Vec<ServerEntry>>,
         primary_idx: usize,
@@ -210,6 +206,19 @@ const BROKER_IDLE_POLL: Duration = Duration::from_secs(2);
 /// task sends periodic keepalives to slots sitting idle in the broker
 /// between episodes, the same way a posting worker already does for slots
 /// idle *within* a run.
+///
+/// Callers must check out an episode's full budget (`check + upload`) in
+/// **one** [`checkout`][Self::checkout] and check the whole set back in
+/// only after drain + recover. Two sequential checkouts of the same episode
+/// deadlock `--jobs` (FIFO `acquire_many`): the next episode can sneak a
+/// partial checkout in between. Checkin-then-checkout of the post slots
+/// for `scale_up` is the same trap.
+///
+/// Known limitation: a check worker may [`ConnectionSlot::retarget`] onto
+/// the server that accepted a given article, so the process-wide cap of
+/// `capacity` sockets can still concentrate on one `[[servers]]` host whose
+/// own `connections` quota is smaller. Per-server carve-out would need a
+/// new knob; this broker only enforces the process total.
 pub struct ConnectionBroker {
     idle: Mutex<VecDeque<(ConnectionSlot, Instant)>>,
     permits: Semaphore,
@@ -290,6 +299,14 @@ impl ConnectionBroker {
     pub async fn checkin(&self, slot: ConnectionSlot) {
         self.idle.lock().await.push_back((slot, Instant::now()));
         self.permits.add_permits(1);
+    }
+
+    /// Return every slot in `slots` to the idle pool. One call at episode
+    /// end, after drain + recover — never between post-join and `scale_up`.
+    pub async fn checkin_all(&self, slots: impl IntoIterator<Item = ConnectionSlot>) {
+        for slot in slots {
+            self.checkin(slot).await;
+        }
     }
 
     /// Send `QUIT` on every idle connection. Call once, after every checked
@@ -415,13 +432,13 @@ mod tests {
 
     #[test]
     fn slot_starts_at_primary_server() {
-        let slot = ConnectionSlot::new(arc(vec![server(2), server(2)]), 1);
+        let slot = ConnectionSlot::with_id(arc(vec![server(2), server(2)]), 1, 0);
         assert_eq!(slot.server_idx(), 1);
     }
 
     #[test]
     fn slot_invalidate_rotates_to_next_server() {
-        let mut slot = ConnectionSlot::new(arc(vec![server(1), server(1), server(1)]), 0);
+        let mut slot = ConnectionSlot::with_id(arc(vec![server(1), server(1), server(1)]), 0, 0);
         slot.invalidate("test");
         assert_eq!(slot.server_idx(), 1);
         slot.invalidate("test");
@@ -435,7 +452,7 @@ mod tests {
         let mut servers = vec![server(1), server(1)];
         servers[0].retry_delay = 5;
         servers[1].retry_delay = 10;
-        let mut slot = ConnectionSlot::new(arc(servers), 0);
+        let mut slot = ConnectionSlot::with_id(arc(servers), 0, 0);
         assert_eq!(slot.retry_delay(), Duration::from_secs(5));
         slot.invalidate("test");
         assert_eq!(slot.retry_delay(), Duration::from_secs(10));
@@ -444,7 +461,7 @@ mod tests {
     #[test]
     fn slot_quit_when_not_connected_is_noop() {
         // Should not panic when there is no open connection.
-        let slot = ConnectionSlot::new(arc(vec![server(1)]), 0);
+        let slot = ConnectionSlot::with_id(arc(vec![server(1)]), 0, 0);
         // Can't call async quit in a sync test, but we can verify the slot
         // has no connection to begin with.
         assert!(slot.conn.is_none());

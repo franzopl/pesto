@@ -92,28 +92,65 @@ fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize, usize, us
 }
 
 /// Split the configured total connection count between upload workers and
-/// the check queue. An auto-derived check pool (`check_connections == 0`)
-/// is carved out of the total so `-n 50` always means 50 connections to
+/// the check queue. Both auto (`check_connections == 0`) and explicit N
+/// are carved out of the total so `-n 50` always means 50 connections to
 /// the server, not 50 + a check pool on top — that total is frequently a
-/// hard provider-enforced cap. An *explicit* `--check-connections` is a
-/// deliberate, separate budget the user stated on purpose, so it's honored
-/// additively instead of eating into `--connections`. Returns
-/// `(check_conns, upload_conns)`.
-fn split_connections(config: &Config, check_enabled: bool) -> (usize, usize) {
+/// hard provider-enforced cap. Explicit N is clamped:
+/// `check = N.min(total.saturating_sub(1))`, so `-n 10 --check-connections 10`
+/// is 9+1, never 10+1.
+///
+/// `check_connections == 0` means auto, not off. Off is `config.check == false`.
+/// After the formula, `check == 0` with checking enabled is a start-up error
+/// (`-n 1 --check` and `-n 1 --check-connections 1`) rather than a silent skip.
+/// Returns `(check_conns, upload_conns)`.
+fn split_connections(config: &Config, check_enabled: bool) -> Result<(usize, usize)> {
     let total_conns = config.total_connections();
     if !check_enabled {
-        return (0, total_conns);
+        return Ok((0, total_conns));
     }
-    if config.check_connections == 0 {
-        // Reserve at least 1 connection for uploading; if the total is too
-        // small to spare any for checking (e.g. `-n 1`), checking is
-        // silently skipped for this run rather than exceeding the budget.
-        let check = config
+    let check = if config.check_connections == 0 {
+        config
             .effective_check_connections()
-            .min(total_conns.saturating_sub(1));
-        (check, total_conns.saturating_sub(check))
+            .min(total_conns.saturating_sub(1))
     } else {
-        (config.check_connections, total_conns)
+        config.check_connections.min(total_conns.saturating_sub(1))
+    };
+    if check == 0 {
+        bail!(
+            "checking is enabled but no connection remains for the STAT pool \
+             (need at least one upload connection and one check connection). \
+             Raise `-n`/`connections`, lower `--check-connections`, or pass `--no-check`"
+        );
+    }
+    Ok((check, total_conns.saturating_sub(check)))
+}
+
+/// Check out `n` slots from the broker, or build a fresh pool of `n` when
+/// this run has no broker. `n == 0` is a no-op.
+async fn take_slots(
+    broker: Option<&Arc<ConnectionBroker>>,
+    servers: Arc<Vec<crate::config::ServerEntry>>,
+    n: usize,
+) -> Vec<ConnectionSlot> {
+    if n == 0 {
+        return Vec::new();
+    }
+    match broker {
+        Some(broker) => broker.checkout(n).await,
+        None => ConnectionPool::build(servers, n).into_slots(),
+    }
+}
+
+/// One checkin of the whole set at episode end (broker), or QUIT when this
+/// run owns the sockets. Never called between post-join and `scale_up`.
+async fn release_slots(broker: Option<&ConnectionBroker>, slots: Vec<ConnectionSlot>) {
+    match broker {
+        Some(broker) => broker.checkin_all(slots).await,
+        None => {
+            for mut slot in slots {
+                slot.quit().await;
+            }
+        }
     }
 }
 
@@ -927,7 +964,7 @@ pub async fn post_files_inner(
     let total_conns = config.total_connections();
 
     let check_enabled = config.check && !config.dry_run && !config.par2_only;
-    let (check_conns, upload_conns) = split_connections(config, check_enabled);
+    let (check_conns, upload_conns) = split_connections(config, check_enabled)?;
 
     let worker_count = if config.par2_only {
         0
@@ -1139,17 +1176,35 @@ pub async fn post_files_inner(
         }
     }
 
+    // One checkout of the episode's full budget so `--jobs` cannot sneak a
+    // partial checkout in between check and upload (FIFO `acquire_many`
+    // deadlock). Check workers share these slots; they never open extra TCP.
+    let mut held_slots = if check_conns > 0 || worker_count > 0 {
+        take_slots(
+            broker.as_ref(),
+            shared.servers.clone(),
+            check_conns + upload_conns,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+    let check_slots: Vec<_> = held_slots
+        .drain(..check_conns.min(held_slots.len()))
+        .collect();
+    let mut post_slots = held_slots;
+
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
-    let mut check_coordinator = if check_enabled && check_conns > 0 {
+    let check_coordinator = if !check_slots.is_empty() {
         Some(spawn_check_coordinator(
             config.clone(),
             shared.post_group.clone(),
             Arc::clone(&shared.results),
             shared.events.clone(),
             Some(Arc::clone(&shared.cancelled)),
-            check_conns,
+            check_slots,
             shared.resume.clone(),
         ))
     } else {
@@ -1163,29 +1218,21 @@ pub async fn post_files_inner(
     let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
     let mut encode_handles = Vec::new();
-    let tx_opt = if worker_count > 0 {
-        let ready_n = ready_queue_depth(worker_count);
-        let post_depth = (ready_n / worker_count).max(2);
-        let mut post_senders = Vec::with_capacity(worker_count);
-        let mut post_receivers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
+    let tx_opt = if worker_count > 0 && !post_slots.is_empty() {
+        let spawn_n = worker_count.min(post_slots.len());
+        let ready_n = ready_queue_depth(spawn_n);
+        let post_depth = (ready_n / spawn_n).max(2);
+        let mut post_senders = Vec::with_capacity(spawn_n);
+        let mut post_receivers = Vec::with_capacity(spawn_n);
+        for _ in 0..spawn_n {
             let (tx, rx) = tokio::sync::mpsc::channel(post_depth);
             post_senders.push(tx);
             post_receivers.push(rx);
         }
         let post_disp = Arc::new(TaskDispatcher::new(post_senders));
-        let slots = match &broker {
-            Some(broker) => broker.checkout(worker_count).await,
-            None => ConnectionPool::build(shared.servers.clone(), worker_count).into_slots(),
-        };
-        for (idx, (slot, rx)) in slots.into_iter().zip(post_receivers).enumerate() {
-            handles.push(tokio::spawn(worker(
-                shared.clone(),
-                rx,
-                idx,
-                slot,
-                broker.clone(),
-            )));
+        let spawned: Vec<_> = post_slots.drain(..spawn_n).collect();
+        for (idx, (slot, rx)) in spawned.into_iter().zip(post_receivers).enumerate() {
+            handles.push(tokio::spawn(worker(shared.clone(), rx, idx, slot)));
         }
 
         let n_enc = encode_concurrency(parmesan::performance_core_count(), worker_count);
@@ -1255,15 +1302,9 @@ pub async fn post_files_inner(
         let _ = handle.await;
     }
     for handle in handles {
-        let _ = handle.await;
-    }
-
-    // The upload's own connections are now idle — reuse that budget to
-    // drain any remaining check backlog faster instead of leaving it to a
-    // handful of dedicated connections that were sized for running
-    // *alongside* the upload, not for a burst catch-up at the end.
-    if let Some(coordinator) = check_coordinator.as_mut() {
-        coordinator.scale_up(upload_conns);
+        if let Ok(slot) = handle.await {
+            post_slots.push(slot);
+        }
     }
 
     let mut failures = std::mem::take(&mut *shared.failures.lock().unwrap());
@@ -1272,7 +1313,8 @@ pub async fn post_files_inner(
 
     // Blind retry for segments that never got a `240` in the main loop
     // (connection drops, timeouts, etc — never confirmed by the server at
-    // all). Recovered segments flow into the same streaming check queue as
+    // all). Runs on the post slots still held — never `ConnectionSlot::new`.
+    // Recovered segments flow into the same streaming check queue as
     // everything else, so they get the same STAT confirmation before the
     // run reports them as posted.
     if !failed_tasks.is_empty() && !cancelled_during_post {
@@ -1284,6 +1326,7 @@ pub async fn post_files_inner(
             &shared.post_group,
             shared.events.as_ref(),
             Some(&shared.cancelled),
+            &mut post_slots,
         )
         .await
         .unwrap_or_else(|e| {
@@ -1331,11 +1374,14 @@ pub async fn post_files_inner(
     // leaving this sender alive would hang `finish_and_drain` forever.
     let _ = shared.check_tx.lock().unwrap().take();
     crate::memory::set_phase(crate::memory::Phase::Check);
-    let mut still_missing = if let Some(coordinator) = check_coordinator {
-        coordinator.finish_and_drain().await
-    } else {
-        Vec::new()
-    };
+    let mut still_missing = Vec::new();
+    if let Some(mut coordinator) = check_coordinator {
+        // Ownership transfer: no checkin in between post-join and scale_up.
+        coordinator.scale_up(std::mem::take(&mut post_slots));
+        let (missing, slots) = coordinator.finish_and_drain().await;
+        still_missing = missing;
+        post_slots = slots;
+    }
     // Re-read after drain: a cancel during the STAT wait must persist
     // unconfirmed records rather than treating the dumped queue as
     // MissingConfirmed (the watcher stays alive until after persist).
@@ -1380,13 +1426,15 @@ pub async fn post_files_inner(
                 .iter()
                 .map(|c| (c.message_id.clone(), (c.file_name.clone(), c.part)))
                 .collect();
-            let recovered = check::recover_missing(
+            let (recovered, slots) = check::recover_missing(
                 config,
                 &shared.post_group,
                 candidates,
                 shared.events.as_ref(),
+                std::mem::take(&mut post_slots),
             )
             .await;
+            post_slots = slots;
             {
                 let mut results = shared.results.lock().unwrap();
                 for seg in &recovered {
@@ -1425,6 +1473,10 @@ pub async fn post_files_inner(
             });
         }
     }
+
+    // One checkin of the whole set so `--jobs` keeps the next episode
+    // blocked on the semaphore until this episode is fully done.
+    release_slots(broker.as_deref(), post_slots).await;
 
     // Whatever is left in `still_missing` at this point is confirmed bad:
     // the original POST got a `240`, but every STAT check and every repost
@@ -3006,8 +3058,7 @@ async fn worker(
     mut rx: tokio::sync::mpsc::Receiver<ReadyArticle>,
     conn_id: usize,
     mut slot: ConnectionSlot,
-    broker: Option<Arc<ConnectionBroker>>,
-) {
+) -> ConnectionSlot {
     let mut rate_limiter = RateLimiter::new(
         // Divide the global rate across all workers proportionally.
         if shared.config.upload_rate > 0 {
@@ -3396,10 +3447,7 @@ async fn worker(
     }
 
     shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
-    match broker {
-        Some(broker) => broker.checkin(slot).await,
-        None => slot.quit().await,
-    }
+    slot
 }
 
 /// Build a `PostTask`, generating per-article subject and From when in
@@ -3696,16 +3744,17 @@ pub async fn repost_failed_tasks(
     groups: &[String],
     events: Option<&ProgressSender>,
     cancel: Option<&Arc<AtomicBool>>,
+    slots: &mut [ConnectionSlot],
 ) -> Result<Vec<PostedSegment>> {
     if failed.is_empty() {
         return Ok(Vec::new());
     }
 
-    let server = config
-        .all_servers()
-        .next()
-        .expect("at least one server is configured");
-    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
+    // Never `ConnectionSlot::new` — extra TCP would exceed a budget already
+    // held by this episode. No slot means nothing to retry on.
+    let Some(slot) = slots.first_mut() else {
+        return Ok(Vec::new());
+    };
 
     let article_size = config.article_size as u64;
     let max_retries = config.retries.max(1);
@@ -3832,9 +3881,6 @@ pub async fn repost_failed_tasks(
                 total: task.total,
                 message_id,
                 bytes: wire_bytes,
-                // `slot` only ever targets the primary server (index 0 in
-                // `config.all_servers()` too — see its "primary first" order),
-                // since this blind end-of-run retry doesn't fail over.
                 server_idx: slot.server_idx(),
                 from: Arc::from(task.from.as_str()),
                 date: task.date.clone(),
@@ -4855,7 +4901,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 50;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 4);
         assert_eq!(upload, 46);
         assert_eq!(check + upload, 50);
@@ -4865,31 +4911,53 @@ mod tests {
     fn split_connections_disabled_uses_the_whole_total_for_upload() {
         let mut config = dry_run_config();
         config.connections = 50;
-        let (check, upload) = split_connections(&config, false);
+        let (check, upload) = split_connections(&config, false).unwrap();
         assert_eq!(check, 0);
         assert_eq!(upload, 50);
     }
 
     #[test]
-    fn split_connections_never_starves_upload_of_its_last_connection() {
+    fn split_connections_n1_check_auto_is_a_startup_error() {
+        // T22: `check_connections == 0` is auto, not off. Auto on `-n 1`
+        // would carve check down to 0 — fail loud instead of silently skipping.
         let mut config = dry_run_config();
         config.connections = 1;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
-        assert_eq!(check, 0, "no connection left to spare for checking");
-        assert_eq!(upload, 1);
+        config.check = true;
+        let err = split_connections(&config, true).unwrap_err().to_string();
+        assert!(
+            err.contains("--no-check"),
+            "start-up error must mention --no-check: {err}"
+        );
+        assert!(
+            err.contains("-n") || err.contains("connections"),
+            "start-up error must mention raising -n: {err}"
+        );
     }
 
     #[test]
-    fn split_connections_explicit_check_connections_is_additive() {
+    fn split_connections_explicit_is_carved_out_not_additive() {
+        // T18: explicit N is no longer added on top of `-n`.
         let mut config = dry_run_config();
-        config.connections = 1;
-        config.check_connections = 1; // explicit, deliberate
-        let (check, upload) = split_connections(&config, true);
-        assert_eq!(check, 1);
+        config.connections = 10;
+        config.check_connections = 4;
+        let (check, upload) = split_connections(&config, true).unwrap();
+        assert_eq!((check, upload), (4, 6));
+
+        config.check_connections = 10;
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(
-            upload, 1,
-            "explicit --check-connections must not shrink upload"
+            (check, upload),
+            (9, 1),
+            "-n 10 --check-connections 10 must clamp to 9+1, never 10+1"
+        );
+
+        config.connections = 1;
+        config.check_connections = 1;
+        let err = split_connections(&config, true).unwrap_err().to_string();
+        assert!(
+            err.contains("--no-check"),
+            "-n 1 --check-connections 1 must error, not open 1+1: {err}"
         );
     }
 
@@ -4898,7 +4966,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 2;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 1);
         assert_eq!(upload, 1);
     }
@@ -4912,7 +4980,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 4;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 1);
         assert_eq!(upload, 3);
     }
@@ -4922,7 +4990,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 200;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 4);
         assert_eq!(upload, 196);
     }

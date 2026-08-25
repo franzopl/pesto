@@ -157,6 +157,7 @@ fn season_par2_describes_the_posted_archive_not_the_original_episode() {
         .args(["-P", &addr.port().to_string()])
         .args(["-g", "alt.binaries.test"])
         .args(["-n", "1"])
+        .arg("--no-check")
         .args(["--jobs", "1"])
         .args(["--par2", "40"])
         // A small article size (rather than a manual --slice-size, which has

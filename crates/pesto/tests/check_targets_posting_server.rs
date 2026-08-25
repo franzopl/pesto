@@ -180,7 +180,7 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
             host: real_addr.ip().to_string(),
             port: real_addr.port(),
             ssl: false,
-            connections: 1,
+            connections: 2,
             username: None,
             password: None,
             retry_delay: 0,

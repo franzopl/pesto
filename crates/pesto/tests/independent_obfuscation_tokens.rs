@@ -147,6 +147,7 @@ fn run_pesto(
         .args(["-g", "alt.binaries.test"])
         .args(["-n", "1"])
         .args(["--par2", "0"])
+        .arg("--no-check")
         .arg("--no-hooks")
         .arg(obfuscate_flag)
         .args(["-o", out.to_str().unwrap()])

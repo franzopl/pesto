@@ -15,8 +15,16 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 fn spawn_counting_server(accepted: Arc<AtomicUsize>) -> SocketAddr {
+    spawn_counting_server_with_post_delay(accepted, Duration::ZERO)
+}
+
+fn spawn_counting_server_with_post_delay(
+    accepted: Arc<AtomicUsize>,
+    post_delay: Duration,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -24,14 +32,14 @@ fn spawn_counting_server(accepted: Arc<AtomicUsize>) -> SocketAddr {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
             accepted.fetch_add(1, Ordering::SeqCst);
-            std::thread::spawn(move || handle_connection(stream));
+            std::thread::spawn(move || handle_connection(stream, post_delay));
         }
     });
 
     addr
 }
 
-fn handle_connection(stream: TcpStream) {
+fn handle_connection(stream: TcpStream, post_delay: Duration) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -65,7 +73,14 @@ fn handle_connection(stream: TcpStream) {
                     break;
                 }
             }
+            if !post_delay.is_zero() {
+                std::thread::sleep(post_delay);
+            }
             if writer.write_all(b"240 article received\r\n").is_err() {
+                return;
+            }
+        } else if command.starts_with("STAT ") {
+            if writer.write_all(b"223 0 article exists\r\n").is_err() {
                 return;
             }
         } else if command.starts_with("MODE READER") {
@@ -133,5 +148,98 @@ fn each_batch_reuses_connections_instead_of_one_pool_per_episode() {
         "expected connections to be reused across the {EPISODES} episodes \
          (≈{CONNECTIONS} total), but the mock server accepted {total} \
          connections — looks like each episode is opening its own pool again"
+    );
+}
+
+/// T17: `--each --jobs 2 --check` with overlapping start must not open a
+/// second peak of sockets for check workers / `scale_up` / `recover_missing`.
+/// Episode B blocks on the broker until A has drained+recovered and
+/// checkined the whole set.
+#[test]
+fn each_jobs_check_overlapping_start_honors_connection_budget() {
+    const CONNECTIONS: usize = 4;
+    const EPISODES: usize = 2;
+
+    let accepted = Arc::new(AtomicUsize::new(0));
+    // Slow POSTs so episode B is already waiting on checkout while A still
+    // holds the full budget (check + upload + drain), not two sequential
+    // `--each` runs that would never overlap.
+    let addr = spawn_counting_server_with_post_delay(accepted.clone(), Duration::from_millis(200));
+
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..EPISODES {
+        let entry_dir = dir.path().join(format!("episode_{i:02}"));
+        std::fs::create_dir_all(&entry_dir).unwrap();
+        std::fs::write(entry_dir.join("movie.bin"), vec![0xABu8; 4096]).unwrap();
+    }
+    let out = dir.path().join("out.nzb");
+    let xdg_home = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pesto"))
+        .env("XDG_CONFIG_HOME", xdg_home.path())
+        .arg("--no-ssl")
+        .args(["-s", "127.0.0.1"])
+        .args(["-P", &addr.port().to_string()])
+        .args(["-g", "alt.binaries.test"])
+        .args(["-n", &CONNECTIONS.to_string()])
+        .args(["--article-size", "4096"])
+        .args(["--par2", "0"])
+        .arg("--no-hooks")
+        .arg("--check")
+        .args(["--check-delay", "0"])
+        .arg("--each")
+        .args(["--jobs", "2"])
+        .args(["-o", out.to_str().unwrap()])
+        .arg(dir.path())
+        .output()
+        .expect("failed to run pesto");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "expected the overlapping --each --jobs 2 --check batch to succeed\nstderr:\n{stderr}"
+    );
+
+    let total = accepted.load(Ordering::SeqCst);
+    assert!(
+        total <= CONNECTIONS + 1,
+        "expected accept() ≤ {CONNECTIONS} (not 2×) with overlapping --jobs 2 --check, \
+         but the mock server accepted {total} connections — check workers or \
+         scale_up/recover_missing opened sockets outside the broker budget"
+    );
+}
+
+/// T22: `-n 1 --check` (auto) is a start-up error, not a silent skip.
+#[test]
+fn n1_check_auto_is_a_startup_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("movie.bin");
+    std::fs::write(&input, vec![0xABu8; 64]).unwrap();
+    let out = dir.path().join("out.nzb");
+    let xdg_home = tempfile::tempdir().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pesto"))
+        .env("XDG_CONFIG_HOME", xdg_home.path())
+        .arg("--no-ssl")
+        .args(["-s", "127.0.0.1"])
+        .args(["-P", "9"])
+        .args(["-g", "alt.binaries.test"])
+        .args(["-n", "1"])
+        .arg("--check")
+        .args(["--par2", "0"])
+        .arg("--no-hooks")
+        .args(["-o", out.to_str().unwrap()])
+        .arg(&input)
+        .output()
+        .expect("failed to run pesto");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "expected `-n 1 --check` to fail at start-up, not silently skip checking\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--no-check") || stderr.contains("STAT pool"),
+        "start-up error must be actionable (raise -n, lower --check-connections, or --no-check):\n{stderr}"
     );
 }
