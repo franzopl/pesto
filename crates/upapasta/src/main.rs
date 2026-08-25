@@ -1133,6 +1133,7 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             // the real filename (see `nzb::generate`'s doc comment), never
             // the wire identity, so there is nothing to recover it from.
             wire_subject: String::new(),
+            incomplete: false,
         };
 
         let (ok, mut log) = pesto::hooks::run_one_hook(&hook, &ctx);
@@ -1962,6 +1963,7 @@ async fn run_season_hooks(
         // either — same reasoning as `server`/`servers` above — so there is
         // no wire identity left to report.
         wire_subject: String::new(),
+        incomplete: false,
     };
 
     let hook_cfg = config.clone();

@@ -281,11 +281,13 @@ pub struct PostOutcome {
     /// was unreachable all run) or, more commonly, every configured server
     /// that had a connection quota. Empty for `--par2-only`/`--dry-run`.
     pub servers: Vec<String>,
-    /// Message-IDs that were posted (`240`) but never confirmed retrievable
-    /// via the streaming STAT check, even after every repost attempt. Empty
-    /// when `config.check` is disabled. A non-empty list means the run
-    /// produced content that is not fully confirmed on the server.
+    /// Message-IDs that were posted (`240`) but STAT 430-exhausted every
+    /// retry/repost. Empty when `config.check` is disabled. Distinct from
+    /// [`Self::inconclusive`]: this is a confirmed gap.
     pub still_missing: Vec<String>,
+    /// Message-IDs whose STAT path failed without a 430 (transport, timeout,
+    /// 480/502, cancel drain). Never unblocked by `--allow-incomplete-nzb`.
+    pub inconclusive: Vec<String>,
     /// Set when the run stopped because `producer` returned an error (bad
     /// PAR2 geometry, a memory-budget check, file I/O, …) rather than because
     /// the user cancelled it. `cancelled` is `true` in both cases — callers
@@ -301,6 +303,29 @@ pub struct PostOutcome {
     /// `--season` entry (`--jobs > 1`) cleans up only its own directory
     /// instead of a path shared by every run in the process (issue #67).
     pub par2_temp_dir: PathBuf,
+}
+
+/// Whether the NZB (and NFO / post-hooks) should be written for this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NzbWriteDecision {
+    Write,
+    Refuse,
+}
+
+/// Single NZB completeness gate used by the CLI and [`crate::upload::run_upload`].
+/// `--allow-incomplete-nzb` unblocks only MissingConfirmed, never POST
+/// failures or Inconclusive.
+pub fn nzb_write_decision(
+    post_failures: bool,
+    missing_confirmed: bool,
+    inconclusive: bool,
+    allow_incomplete_nzb: bool,
+) -> NzbWriteDecision {
+    if post_failures || inconclusive || (missing_confirmed && !allow_incomplete_nzb) {
+        NzbWriteDecision::Refuse
+    } else {
+        NzbWriteDecision::Write
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1374,14 +1399,19 @@ pub async fn post_files_inner(
     // leaving this sender alive would hang `finish_and_drain` forever.
     let _ = shared.check_tx.lock().unwrap().take();
     crate::memory::set_phase(crate::memory::Phase::Check);
-    let mut still_missing = Vec::new();
-    if let Some(mut coordinator) = check_coordinator {
+    let drain = if let Some(mut coordinator) = check_coordinator {
         // Ownership transfer: no checkin in between post-join and scale_up.
         coordinator.scale_up(std::mem::take(&mut post_slots));
-        let (missing, slots) = coordinator.finish_and_drain().await;
-        still_missing = missing;
-        post_slots = slots;
-    }
+        coordinator.finish_and_drain().await
+    } else {
+        check::CheckDrain {
+            slots: std::mem::take(&mut post_slots),
+            ..check::CheckDrain::default()
+        }
+    };
+    let mut still_missing = drain.still_missing;
+    let mut inconclusive = drain.inconclusive;
+    post_slots = drain.slots;
     // Re-read after drain: a cancel during the STAT wait must persist
     // unconfirmed records rather than treating the dumped queue as
     // MissingConfirmed (the watcher stays alive until after persist).
@@ -1426,7 +1456,7 @@ pub async fn post_files_inner(
                 .iter()
                 .map(|c| (c.message_id.clone(), (c.file_name.clone(), c.part)))
                 .collect();
-            let (recovered, slots) = check::recover_missing(
+            let recovered = check::recover_missing(
                 config,
                 &shared.post_group,
                 candidates,
@@ -1434,10 +1464,14 @@ pub async fn post_files_inner(
                 std::mem::take(&mut post_slots),
             )
             .await;
-            post_slots = slots;
+            post_slots = recovered.slots;
             {
                 let mut results = shared.results.lock().unwrap();
-                for seg in &recovered {
+                for seg in recovered
+                    .recovered
+                    .iter()
+                    .chain(recovered.inconclusive.iter())
+                {
                     if let Some(existing) = results
                         .iter_mut()
                         .find(|s| s.file_name == seg.file_name && s.part == seg.part)
@@ -1448,7 +1482,7 @@ pub async fn post_files_inner(
             }
             if let Some(resume) = &shared.resume {
                 let mut state = resume.lock().unwrap();
-                for seg in &recovered {
+                for seg in &recovered.recovered {
                     state.record_with(
                         &seg.file_name,
                         seg.part,
@@ -1461,9 +1495,24 @@ pub async fn post_files_inner(
                         },
                     );
                 }
+                for seg in &recovered.inconclusive {
+                    state.record_with(
+                        &seg.file_name,
+                        seg.part,
+                        SegmentRecord {
+                            message_id: seg.message_id.clone(),
+                            bytes: seg.bytes,
+                            confirmed: false,
+                            check_disabled: false,
+                            server_idx: seg.server_idx,
+                        },
+                    );
+                }
             }
             let recovered_keys: std::collections::HashSet<(String, u32)> = recovered
+                .recovered
                 .iter()
+                .chain(recovered.inconclusive.iter())
                 .map(|s| (s.file_name.clone(), s.part))
                 .collect();
             still_missing.retain(|id| {
@@ -1471,6 +1520,7 @@ pub async fn post_files_inner(
                     .get(id)
                     .is_some_and(|key| recovered_keys.contains(key))
             });
+            inconclusive.extend(recovered.inconclusive.into_iter().map(|s| s.message_id));
         }
     }
 
@@ -1507,24 +1557,19 @@ pub async fn post_files_inner(
     }
 
     // Single, final resume-state persistence decision, replacing the old
-    // per-segment write in `commit_result`. Mirrors the completeness check
-    // `run_single_upload` uses to decide whether the NZB itself gets
-    // written: a run cancellation makes `still_missing` meaningless (the
-    // check simply didn't get to finish verifying everything, not a
-    // confirmed gap), and `allow_incomplete_nzb` means the user has already
-    // accepted the remaining gap and is relying on PAR2, not `--resume`, to
-    // fill it. Cancel with any Posted/Confirmed records still persists so
-    // the operator does not lose 240s already accepted. Whenever the run is
-    // *not* complete by those terms, persist once so a later `--resume` has
-    // something to load; otherwise delete any state file (freshly written
-    // or left over from an earlier failed attempt at the same output path)
-    // — there is nothing left to resume.
+    // per-segment write in `commit_result`. Persist whenever anything is
+    // still unconfirmed: POST failures, MissingConfirmed (even with
+    // `--allow-incomplete-nzb` — the opt-in publishes the NZB but a later
+    // `--resume` can still fill the gap), Inconclusive, or a cancel that
+    // already has Posted records. Complete runs delete the state file.
     if let (Some(resume), Some(rp)) = (&shared.resume, &shared.resume_path) {
         let has_post_failures = !failed_tasks.is_empty();
         let has_confirmed_missing = !cancelled && !still_missing.is_empty();
+        let has_inconclusive = !inconclusive.is_empty();
         let has_progress = !resume.lock().unwrap().is_empty();
         let incomplete = has_post_failures
-            || (has_confirmed_missing && !config.allow_incomplete_nzb)
+            || has_confirmed_missing
+            || has_inconclusive
             || (cancelled && has_progress);
         if incomplete {
             let _ = resume.lock().unwrap().save(rp);
@@ -1550,6 +1595,7 @@ pub async fn post_files_inner(
         failed = failures.len(),
         retries = total_retries,
         still_missing = still_missing.len(),
+        inconclusive = inconclusive.len(),
         elapsed_ms = t_post_start.elapsed().as_millis(),
         phase = "post",
         "network summary"
@@ -1574,6 +1620,7 @@ pub async fn post_files_inner(
         cancelled,
         groups: shared.post_group.clone(),
         still_missing,
+        inconclusive,
         servers: servers_used,
         failure_reason,
         par2_temp_dir: par2_temp_dir(config.par2_temp_dir.as_deref(), shared.run_id),
@@ -4983,6 +5030,46 @@ mod tests {
         let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 1);
         assert_eq!(upload, 3);
+    }
+
+    #[test]
+    fn nzb_write_decision_writes_when_everything_confirmed() {
+        assert_eq!(
+            nzb_write_decision(false, false, false, false),
+            NzbWriteDecision::Write
+        );
+    }
+
+    #[test]
+    fn nzb_write_decision_refuses_post_failures_even_with_allow() {
+        assert_eq!(
+            nzb_write_decision(true, false, false, true),
+            NzbWriteDecision::Refuse
+        );
+    }
+
+    #[test]
+    fn nzb_write_decision_allow_incomplete_unblocks_missing_only() {
+        assert_eq!(
+            nzb_write_decision(false, true, false, true),
+            NzbWriteDecision::Write
+        );
+        assert_eq!(
+            nzb_write_decision(false, true, false, false),
+            NzbWriteDecision::Refuse
+        );
+    }
+
+    #[test]
+    fn nzb_write_decision_inconclusive_always_refuses() {
+        assert_eq!(
+            nzb_write_decision(false, false, true, true),
+            NzbWriteDecision::Refuse
+        );
+        assert_eq!(
+            nzb_write_decision(false, true, true, true),
+            NzbWriteDecision::Refuse
+        );
     }
 
     #[test]

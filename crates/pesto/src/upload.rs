@@ -22,6 +22,8 @@ pub struct UploadOutcome {
     pub groups: Vec<String>,
     pub cancelled: bool,
     pub had_failures: bool,
+    /// STAT path failed without a 430. Never unblocked by `allow_incomplete_nzb`.
+    pub inconclusive: Vec<String>,
     pub nzb_path: Option<PathBuf>,
     pub total_bytes: u64,
     /// See [`crate::poster::PostOutcome::failure_reason`]: set when
@@ -241,8 +243,9 @@ pub async fn run_upload(
     // Set when the streaming check still can't confirm some articles after
     // every repost attempt. Kept separate from `has_post_failures` because
     // `--allow-incomplete-nzb` only opts back into publishing past *this*
-    // kind of gap, not a genuine POST failure.
+    // kind of gap, not a genuine POST failure, and never past Inconclusive.
     let has_confirmed_missing = !outcome.still_missing.is_empty();
+    let has_inconclusive = !outcome.inconclusive.is_empty();
     let cancelled = outcome.cancelled || cancel.as_ref().is_some_and(|f| f.load(Ordering::Relaxed));
 
     if has_confirmed_missing {
@@ -255,14 +258,25 @@ pub async fn run_upload(
             "check: articles still missing after every repost attempt"
         );
     }
+    if has_inconclusive {
+        for id in &outcome.inconclusive {
+            emit_status(&progress_tx, format!("  inconclusive: {id}"));
+        }
+        tracing::error!(
+            count = outcome.inconclusive.len(),
+            ids = ?outcome.inconclusive,
+            "check: articles inconclusive (check path failed — not a confirmed gap)"
+        );
+    }
 
-    // If some articles are still confirmed missing after every repost round,
-    // refuse to write the NZB (and skip NFO/hooks below) unless the caller
-    // explicitly opted into publishing anyway via `allow_incomplete_nzb`
-    // (e.g. relying on PAR2 recovery). A genuine POST failure always blocks,
-    // regardless of the flag.
-    let write_blocked =
-        has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+    // POST failures and Inconclusive always refuse the NZB.
+    // `--allow-incomplete-nzb` unblocks only MissingConfirmed.
+    let write_blocked = crate::poster::nzb_write_decision(
+        has_post_failures,
+        has_confirmed_missing,
+        has_inconclusive,
+        config.allow_incomplete_nzb,
+    ) == crate::poster::NzbWriteDecision::Refuse;
 
     // ── Write NZB ────────────────────────────────────────────────────────────
     let nzb_path: Option<PathBuf> = if (cancelled && !config.resume)
@@ -369,7 +383,7 @@ pub async fn run_upload(
             // Reflects true completeness, independent of `allow_incomplete_nzb`
             // — the notification should say "not fully ok" even when the
             // caller chose to publish anyway.
-            ok: !(has_post_failures || has_confirmed_missing),
+            ok: !(has_post_failures || has_confirmed_missing || has_inconclusive),
         })
         .await;
     }
@@ -456,6 +470,7 @@ pub async fn run_upload(
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             wire_subject: crate::nzb::wire_subject(&outcome.segments).unwrap_or_default(),
+            incomplete: has_confirmed_missing,
         };
         let hook_cfg = config.clone();
         let log_lines =
@@ -487,7 +502,8 @@ pub async fn run_upload(
         // True completeness, independent of `allow_incomplete_nzb` — the
         // caller (e.g. upapasta's catalog) should still be able to tell an
         // upload with confirmed-missing articles apart from a clean one.
-        had_failures: has_post_failures || has_confirmed_missing,
+        had_failures: has_post_failures || has_confirmed_missing || has_inconclusive,
+        inconclusive: outcome.inconclusive,
         nzb_path,
         total_bytes,
         failure_reason: outcome.failure_reason,

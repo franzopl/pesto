@@ -119,6 +119,9 @@ struct Inner {
     groups: Vec<String>,
     results: Arc<Mutex<Vec<PostedSegment>>>,
     still_missing: Mutex<Vec<String>>,
+    /// STAT transport/auth/timeout/unexpected-code exhausted retries, or
+    /// a cancel drain of the queue. Distinct from `still_missing` (430).
+    inconclusive: Mutex<Vec<String>>,
     events: Option<ProgressSender>,
     cancel: Option<Arc<AtomicBool>>,
     servers: Arc<Vec<crate::config::ServerEntry>>,
@@ -133,8 +136,6 @@ struct Inner {
     /// simplicity.
     first_checks: AtomicUsize,
     first_misses: AtomicUsize,
-    /// Articles whose STAT path exhausted retries with `Err`, not 430.
-    inconclusive_count: AtomicUsize,
     resume: Option<Arc<Mutex<ResumeState>>>,
 }
 
@@ -264,14 +265,10 @@ impl CheckCoordinatorHandle {
 
     /// Close the input (no more segments will be queued) and wait for every
     /// queued/in-flight article to resolve — verified, reposted-and-verified,
-    /// or given up on. Returns the Message-IDs that could never be confirmed
-    /// and the slots every worker held, still in budget, for the caller to
-    /// hand to [`recover_missing`] or check in as a single set.
-    ///
-    /// A panicking worker's `JoinError` drops its slot; if that slot was
-    /// broker-checked-out, [`ConnectionSlot`]'s Drop replenishes the idle
-    /// pool so `--jobs` cannot deadlock on a leaked permit.
-    pub async fn finish_and_drain(mut self) -> (Vec<String>, Vec<ConnectionSlot>) {
+    /// given up on as a confirmed 430 miss, or left inconclusive. `failed`
+    /// on `CheckDone` is the MissingConfirmed count only. The slots remain
+    /// checked out for recovery and are returned to the caller as one set.
+    pub async fn finish_and_drain(mut self) -> CheckDrain {
         drop(self.tx.take());
         let _ = self.feeder.await;
         let mut slots = Vec::with_capacity(self.workers.len());
@@ -281,11 +278,27 @@ impl CheckCoordinatorHandle {
             }
         }
         let still_missing = self.inner.still_missing.lock().unwrap().clone();
+        let inconclusive = self.inner.inconclusive.lock().unwrap().clone();
         self.inner.emit(ProgressEvent::CheckDone {
             failed: still_missing.len() as u64,
         });
-        (still_missing, slots)
+        CheckDrain {
+            still_missing,
+            inconclusive,
+            slots,
+        }
     }
+}
+
+/// Result of draining the streaming STAT queue.
+#[derive(Default)]
+pub struct CheckDrain {
+    /// STAT 430 exhausted every retry/repost. MissingConfirmed.
+    pub still_missing: Vec<String>,
+    /// STAT path failed without a 430 (transport, timeout, 480/502, cancel).
+    pub inconclusive: Vec<String>,
+    /// Slots owned by the completed workers, still within the run's budget.
+    pub slots: Vec<ConnectionSlot>,
 }
 
 /// Spawn the streaming check coordinator: a feeder task that queues incoming
@@ -316,6 +329,7 @@ pub fn spawn_check_coordinator(
         groups,
         results,
         still_missing: Mutex::new(Vec::new()),
+        inconclusive: Mutex::new(Vec::new()),
         events,
         cancel,
         servers,
@@ -323,7 +337,6 @@ pub fn spawn_check_coordinator(
         reposted_count: AtomicUsize::new(0),
         first_checks: AtomicUsize::new(0),
         first_misses: AtomicUsize::new(0),
-        inconclusive_count: AtomicUsize::new(0),
         resume,
     });
 
@@ -379,13 +392,14 @@ async fn check_worker(
 
     loop {
         if inner.is_cancelled() {
-            // Drain whatever remains without further network calls so
-            // `finish_and_drain` doesn't hang waiting on cancelled work.
+            // Drain without further network calls so `finish_and_drain`
+            // doesn't hang. Cancel is Inconclusive, not MissingConfirmed:
+            // the check simply did not finish, so `--resume --check` re-STATs.
             for heap in &inner.heaps {
                 let mut heap = heap.lock().unwrap();
                 while let Some(item) = heap.pop() {
                     inner
-                        .still_missing
+                        .inconclusive
                         .lock()
                         .unwrap()
                         .push(item.seg.message_id.clone());
@@ -543,15 +557,28 @@ async fn process_item(
                 });
                 return;
             }
-            // Distinct from a 430 miss: STAT itself never completed.
-            let count = inner.inconclusive_count.fetch_add(1, Ordering::Relaxed) + 1;
-            inner.emit(ProgressEvent::CheckInconclusive {
-                count: count as u64,
-                reason: "connection error",
-            });
-            handle_confirmed_miss(inner, slot, worker_idx, item).await;
+            // Exhausted STAT retries without ever seeing 430 — the article
+            // may well be on the server; the check path died. Do not repost
+            // and do not classify as MissingConfirmed.
+            mark_inconclusive(inner, item.seg.message_id, "connection error");
         }
     }
+}
+
+fn mark_inconclusive(inner: &Inner, message_id: String, reason: &'static str) {
+    let count = {
+        let mut list = inner.inconclusive.lock().unwrap();
+        list.push(message_id);
+        list.len()
+    };
+    warn!(
+        count,
+        reason, "check: article inconclusive (check path failed — not a confirmed gap)"
+    );
+    inner.emit(ProgressEvent::Status {
+        text: format!("check: {count} inconclusive (check path failed — not a confirmed gap)"),
+    });
+    inner.in_flight.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// An article's current posted copy has exhausted its STAT attempts. Repost
@@ -617,17 +644,22 @@ async fn handle_confirmed_miss(
                 error = %e,
                 "check: repost failed; giving up on this article"
             );
-            inner
-                .still_missing
-                .lock()
-                .unwrap()
-                .push(item.seg.message_id.clone());
-            let checked = inner.checked_count.fetch_add(1, Ordering::Relaxed) + 1;
-            inner.emit(ProgressEvent::CheckProgress {
-                checked: checked as u64,
-                ok: false,
-            });
-            inner.in_flight.fetch_sub(1, Ordering::AcqRel);
+            if is_post_refusal(&e) {
+                inner
+                    .still_missing
+                    .lock()
+                    .unwrap()
+                    .push(item.seg.message_id.clone());
+                let checked = inner.checked_count.fetch_add(1, Ordering::Relaxed) + 1;
+                inner.emit(ProgressEvent::CheckProgress {
+                    checked: checked as u64,
+                    ok: false,
+                });
+                inner.in_flight.fetch_sub(1, Ordering::AcqRel);
+            } else {
+                // Transport/timeout on the POST itself is not a 430 gap.
+                mark_inconclusive(inner, item.seg.message_id, "repost connection error");
+            }
         }
     }
 }
@@ -738,6 +770,24 @@ async fn repost_one(
     Err(last_err)
 }
 
+/// True when a repost failed because the server refused the article (441/4xx),
+/// not because the check/post path itself died. Refusals stay MissingConfirmed;
+/// transport errors are Inconclusive.
+fn is_post_refusal(err: &anyhow::Error) -> bool {
+    let s = err.to_string();
+    s.contains("441") || s.contains("rejected by server") || s.contains("unexpected POST")
+}
+
+/// Recovered (STAT 223) vs STAT-`Err` subsets of a recovery pass.
+/// Anything in neither is still MissingConfirmed (430, or the recovery POST
+/// itself failed). Recovery never runs on articles that were already
+/// Inconclusive — the caller only passes MissingConfirmed.
+pub(crate) struct RecoverOutcome {
+    pub recovered: Vec<PostedSegment>,
+    pub inconclusive: Vec<PostedSegment>,
+    pub slots: Vec<ConnectionSlot>,
+}
+
 /// One extra, bounded recovery attempt for articles that are still missing
 /// after every `check_post_retries` round already ran out — the caller (see
 /// `poster::maybe_recover_missing`) has already decided this batch is small
@@ -768,9 +818,13 @@ pub(crate) async fn recover_missing(
     segments: Vec<PostedSegment>,
     events: Option<&ProgressSender>,
     mut slots: Vec<ConnectionSlot>,
-) -> (Vec<PostedSegment>, Vec<ConnectionSlot>) {
+) -> RecoverOutcome {
     if segments.is_empty() || slots.is_empty() {
-        return (Vec::new(), slots);
+        return RecoverOutcome {
+            recovered: Vec::new(),
+            inconclusive: Vec::new(),
+            slots,
+        };
     }
 
     let total = segments.len() as u64;
@@ -784,6 +838,7 @@ pub(crate) async fn recover_missing(
     let queue = Arc::new(Mutex::new(segments));
     let done = Arc::new(AtomicUsize::new(0));
     let recovered = Arc::new(Mutex::new(Vec::with_capacity(total as usize)));
+    let inconclusive = Arc::new(Mutex::new(Vec::new()));
 
     let mut workers = Vec::with_capacity(n_workers);
     for mut slot in work_slots {
@@ -792,6 +847,7 @@ pub(crate) async fn recover_missing(
         let queue = Arc::clone(&queue);
         let done = Arc::clone(&done);
         let recovered = Arc::clone(&recovered);
+        let inconclusive = Arc::clone(&inconclusive);
         let events = events.cloned();
 
         workers.push(tokio::spawn(async move {
@@ -804,19 +860,38 @@ pub(crate) async fn recover_missing(
                 let ok = match repost_one(&config, &mut slot, &seg, &groups).await {
                     Ok(new_seg) => {
                         tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
-                        let confirmed = match slot.ensure_connected().await {
-                            Ok(conn) => conn.stat(&new_seg.message_id).await.unwrap_or(false),
-                            Err(_) => false,
-                        };
-                        if confirmed {
-                            recovered.lock().unwrap().push(new_seg);
-                            true
-                        } else {
-                            warn!(
-                                id = %new_seg.message_id,
-                                "check: recovery repost accepted but not confirmed on final STAT"
-                            );
-                            false
+                        match slot.ensure_connected().await {
+                            Ok(conn) => match conn.stat(&new_seg.message_id).await {
+                                Ok(true) => {
+                                    recovered.lock().unwrap().push(new_seg);
+                                    true
+                                }
+                                Ok(false) => {
+                                    warn!(
+                                        id = %new_seg.message_id,
+                                        "check: recovery repost accepted but STAT 430 on final check"
+                                    );
+                                    false
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        id = %new_seg.message_id,
+                                        error = %e,
+                                        "check: recovery STAT error; classifying as inconclusive"
+                                    );
+                                    inconclusive.lock().unwrap().push(new_seg);
+                                    false
+                                }
+                            },
+                            Err(e) => {
+                                warn!(
+                                    id = %new_seg.message_id,
+                                    error = %e,
+                                    "check: recovery STAT connect error; classifying as inconclusive"
+                                );
+                                inconclusive.lock().unwrap().push(new_seg);
+                                false
+                            }
                         }
                     }
                     Err(e) => {
@@ -850,11 +925,17 @@ pub(crate) async fn recover_missing(
         }
     }
 
-    let recovered = Arc::try_unwrap(recovered)
-        .expect("every worker task has finished by now")
-        .into_inner()
-        .unwrap();
-    (recovered, slots)
+    RecoverOutcome {
+        recovered: Arc::try_unwrap(recovered)
+            .expect("every worker task has finished by now")
+            .into_inner()
+            .unwrap(),
+        inconclusive: Arc::try_unwrap(inconclusive)
+            .expect("every worker task has finished by now")
+            .into_inner()
+            .unwrap(),
+        slots,
+    }
 }
 
 #[cfg(test)]

@@ -1039,6 +1039,10 @@ struct UploadResult {
     groups: Vec<String>,
     cancelled: bool,
     had_failures: bool,
+    /// STAT path failed without a 430. Split from `had_failures` so a later
+    /// season-pack gate can refuse independently of MissingConfirmed.
+    #[allow(dead_code)]
+    inconclusive: Vec<String>,
     total_bytes: u64,
     nzb_path: Option<PathBuf>,
     /// The files actually posted for this entry — post-compression when
@@ -1183,6 +1187,7 @@ async fn run_single_upload(
             imdb_id: config.imdb_id.as_deref(),
             tvdb_id: config.tvdb_id.as_deref(),
             mal_id: config.mal_id.as_deref(),
+            incomplete: false,
         };
 
         // Explicit --pre-hook always runs (not suppressed by --no-hooks).
@@ -1511,13 +1516,18 @@ async fn run_single_upload(
     // `post_files_with_progress_and_cancel` already retried in-run POST
     // failures (repost_failed_tasks) and ran the streaming STAT check +
     // repost internally, concurrently with the upload. `outcome.still_missing`
-    // is the final list of articles that never got confirmed after every
-    // repost attempt.
+    // is MissingConfirmed (430); `outcome.inconclusive` is a failed check
+    // path, not a confirmed gap. Cancel drain is Inconclusive, not missing.
     let cancelled = outcome.cancelled || cancel.is_some_and(|f| f.load(Ordering::Relaxed));
     let check_missing: Vec<String> = if cancelled {
         Vec::new()
     } else {
         outcome.still_missing.clone()
+    };
+    let check_inconclusive: Vec<String> = if cancelled {
+        Vec::new()
+    } else {
+        outcome.inconclusive.clone()
     };
 
     if !params.json_mode && config.par2_only {
@@ -1578,6 +1588,20 @@ async fn run_single_upload(
                 "check: articles still missing after every repost attempt"
             );
         }
+        if !check_inconclusive.is_empty() {
+            eprintln!(
+                "check: {} article(s) inconclusive (check path failed — not a confirmed gap):",
+                check_inconclusive.len()
+            );
+            for id in &check_inconclusive {
+                eprintln!("  - {id}");
+            }
+            error!(
+                count = check_inconclusive.len(),
+                ids = ?check_inconclusive,
+                "check: articles inconclusive (check path failed — not a confirmed gap)"
+            );
+        }
     }
 
     // If segments still failed after retry, refuse to write the NZB — it
@@ -1585,14 +1609,17 @@ async fn run_single_upload(
     // posted segments so the user can continue with --resume.
     let has_post_failures =
         !outcome.failed_tasks.is_empty() && !config.dry_run && !config.par2_only;
-    // Set when a STAT pass still can't find some articles after every
-    // --check-post-retries round — a *different* kind of incompleteness
-    // than a POST that never got acknowledged at all. `--allow-incomplete-nzb`
-    // opts back into publishing only this kind of gap (e.g. relying on PAR2
-    // recovery); a genuine POST failure always blocks regardless of the flag.
+    // STAT 430-exhausted after every --check-post-retries round.
+    // `--allow-incomplete-nzb` opts back into publishing only this kind of
+    // gap; POST failures and Inconclusive always block.
     let has_confirmed_missing = !check_missing.is_empty() && !config.dry_run && !config.par2_only;
-    let has_unrecoverable_failures =
-        has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+    let has_inconclusive = !check_inconclusive.is_empty() && !config.dry_run && !config.par2_only;
+    let has_unrecoverable_failures = pesto::poster::nzb_write_decision(
+        has_post_failures,
+        has_confirmed_missing,
+        has_inconclusive,
+        config.allow_incomplete_nzb,
+    ) == pesto::poster::NzbWriteDecision::Refuse;
     let files_str = || {
         entry_paths
             .iter()
@@ -1654,6 +1681,25 @@ async fn run_single_upload(
                 eprintln!("  {}", state_path.display());
                 eprintln!("  pesto {} --resume {}", files_str(), resume_flags_str());
             }
+        }
+        eprintln!();
+    }
+    if has_inconclusive {
+        let n = check_inconclusive.len();
+        eprintln!();
+        eprintln!("error: {n} article(s) inconclusive (check path failed — not a confirmed gap).");
+        eprintln!(
+            "The NZB will NOT be written — --allow-incomplete-nzb does not apply to \
+             an unverified check path."
+        );
+        if let Some(ref state_path) = resume_path {
+            eprintln!();
+            eprintln!(
+                "Retry with --resume --check to re-STAT the same Message-IDs \
+                 (no second POST):"
+            );
+            eprintln!("  {}", state_path.display());
+            eprintln!("  pesto {} --resume {}", files_str(), resume_flags_str());
         }
         eprintln!();
     }
@@ -1814,8 +1860,10 @@ async fn run_single_upload(
         // Reflects true completeness, independent of --allow-incomplete-nzb —
         // the notification should say "not fully ok" even when the user
         // chose to publish anyway.
-        let had_failures =
-            !outcome.failures.is_empty() || has_post_failures || has_confirmed_missing;
+        let had_failures = !outcome.failures.is_empty()
+            || has_post_failures
+            || has_confirmed_missing
+            || has_inconclusive;
         pesto::notify::send_all(&pesto::notify::NotifyConfig {
             webhook_url: config.notify_webhook.as_deref(),
             ntfy_topic: config.notify_ntfy.as_deref(),
@@ -1942,6 +1990,7 @@ async fn run_single_upload(
             imdb_id: config.imdb_id.as_deref(),
             tvdb_id: config.tvdb_id.as_deref(),
             mal_id: config.mal_id.as_deref(),
+            incomplete: has_confirmed_missing,
         };
 
         run_all_hooks(config, &hook_env);
@@ -1985,8 +2034,10 @@ async fn run_single_upload(
     }
 
     // Apply cleanup only if upload succeeded completely (no failures/cancellation).
-    let no_failures =
-        outcome.failures.is_empty() && check_missing.is_empty() && !has_unrecoverable_failures;
+    let no_failures = outcome.failures.is_empty()
+        && check_missing.is_empty()
+        && check_inconclusive.is_empty()
+        && !has_unrecoverable_failures;
     let should_cleanup = !cancelled && no_failures;
 
     if should_cleanup {
@@ -2003,7 +2054,9 @@ async fn run_single_upload(
         cancelled,
         had_failures: !outcome.failures.is_empty()
             || !check_missing.is_empty()
+            || !check_inconclusive.is_empty()
             || has_unrecoverable_failures,
+        inconclusive: check_inconclusive,
         total_bytes,
         nzb_path: nzb_reported_path,
         posted_paths,
@@ -2705,6 +2758,7 @@ async fn run_batch(
                 imdb_id: config.imdb_id.as_deref(),
                 tvdb_id: config.tvdb_id.as_deref(),
                 mal_id: config.mal_id.as_deref(),
+                incomplete: false,
             };
             // Skip hooks for --dry-run / --par2-only: no real upload happened.
             if !config.dry_run && !config.par2_only {
@@ -3924,6 +3978,8 @@ struct HookEnv<'a> {
     tvdb_id: Option<&'a str>,
     /// MyAnimeList ID (`--mal-id`).
     mal_id: Option<&'a str>,
+    /// True when the NZB was published despite MissingConfirmed.
+    incomplete: bool,
 }
 
 fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
@@ -3960,6 +4016,7 @@ fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
     );
+    child.env("PESTO_INCOMPLETE", if env.incomplete { "1" } else { "0" });
 }
 
 /// Execute a shell command as a pre-upload hook.

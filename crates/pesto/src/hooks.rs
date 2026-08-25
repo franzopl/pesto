@@ -12,7 +12,7 @@
 //! `PESTO_NAME`, `PESTO_BYTES`, `PESTO_INPUT_PATHS`, `PESTO_SERVER`,
 //! `PESTO_SERVERS`, `PESTO_GROUP`, `PESTO_GROUPS`, `PESTO_PASSWORD`, `PESTO_NZB`, `PESTO_NFO`,
 //! `PESTO_CATEGORY`, `PESTO_NZB_TITLE`, `PESTO_OBFUSCATE`, `PESTO_PAR2`,
-//! `PESTO_TAGS`, `PESTO_WIRE_SUBJECT`. `PESTO_NZB_NAME` is also set, as a
+//! `PESTO_TAGS`, `PESTO_WIRE_SUBJECT`, `PESTO_INCOMPLETE`. `PESTO_NZB_NAME` is also set, as a
 //! deprecated alias of `PESTO_NZB_TITLE` with the same value — see
 //! [`HookContext::nzb_title`].
 
@@ -56,6 +56,9 @@ pub struct HookContext {
     /// this differs from the real filename the `.nzb` carries; empty when
     /// no segments were posted.
     pub wire_subject: String,
+    /// True when the NZB was published despite MissingConfirmed
+    /// (`--allow-incomplete-nzb`). Hooks see `PESTO_INCOMPLETE=1`.
+    pub incomplete: bool,
 }
 
 /// Run all configured post-upload hooks.
@@ -252,7 +255,8 @@ fn apply_env(cmd: &mut Command, ctx: &HookContext) {
         .env("PESTO_TAGS", &ctx.tags)
         .env("PESTO_NZB", &ctx.nzb_path)
         .env("PESTO_NFO", &ctx.nfo_path)
-        .env("PESTO_WIRE_SUBJECT", &ctx.wire_subject);
+        .env("PESTO_WIRE_SUBJECT", &ctx.wire_subject)
+        .env("PESTO_INCOMPLETE", if ctx.incomplete { "1" } else { "0" });
 }
 
 #[cfg(unix)]
