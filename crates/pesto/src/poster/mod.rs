@@ -1295,9 +1295,6 @@ pub async fn post_files_inner(
             .map(|s| (s.file_name.clone(), s.part, s.total))
             .collect();
         for seg in recovered {
-            if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
-                let _ = tx.send(seg.clone());
-            }
             if let Some(resume) = &shared.resume {
                 resume.lock().unwrap().record_with(
                     &seg.file_name,
@@ -1311,7 +1308,10 @@ pub async fn post_files_inner(
                     },
                 );
             }
-            shared.results.lock().unwrap().push(seg);
+            shared.results.lock().unwrap().push(seg.clone());
+            if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+                let _ = tx.send(seg);
+            }
         }
         failed_tasks.retain(|t| !recovered_keys.contains(&(t.file_name.clone(), t.part, t.total)));
         failures.retain(|f| {
@@ -2904,12 +2904,12 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
                     file_index: task.meta.file_index,
                     total_files: shared.total_files,
                 };
+                shared.results.lock().unwrap().push(seg.clone());
                 if action == ResumeAction::ReStatStoredId {
                     if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
-                        let _ = tx.send(seg.clone());
+                        let _ = tx.send(seg);
                     }
                 }
-                shared.results.lock().unwrap().push(seg);
                 let raw_bytes = task.data.len() as u64;
                 shared.release_buffer(task.data);
                 shared.emit(ProgressEvent::SegmentDone {
@@ -3584,10 +3584,10 @@ fn commit_result(
             file_index: task.meta.file_index,
             total_files: shared.total_files,
         };
+        shared.results.lock().unwrap().push(seg.clone());
         if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
-            let _ = tx.send(seg.clone());
+            let _ = tx.send(seg);
         }
-        shared.results.lock().unwrap().push(seg);
     } else {
         record_failure(shared, &task.meta, &task, message_id, last_err);
     }

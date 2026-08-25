@@ -99,8 +99,9 @@ pub struct FileFingerprint {
 
 /// In-memory confirmation state for a posted article. Not serialized —
 /// disk uses [`SegmentRecord`]'s two bools + `server_idx`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfirmState {
+pub(crate) enum ConfirmState {
     Posted,
     CheckPending,
     CheckInFlight,
