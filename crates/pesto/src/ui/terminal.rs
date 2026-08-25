@@ -2240,7 +2240,6 @@ fn inconclusive_label(count: u64) -> String {
     format!("{count} inconclusive (check path failed — not a confirmed gap)")
 }
 
-/// Fast-repost heuristic snapshot for the availability box / plain suffix.
 fn fast_repost_label(first_checks: u64, first_misses: u64) -> String {
     let pct = (first_misses as f64 / first_checks.max(1) as f64 * 100.0).round() as u64;
     format!("fast-repost: isolated miss (miss rate {pct}% of {first_checks} first checks)")
