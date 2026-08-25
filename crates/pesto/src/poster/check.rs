@@ -35,6 +35,7 @@ use crate::article::{default_subject, generate_message_id, Article};
 use crate::config::Config;
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::{ProgressEvent, ProgressSender};
+use crate::resume::{ResumeState, SegmentRecord};
 use crate::yenc;
 
 use super::PostedSegment;
@@ -134,6 +135,7 @@ struct Inner {
     first_misses: AtomicUsize,
     /// Articles whose STAT path exhausted retries with `Err`, not 430.
     inconclusive_count: AtomicUsize,
+    resume: Option<Arc<Mutex<ResumeState>>>,
 }
 
 impl Inner {
@@ -191,7 +193,8 @@ impl Inner {
     }
 
     /// Replace `results`' entry for `(file_name, part)` — used after a
-    /// repost changes an article's Message-ID.
+    /// repost changes an article's Message-ID. Also overwrites the resume
+    /// record so a later `--resume` does not re-inject the cursed id.
     fn splice(&self, seg: &PostedSegment) {
         let mut results = self.results.lock().unwrap();
         if let Some(existing) = results
@@ -199,6 +202,20 @@ impl Inner {
             .find(|s| s.file_name == seg.file_name && s.part == seg.part)
         {
             *existing = seg.clone();
+        }
+        drop(results);
+        if let Some(resume) = &self.resume {
+            resume.lock().unwrap().record_with(
+                &seg.file_name,
+                seg.part,
+                SegmentRecord {
+                    message_id: seg.message_id.clone(),
+                    bytes: seg.bytes,
+                    confirmed: false,
+                    check_disabled: false,
+                    server_idx: seg.server_idx,
+                },
+            );
         }
     }
 }
@@ -280,6 +297,7 @@ pub fn spawn_check_coordinator(
     events: Option<ProgressSender>,
     cancel: Option<Arc<AtomicBool>>,
     check_connections: usize,
+    resume: Option<Arc<Mutex<ResumeState>>>,
 ) -> CheckCoordinatorHandle {
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let n_workers = check_connections;
@@ -303,6 +321,7 @@ pub fn spawn_check_coordinator(
         first_checks: AtomicUsize::new(0),
         first_misses: AtomicUsize::new(0),
         inconclusive_count: AtomicUsize::new(0),
+        resume,
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<PostedSegment>();
@@ -436,6 +455,12 @@ async fn process_item(
             }
             if is_first_attempt {
                 inner.first_checks.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(resume) = &inner.resume {
+                resume
+                    .lock()
+                    .unwrap()
+                    .mark_confirmed(&item.seg.file_name, item.seg.part);
             }
             let checked = inner.checked_count.fetch_add(1, Ordering::Relaxed) + 1;
             inner.emit(ProgressEvent::CheckProgress {

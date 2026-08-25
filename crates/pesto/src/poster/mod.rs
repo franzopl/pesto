@@ -22,7 +22,7 @@ use crate::article::{
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionBroker, ConnectionPool, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
-use crate::resume::ResumeState;
+use crate::resume::{resume_action, ResumeAction, ResumeState, SegmentRecord};
 use crate::walk::{natural_cmp, InputFile};
 use crate::yenc;
 use parmesan::encoder::{FileHasher, FileHashes, RecoveryEncoder};
@@ -167,10 +167,10 @@ pub struct PostedSegment {
     /// server the article was posted to, instead of guessing — with a
     /// multi-server failover config, different articles from the same run
     /// can legitimately land on different servers, and a provider that
-    /// never received an article obviously can't confirm it. Meaningless
-    /// (left as `0`) for segments that never go through the check queue:
-    /// resume-skipped segments (already confirmed in a prior run) and
-    /// dry-run segments (nothing was actually posted).
+    /// never received an article obviously can't confirm it. Copied from
+    /// `.pesto-state` on a resume re-STAT so the check targets the same host.
+    /// Left as `0` for dry-run segments (nothing was actually posted) and
+    /// pre-schema resume records.
     pub server_idx: usize,
     /// This file's 1-based position among every file in the release, and the
     /// release's total file count — the `--file-counter` subject prefix.
@@ -445,6 +445,11 @@ struct Shared {
     /// before PAR2 encoding actually starts. `0` when `config.file_counter`
     /// is off, which callers treat as "no counter" (see `FileMeta::file_index`).
     total_files: u32,
+    /// Sender into the streaming STAT queue. `prepare_ready` arm 2
+    /// (re-STAT a stored id, no POST) needs this; the POST path uses it
+    /// after a 240. Taken (dropped) before `finish_and_drain` so the
+    /// feeder observes end-of-stream.
+    check_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>>,
 }
 
 impl Shared {
@@ -997,6 +1002,7 @@ pub async fn post_files_inner(
         release_from,
         run_id,
         total_files,
+        check_tx: Mutex::new(None),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -1144,11 +1150,14 @@ pub async fn post_files_inner(
             shared.events.clone(),
             Some(Arc::clone(&shared.cancelled)),
             check_conns,
+            shared.resume.clone(),
         ))
     } else {
         None
     };
-    let check_tx = check_coordinator.as_ref().map(|c| c.sender());
+    if let Some(c) = check_coordinator.as_ref() {
+        *shared.check_tx.lock().unwrap() = Some(c.sender());
+    }
 
     crate::memory::set_phase(crate::memory::Phase::Posting);
     let t_post_start = std::time::Instant::now();
@@ -1175,7 +1184,6 @@ pub async fn post_files_inner(
                 rx,
                 idx,
                 slot,
-                check_tx.clone(),
                 broker.clone(),
             )));
         }
@@ -1258,18 +1266,16 @@ pub async fn post_files_inner(
         coordinator.scale_up(upload_conns);
     }
 
-    cancel_handle.abort();
-
     let mut failures = std::mem::take(&mut *shared.failures.lock().unwrap());
     let mut failed_tasks = std::mem::take(&mut *shared.failed_tasks.lock().unwrap());
-    let cancelled = shared.cancelled.load(Ordering::Relaxed);
+    let cancelled_during_post = shared.cancelled.load(Ordering::Relaxed);
 
     // Blind retry for segments that never got a `240` in the main loop
     // (connection drops, timeouts, etc — never confirmed by the server at
     // all). Recovered segments flow into the same streaming check queue as
     // everything else, so they get the same STAT confirmation before the
     // run reports them as posted.
-    if !failed_tasks.is_empty() && !cancelled {
+    if !failed_tasks.is_empty() && !cancelled_during_post {
         let n = failed_tasks.len();
         info!(count = n, "retrying segments that failed during upload");
         let recovered = repost_failed_tasks(
@@ -1289,8 +1295,21 @@ pub async fn post_files_inner(
             .map(|s| (s.file_name.clone(), s.part, s.total))
             .collect();
         for seg in recovered {
-            if let Some(tx) = &check_tx {
+            if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
                 let _ = tx.send(seg.clone());
+            }
+            if let Some(resume) = &shared.resume {
+                resume.lock().unwrap().record_with(
+                    &seg.file_name,
+                    seg.part,
+                    SegmentRecord {
+                        message_id: seg.message_id.clone(),
+                        bytes: seg.bytes,
+                        confirmed: false,
+                        check_disabled: !shared.config.check,
+                        server_idx: seg.server_idx,
+                    },
+                );
             }
             shared.results.lock().unwrap().push(seg);
         }
@@ -1308,13 +1327,19 @@ pub async fn post_files_inner(
     // PAR2 file's bytes while it drains below. The caller is responsible for
     // removing `par2_temp_dir()` once it's truly done with the run (see
     // `run_single_upload` / `run_upload`).
-    drop(check_tx);
+    // Close the STAT feeder before drain. Shared outlives the coordinator;
+    // leaving this sender alive would hang `finish_and_drain` forever.
+    let _ = shared.check_tx.lock().unwrap().take();
     crate::memory::set_phase(crate::memory::Phase::Check);
     let mut still_missing = if let Some(coordinator) = check_coordinator {
         coordinator.finish_and_drain().await
     } else {
         Vec::new()
     };
+    // Re-read after drain: a cancel during the STAT wait must persist
+    // unconfirmed records rather than treating the dumped queue as
+    // MissingConfirmed (the watcher stays alive until after persist).
+    let cancelled = shared.cancelled.load(Ordering::Relaxed);
 
     // One more, bounded automatic recovery attempt for a small stubborn
     // tail. The common real-world case this targets: posting finished, the
@@ -1362,13 +1387,31 @@ pub async fn post_files_inner(
                 shared.events.as_ref(),
             )
             .await;
-            for seg in &recovered {
+            {
                 let mut results = shared.results.lock().unwrap();
-                if let Some(existing) = results
-                    .iter_mut()
-                    .find(|s| s.file_name == seg.file_name && s.part == seg.part)
-                {
-                    *existing = seg.clone();
+                for seg in &recovered {
+                    if let Some(existing) = results
+                        .iter_mut()
+                        .find(|s| s.file_name == seg.file_name && s.part == seg.part)
+                    {
+                        *existing = seg.clone();
+                    }
+                }
+            }
+            if let Some(resume) = &shared.resume {
+                let mut state = resume.lock().unwrap();
+                for seg in &recovered {
+                    state.record_with(
+                        &seg.file_name,
+                        seg.part,
+                        SegmentRecord {
+                            message_id: seg.message_id.clone(),
+                            bytes: seg.bytes,
+                            confirmed: true,
+                            check_disabled: false,
+                            server_idx: seg.server_idx,
+                        },
+                    );
                 }
             }
             let recovered_keys: std::collections::HashSet<(String, u32)> = recovered
@@ -1390,9 +1433,11 @@ pub async fn post_files_inner(
     // Message-ID must be forgotten now — otherwise a later `--resume` would
     // trust that known-bad ID and silently skip re-posting the segment,
     // producing an NZB that looks complete but references an article that
-    // was never actually confirmed present.
+    // was never actually confirmed present. Cancel is not a confirmed miss:
+    // keep those records as `confirmed: false` so `--resume --check` can
+    // re-STAT the same ids.
     if let Some(resume) = &shared.resume {
-        if !still_missing.is_empty() {
+        if !cancelled && !still_missing.is_empty() {
             let results = shared.results.lock().unwrap();
             let mut state = resume.lock().unwrap();
             for id in &still_missing {
@@ -1416,15 +1461,19 @@ pub async fn post_files_inner(
     // check simply didn't get to finish verifying everything, not a
     // confirmed gap), and `allow_incomplete_nzb` means the user has already
     // accepted the remaining gap and is relying on PAR2, not `--resume`, to
-    // fill it. Whenever the run is *not* complete by those terms, persist
-    // once so a later `--resume` has something to load; otherwise delete
-    // any state file (freshly written or left over from an earlier failed
-    // attempt at the same output path) — there is nothing left to resume.
+    // fill it. Cancel with any Posted/Confirmed records still persists so
+    // the operator does not lose 240s already accepted. Whenever the run is
+    // *not* complete by those terms, persist once so a later `--resume` has
+    // something to load; otherwise delete any state file (freshly written
+    // or left over from an earlier failed attempt at the same output path)
+    // — there is nothing left to resume.
     if let (Some(resume), Some(rp)) = (&shared.resume, &shared.resume_path) {
         let has_post_failures = !failed_tasks.is_empty();
         let has_confirmed_missing = !cancelled && !still_missing.is_empty();
-        let incomplete =
-            has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+        let has_progress = !resume.lock().unwrap().is_empty();
+        let incomplete = has_post_failures
+            || (has_confirmed_missing && !config.allow_incomplete_nzb)
+            || (cancelled && has_progress);
         if incomplete {
             let _ = resume.lock().unwrap().save(rp);
         } else {
@@ -1463,6 +1512,8 @@ pub async fn post_files_inner(
         .filter_map(|idx| all_servers.get(idx))
         .map(|s| s.host.clone())
         .collect();
+
+    cancel_handle.abort();
 
     Ok(PostOutcome {
         segments,
@@ -2823,7 +2874,8 @@ async fn encode_worker(
     }
 }
 
-/// Resume skip / spool / yEnc. `None` means the segment is already done.
+/// Resume skip / spool / yEnc. `None` means the segment is already done
+/// (skipped or re-queued for STAT of a stored id).
 async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArticle> {
     if let Some(resume) = &shared.resume {
         let existing = resume
@@ -2831,32 +2883,42 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
             .unwrap()
             .get(&task.meta.real_name, task.part)
             .cloned();
-        if let Some(existing) = existing {
-            shared.results.lock().unwrap().push(PostedSegment {
-                file_name: task.meta.real_name.clone(),
-                file_path: Arc::from(task.meta.path.as_path()),
-                subject_name: Arc::from(task.meta.real_name.as_str()),
-                wire_name: Arc::from(task.subject_name.as_str()),
-                file_size: task.meta.size,
-                part: task.part,
-                total: task.total,
-                message_id: existing.message_id,
-                bytes: existing.bytes,
-                from: Arc::from(task.from.as_str()),
-                date: task.date.clone(),
-                full_crc32: task.file_crc32.unwrap_or(0),
-                server_idx: 0,
-                file_index: task.meta.file_index,
-                total_files: shared.total_files,
-            });
-            let raw_bytes = task.data.len() as u64;
-            shared.release_buffer(task.data);
-            shared.emit(ProgressEvent::SegmentDone {
-                file: task.meta.real_name.clone(),
-                bytes: raw_bytes,
-                ok: true,
-            });
-            return None;
+        match resume_action(shared.config.check, existing.as_ref()) {
+            ResumeAction::Post => {}
+            action @ (ResumeAction::Skip | ResumeAction::ReStatStoredId) => {
+                let existing = existing.expect("skip/re-STAT arms require a record");
+                let seg = PostedSegment {
+                    file_name: task.meta.real_name.clone(),
+                    file_path: Arc::from(task.meta.path.as_path()),
+                    subject_name: Arc::from(task.meta.real_name.as_str()),
+                    wire_name: Arc::from(task.subject_name.as_str()),
+                    file_size: task.meta.size,
+                    part: task.part,
+                    total: task.total,
+                    message_id: existing.message_id,
+                    bytes: existing.bytes,
+                    from: Arc::from(task.from.as_str()),
+                    date: task.date.clone(),
+                    full_crc32: task.file_crc32.unwrap_or(0),
+                    server_idx: existing.server_idx,
+                    file_index: task.meta.file_index,
+                    total_files: shared.total_files,
+                };
+                if action == ResumeAction::ReStatStoredId {
+                    if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+                        let _ = tx.send(seg.clone());
+                    }
+                }
+                shared.results.lock().unwrap().push(seg);
+                let raw_bytes = task.data.len() as u64;
+                shared.release_buffer(task.data);
+                shared.emit(ProgressEvent::SegmentDone {
+                    file: task.meta.real_name.clone(),
+                    bytes: raw_bytes,
+                    ok: true,
+                });
+                return None;
+            }
         }
     }
 
@@ -2944,7 +3006,6 @@ async fn worker(
     mut rx: tokio::sync::mpsc::Receiver<ReadyArticle>,
     conn_id: usize,
     mut slot: ConnectionSlot,
-    check_tx: Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
     broker: Option<Arc<ConnectionBroker>>,
 ) {
     let mut rate_limiter = RateLimiter::new(
@@ -3182,7 +3243,6 @@ async fn worker(
             let wire = p.headers.len() + p.encoded.body.len();
             commit_result(
                 &shared,
-                check_tx.as_ref(),
                 p.task,
                 p.message_id,
                 wire,
@@ -3322,7 +3382,6 @@ async fn worker(
                 let wire = p.headers.len() + p.encoded.body.len();
                 commit_result(
                     &shared,
-                    check_tx.as_ref(),
                     p.task,
                     p.message_id,
                     wire,
@@ -3467,7 +3526,6 @@ fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
 #[allow(clippy::too_many_arguments)]
 fn commit_result(
     shared: &Shared,
-    check_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
     task: PostTask,
     message_id: String,
     wire_bytes: usize,
@@ -3489,11 +3547,19 @@ fn commit_result(
             // single persist decided by the final outcome (see the
             // still_missing handling and `run_single_upload`'s cleanup)
             // covers the same guarantee at a fraction of the cost.
-            resume.lock().unwrap().record(
+            //
+            // `confirmed` is false until STAT 223; `--no-check` never flips
+            // it (that run never STATed).
+            resume.lock().unwrap().record_with(
                 &task.meta.real_name,
                 task.part,
-                &message_id,
-                wire_bytes as u64,
+                SegmentRecord {
+                    message_id: message_id.clone(),
+                    bytes: wire_bytes as u64,
+                    confirmed: false,
+                    check_disabled: !shared.config.check,
+                    server_idx,
+                },
             );
         }
         // Confirmed posted — any spooled copy has served its purpose.
@@ -3518,7 +3584,7 @@ fn commit_result(
             file_index: task.meta.file_index,
             total_files: shared.total_files,
         };
-        if let Some(tx) = check_tx {
+        if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
             let _ = tx.send(seg.clone());
         }
         shared.results.lock().unwrap().push(seg);
@@ -5070,6 +5136,7 @@ mod tests {
             release_from: None,
             run_id: 0,
             total_files: 0,
+            check_tx: Mutex::new(None),
         })
     }
 

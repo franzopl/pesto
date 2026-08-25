@@ -62,6 +62,7 @@ par2-avx2-gfni-unsafe = ["parmesan/par2-avx2-gfni-unsafe"]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
 tempfile = "3"
 proptest = "1.11.0"
+serde_json = "1"
 
 [[bench]]
 name = "par2_encoder"

@@ -4,9 +4,9 @@
 //! State is stored as a JSON file (`.pesto-state`) beside the `.nzb` output.
 //! Each record maps a `(relative_file_name, part_number)` pair to the
 //! `Message-ID` (and wire size) issued when the segment was originally
-//! posted. On resume, workers skip segments present in the state and inject
-//! the stored `Message-ID`/`bytes` directly into the results, so the final
-//! `.nzb` is correct.
+//! posted, plus whether STAT 223 confirmed it. On resume, `prepare_ready`
+//! either skips the segment, re-STATs the stored id without a second POST,
+//! or POSTs a fresh article — see [`resume_action`].
 //!
 //! Trusting a state file blindly is unsafe (see GitHub issue #18): the same
 //! output name can be reused for an unrelated or edited file, or with
@@ -97,18 +97,79 @@ pub struct FileFingerprint {
     pub mtime: Option<u64>,
 }
 
+/// In-memory confirmation state for a posted article. Not serialized —
+/// disk uses [`SegmentRecord`]'s two bools + `server_idx`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmState {
+    Posted,
+    CheckPending,
+    CheckInFlight,
+    Confirmed,
+    RetryWait,
+    Reposting,
+    Recovering,
+    MissingConfirmed,
+    Inconclusive,
+}
+
+/// What `--resume` should do with a stored [`SegmentRecord`] (or the lack of
+/// one) on this run. Evaluated in this order: no record → POST; check off
+/// or already confirmed → skip; otherwise re-STAT the stored Message-ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeAction {
+    /// Inject the stored `PostedSegment`; no POST; no STAT.
+    Skip,
+    /// Inject the stored Message-ID into results and enqueue a STAT of that
+    /// same id. Do not encode or POST.
+    ReStatStoredId,
+    /// Encode and POST a fresh Message-ID (MissingConfirmed stripped, or
+    /// never posted).
+    Post,
+}
+
+/// Decide the `--resume` arm for this segment. Pre-schema JSON (no
+/// `confirmed`/`check_disabled` fields) deserializes both bools as `false`,
+/// which is the re-STAT path under `--check` and the skip path under
+/// `--no-check`. `check_disabled` is not inferred from old files.
+pub fn resume_action(check: bool, rec: Option<&SegmentRecord>) -> ResumeAction {
+    match rec {
+        None => ResumeAction::Post,
+        Some(_) if !check => ResumeAction::Skip,
+        Some(r) if r.confirmed => ResumeAction::Skip,
+        Some(_) => ResumeAction::ReStatStoredId,
+    }
+}
+
 /// One recorded segment: the `Message-ID` a prior run's `POST` was
 /// acknowledged under, and the wire size actually sent (headers + encoded
 /// body) — needed so a resumed segment can report its real size in the NZB
 /// instead of `0`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `confirmed` is set **only** after STAT 223. A `--no-check` run never
+/// writes `confirmed: true` (that run never STATed). New fields use
+/// `#[serde(default)]` so a pre-schema `{message_id, bytes}` record still
+/// loads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SegmentRecord {
     pub message_id: String,
     pub bytes: u64,
+    /// STAT 223 observed in the run that wrote this record.
+    #[serde(default)]
+    pub confirmed: bool,
+    /// The writing run had `--no-check`. Informational; skip-when-check-off
+    /// does not require this field (any existing record is skipped when
+    /// check is off).
+    #[serde(default)]
+    pub check_disabled: bool,
+    /// Server that accepted the 240. Arm 2 copies this into `PostedSegment`
+    /// so STAT retargets the right host. Pre-schema JSON → 0.
+    #[serde(default)]
+    pub server_idx: usize,
 }
 
 /// Persistent state for a single upload session.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ResumeState {
     /// Posting parameters this state was recorded under. `None` for a fresh
     /// state (nothing recorded yet) or a state file written before this
@@ -273,15 +334,35 @@ impl ResumeState {
         self.segments.get(&Self::key(file_name, part))
     }
 
-    /// Record a successfully posted segment.
+    /// Record a successfully posted segment. `confirmed`/`check_disabled`/
+    /// `server_idx` default to `(false, false, 0)` — the POST-240 path
+    /// should call [`Self::record_with`] so those flags match the run.
     pub fn record(&mut self, file_name: &str, part: u32, message_id: &str, bytes: u64) {
-        self.segments.insert(
-            Self::key(file_name, part),
+        self.record_with(
+            file_name,
+            part,
             SegmentRecord {
                 message_id: message_id.to_string(),
                 bytes,
+                confirmed: false,
+                check_disabled: false,
+                server_idx: 0,
             },
         );
+    }
+
+    /// Insert or overwrite the record for `(file_name, part)`.
+    pub fn record_with(&mut self, file_name: &str, part: u32, rec: SegmentRecord) {
+        self.segments.insert(Self::key(file_name, part), rec);
+    }
+
+    /// Flip `confirmed` after STAT 223. No-op if the segment is not recorded.
+    /// Never called on a `--no-check` run (that path never STATs).
+    pub fn mark_confirmed(&mut self, file_name: &str, part: u32) {
+        if let Some(rec) = self.segments.get_mut(&Self::key(file_name, part)) {
+            rec.confirmed = true;
+            rec.check_disabled = false;
+        }
     }
 
     /// Forget a segment — used when a POST that once succeeded is later
@@ -558,5 +639,92 @@ mod tests {
         let mut ll = base.clone();
         ll.line_length = 256;
         assert_ne!(base, ll);
+    }
+
+    #[test]
+    fn pre_schema_json_defaults_new_fields() {
+        let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
+        let loaded: ResumeState = serde_json::from_str(json).unwrap();
+        let rec = loaded.get("a.bin", 1).unwrap();
+        assert_eq!(rec.message_id, "id1@x");
+        assert_eq!(rec.bytes, 100);
+        assert!(!rec.confirmed);
+        assert!(!rec.check_disabled);
+        assert_eq!(rec.server_idx, 0);
+    }
+
+    #[test]
+    fn mark_confirmed_flips_only_that_record() {
+        let mut s = ResumeState::default();
+        s.record_with(
+            "a.bin",
+            1,
+            SegmentRecord {
+                message_id: "id1@x".into(),
+                bytes: 100,
+                confirmed: false,
+                check_disabled: true,
+                server_idx: 2,
+            },
+        );
+        s.record("a.bin", 2, "id2@x", 50);
+        s.mark_confirmed("a.bin", 1);
+        let rec = s.get("a.bin", 1).unwrap();
+        assert!(rec.confirmed);
+        assert!(!rec.check_disabled);
+        assert_eq!(rec.server_idx, 2);
+        assert!(!s.get("a.bin", 2).unwrap().confirmed);
+    }
+
+    #[test]
+    fn resume_action_three_arms() {
+        let confirmed = SegmentRecord {
+            message_id: "id@x".into(),
+            bytes: 1,
+            confirmed: true,
+            check_disabled: false,
+            server_idx: 0,
+        };
+        let unconfirmed = SegmentRecord {
+            confirmed: false,
+            ..confirmed.clone()
+        };
+        let check_off = SegmentRecord {
+            confirmed: false,
+            check_disabled: true,
+            ..confirmed.clone()
+        };
+        assert_eq!(resume_action(true, None), ResumeAction::Post);
+        assert_eq!(resume_action(false, None), ResumeAction::Post);
+        assert_eq!(resume_action(false, Some(&unconfirmed)), ResumeAction::Skip);
+        assert_eq!(resume_action(false, Some(&check_off)), ResumeAction::Skip);
+        assert_eq!(resume_action(false, Some(&confirmed)), ResumeAction::Skip);
+        assert_eq!(resume_action(true, Some(&confirmed)), ResumeAction::Skip);
+        assert_eq!(
+            resume_action(true, Some(&unconfirmed)),
+            ResumeAction::ReStatStoredId
+        );
+        assert_eq!(
+            resume_action(true, Some(&check_off)),
+            ResumeAction::ReStatStoredId
+        );
+    }
+
+    #[test]
+    fn no_check_record_never_sets_confirmed() {
+        let mut s = ResumeState::default();
+        s.record_with(
+            "a.bin",
+            1,
+            SegmentRecord {
+                message_id: "id@x".into(),
+                bytes: 10,
+                confirmed: false,
+                check_disabled: true,
+                server_idx: 0,
+            },
+        );
+        let rec = s.get("a.bin", 1).unwrap();
+        assert!(!rec.confirmed && rec.check_disabled);
     }
 }
