@@ -279,8 +279,15 @@ impl CheckCoordinatorHandle {
         }
         let still_missing = self.inner.still_missing.lock().unwrap().clone();
         let inconclusive = self.inner.inconclusive.lock().unwrap().clone();
+        if !inconclusive.is_empty() {
+            self.inner.emit(ProgressEvent::CheckInconclusive {
+                count: inconclusive.len() as u64,
+                reason: "check path failed",
+            });
+        }
         self.inner.emit(ProgressEvent::CheckDone {
             failed: still_missing.len() as u64,
+            inconclusive: inconclusive.len() as u64,
         });
         CheckDrain {
             still_missing,
@@ -575,8 +582,9 @@ fn mark_inconclusive(inner: &Inner, message_id: String, reason: &'static str) {
         count,
         reason, "check: article inconclusive (check path failed — not a confirmed gap)"
     );
-    inner.emit(ProgressEvent::Status {
-        text: format!("check: {count} inconclusive (check path failed — not a confirmed gap)"),
+    inner.emit(ProgressEvent::CheckInconclusive {
+        count: count as u64,
+        reason,
     });
     inner.in_flight.fetch_sub(1, Ordering::AcqRel);
 }
@@ -770,17 +778,43 @@ async fn repost_one(
     Err(last_err)
 }
 
-/// True when a repost failed because the server refused the article (441/4xx),
-/// not because the check/post path itself died. Refusals stay MissingConfirmed;
-/// transport errors are Inconclusive.
-fn is_post_refusal(err: &anyhow::Error) -> bool {
+/// NNTP response code embedded in a POST error, if any.
+fn nntp_error_code(err: &anyhow::Error) -> Option<u16> {
     let s = err.to_string();
-    s.contains("441") || s.contains("rejected by server") || s.contains("unexpected POST")
+    for prefix in [
+        "article rejected by server (",
+        "authentication rejected by server (code ",
+        "unexpected POST response: ",
+        "unexpected POST response (pipelined): ",
+        "POST not permitted: ",
+        "POST not permitted (pipelined): ",
+    ] {
+        if let Some(rest) = s.split_once(prefix).map(|(_, r)| r) {
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(code) = digits.parse::<u16>() {
+                if (200..600).contains(&code) {
+                    return Some(code);
+                }
+            }
+        }
+    }
+    None
 }
 
-/// Recovered (STAT 223) vs STAT-`Err` subsets of a recovery pass.
-/// Anything in neither is still MissingConfirmed (430, or the recovery POST
-/// itself failed). Recovery never runs on articles that were already
+/// True when a repost failed because the server refused the article (441 or
+/// other 4xx except AUTH 480). Connect/timeout/5xx/AUTH are Inconclusive.
+fn is_post_refusal(err: &anyhow::Error) -> bool {
+    match nntp_error_code(err) {
+        Some(480) => false,
+        Some(code) if (400..500).contains(&code) => true,
+        _ => false,
+    }
+}
+
+/// Recovered (STAT 223) vs Inconclusive (STAT `Err`, or recovery POST
+/// transport/AUTH/5xx) subsets of a recovery pass.
+/// Anything in neither is still MissingConfirmed (430, or a 441/4xx recovery
+/// POST refusal). Recovery never runs on articles that were already
 /// Inconclusive — the caller only passes MissingConfirmed.
 pub(crate) struct RecoverOutcome {
     pub recovered: Vec<PostedSegment>,
@@ -895,8 +929,22 @@ pub(crate) async fn recover_missing(
                         }
                     }
                     Err(e) => {
-                        warn!(id = %seg.message_id, error = %e, "check: final recovery repost failed");
-                        false
+                        if is_post_refusal(&e) {
+                            warn!(
+                                id = %seg.message_id,
+                                error = %e,
+                                "check: final recovery repost refused; still missing"
+                            );
+                            false
+                        } else {
+                            warn!(
+                                id = %seg.message_id,
+                                error = %e,
+                                "check: recovery POST path failed; classifying as inconclusive"
+                            );
+                            inconclusive.lock().unwrap().push(seg);
+                            false
+                        }
                     }
                 };
 
@@ -966,5 +1014,33 @@ mod tests {
         // A third of checks missing is a server having a bad time, not a
         // handful of unlucky articles.
         assert!(!should_fast_repost(300, 100));
+    }
+
+    fn err(msg: &str) -> anyhow::Error {
+        anyhow::anyhow!("{msg}")
+    }
+
+    #[test]
+    fn post_refusal_is_441_and_other_4xx_except_auth() {
+        assert!(is_post_refusal(&err(
+            "article rejected by server (441): 435 Already exists in history"
+        )));
+        assert!(is_post_refusal(&err(
+            "POST not permitted: 440 Posting Not Allowed"
+        )));
+        assert!(is_post_refusal(&err(
+            "unexpected POST response: 441 article rejected"
+        )));
+        assert!(!is_post_refusal(&err(
+            "authentication rejected by server (code 502); check the configured username and password"
+        )));
+        assert!(!is_post_refusal(&err(
+            "POST not permitted: 480 Authentication required"
+        )));
+        assert!(!is_post_refusal(&err(
+            "unexpected POST response: 502 Permission denied"
+        )));
+        assert!(!is_post_refusal(&err("connection reset by peer")));
+        assert!(!is_post_refusal(&err("timed out")));
     }
 }

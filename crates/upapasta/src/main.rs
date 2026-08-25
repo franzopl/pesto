@@ -2382,9 +2382,26 @@ fn format_progress_event(ev: &pesto::progress::ProgressEvent) -> String {
         E::Interrupted => "Interrupted by user".into(),
         E::Paused => "=== Upload paused ===".into(),
         E::Resumed => "=== Upload resumed ===".into(),
-        E::CheckDone { failed } if *failed == 0 => "✓ Check: all articles verified".into(),
-        E::CheckDone { failed } => {
-            format!("✗ Check: {failed} article(s) still missing after every repost attempt")
+        E::CheckDone {
+            failed,
+            inconclusive,
+        } if *failed == 0 && *inconclusive == 0 => "✓ Check: all articles verified".into(),
+        E::CheckDone {
+            failed,
+            inconclusive,
+        } => {
+            let mut parts = Vec::new();
+            if *failed > 0 {
+                parts.push(format!(
+                    "{failed} article(s) still missing after every repost attempt"
+                ));
+            }
+            if *inconclusive > 0 {
+                parts.push(format!(
+                    "{inconclusive} inconclusive (check path failed — not a confirmed gap)"
+                ));
+            }
+            format!("✗ Check: {}", parts.join("; "))
         }
         E::CheckRetrying {
             attempt,
@@ -2593,7 +2610,10 @@ fn extract_progress_update(
                 par2_complete: false,
             })
         }
-        E::CheckDone { failed } => Some(ProgressUpdate {
+        E::CheckDone {
+            failed,
+            inconclusive,
+        } => Some(ProgressUpdate {
             done_segments: previous.done_segments,
             total_segments: previous.total_segments,
             done_bytes: previous.done_bytes,
@@ -2605,7 +2625,7 @@ fn extract_progress_update(
             par2_slices: None,
             check_progress: Some((
                 previous.check_progress.map(|(c, _)| c).unwrap_or(0),
-                *failed,
+                *failed + *inconclusive,
             )),
             queue_extended: None,
             par2_hint_bytes: 0,

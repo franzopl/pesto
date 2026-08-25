@@ -185,9 +185,10 @@ pub enum ProgressEvent {
         first_misses: u64,
     },
     /// The streaming check queue has fully drained (all articles resolved).
-    /// `failed` is the number of articles that were never confirmed even
-    /// after every repost attempt.
-    CheckDone { failed: u64 },
+    /// `failed` is MissingConfirmed (STAT 430 exhausted). `inconclusive` is
+    /// a failed check path (transport/timeout/480/502/cancel) — not a
+    /// confirmed gap, and never "all articles confirmed".
+    CheckDone { failed: u64, inconclusive: u64 },
     /// A STAT attempt failed on try `attempt`; retrying after `delay_secs`.
     /// `reason` distinguishes an article genuinely missing ("article not
     /// found") from the STAT call itself failing ("connection error") —
@@ -467,8 +468,14 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                             r#"{{"type":"check_fast_repost","first_checks":{first_checks},"first_misses":{first_misses}}}"#
                         );
                     }
-                    ProgressEvent::CheckDone { failed } => {
-                        let _ = writeln!(out, r#"{{"type":"check_done","failed":{failed}}}"#);
+                    ProgressEvent::CheckDone {
+                        failed,
+                        inconclusive,
+                    } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_done","failed":{failed},"inconclusive":{inconclusive}}}"#
+                        );
                     }
                     ProgressEvent::CheckRetrying {
                         attempt,

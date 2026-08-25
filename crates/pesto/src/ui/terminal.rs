@@ -684,6 +684,11 @@ impl RenderState {
                     self.check_active = true;
                     self.check_start = Instant::now();
                 }
+                if count > self.check_inconclusive {
+                    self.check_checked = self
+                        .check_checked
+                        .saturating_add(count - self.check_inconclusive);
+                }
                 self.check_inconclusive = count;
             }
             ProgressEvent::CheckFastRepost {
@@ -714,9 +719,18 @@ impl RenderState {
             ProgressEvent::CheckRetryRecovered => {
                 self.recovered_check_retries += 1;
             }
-            ProgressEvent::CheckDone { failed } => {
+            ProgressEvent::CheckDone {
+                failed,
+                inconclusive,
+            } => {
                 self.check_active = false;
                 self.check_failed = failed;
+                if inconclusive > self.check_inconclusive {
+                    self.check_checked = self
+                        .check_checked
+                        .saturating_add(inconclusive - self.check_inconclusive);
+                }
+                self.check_inconclusive = inconclusive;
                 self.check_retry = None;
             }
             ProgressEvent::CheckRecoverStarted { total } => {
@@ -921,7 +935,9 @@ impl RenderState {
     }
 
     fn confirmed_articles(&self) -> u64 {
-        self.check_checked.saturating_sub(self.check_failed)
+        self.check_checked
+            .saturating_sub(self.check_failed)
+            .saturating_sub(self.check_inconclusive)
     }
 
     fn accepted_articles(&self) -> u64 {
@@ -1008,7 +1024,7 @@ impl RenderState {
             // Reserve the red-style cross for unresolved upload/availability
             // failures. Cancellation remains a warning rather than looking
             // like a server rejected data.
-            if self.failures > 0 || self.check_failed > 0 {
+            if self.failures > 0 || self.check_failed > 0 || self.check_inconclusive > 0 {
                 '✗'
             } else if self.interrupted || self.failed_description.is_some() {
                 '⚠'
@@ -1243,7 +1259,7 @@ impl RenderState {
     /// nzb`/`wrote nfo` paths, so this covers only what the renderer itself
     /// knows — outcome, throughput and verification.
     fn summary_lines(&self, width: usize) -> Vec<String> {
-        let unresolved = self.failures + self.check_failed;
+        let unresolved = self.failures + self.check_failed + self.check_inconclusive;
         let ok = unresolved == 0 && !self.interrupted && self.failed_description.is_none();
         let glyph = if self.interrupted || self.failed_description.is_some() {
             ansi("⚠", "33")
@@ -1582,7 +1598,10 @@ impl RenderState {
             // This box carries the numbers that band can't — the running
             // verified / pending / missing / reposted tally.
             if self.check_active || (final_draw && self.check_checked > 0) {
-                let verified = self.check_checked.saturating_sub(self.check_failed);
+                let verified = self
+                    .check_checked
+                    .saturating_sub(self.check_failed)
+                    .saturating_sub(self.check_inconclusive);
                 let pending = self.done_segments.saturating_sub(self.check_checked);
                 // Colour-match the upload bar's two bands: "verified" in the
                 // checked band's colour, "pending" in the upload band's —
@@ -1594,11 +1613,21 @@ impl RenderState {
                     &format!("{pending} pending confirmation"),
                     UPLOAD_BAND_COLOR,
                 );
-                let mut line1 = if self.check_failed > 0 {
-                    format!(
-                        "{verified_str} · {pending_str} · {}",
-                        ansi(&format!("{} missing", self.check_failed), "31")
-                    )
+                let mut line1 = if self.check_failed > 0 || self.check_inconclusive > 0 {
+                    let mut extra = String::new();
+                    if self.check_failed > 0 {
+                        extra.push_str(&format!(
+                            " · {}",
+                            ansi(&format!("{} missing", self.check_failed), "31")
+                        ));
+                    }
+                    if self.check_inconclusive > 0 {
+                        extra.push_str(&format!(
+                            " · {}",
+                            ansi(&format!("{} inconclusive", self.check_inconclusive), "33")
+                        ));
+                    }
+                    format!("{verified_str} · {pending_str}{extra}")
                 } else if !self.check_active {
                     format!("{verified_str} · all confirmed available")
                 } else {
@@ -2034,11 +2063,14 @@ impl RenderState {
         // extra suffix on the normal progress line rather than a phase that
         // suppresses it.
         let check_suffix = if self.check_active || (final_draw && self.check_checked > 0) {
-            let verified = self.check_checked.saturating_sub(self.check_failed);
+            let verified = self
+                .check_checked
+                .saturating_sub(self.check_failed)
+                .saturating_sub(self.check_inconclusive);
             let pending = self.done_segments.saturating_sub(self.check_checked);
             let mut suffix = format!(
-                " · availability: {verified} confirmed/{} missing/{pending} pending",
-                self.check_failed
+                " · availability: {verified} confirmed/{} missing/{} inconclusive/{pending} pending",
+                self.check_failed, self.check_inconclusive
             );
             let retries_awaiting_confirmation = self
                 .check_reposted
@@ -2690,7 +2722,10 @@ mod tests {
     /// `check::recover_missing` (and its `CheckRecoverStarted`) ever runs.
     fn recovery_pass_running() -> RenderState {
         let mut state = upload_done_check_running();
-        state.apply(ProgressEvent::CheckDone { failed: 2 });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 2,
+            inconclusive: 0,
+        });
         state.apply(ProgressEvent::CheckRecoverStarted { total: 2 });
         state
     }
@@ -2824,7 +2859,10 @@ mod tests {
             checked: state.total_segments,
             ok: true,
         });
-        state.apply(ProgressEvent::CheckDone { failed: 0 });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 0,
+            inconclusive: 0,
+        });
         for width in [60, 80, 100] {
             let summary = state.summary_lines(width);
             assert_eq!(summary.len(), 2, "clean summary stays at two lines");
@@ -2892,7 +2930,10 @@ mod tests {
             checked: state.total_segments,
             ok: true,
         });
-        state.apply(ProgressEvent::CheckDone { failed: 0 });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 0,
+            inconclusive: 0,
+        });
 
         for width in [60, 80] {
             let lines = state.summary_lines(width);
@@ -2924,7 +2965,10 @@ mod tests {
             checked: state.total_segments,
             ok: true,
         });
-        state.apply(ProgressEvent::CheckDone { failed: 0 });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 0,
+            inconclusive: 0,
+        });
 
         let summary = state.summary_lines(80).join("\n");
         assert!(summary.contains("Upload complete"));
@@ -2940,7 +2984,10 @@ mod tests {
             checked: state.total_segments,
             ok: false,
         });
-        state.apply(ProgressEvent::CheckDone { failed: 1 });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 1,
+            inconclusive: 0,
+        });
 
         let summary = state.summary_lines(160).join("\n");
         assert!(summary.contains("Upload incomplete"));
@@ -2984,7 +3031,10 @@ mod tests {
             checked: state.total_segments,
             ok: false,
         });
-        state.apply(ProgressEvent::CheckDone { failed: 1 });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 1,
+            inconclusive: 2,
+        });
 
         let panel = state.panel_lines(true, 160).join("\n");
         assert!(
@@ -3024,6 +3074,28 @@ mod tests {
             panel.contains("fast-repost: isolated miss (miss rate 5% of 20 first checks)"),
             "availability box should report the fast-repost heuristic:\n{panel}"
         );
+    }
+
+    #[test]
+    fn inconclusive_check_never_claims_articles_were_confirmed() {
+        let mut state = upload_done_check_running();
+        state.apply(ProgressEvent::CheckInconclusive {
+            count: 1,
+            reason: "connection error",
+        });
+        state.apply(ProgressEvent::CheckDone {
+            failed: 0,
+            inconclusive: 1,
+        });
+
+        let summary = state.summary_lines(160).join("\n");
+        assert!(summary.contains("Upload incomplete"));
+        assert!(summary.contains("unresolved"));
+        assert!(
+            !summary.contains("articles confirmed"),
+            "Inconclusive must not be reported as confirmed: {summary}"
+        );
+        assert!(!summary.contains("Upload complete"));
     }
 
     #[test]
