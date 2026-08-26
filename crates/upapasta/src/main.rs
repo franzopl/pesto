@@ -1701,8 +1701,16 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             }
 
             // Season: consolidate every posted segment into one combined NZB.
+            // The pack is a distinct artefact: --allow-incomplete-nzb never
+            // unlocks it. Per-episode NZBs already followed nzb_write_decision.
             let mut season_nzb = None;
-            if folder_mode == app::FolderMode::Season && !all_segments.is_empty() {
+            if folder_mode == app::FolderMode::Season
+                && pesto::poster::should_write_season_nzb(
+                    any_cancelled,
+                    !folder_ok,
+                    all_segments.is_empty(),
+                )
+            {
                 if let Some(ref dir) = nzb_out_dir {
                     let out = dir.join(format!("{label}.nzb"));
                     let meta = pesto::nzb::NzbMeta {
@@ -2677,6 +2685,37 @@ fn extract_progress_update(
             par2_complete: false,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod season_nzb_gate_tests {
+    /// T16b: UpaPasta `folder_mode == Season` gates `fs::write` on the same
+    /// library predicate as pesto CLI `run_batch`. `folder_ok == false`
+    /// (any episode `had_failures`, including MissingConfirmed with
+    /// `--allow-incomplete-nzb`) maps to `any_episode_incomplete`.
+    fn gate(any_cancelled: bool, folder_ok: bool, all_segments_empty: bool) -> bool {
+        pesto::poster::should_write_season_nzb(any_cancelled, !folder_ok, all_segments_empty)
+    }
+
+    #[test]
+    fn t16b_all_episodes_ok_writes_pack() {
+        assert!(gate(false, true, false));
+    }
+
+    #[test]
+    fn t16b_incomplete_episode_does_not_write_pack() {
+        assert!(!gate(false, false, false));
+    }
+
+    #[test]
+    fn t16b_cancelled_does_not_write_pack() {
+        assert!(!gate(true, true, false));
+    }
+
+    #[test]
+    fn t16b_empty_segments_does_not_write_pack() {
+        assert!(!gate(false, true, true));
     }
 }
 

@@ -1039,9 +1039,8 @@ struct UploadResult {
     groups: Vec<String>,
     cancelled: bool,
     had_failures: bool,
-    /// STAT path failed without a 430. Split from `had_failures` so a later
+    /// STAT path failed without a 430. Split from `had_failures` so the
     /// season-pack gate can refuse independently of MissingConfirmed.
-    #[allow(dead_code)]
     inconclusive: Vec<String>,
     total_bytes: u64,
     nzb_path: Option<PathBuf>,
@@ -2529,7 +2528,11 @@ async fn run_batch(
                 if result.cancelled {
                     any_cancelled = true;
                 }
-                if result.had_failures {
+                // Pack completeness is independent of --allow-incomplete-nzb
+                // (that flag is per-episode). had_failures already covers
+                // MissingConfirmed; inconclusive is OR'd so Inconclusive
+                // still blocks if the two ever diverge.
+                if result.had_failures || !result.inconclusive.is_empty() {
                     any_failures = true;
                 }
                 posted_episode_paths.extend(result.posted_paths);
@@ -2556,10 +2559,13 @@ async fn run_batch(
     info!(entries = total_entries, "--each complete");
 
     // Write consolidated season NZB (and matching .nfo + hooks) when requested.
+    // The pack is a distinct artefact: --allow-incomplete-nzb never unlocks it.
     if let Some(season_path) = season_nzb {
-        if any_cancelled {
-            eprintln!("interrupted — skipping season nzb output");
-        } else if !all_segments.is_empty() {
+        if pesto::poster::should_write_season_nzb(
+            any_cancelled,
+            any_failures,
+            all_segments.is_empty(),
+        ) {
             info!(entries = total_entries, path = %season_path.display(), "season merge starting");
             let config = &params.config;
             let season_name = config.nzb_title.clone().or_else(|| {
@@ -2764,6 +2770,8 @@ async fn run_batch(
             if !config.dry_run && !config.par2_only {
                 run_all_hooks(config, &hook_env);
             }
+        } else if any_cancelled {
+            eprintln!("interrupted — skipping season nzb output");
         } else if any_failures {
             eprintln!("error: season pack was not created due to earlier upload failures");
         } else {

@@ -328,6 +328,22 @@ pub fn nzb_write_decision(
     }
 }
 
+/// Whether a combined `--season` NZB should be written.
+///
+/// The pack is a distinct artefact from per-episode NZBs: write only when
+/// every episode is complete (Confirmed, or Posted under `--no-check`),
+/// the run was not cancelled, and there is at least one segment. One
+/// MissingConfirmed or Inconclusive episode blocks the pack even if
+/// `--allow-incomplete-nzb` wrote that episode's own NZB — the flag never
+/// unlocks the merge.
+pub fn should_write_season_nzb(
+    any_cancelled: bool,
+    any_episode_incomplete: bool,
+    all_segments_empty: bool,
+) -> bool {
+    !any_cancelled && !any_episode_incomplete && !all_segments_empty
+}
+
 #[derive(Debug, Clone)]
 struct FileMeta {
     path: PathBuf,
@@ -5070,6 +5086,32 @@ mod tests {
             nzb_write_decision(false, true, true, true),
             NzbWriteDecision::Refuse
         );
+    }
+
+    // T16: season pack is a distinct artefact; incomplete episodes never merge.
+    #[test]
+    fn should_write_season_nzb_requires_every_episode_complete() {
+        assert!(should_write_season_nzb(false, false, false));
+        assert!(!should_write_season_nzb(true, false, false));
+        assert!(!should_write_season_nzb(false, true, false));
+        assert!(!should_write_season_nzb(false, false, true));
+        assert!(!should_write_season_nzb(true, true, false));
+        assert!(!should_write_season_nzb(false, true, true));
+        assert!(!should_write_season_nzb(true, false, true));
+        assert!(!should_write_season_nzb(true, true, true));
+    }
+
+    // T16: MissingConfirmed on one episode blocks the pack even when that
+    // episode's NZB was written via --allow-incomplete-nzb. The flag is not
+    // a parameter of this predicate.
+    #[test]
+    fn should_write_season_nzb_allow_incomplete_does_not_unlock_pack() {
+        let any_episode_incomplete = true; // MissingConfirmed, regardless of flag
+        assert!(!should_write_season_nzb(
+            false,
+            any_episode_incomplete,
+            false
+        ));
     }
 
     #[test]
