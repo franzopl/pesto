@@ -142,9 +142,9 @@ async fn spawn_mock(stat: StatBehaviour, post_already_exists: bool) -> (u16, Moc
     (addr.port(), counts)
 }
 
-/// POST 240, STAT 430, then AUTH 481 on the reconnect that `repost_one` does
-/// after `handle_confirmed_miss`. AUTH 48x must be Inconclusive, not a 4xx
-/// article refusal.
+/// POST 240, STAT 430 followed by a dropped connection, then AUTH 481 on
+/// `repost_one`'s retry connection. AUTH 48x must be Inconclusive, not a
+/// 4xx article refusal.
 async fn spawn_430_then_auth_481() -> (u16, MockStats) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -227,6 +227,10 @@ async fn handle_430_then_auth_481(
                 .write_all(b"430 No such article\r\n")
                 .await
                 .unwrap();
+            // A 430 keeps a healthy connection reusable in production. Drop
+            // this mock connection so the repost's transport retry must open
+            // a new one and exercise the AUTH 481 classification below.
+            return;
         } else if command.starts_with("MODE READER") {
             write_half.write_all(b"200 reader mode\r\n").await.unwrap();
         } else if command == "QUIT" {
@@ -552,6 +556,7 @@ async fn auth_481_on_repost_after_430_is_inconclusive() {
     let file = input(dir.path(), "movie.bin", 80);
     let state_path = dir.path().join("movie.bin.pesto-state");
     let mut config = test_config(port);
+    config.retries = 2;
     config.check_post_retries = 1;
 
     let outcome = post_files_with_progress(

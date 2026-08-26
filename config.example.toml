@@ -144,17 +144,22 @@ groups = ["alt.binaries.test"]
 # check_connections — number of dedicated parallel NNTP connections for the
 # streaming check queue, carved out of the connections above (not opened on
 # top of them, so the total connections used never exceeds what you
-# configured). Default: 0 (a small pool, e.g. connections=50 uses 46 for
-# posting and 4 for checking).
+# configured). At least one connection remains available for posting, so an
+# explicit value is capped at connections - 1; checking therefore requires
+# connections >= 2. Reposts and recovery reuse these slots. Default: 0 (a
+# small pool, e.g. connections=50 uses 46 for posting and 4 for checking).
 # check_connections = 0
 
 # check_post_retries — number of times to re-post an article the check queue
 # still can't find. Default: 1.
 # check_post_retries = 1
 
-# allow_incomplete_nzb — publish the NZB (and run post-upload hooks) even
-# when some articles are still confirmed missing after every
-# check_post_retries round. Default: false.
+# allow_incomplete_nzb — publish the per-upload NZB (and run post-upload hooks
+# with PESTO_INCOMPLETE=1) when articles are confirmed missing by STAT 430
+# after every retry/recovery round. It never overrides a POST failure or an
+# inconclusive check (timeout, connection/authentication failure, or an
+# unexpected server reply), and never permits a partial combined season NZB.
+# Default: false.
 # allow_incomplete_nzb = false
 
 # check_recover_percent / check_recover_max — after every check_post_retries
