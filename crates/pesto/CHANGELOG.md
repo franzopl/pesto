@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-25
+
 ### Changed
 
 - Streaming STAT checks, reposts, and final recovery now share the strict
