@@ -1440,6 +1440,34 @@ fn trigger_prowlarr_download(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>)
     });
 }
 
+/// Combined season NZB is a distinct artefact from per-episode NZBs.
+/// `--allow-incomplete-nzb` never unlocks the pack: `folder_ok` is already
+/// false on `had_failures` (including MissingConfirmed with the flag).
+fn should_write_season_pack(
+    any_cancelled: bool,
+    folder_ok: bool,
+    all_segments_empty: bool,
+) -> bool {
+    pesto::poster::should_write_season_nzb(any_cancelled, !folder_ok, all_segments_empty)
+}
+
+/// Same skip reasons as pesto CLI `run_batch`. `None` means write the pack.
+fn season_pack_skip_message(
+    any_cancelled: bool,
+    folder_ok: bool,
+    all_segments_empty: bool,
+) -> Option<&'static str> {
+    if should_write_season_pack(any_cancelled, folder_ok, all_segments_empty) {
+        None
+    } else if any_cancelled {
+        Some("interrupted — skipping season nzb output")
+    } else if !folder_ok {
+        Some("season pack was not created due to earlier upload failures")
+    } else {
+        Some("season pack was not created (no valid segments were uploaded)")
+    }
+}
+
 /// Called when the user presses 'u' on the Dashboard.
 /// Delegates the full upload pipeline to `pesto::upload::run_upload`, which
 /// handles compression, posting, NZB writing, history, indexer, and hooks.
@@ -1704,74 +1732,82 @@ fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
             // The pack is a distinct artefact: --allow-incomplete-nzb never
             // unlocks it. Per-episode NZBs already followed nzb_write_decision.
             let mut season_nzb = None;
-            if folder_mode == app::FolderMode::Season
-                && pesto::poster::should_write_season_nzb(
-                    any_cancelled,
-                    !folder_ok,
-                    all_segments.is_empty(),
-                )
-            {
-                if let Some(ref dir) = nzb_out_dir {
-                    let out = dir.join(format!("{label}.nzb"));
-                    let meta = pesto::nzb::NzbMeta {
-                        name: Some(label.clone()),
-                        password: config
-                            .nzb_password
-                            .clone()
-                            .or_else(|| config.compress_password.clone()),
-                        category: config.nzb_category.clone(),
-                        tmdb_id: config.tmdb_id.clone(),
-                        imdb_id: config.imdb_id.clone(),
-                        tvdb_id: config.tvdb_id.as_deref().map(|id| {
-                            format!(
-                                "{}/{id}",
-                                config
-                                    .tvdb_kind
-                                    .unwrap_or(pesto::nzb::TvdbKind::Series)
-                                    .as_str()
-                            )
-                        }),
-                        mal_id: config.mal_id.clone(),
-                        tags: config.nzb_tags.clone(),
-                    };
-                    let xml = pesto::nzb::generate(
-                        &config.groups,
-                        &all_segments,
-                        &meta,
-                        config.obfuscate,
-                    );
-                    match std::fs::write(&out, xml) {
-                        Ok(()) => {
-                            let _ = tx.send(AppEvent::Progress(format!(
-                                "wrote season nzb: {}",
-                                out.display()
-                            )));
-                            let _ = tx.send(AppEvent::CatalogRecord {
-                                original_name: label.clone(),
-                                size_bytes: total_size,
-                                nzb_path: Some(out.clone()),
-                                duration_s: item_start.elapsed().as_secs_f64(),
-                            });
+            if folder_mode == app::FolderMode::Season {
+                match season_pack_skip_message(any_cancelled, folder_ok, all_segments.is_empty()) {
+                    None => {
+                        if let Some(ref dir) = nzb_out_dir {
+                            let out = dir.join(format!("{label}.nzb"));
+                            let meta = pesto::nzb::NzbMeta {
+                                name: Some(label.clone()),
+                                password: config
+                                    .nzb_password
+                                    .clone()
+                                    .or_else(|| config.compress_password.clone()),
+                                category: config.nzb_category.clone(),
+                                tmdb_id: config.tmdb_id.clone(),
+                                imdb_id: config.imdb_id.clone(),
+                                tvdb_id: config.tvdb_id.as_deref().map(|id| {
+                                    format!(
+                                        "{}/{id}",
+                                        config
+                                            .tvdb_kind
+                                            .unwrap_or(pesto::nzb::TvdbKind::Series)
+                                            .as_str()
+                                    )
+                                }),
+                                mal_id: config.mal_id.clone(),
+                                tags: config.nzb_tags.clone(),
+                            };
+                            let xml = pesto::nzb::generate(
+                                &config.groups,
+                                &all_segments,
+                                &meta,
+                                config.obfuscate,
+                            );
+                            match std::fs::write(&out, xml) {
+                                Ok(()) => {
+                                    let _ = tx.send(AppEvent::Progress(format!(
+                                        "wrote season nzb: {}",
+                                        out.display()
+                                    )));
+                                    let _ = tx.send(AppEvent::CatalogRecord {
+                                        original_name: label.clone(),
+                                        size_bytes: total_size,
+                                        nzb_path: Some(out.clone()),
+                                        duration_s: item_start.elapsed().as_secs_f64(),
+                                    });
 
-                            // Run post-upload hooks on the combined season pack so
-                            // it reaches the indexer just like each episode does.
-                            // Per-episode hooks run inside `run_upload`; this NZB is
-                            // written here, outside that pipeline, so without this
-                            // the season pack is posted but never sent on. Skip when
-                            // an episode failed — an incomplete pack must not be
-                            // forwarded to the indexer (matches run_upload, which
-                            // only runs hooks when there were no failures).
-                            if folder_ok {
-                                run_season_hooks(&config, path, &label, &out, total_size, &tx)
-                                    .await;
+                                    // Run post-upload hooks on the combined season pack so
+                                    // it reaches the indexer just like each episode does.
+                                    // Per-episode hooks run inside `run_upload`; this NZB is
+                                    // written here, outside that pipeline, so without this
+                                    // the season pack is posted but never sent on. Skip when
+                                    // an episode failed — an incomplete pack must not be
+                                    // forwarded to the indexer (matches run_upload, which
+                                    // only runs hooks when there were no failures).
+                                    if folder_ok {
+                                        run_season_hooks(
+                                            &config, path, &label, &out, total_size, &tx,
+                                        )
+                                        .await;
+                                    }
+
+                                    season_nzb = Some(out);
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(AppEvent::UploadError(format!(
+                                        "season nzb write: {e}"
+                                    )));
+                                    folder_ok = false;
+                                }
                             }
-
-                            season_nzb = Some(out);
                         }
-                        Err(e) => {
-                            let _ =
-                                tx.send(AppEvent::UploadError(format!("season nzb write: {e}")));
-                            folder_ok = false;
+                    }
+                    Some(msg) => {
+                        if any_cancelled {
+                            let _ = tx.send(AppEvent::Progress(msg.to_string()));
+                        } else {
+                            let _ = tx.send(AppEvent::UploadError(msg.to_string()));
                         }
                     }
                 }
@@ -2690,32 +2726,42 @@ fn extract_progress_update(
 
 #[cfg(test)]
 mod season_nzb_gate_tests {
-    /// T16b: UpaPasta `folder_mode == Season` gates `fs::write` on the same
-    /// library predicate as pesto CLI `run_batch`. `folder_ok == false`
-    /// (any episode `had_failures`, including MissingConfirmed with
-    /// `--allow-incomplete-nzb`) maps to `any_episode_incomplete`.
-    fn gate(any_cancelled: bool, folder_ok: bool, all_segments_empty: bool) -> bool {
-        pesto::poster::should_write_season_nzb(any_cancelled, !folder_ok, all_segments_empty)
+    use super::{season_pack_skip_message, should_write_season_pack};
+
+    /// T16b: production `should_write_season_pack` is what the Season
+    /// `fs::write` calls. `folder_ok == false` (had_failures, including
+    /// MissingConfirmed with `--allow-incomplete-nzb`) is incomplete.
+    #[test]
+    fn t16b_folder_ok_writes_pack() {
+        assert!(should_write_season_pack(false, true, false));
+        assert_eq!(season_pack_skip_message(false, true, false), None);
     }
 
     #[test]
-    fn t16b_all_episodes_ok_writes_pack() {
-        assert!(gate(false, true, false));
-    }
-
-    #[test]
-    fn t16b_incomplete_episode_does_not_write_pack() {
-        assert!(!gate(false, false, false));
+    fn t16b_folder_ok_false_does_not_write_pack() {
+        assert!(!should_write_season_pack(false, false, false));
+        assert_eq!(
+            season_pack_skip_message(false, false, false),
+            Some("season pack was not created due to earlier upload failures")
+        );
     }
 
     #[test]
     fn t16b_cancelled_does_not_write_pack() {
-        assert!(!gate(true, true, false));
+        assert!(!should_write_season_pack(true, true, false));
+        assert_eq!(
+            season_pack_skip_message(true, true, false),
+            Some("interrupted — skipping season nzb output")
+        );
     }
 
     #[test]
     fn t16b_empty_segments_does_not_write_pack() {
-        assert!(!gate(false, true, true));
+        assert!(!should_write_season_pack(false, true, true));
+        assert_eq!(
+            season_pack_skip_message(false, true, true),
+            Some("season pack was not created (no valid segments were uploaded)")
+        );
     }
 }
 

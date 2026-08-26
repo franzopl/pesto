@@ -5101,17 +5101,29 @@ mod tests {
         assert!(!should_write_season_nzb(true, true, true));
     }
 
-    // T16: MissingConfirmed on one episode blocks the pack even when that
-    // episode's NZB was written via --allow-incomplete-nzb. The flag is not
-    // a parameter of this predicate.
+    // T16: pack input is had_failures (true completeness), not
+    // nzb_write_decision. MissingConfirmed + --allow-incomplete-nzb writes
+    // the episode NZB but CLI/UpaPasta still pass incomplete=true.
     #[test]
-    fn should_write_season_nzb_allow_incomplete_does_not_unlock_pack() {
-        let any_episode_incomplete = true; // MissingConfirmed, regardless of flag
-        assert!(!should_write_season_nzb(
-            false,
-            any_episode_incomplete,
-            false
-        ));
+    fn season_pack_uses_had_failures_not_nzb_write_decision() {
+        let post_failures = false;
+        let missing_confirmed = true;
+        let inconclusive = false;
+        let allow_incomplete_nzb = true;
+        assert_eq!(
+            nzb_write_decision(
+                post_failures,
+                missing_confirmed,
+                inconclusive,
+                allow_incomplete_nzb
+            ),
+            NzbWriteDecision::Write
+        );
+        // CLI UploadResult.had_failures / UploadOutcome.had_failures —
+        // independent of the flag.
+        let had_failures = post_failures || missing_confirmed || inconclusive;
+        assert!(had_failures);
+        assert!(!should_write_season_nzb(false, had_failures, false));
     }
 
     #[test]
