@@ -592,6 +592,12 @@ pesto --season ./Season01/
 pesto --season --jobs 2 ./Season01/
 ```
 
+The combined season NZB is written only when every episode is complete and
+the batch was not cancelled. `--allow-incomplete-nzb` can permit an individual
+episode NZB with confirmed-missing articles, but it never permits a partial
+combined season NZB. POST failures and inconclusive checks also block the
+combined NZB in both the CLI and UpaPasta.
+
 ### `--watch` — daemon mode
 
 ```bash
@@ -660,6 +666,14 @@ resume from a finished upload. `--resume` controls the other half: whether a
 *prior* run's saved state is actually loaded and its already-posted segments
 skipped. Without it, `pesto` always starts fresh, even if a `.pesto-state` file
 is sitting right there.
+
+Resume state also records whether each segment was confirmed and whether
+checking was disabled. A confirmed segment is skipped. With `--no-check`, a
+segment saved by a no-check run is also skipped. In every other case —
+including state written by older pesto versions before these fields existed —
+`--resume --check` first sends `STAT` for the saved `Message-ID`: `223` skips
+the segment, `430` posts it again, and an inconclusive reply leaves it
+unverified without posting a duplicate.
 
 ```bash
 pesto --resume movie.mkv
@@ -741,11 +755,31 @@ changes. This runs concurrently with the upload rather than as a separate
 pass afterward, so by the time the last file finishes posting most of the
 run's articles are typically already confirmed.
 
+The connection budget is strict. With `--connections N`, at least one slot is
+kept for posting and the check pool is capped at `N - 1`; for example,
+`--connections 10 --check-connections 10` runs with 9 check connections and
+1 posting connection. Checking therefore requires at least two total
+connections. Reposts and the final recovery pass reuse slots already held by
+the check pool and never open sockets beyond `--connections`.
+
 A miss is retried up to `--check-retries` times (default **3**, **20 s**
 apart). If it's still missing, pesto reposts it under a fresh `Message-ID`
 (so the `.nzb` stays valid) and queues the new copy for another round of
 checks. `--check-post-retries` (default **1**) caps how many times a single
 article can be reposted before it's given up on as permanently missing.
+
+Each check ends in one of three states: `223` is confirmed present; `430`
+after all retry and recovery rounds is confirmed missing; and a timeout,
+connection failure, authentication failure, or other unexpected server reply
+is **inconclusive**. An inconclusive check is not evidence that the article is
+missing, so pesto does not repost it as a confirmed miss. It blocks the NZB,
+post-upload hooks, cleanup, and a successful exit so that `--resume --check`
+can retry `STAT` for the same `Message-ID` without another `POST`.
+
+`--allow-incomplete-nzb` applies only to articles confirmed missing by `430`.
+It may publish that incomplete per-upload NZB and runs its hooks with
+`PESTO_INCOMPLETE=1`; it never overrides a POST failure or an inconclusive
+check.
 
 Disable the whole thing with `--no-check` if you'd rather skip verification
 entirely — faster, but you won't find out about missing articles until

@@ -116,7 +116,7 @@ fn config(addr: SocketAddr) -> Config {
         host: addr.ip().to_string(),
         port: addr.port(),
         ssl: false,
-        connections: 1,
+        connections: 2,
         username: None,
         password: None,
         from: "tester <t@pesto.test>".to_string(),

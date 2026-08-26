@@ -52,8 +52,10 @@ pub enum ProgressEvent {
         /// (0 for `--par2-only`) — does not include `check_connections`.
         connections: usize,
         /// Number of NNTP connections dedicated to the streaming STAT check
-        /// (`poster::check`), carved out of (or additive to) `connections` —
-        /// see `split_connections`. 0 when checking is disabled.
+        /// (`poster::check`), carved out of `total_connections()` / `-n`
+        /// (not additive, and not a carve-out of this event's `connections`
+        /// field — that is `worker_count`, which can be smaller than upload
+        /// when the release has few segments). 0 when checking is disabled.
         check_connections: usize,
         /// `host:port` of the NNTP server, or `None` when not posting.
         target: Option<String>,
@@ -170,10 +172,23 @@ pub enum ProgressEvent {
     /// if this particular article was confirmed. Fires continuously,
     /// concurrently with the upload — there is no separate "check phase".
     CheckProgress { checked: u64, ok: bool },
+    /// STAT itself failed (timeout, transport, 480/502, unexpected code)
+    /// until `check_retries` ran out, without ever seeing a 430. `count` is
+    /// how many articles have taken this path so far this run; `reason`
+    /// matches [`Self::CheckRetrying`] (`"connection error"`).
+    CheckInconclusive { count: u64, reason: &'static str },
+    /// An isolated first-copy 430 skipped the remaining patient STAT
+    /// retries and went straight to repost. `first_checks` / `first_misses`
+    /// are the running totals that satisfied the fast-repost heuristic.
+    CheckFastRepost {
+        first_checks: u64,
+        first_misses: u64,
+    },
     /// The streaming check queue has fully drained (all articles resolved).
-    /// `failed` is the number of articles that were never confirmed even
-    /// after every repost attempt.
-    CheckDone { failed: u64 },
+    /// `failed` is MissingConfirmed (STAT 430 exhausted). `inconclusive` is
+    /// a failed check path (transport/timeout/480/502/cancel) — not a
+    /// confirmed gap, and never "all articles confirmed".
+    CheckDone { failed: u64, inconclusive: u64 },
     /// A STAT attempt failed on try `attempt`; retrying after `delay_secs`.
     /// `reason` distinguishes an article genuinely missing ("article not
     /// found") from the STAT call itself failing ("connection error") —
@@ -437,8 +452,30 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                             r#"{{"type":"check_progress","checked":{checked},"ok":{ok_str}}}"#
                         );
                     }
-                    ProgressEvent::CheckDone { failed } => {
-                        let _ = writeln!(out, r#"{{"type":"check_done","failed":{failed}}}"#);
+                    ProgressEvent::CheckInconclusive { count, reason } => {
+                        let reason_esc = reason.replace('\\', "\\\\").replace('"', "\\\"");
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_inconclusive","count":{count},"reason":"{reason_esc}"}}"#
+                        );
+                    }
+                    ProgressEvent::CheckFastRepost {
+                        first_checks,
+                        first_misses,
+                    } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_fast_repost","first_checks":{first_checks},"first_misses":{first_misses}}}"#
+                        );
+                    }
+                    ProgressEvent::CheckDone {
+                        failed,
+                        inconclusive,
+                    } => {
+                        let _ = writeln!(
+                            out,
+                            r#"{{"type":"check_done","failed":{failed},"inconclusive":{inconclusive}}}"#
+                        );
                     }
                     ProgressEvent::CheckRetrying {
                         attempt,

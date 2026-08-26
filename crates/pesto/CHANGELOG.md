@@ -12,6 +12,30 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-25
+
+### Changed
+
+- Streaming STAT checks, reposts, and final recovery now share the strict
+  `--connections` budget. The check pool is capped at one fewer than the total
+  so at least one posting connection remains available; checking with only one
+  total connection is rejected.
+- Resume state now records confirmed and no-check segments. `--resume --check`
+  rechecks unconfirmed and legacy-state Message-IDs with STAT before deciding
+  whether another POST is necessary.
+- Combined `--season` NZBs are now written only when every episode is complete;
+  `--allow-incomplete-nzb` remains limited to individual episode NZBs.
+
+### Fixed
+
+- Failed STAT paths are now reported as Inconclusive instead of confirmed
+  missing. Timeouts, connection/authentication failures, and unexpected server
+  replies no longer trigger a duplicate repost, cannot be overridden by
+  `--allow-incomplete-nzb`, and block NZB output and post-upload hooks.
+- Check connections are returned to the shared pool exactly once after the
+  final drain/recovery pass, preventing both temporary socket-budget overruns
+  and lost pool capacity.
+
 ## [0.9.0] — 2026-08-24
 
 ### Changed

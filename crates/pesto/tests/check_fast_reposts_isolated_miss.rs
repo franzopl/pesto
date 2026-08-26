@@ -170,7 +170,7 @@ async fn check_fast_reposts_an_isolated_miss_instead_of_waiting_out_patient_retr
         host: addr.ip().to_string(),
         port: addr.port(),
         ssl: false,
-        connections: 1,
+        connections: 2,
         username: None,
         password: None,
         from: "tester <t@pesto.test>".to_string(),

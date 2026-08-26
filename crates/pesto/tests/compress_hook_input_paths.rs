@@ -118,6 +118,7 @@ fn compress_preserves_original_filenames_in_hook_input_paths() {
         .args(["-g", "alt.binaries.test"])
         .args(["-n", "1"])
         .args(["--par2", "0"])
+        .arg("--no-check")
         .arg("--compress")
         .args(["-o", out.to_str().unwrap()])
         .arg(&input)

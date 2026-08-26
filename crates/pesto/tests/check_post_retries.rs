@@ -238,7 +238,7 @@ fn run_pesto_with_args(
         .args(["-s", "127.0.0.1"])
         .args(["-P", &port.to_string()])
         .args(["-g", "alt.binaries.test"])
-        .args(["-n", "1"])
+        .args(["-n", "2"])
         .args(["--par2", "0"])
         .arg("--check")
         .args(["--check-delay", "0"])
@@ -366,7 +366,15 @@ fn allow_incomplete_nzb_publishes_despite_confirmed_missing_articles() {
     std::fs::write(&input, vec![0xABu8; 64]).unwrap();
     let out = dir.path().join("out.nzb");
 
-    let output = run_pesto_with_args(addr.port(), 1, &input, &out, &["--allow-incomplete-nzb"]);
+    let captured = dir.path().join("incomplete.env");
+    let hook = format!("printf %s \"$PESTO_INCOMPLETE\" > {}", captured.display());
+    let output = run_pesto_with_args(
+        addr.port(),
+        1,
+        &input,
+        &out,
+        &["--allow-incomplete-nzb", "--post-hook", &hook],
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Still reported as a failure (exit code), since the article really is
@@ -382,5 +390,26 @@ fn allow_incomplete_nzb_publishes_despite_confirmed_missing_articles() {
     assert!(
         out.exists(),
         "expected the NZB to be written when --allow-incomplete-nzb is set"
+    );
+    let state_path = out.with_extension("pesto-state");
+    assert!(
+        state_path.exists(),
+        "T11: --allow-incomplete-nzb must keep .pesto-state so --resume can fill the gap"
+    );
+    let state = pesto::resume::ResumeState::load(&state_path).unwrap();
+    assert!(
+        state.get("movie.bin", 1).is_none(),
+        "T11: MissingConfirmed ids must be stripped from resume"
+    );
+    let env = std::fs::read_to_string(&captured).unwrap_or_else(|e| {
+        panic!(
+            "CLI hook never wrote {} (PESTO_INCOMPLETE)\nstderr:\n{stderr}\n{e}",
+            captured.display()
+        )
+    });
+    assert_eq!(
+        env.trim(),
+        "1",
+        "T11: PESTO_INCOMPLETE=1 on the CLI hook path"
     );
 }

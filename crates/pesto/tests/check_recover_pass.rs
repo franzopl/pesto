@@ -120,7 +120,7 @@ fn test_config(addr: SocketAddr) -> Config {
         host: addr.ip().to_string(),
         port: addr.port(),
         ssl: false,
-        connections: 1,
+        connections: 2,
         username: None,
         password: None,
         from: "tester <t@pesto.test>".to_string(),
@@ -413,6 +413,7 @@ async fn auto_recovery_pass_resolves_several_concurrent_stubborn_misses() {
         .collect();
 
     let mut config = test_config(addr);
+    config.connections = 4;
     config.check_connections = 3;
     config.check_recover_percent = 100;
     config.check_recover_max = N;

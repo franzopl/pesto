@@ -22,7 +22,7 @@ use crate::article::{
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionBroker, ConnectionPool, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
-use crate::resume::ResumeState;
+use crate::resume::{resume_action, ResumeAction, ResumeState, SegmentRecord};
 use crate::walk::{natural_cmp, InputFile};
 use crate::yenc;
 use parmesan::encoder::{FileHasher, FileHashes, RecoveryEncoder};
@@ -92,28 +92,65 @@ fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize, usize, us
 }
 
 /// Split the configured total connection count between upload workers and
-/// the check queue. An auto-derived check pool (`check_connections == 0`)
-/// is carved out of the total so `-n 50` always means 50 connections to
+/// the check queue. Both auto (`check_connections == 0`) and explicit N
+/// are carved out of the total so `-n 50` always means 50 connections to
 /// the server, not 50 + a check pool on top — that total is frequently a
-/// hard provider-enforced cap. An *explicit* `--check-connections` is a
-/// deliberate, separate budget the user stated on purpose, so it's honored
-/// additively instead of eating into `--connections`. Returns
-/// `(check_conns, upload_conns)`.
-fn split_connections(config: &Config, check_enabled: bool) -> (usize, usize) {
+/// hard provider-enforced cap. Explicit N is clamped:
+/// `check = N.min(total.saturating_sub(1))`, so `-n 10 --check-connections 10`
+/// is 9+1, never 10+1.
+///
+/// `check_connections == 0` means auto, not off. Off is `config.check == false`.
+/// After the formula, `check == 0` with checking enabled is a start-up error
+/// (`-n 1 --check` and `-n 1 --check-connections 1`) rather than a silent skip.
+/// Returns `(check_conns, upload_conns)`.
+fn split_connections(config: &Config, check_enabled: bool) -> Result<(usize, usize)> {
     let total_conns = config.total_connections();
     if !check_enabled {
-        return (0, total_conns);
+        return Ok((0, total_conns));
     }
-    if config.check_connections == 0 {
-        // Reserve at least 1 connection for uploading; if the total is too
-        // small to spare any for checking (e.g. `-n 1`), checking is
-        // silently skipped for this run rather than exceeding the budget.
-        let check = config
+    let check = if config.check_connections == 0 {
+        config
             .effective_check_connections()
-            .min(total_conns.saturating_sub(1));
-        (check, total_conns.saturating_sub(check))
+            .min(total_conns.saturating_sub(1))
     } else {
-        (config.check_connections, total_conns)
+        config.check_connections.min(total_conns.saturating_sub(1))
+    };
+    if check == 0 {
+        bail!(
+            "checking is enabled but no connection remains for the STAT pool \
+             (need at least one upload connection and one check connection). \
+             Raise `-n`/`connections`, lower `--check-connections`, or pass `--no-check`"
+        );
+    }
+    Ok((check, total_conns.saturating_sub(check)))
+}
+
+/// Check out `n` slots from the broker, or build a fresh pool of `n` when
+/// this run has no broker. `n == 0` is a no-op.
+async fn take_slots(
+    broker: Option<&Arc<ConnectionBroker>>,
+    servers: Arc<Vec<crate::config::ServerEntry>>,
+    n: usize,
+) -> Vec<ConnectionSlot> {
+    if n == 0 {
+        return Vec::new();
+    }
+    match broker {
+        Some(broker) => broker.checkout(n).await,
+        None => ConnectionPool::build(servers, n).into_slots(),
+    }
+}
+
+/// One checkin of the whole set at episode end (broker), or QUIT when this
+/// run owns the sockets. Never called between post-join and `scale_up`.
+async fn release_slots(broker: Option<&ConnectionBroker>, slots: Vec<ConnectionSlot>) {
+    match broker {
+        Some(broker) => broker.checkin_all(slots).await,
+        None => {
+            for mut slot in slots {
+                slot.quit().await;
+            }
+        }
     }
 }
 
@@ -167,10 +204,10 @@ pub struct PostedSegment {
     /// server the article was posted to, instead of guessing — with a
     /// multi-server failover config, different articles from the same run
     /// can legitimately land on different servers, and a provider that
-    /// never received an article obviously can't confirm it. Meaningless
-    /// (left as `0`) for segments that never go through the check queue:
-    /// resume-skipped segments (already confirmed in a prior run) and
-    /// dry-run segments (nothing was actually posted).
+    /// never received an article obviously can't confirm it. Copied from
+    /// `.pesto-state` on a resume re-STAT so the check targets the same host.
+    /// Left as `0` for dry-run segments (nothing was actually posted) and
+    /// pre-schema resume records.
     pub server_idx: usize,
     /// This file's 1-based position among every file in the release, and the
     /// release's total file count — the `--file-counter` subject prefix.
@@ -244,11 +281,13 @@ pub struct PostOutcome {
     /// was unreachable all run) or, more commonly, every configured server
     /// that had a connection quota. Empty for `--par2-only`/`--dry-run`.
     pub servers: Vec<String>,
-    /// Message-IDs that were posted (`240`) but never confirmed retrievable
-    /// via the streaming STAT check, even after every repost attempt. Empty
-    /// when `config.check` is disabled. A non-empty list means the run
-    /// produced content that is not fully confirmed on the server.
+    /// Message-IDs that were posted (`240`) but STAT 430-exhausted every
+    /// retry/repost. Empty when `config.check` is disabled. Distinct from
+    /// [`Self::inconclusive`]: this is a confirmed gap.
     pub still_missing: Vec<String>,
+    /// Message-IDs whose STAT path failed without a 430 (transport, timeout,
+    /// 480/502, cancel drain). Never unblocked by `--allow-incomplete-nzb`.
+    pub inconclusive: Vec<String>,
     /// Set when the run stopped because `producer` returned an error (bad
     /// PAR2 geometry, a memory-budget check, file I/O, …) rather than because
     /// the user cancelled it. `cancelled` is `true` in both cases — callers
@@ -264,6 +303,45 @@ pub struct PostOutcome {
     /// `--season` entry (`--jobs > 1`) cleans up only its own directory
     /// instead of a path shared by every run in the process (issue #67).
     pub par2_temp_dir: PathBuf,
+}
+
+/// Whether the NZB (and NFO / post-hooks) should be written for this run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NzbWriteDecision {
+    Write,
+    Refuse,
+}
+
+/// Single NZB completeness gate used by the CLI and [`crate::upload::run_upload`].
+/// `--allow-incomplete-nzb` unblocks only MissingConfirmed, never POST
+/// failures or Inconclusive.
+pub fn nzb_write_decision(
+    post_failures: bool,
+    missing_confirmed: bool,
+    inconclusive: bool,
+    allow_incomplete_nzb: bool,
+) -> NzbWriteDecision {
+    if post_failures || inconclusive || (missing_confirmed && !allow_incomplete_nzb) {
+        NzbWriteDecision::Refuse
+    } else {
+        NzbWriteDecision::Write
+    }
+}
+
+/// Whether a combined `--season` NZB should be written.
+///
+/// The pack is a distinct artefact from per-episode NZBs: write only when
+/// every episode is complete (Confirmed, or Posted under `--no-check`),
+/// the run was not cancelled, and there is at least one segment. One
+/// MissingConfirmed or Inconclusive episode blocks the pack even if
+/// `--allow-incomplete-nzb` wrote that episode's own NZB — the flag never
+/// unlocks the merge.
+pub fn should_write_season_nzb(
+    any_cancelled: bool,
+    any_episode_incomplete: bool,
+    all_segments_empty: bool,
+) -> bool {
+    !any_cancelled && !any_episode_incomplete && !all_segments_empty
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +523,11 @@ struct Shared {
     /// before PAR2 encoding actually starts. `0` when `config.file_counter`
     /// is off, which callers treat as "no counter" (see `FileMeta::file_index`).
     total_files: u32,
+    /// Sender into the streaming STAT queue. `prepare_ready` arm 2
+    /// (re-STAT a stored id, no POST) needs this; the POST path uses it
+    /// after a 240. Taken (dropped) before `finish_and_drain` so the
+    /// feeder observes end-of-stream.
+    check_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>>,
 }
 
 impl Shared {
@@ -922,7 +1005,7 @@ pub async fn post_files_inner(
     let total_conns = config.total_connections();
 
     let check_enabled = config.check && !config.dry_run && !config.par2_only;
-    let (check_conns, upload_conns) = split_connections(config, check_enabled);
+    let (check_conns, upload_conns) = split_connections(config, check_enabled)?;
 
     let worker_count = if config.par2_only {
         0
@@ -997,6 +1080,7 @@ pub async fn post_files_inner(
         release_from,
         run_id,
         total_files,
+        check_tx: Mutex::new(None),
     });
 
     // Announce the work plan: one `FileEntry` per source file, with the
@@ -1133,51 +1217,63 @@ pub async fn post_files_inner(
         }
     }
 
+    // One checkout of the episode's full budget so `--jobs` cannot sneak a
+    // partial checkout in between check and upload (FIFO `acquire_many`
+    // deadlock). Check workers share these slots; they never open extra TCP.
+    let mut held_slots = if check_conns > 0 || worker_count > 0 {
+        take_slots(
+            broker.as_ref(),
+            shared.servers.clone(),
+            check_conns + upload_conns,
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+    let check_slots: Vec<_> = held_slots
+        .drain(..check_conns.min(held_slots.len()))
+        .collect();
+    let mut post_slots = held_slots;
+
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
-    let mut check_coordinator = if check_enabled && check_conns > 0 {
+    let check_coordinator = if !check_slots.is_empty() {
         Some(spawn_check_coordinator(
             config.clone(),
             shared.post_group.clone(),
             Arc::clone(&shared.results),
             shared.events.clone(),
             Some(Arc::clone(&shared.cancelled)),
-            check_conns,
+            check_slots,
+            shared.resume.clone(),
         ))
     } else {
         None
     };
-    let check_tx = check_coordinator.as_ref().map(|c| c.sender());
+    if let Some(c) = check_coordinator.as_ref() {
+        *shared.check_tx.lock().unwrap() = Some(c.sender());
+    }
 
     crate::memory::set_phase(crate::memory::Phase::Posting);
     let t_post_start = std::time::Instant::now();
     let mut handles = Vec::with_capacity(worker_count);
     let mut encode_handles = Vec::new();
-    let tx_opt = if worker_count > 0 {
-        let ready_n = ready_queue_depth(worker_count);
-        let post_depth = (ready_n / worker_count).max(2);
-        let mut post_senders = Vec::with_capacity(worker_count);
-        let mut post_receivers = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
+    let tx_opt = if worker_count > 0 && !post_slots.is_empty() {
+        let spawn_n = worker_count.min(post_slots.len());
+        let ready_n = ready_queue_depth(spawn_n);
+        let post_depth = (ready_n / spawn_n).max(2);
+        let mut post_senders = Vec::with_capacity(spawn_n);
+        let mut post_receivers = Vec::with_capacity(spawn_n);
+        for _ in 0..spawn_n {
             let (tx, rx) = tokio::sync::mpsc::channel(post_depth);
             post_senders.push(tx);
             post_receivers.push(rx);
         }
         let post_disp = Arc::new(TaskDispatcher::new(post_senders));
-        let slots = match &broker {
-            Some(broker) => broker.checkout(worker_count).await,
-            None => ConnectionPool::build(shared.servers.clone(), worker_count).into_slots(),
-        };
-        for (idx, (slot, rx)) in slots.into_iter().zip(post_receivers).enumerate() {
-            handles.push(tokio::spawn(worker(
-                shared.clone(),
-                rx,
-                idx,
-                slot,
-                check_tx.clone(),
-                broker.clone(),
-            )));
+        let spawned: Vec<_> = post_slots.drain(..spawn_n).collect();
+        for (idx, (slot, rx)) in spawned.into_iter().zip(post_receivers).enumerate() {
+            handles.push(tokio::spawn(worker(shared.clone(), rx, idx, slot)));
         }
 
         let n_enc = encode_concurrency(parmesan::performance_core_count(), worker_count);
@@ -1247,29 +1343,22 @@ pub async fn post_files_inner(
         let _ = handle.await;
     }
     for handle in handles {
-        let _ = handle.await;
+        if let Ok(slot) = handle.await {
+            post_slots.push(slot);
+        }
     }
-
-    // The upload's own connections are now idle — reuse that budget to
-    // drain any remaining check backlog faster instead of leaving it to a
-    // handful of dedicated connections that were sized for running
-    // *alongside* the upload, not for a burst catch-up at the end.
-    if let Some(coordinator) = check_coordinator.as_mut() {
-        coordinator.scale_up(upload_conns);
-    }
-
-    cancel_handle.abort();
 
     let mut failures = std::mem::take(&mut *shared.failures.lock().unwrap());
     let mut failed_tasks = std::mem::take(&mut *shared.failed_tasks.lock().unwrap());
-    let cancelled = shared.cancelled.load(Ordering::Relaxed);
+    let cancelled_during_post = shared.cancelled.load(Ordering::Relaxed);
 
     // Blind retry for segments that never got a `240` in the main loop
     // (connection drops, timeouts, etc — never confirmed by the server at
-    // all). Recovered segments flow into the same streaming check queue as
+    // all). Runs on the post slots still held — never `ConnectionSlot::new`.
+    // Recovered segments flow into the same streaming check queue as
     // everything else, so they get the same STAT confirmation before the
     // run reports them as posted.
-    if !failed_tasks.is_empty() && !cancelled {
+    if !failed_tasks.is_empty() && !cancelled_during_post {
         let n = failed_tasks.len();
         info!(count = n, "retrying segments that failed during upload");
         let recovered = repost_failed_tasks(
@@ -1278,6 +1367,7 @@ pub async fn post_files_inner(
             &shared.post_group,
             shared.events.as_ref(),
             Some(&shared.cancelled),
+            &mut post_slots,
         )
         .await
         .unwrap_or_else(|e| {
@@ -1289,10 +1379,23 @@ pub async fn post_files_inner(
             .map(|s| (s.file_name.clone(), s.part, s.total))
             .collect();
         for seg in recovered {
-            if let Some(tx) = &check_tx {
-                let _ = tx.send(seg.clone());
+            if let Some(resume) = &shared.resume {
+                resume.lock().unwrap().record_with(
+                    &seg.file_name,
+                    seg.part,
+                    SegmentRecord {
+                        message_id: seg.message_id.clone(),
+                        bytes: seg.bytes,
+                        confirmed: false,
+                        check_disabled: !shared.config.check,
+                        server_idx: seg.server_idx,
+                    },
+                );
             }
-            shared.results.lock().unwrap().push(seg);
+            shared.results.lock().unwrap().push(seg.clone());
+            if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+                let _ = tx.send(seg);
+            }
         }
         failed_tasks.retain(|t| !recovered_keys.contains(&(t.file_name.clone(), t.part, t.total)));
         failures.retain(|f| {
@@ -1308,13 +1411,27 @@ pub async fn post_files_inner(
     // PAR2 file's bytes while it drains below. The caller is responsible for
     // removing `par2_temp_dir()` once it's truly done with the run (see
     // `run_single_upload` / `run_upload`).
-    drop(check_tx);
+    // Close the STAT feeder before drain. Shared outlives the coordinator;
+    // leaving this sender alive would hang `finish_and_drain` forever.
+    let _ = shared.check_tx.lock().unwrap().take();
     crate::memory::set_phase(crate::memory::Phase::Check);
-    let mut still_missing = if let Some(coordinator) = check_coordinator {
+    let drain = if let Some(mut coordinator) = check_coordinator {
+        // Ownership transfer: no checkin in between post-join and scale_up.
+        coordinator.scale_up(std::mem::take(&mut post_slots));
         coordinator.finish_and_drain().await
     } else {
-        Vec::new()
+        check::CheckDrain {
+            slots: std::mem::take(&mut post_slots),
+            ..check::CheckDrain::default()
+        }
     };
+    let mut still_missing = drain.still_missing;
+    let mut inconclusive = drain.inconclusive;
+    post_slots = drain.slots;
+    // Re-read after drain: a cancel during the STAT wait must persist
+    // unconfirmed records rather than treating the dumped queue as
+    // MissingConfirmed (the watcher stays alive until after persist).
+    let cancelled = shared.cancelled.load(Ordering::Relaxed);
 
     // One more, bounded automatic recovery attempt for a small stubborn
     // tail. The common real-world case this targets: posting finished, the
@@ -1360,19 +1477,58 @@ pub async fn post_files_inner(
                 &shared.post_group,
                 candidates,
                 shared.events.as_ref(),
+                std::mem::take(&mut post_slots),
             )
             .await;
-            for seg in &recovered {
+            post_slots = recovered.slots;
+            {
                 let mut results = shared.results.lock().unwrap();
-                if let Some(existing) = results
-                    .iter_mut()
-                    .find(|s| s.file_name == seg.file_name && s.part == seg.part)
+                for seg in recovered
+                    .recovered
+                    .iter()
+                    .chain(recovered.inconclusive.iter())
                 {
-                    *existing = seg.clone();
+                    if let Some(existing) = results
+                        .iter_mut()
+                        .find(|s| s.file_name == seg.file_name && s.part == seg.part)
+                    {
+                        *existing = seg.clone();
+                    }
+                }
+            }
+            if let Some(resume) = &shared.resume {
+                let mut state = resume.lock().unwrap();
+                for seg in &recovered.recovered {
+                    state.record_with(
+                        &seg.file_name,
+                        seg.part,
+                        SegmentRecord {
+                            message_id: seg.message_id.clone(),
+                            bytes: seg.bytes,
+                            confirmed: true,
+                            check_disabled: false,
+                            server_idx: seg.server_idx,
+                        },
+                    );
+                }
+                for seg in &recovered.inconclusive {
+                    state.record_with(
+                        &seg.file_name,
+                        seg.part,
+                        SegmentRecord {
+                            message_id: seg.message_id.clone(),
+                            bytes: seg.bytes,
+                            confirmed: false,
+                            check_disabled: false,
+                            server_idx: seg.server_idx,
+                        },
+                    );
                 }
             }
             let recovered_keys: std::collections::HashSet<(String, u32)> = recovered
+                .recovered
                 .iter()
+                .chain(recovered.inconclusive.iter())
                 .map(|s| (s.file_name.clone(), s.part))
                 .collect();
             still_missing.retain(|id| {
@@ -1380,8 +1536,13 @@ pub async fn post_files_inner(
                     .get(id)
                     .is_some_and(|key| recovered_keys.contains(key))
             });
+            inconclusive.extend(recovered.inconclusive.into_iter().map(|s| s.message_id));
         }
     }
+
+    // One checkin of the whole set so `--jobs` keeps the next episode
+    // blocked on the semaphore until this episode is fully done.
+    release_slots(broker.as_deref(), post_slots).await;
 
     // Whatever is left in `still_missing` at this point is confirmed bad:
     // the original POST got a `240`, but every STAT check and every repost
@@ -1390,9 +1551,11 @@ pub async fn post_files_inner(
     // Message-ID must be forgotten now — otherwise a later `--resume` would
     // trust that known-bad ID and silently skip re-posting the segment,
     // producing an NZB that looks complete but references an article that
-    // was never actually confirmed present.
+    // was never actually confirmed present. Cancel is not a confirmed miss:
+    // keep those records as `confirmed: false` so `--resume --check` can
+    // re-STAT the same ids.
     if let Some(resume) = &shared.resume {
-        if !still_missing.is_empty() {
+        if !cancelled && !still_missing.is_empty() {
             let results = shared.results.lock().unwrap();
             let mut state = resume.lock().unwrap();
             for id in &still_missing {
@@ -1410,21 +1573,20 @@ pub async fn post_files_inner(
     }
 
     // Single, final resume-state persistence decision, replacing the old
-    // per-segment write in `commit_result`. Mirrors the completeness check
-    // `run_single_upload` uses to decide whether the NZB itself gets
-    // written: a run cancellation makes `still_missing` meaningless (the
-    // check simply didn't get to finish verifying everything, not a
-    // confirmed gap), and `allow_incomplete_nzb` means the user has already
-    // accepted the remaining gap and is relying on PAR2, not `--resume`, to
-    // fill it. Whenever the run is *not* complete by those terms, persist
-    // once so a later `--resume` has something to load; otherwise delete
-    // any state file (freshly written or left over from an earlier failed
-    // attempt at the same output path) — there is nothing left to resume.
+    // per-segment write in `commit_result`. Persist whenever anything is
+    // still unconfirmed: POST failures, MissingConfirmed (even with
+    // `--allow-incomplete-nzb` — the opt-in publishes the NZB but a later
+    // `--resume` can still fill the gap), Inconclusive, or a cancel that
+    // already has Posted records. Complete runs delete the state file.
     if let (Some(resume), Some(rp)) = (&shared.resume, &shared.resume_path) {
         let has_post_failures = !failed_tasks.is_empty();
         let has_confirmed_missing = !cancelled && !still_missing.is_empty();
-        let incomplete =
-            has_post_failures || (has_confirmed_missing && !config.allow_incomplete_nzb);
+        let has_inconclusive = !inconclusive.is_empty();
+        let has_progress = !resume.lock().unwrap().is_empty();
+        let incomplete = has_post_failures
+            || has_confirmed_missing
+            || has_inconclusive
+            || (cancelled && has_progress);
         if incomplete {
             let _ = resume.lock().unwrap().save(rp);
         } else {
@@ -1449,6 +1611,7 @@ pub async fn post_files_inner(
         failed = failures.len(),
         retries = total_retries,
         still_missing = still_missing.len(),
+        inconclusive = inconclusive.len(),
         elapsed_ms = t_post_start.elapsed().as_millis(),
         phase = "post",
         "network summary"
@@ -1464,6 +1627,8 @@ pub async fn post_files_inner(
         .map(|s| s.host.clone())
         .collect();
 
+    cancel_handle.abort();
+
     Ok(PostOutcome {
         segments,
         failures,
@@ -1471,6 +1636,7 @@ pub async fn post_files_inner(
         cancelled,
         groups: shared.post_group.clone(),
         still_missing,
+        inconclusive,
         servers: servers_used,
         failure_reason,
         par2_temp_dir: par2_temp_dir(config.par2_temp_dir.as_deref(), shared.run_id),
@@ -2823,7 +2989,8 @@ async fn encode_worker(
     }
 }
 
-/// Resume skip / spool / yEnc. `None` means the segment is already done.
+/// Resume skip / spool / yEnc. `None` means the segment is already done
+/// (skipped or re-queued for STAT of a stored id).
 async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArticle> {
     if let Some(resume) = &shared.resume {
         let existing = resume
@@ -2831,32 +2998,42 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
             .unwrap()
             .get(&task.meta.real_name, task.part)
             .cloned();
-        if let Some(existing) = existing {
-            shared.results.lock().unwrap().push(PostedSegment {
-                file_name: task.meta.real_name.clone(),
-                file_path: Arc::from(task.meta.path.as_path()),
-                subject_name: Arc::from(task.meta.real_name.as_str()),
-                wire_name: Arc::from(task.subject_name.as_str()),
-                file_size: task.meta.size,
-                part: task.part,
-                total: task.total,
-                message_id: existing.message_id,
-                bytes: existing.bytes,
-                from: Arc::from(task.from.as_str()),
-                date: task.date.clone(),
-                full_crc32: task.file_crc32.unwrap_or(0),
-                server_idx: 0,
-                file_index: task.meta.file_index,
-                total_files: shared.total_files,
-            });
-            let raw_bytes = task.data.len() as u64;
-            shared.release_buffer(task.data);
-            shared.emit(ProgressEvent::SegmentDone {
-                file: task.meta.real_name.clone(),
-                bytes: raw_bytes,
-                ok: true,
-            });
-            return None;
+        match resume_action(shared.config.check, existing.as_ref()) {
+            ResumeAction::Post => {}
+            action @ (ResumeAction::Skip | ResumeAction::ReStatStoredId) => {
+                let existing = existing.expect("skip/re-STAT arms require a record");
+                let seg = PostedSegment {
+                    file_name: task.meta.real_name.clone(),
+                    file_path: Arc::from(task.meta.path.as_path()),
+                    subject_name: Arc::from(task.meta.real_name.as_str()),
+                    wire_name: Arc::from(task.subject_name.as_str()),
+                    file_size: task.meta.size,
+                    part: task.part,
+                    total: task.total,
+                    message_id: existing.message_id,
+                    bytes: existing.bytes,
+                    from: Arc::from(task.from.as_str()),
+                    date: task.date.clone(),
+                    full_crc32: task.file_crc32.unwrap_or(0),
+                    server_idx: existing.server_idx,
+                    file_index: task.meta.file_index,
+                    total_files: shared.total_files,
+                };
+                shared.results.lock().unwrap().push(seg.clone());
+                if action == ResumeAction::ReStatStoredId {
+                    if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+                        let _ = tx.send(seg);
+                    }
+                }
+                let raw_bytes = task.data.len() as u64;
+                shared.release_buffer(task.data);
+                shared.emit(ProgressEvent::SegmentDone {
+                    file: task.meta.real_name.clone(),
+                    bytes: raw_bytes,
+                    ok: true,
+                });
+                return None;
+            }
         }
     }
 
@@ -2944,9 +3121,7 @@ async fn worker(
     mut rx: tokio::sync::mpsc::Receiver<ReadyArticle>,
     conn_id: usize,
     mut slot: ConnectionSlot,
-    check_tx: Option<tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
-    broker: Option<Arc<ConnectionBroker>>,
-) {
+) -> ConnectionSlot {
     let mut rate_limiter = RateLimiter::new(
         // Divide the global rate across all workers proportionally.
         if shared.config.upload_rate > 0 {
@@ -3182,7 +3357,6 @@ async fn worker(
             let wire = p.headers.len() + p.encoded.body.len();
             commit_result(
                 &shared,
-                check_tx.as_ref(),
                 p.task,
                 p.message_id,
                 wire,
@@ -3322,7 +3496,6 @@ async fn worker(
                 let wire = p.headers.len() + p.encoded.body.len();
                 commit_result(
                     &shared,
-                    check_tx.as_ref(),
                     p.task,
                     p.message_id,
                     wire,
@@ -3337,10 +3510,7 @@ async fn worker(
     }
 
     shared.emit(ProgressEvent::ConnectionIdle { conn: conn_id });
-    match broker {
-        Some(broker) => broker.checkin(slot).await,
-        None => slot.quit().await,
-    }
+    slot
 }
 
 /// Build a `PostTask`, generating per-article subject and From when in
@@ -3467,7 +3637,6 @@ fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
 #[allow(clippy::too_many_arguments)]
 fn commit_result(
     shared: &Shared,
-    check_tx: Option<&tokio::sync::mpsc::UnboundedSender<PostedSegment>>,
     task: PostTask,
     message_id: String,
     wire_bytes: usize,
@@ -3489,11 +3658,19 @@ fn commit_result(
             // single persist decided by the final outcome (see the
             // still_missing handling and `run_single_upload`'s cleanup)
             // covers the same guarantee at a fraction of the cost.
-            resume.lock().unwrap().record(
+            //
+            // `confirmed` is false until STAT 223; `--no-check` never flips
+            // it (that run never STATed).
+            resume.lock().unwrap().record_with(
                 &task.meta.real_name,
                 task.part,
-                &message_id,
-                wire_bytes as u64,
+                SegmentRecord {
+                    message_id: message_id.clone(),
+                    bytes: wire_bytes as u64,
+                    confirmed: false,
+                    check_disabled: !shared.config.check,
+                    server_idx,
+                },
             );
         }
         // Confirmed posted — any spooled copy has served its purpose.
@@ -3518,10 +3695,10 @@ fn commit_result(
             file_index: task.meta.file_index,
             total_files: shared.total_files,
         };
-        if let Some(tx) = check_tx {
-            let _ = tx.send(seg.clone());
+        shared.results.lock().unwrap().push(seg.clone());
+        if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+            let _ = tx.send(seg);
         }
-        shared.results.lock().unwrap().push(seg);
     } else {
         record_failure(shared, &task.meta, &task, message_id, last_err);
     }
@@ -3630,16 +3807,17 @@ pub async fn repost_failed_tasks(
     groups: &[String],
     events: Option<&ProgressSender>,
     cancel: Option<&Arc<AtomicBool>>,
+    slots: &mut [ConnectionSlot],
 ) -> Result<Vec<PostedSegment>> {
     if failed.is_empty() {
         return Ok(Vec::new());
     }
 
-    let server = config
-        .all_servers()
-        .next()
-        .expect("at least one server is configured");
-    let mut slot = ConnectionSlot::new(Arc::new(vec![server]), 0);
+    // Never `ConnectionSlot::new` — extra TCP would exceed a budget already
+    // held by this episode. No slot means nothing to retry on.
+    let Some(slot) = slots.first_mut() else {
+        return Ok(Vec::new());
+    };
 
     let article_size = config.article_size as u64;
     let max_retries = config.retries.max(1);
@@ -3766,9 +3944,6 @@ pub async fn repost_failed_tasks(
                 total: task.total,
                 message_id,
                 bytes: wire_bytes,
-                // `slot` only ever targets the primary server (index 0 in
-                // `config.all_servers()` too — see its "primary first" order),
-                // since this blind end-of-run retry doesn't fail over.
                 server_idx: slot.server_idx(),
                 from: Arc::from(task.from.as_str()),
                 date: task.date.clone(),
@@ -4789,7 +4964,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 50;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 4);
         assert_eq!(upload, 46);
         assert_eq!(check + upload, 50);
@@ -4799,31 +4974,53 @@ mod tests {
     fn split_connections_disabled_uses_the_whole_total_for_upload() {
         let mut config = dry_run_config();
         config.connections = 50;
-        let (check, upload) = split_connections(&config, false);
+        let (check, upload) = split_connections(&config, false).unwrap();
         assert_eq!(check, 0);
         assert_eq!(upload, 50);
     }
 
     #[test]
-    fn split_connections_never_starves_upload_of_its_last_connection() {
+    fn split_connections_n1_check_auto_is_a_startup_error() {
+        // T22: `check_connections == 0` is auto, not off. Auto on `-n 1`
+        // would carve check down to 0 — fail loud instead of silently skipping.
         let mut config = dry_run_config();
         config.connections = 1;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
-        assert_eq!(check, 0, "no connection left to spare for checking");
-        assert_eq!(upload, 1);
+        config.check = true;
+        let err = split_connections(&config, true).unwrap_err().to_string();
+        assert!(
+            err.contains("--no-check"),
+            "start-up error must mention --no-check: {err}"
+        );
+        assert!(
+            err.contains("-n") || err.contains("connections"),
+            "start-up error must mention raising -n: {err}"
+        );
     }
 
     #[test]
-    fn split_connections_explicit_check_connections_is_additive() {
+    fn split_connections_explicit_is_carved_out_not_additive() {
+        // T18: explicit N is no longer added on top of `-n`.
         let mut config = dry_run_config();
-        config.connections = 1;
-        config.check_connections = 1; // explicit, deliberate
-        let (check, upload) = split_connections(&config, true);
-        assert_eq!(check, 1);
+        config.connections = 10;
+        config.check_connections = 4;
+        let (check, upload) = split_connections(&config, true).unwrap();
+        assert_eq!((check, upload), (4, 6));
+
+        config.check_connections = 10;
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(
-            upload, 1,
-            "explicit --check-connections must not shrink upload"
+            (check, upload),
+            (9, 1),
+            "-n 10 --check-connections 10 must clamp to 9+1, never 10+1"
+        );
+
+        config.connections = 1;
+        config.check_connections = 1;
+        let err = split_connections(&config, true).unwrap_err().to_string();
+        assert!(
+            err.contains("--no-check"),
+            "-n 1 --check-connections 1 must error, not open 1+1: {err}"
         );
     }
 
@@ -4832,7 +5029,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 2;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 1);
         assert_eq!(upload, 1);
     }
@@ -4846,9 +5043,87 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 4;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 1);
         assert_eq!(upload, 3);
+    }
+
+    #[test]
+    fn nzb_write_decision_writes_when_everything_confirmed() {
+        assert_eq!(
+            nzb_write_decision(false, false, false, false),
+            NzbWriteDecision::Write
+        );
+    }
+
+    #[test]
+    fn nzb_write_decision_refuses_post_failures_even_with_allow() {
+        assert_eq!(
+            nzb_write_decision(true, false, false, true),
+            NzbWriteDecision::Refuse
+        );
+    }
+
+    #[test]
+    fn nzb_write_decision_allow_incomplete_unblocks_missing_only() {
+        assert_eq!(
+            nzb_write_decision(false, true, false, true),
+            NzbWriteDecision::Write
+        );
+        assert_eq!(
+            nzb_write_decision(false, true, false, false),
+            NzbWriteDecision::Refuse
+        );
+    }
+
+    #[test]
+    fn nzb_write_decision_inconclusive_always_refuses() {
+        assert_eq!(
+            nzb_write_decision(false, false, true, true),
+            NzbWriteDecision::Refuse
+        );
+        assert_eq!(
+            nzb_write_decision(false, true, true, true),
+            NzbWriteDecision::Refuse
+        );
+    }
+
+    // T16: season pack is a distinct artefact; incomplete episodes never merge.
+    #[test]
+    fn should_write_season_nzb_requires_every_episode_complete() {
+        assert!(should_write_season_nzb(false, false, false));
+        assert!(!should_write_season_nzb(true, false, false));
+        assert!(!should_write_season_nzb(false, true, false));
+        assert!(!should_write_season_nzb(false, false, true));
+        assert!(!should_write_season_nzb(true, true, false));
+        assert!(!should_write_season_nzb(false, true, true));
+        assert!(!should_write_season_nzb(true, false, true));
+        assert!(!should_write_season_nzb(true, true, true));
+    }
+
+    // T16: pack input is had_failures (true completeness), not
+    // nzb_write_decision. MissingConfirmed + --allow-incomplete-nzb writes
+    // the episode NZB but CLI/UpaPasta still pass incomplete=true.
+    #[test]
+    fn season_pack_uses_had_failures_not_nzb_write_decision() {
+        let post_failures = false;
+        let missing_confirmed = true;
+        let inconclusive = false;
+        let allow_incomplete_nzb = true;
+        assert_eq!(
+            nzb_write_decision(
+                post_failures,
+                missing_confirmed,
+                inconclusive,
+                allow_incomplete_nzb
+            ),
+            NzbWriteDecision::Write
+        );
+        // CLI UploadResult.had_failures / UploadOutcome.had_failures —
+        // independent of the flag.
+        let had_failures = post_failures || missing_confirmed || inconclusive;
+        assert!(had_failures);
+        assert!(!should_write_season_nzb(false, had_failures, false));
     }
 
     #[test]
@@ -4856,7 +5131,7 @@ mod tests {
         let mut config = dry_run_config();
         config.connections = 200;
         config.check_connections = 0; // auto
-        let (check, upload) = split_connections(&config, true);
+        let (check, upload) = split_connections(&config, true).unwrap();
         assert_eq!(check, 4);
         assert_eq!(upload, 196);
     }
@@ -5070,6 +5345,7 @@ mod tests {
             release_from: None,
             run_id: 0,
             total_files: 0,
+            check_tx: Mutex::new(None),
         })
     }
 

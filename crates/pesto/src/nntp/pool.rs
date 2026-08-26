@@ -8,7 +8,7 @@
 //! shifts to a healthy server automatically.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -35,13 +35,15 @@ pub struct ConnectionSlot {
     slot_id: usize,
     /// Reason for the next connection attempt; "initial" until first invalidate.
     next_connect_reason: &'static str,
+    /// Set while this slot is checked out of a [`ConnectionBroker`]. Drop
+    /// replenishes the idle pool if the slot never makes it back through
+    /// [`ConnectionBroker::checkin`] (a panicking worker), so `--jobs`
+    /// cannot deadlock on a leaked permit. `Weak` so an idle slot that
+    /// still holds this cannot keep the broker alive.
+    broker: Option<Weak<ConnectionBroker>>,
 }
 
 impl ConnectionSlot {
-    pub(crate) fn new(servers: Arc<Vec<ServerEntry>>, primary_idx: usize) -> Self {
-        ConnectionSlot::with_id(servers, primary_idx, 0)
-    }
-
     pub(crate) fn with_id(
         servers: Arc<Vec<ServerEntry>>,
         primary_idx: usize,
@@ -53,6 +55,7 @@ impl ConnectionSlot {
             server_idx: primary_idx,
             slot_id,
             next_connect_reason: "initial",
+            broker: None,
         }
     }
 
@@ -169,6 +172,37 @@ impl ConnectionSlot {
     }
 }
 
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        let Some(weak) = self.broker.take() else {
+            return;
+        };
+        let Some(broker) = weak.upgrade() else {
+            return;
+        };
+        // The live TCP, if any, is abandoned — this path is a panic or a
+        // forgotten checkin, not a clean shutdown.
+        self.conn = None;
+        let replacement =
+            ConnectionSlot::with_id(Arc::clone(&self.servers), self.server_idx, self.slot_id);
+        if let Ok(mut idle) = broker.idle.try_lock() {
+            idle.push_back((replacement, Instant::now()));
+            broker.permits.add_permits(1);
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                broker
+                    .idle
+                    .lock()
+                    .await
+                    .push_back((replacement, Instant::now()));
+                broker.permits.add_permits(1);
+            });
+        }
+    }
+}
+
 /// A fixed set of [`ConnectionSlot`]s — one per posting worker — distributed
 /// across the configured servers by connection quota.
 pub struct ConnectionPool {
@@ -210,6 +244,21 @@ const BROKER_IDLE_POLL: Duration = Duration::from_secs(2);
 /// task sends periodic keepalives to slots sitting idle in the broker
 /// between episodes, the same way a posting worker already does for slots
 /// idle *within* a run.
+///
+/// Callers must check out an episode's full budget (`check + upload`) in
+/// **one** [`checkout`][Self::checkout] and check the whole set back in
+/// only after drain + recover. Two sequential checkouts of the same episode
+/// deadlock `--jobs` (FIFO `acquire_many`): the next episode can sneak a
+/// partial checkout in between. Checkin-then-checkout of the post slots
+/// for `scale_up` is the same trap. A panicking worker that drops its slot
+/// without checkin is covered by [`ConnectionSlot`]'s Drop, which puts a
+/// replacement in the idle pool so the next episode is not stuck forever.
+///
+/// Known limitation: a check worker may [`ConnectionSlot::retarget`] onto
+/// the server that accepted a given article, so the process-wide cap of
+/// `capacity` sockets can still concentrate on one `[[servers]]` host whose
+/// own `connections` quota is smaller. Per-server carve-out would need a
+/// new knob; this broker only enforces the process total.
 pub struct ConnectionBroker {
     idle: Mutex<VecDeque<(ConnectionSlot, Instant)>>,
     permits: Semaphore,
@@ -262,13 +311,19 @@ impl ConnectionBroker {
     /// broker's whole capacity is currently checked out elsewhere (this is
     /// how concurrent `--jobs` episodes end up sharing one fixed connection
     /// budget instead of each opening their own).
-    pub async fn checkout(&self, n: usize) -> Vec<ConnectionSlot> {
+    ///
+    /// Each returned slot holds a weak pointer back to this broker. If the
+    /// slot is dropped without [`checkin`][Self::checkin] (a panicking
+    /// worker), [`ConnectionSlot`]'s Drop puts a fresh idle slot back so
+    /// the next episode's `checkout` cannot wait forever.
+    pub async fn checkout(self: &Arc<Self>, n: usize) -> Vec<ConnectionSlot> {
         if n == 0 {
             return Vec::new();
         }
         // Acquired permits are intentionally leaked (not held/released via
         // guard) — capacity is returned to the semaphore explicitly by
-        // `checkin`, once each slot actually comes back.
+        // `checkin`, once each slot actually comes back. Drop of a
+        // checked-out slot also returns a permit, via the idle replenish.
         self.permits
             .acquire_many(n as u32)
             .await
@@ -277,9 +332,12 @@ impl ConnectionBroker {
         let mut idle = self.idle.lock().await;
         (0..n)
             .map(|_| {
-                idle.pop_front()
+                let mut slot = idle
+                    .pop_front()
                     .expect("permits guarantee a matching idle slot")
-                    .0
+                    .0;
+                slot.broker = Some(Arc::downgrade(self));
+                slot
             })
             .collect()
     }
@@ -287,9 +345,24 @@ impl ConnectionBroker {
     /// Return a checked-out connection to the idle pool instead of closing
     /// it, so a later `checkout` (the next episode, or another concurrent
     /// one) can reuse it without reconnecting.
-    pub async fn checkin(&self, slot: ConnectionSlot) {
-        self.idle.lock().await.push_back((slot, Instant::now()));
+    ///
+    /// The Drop lease stays armed until the slot is in `idle`. Cancelling
+    /// this call at `idle.lock()` therefore still replenishes via Drop,
+    /// instead of leaking a `--jobs` permit.
+    pub async fn checkin(&self, mut slot: ConnectionSlot) {
+        let mut idle = self.idle.lock().await;
+        slot.broker = None;
+        idle.push_back((slot, Instant::now()));
+        drop(idle);
         self.permits.add_permits(1);
+    }
+
+    /// Return every slot in `slots` to the idle pool. One call at episode
+    /// end, after drain + recover — never between post-join and `scale_up`.
+    pub async fn checkin_all(&self, slots: impl IntoIterator<Item = ConnectionSlot>) {
+        for slot in slots {
+            self.checkin(slot).await;
+        }
     }
 
     /// Send `QUIT` on every idle connection. Call once, after every checked
@@ -415,13 +488,13 @@ mod tests {
 
     #[test]
     fn slot_starts_at_primary_server() {
-        let slot = ConnectionSlot::new(arc(vec![server(2), server(2)]), 1);
+        let slot = ConnectionSlot::with_id(arc(vec![server(2), server(2)]), 1, 0);
         assert_eq!(slot.server_idx(), 1);
     }
 
     #[test]
     fn slot_invalidate_rotates_to_next_server() {
-        let mut slot = ConnectionSlot::new(arc(vec![server(1), server(1), server(1)]), 0);
+        let mut slot = ConnectionSlot::with_id(arc(vec![server(1), server(1), server(1)]), 0, 0);
         slot.invalidate("test");
         assert_eq!(slot.server_idx(), 1);
         slot.invalidate("test");
@@ -435,7 +508,7 @@ mod tests {
         let mut servers = vec![server(1), server(1)];
         servers[0].retry_delay = 5;
         servers[1].retry_delay = 10;
-        let mut slot = ConnectionSlot::new(arc(servers), 0);
+        let mut slot = ConnectionSlot::with_id(arc(servers), 0, 0);
         assert_eq!(slot.retry_delay(), Duration::from_secs(5));
         slot.invalidate("test");
         assert_eq!(slot.retry_delay(), Duration::from_secs(10));
@@ -444,7 +517,7 @@ mod tests {
     #[test]
     fn slot_quit_when_not_connected_is_noop() {
         // Should not panic when there is no open connection.
-        let slot = ConnectionSlot::new(arc(vec![server(1)]), 0);
+        let slot = ConnectionSlot::with_id(arc(vec![server(1)]), 0, 0);
         // Can't call async quit in a sync test, but we can verify the slot
         // has no connection to begin with.
         assert!(slot.conn.is_none());
@@ -492,6 +565,45 @@ mod tests {
 
         let slots_again = broker.checkout(1).await;
         assert_eq!(slots_again.len(), 1);
+        keepalive.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_a_checked_out_slot_returns_capacity() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(1)]), 1, 0);
+        let slots = broker.checkout(1).await;
+        drop(slots);
+        let resumed = tokio::time::timeout(Duration::from_millis(100), broker.checkout(1)).await;
+        assert!(
+            resumed.is_ok(),
+            "dropping a checked-out slot must replenish the broker so --jobs cannot deadlock"
+        );
+        keepalive.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_checkin_still_returns_capacity() {
+        let (broker, keepalive) = ConnectionBroker::new(arc(vec![server(1)]), 1, 0);
+        let mut slots = broker.checkout(1).await;
+        let slot = slots.pop().unwrap();
+
+        // Hold idle so checkin blocks on the mutex; aborting then drops the
+        // slot while the lease is still armed.
+        let hold = broker.idle.lock().await;
+        let broker_for_checkin = broker.clone();
+        let checkin_task = tokio::spawn(async move {
+            broker_for_checkin.checkin(slot).await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        checkin_task.abort();
+        let _ = checkin_task.await;
+        drop(hold);
+
+        let resumed = tokio::time::timeout(Duration::from_millis(200), broker.checkout(1)).await;
+        assert!(
+            resumed.is_ok(),
+            "aborting checkin while idle is locked must still replenish via Drop"
+        );
         keepalive.abort();
     }
 

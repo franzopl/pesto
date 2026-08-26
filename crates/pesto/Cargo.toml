@@ -2,7 +2,7 @@
 name = "pesto-poster"
 # pesto is versioned, published, and released independently of the rest of
 # the workspace (own CHANGELOG.md, own `pesto-v*` tag) — see RELEASING.md.
-version = "0.9.0"
+version = "0.9.1"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation. Also provides the core library used by upapasta."
@@ -62,6 +62,7 @@ par2-avx2-gfni-unsafe = ["parmesan/par2-avx2-gfni-unsafe"]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
 tempfile = "3"
 proptest = "1.11.0"
+serde_json = "1"
 
 [[bench]]
 name = "par2_encoder"

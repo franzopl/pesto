@@ -115,7 +115,7 @@ fn check_completes_an_early_segment_before_the_last_segment_finishes_posting() {
         .args(["-s", "127.0.0.1"])
         .args(["-P", &addr.port().to_string()])
         .args(["-g", "alt.binaries.test"])
-        .args(["-n", "1"])
+        .args(["-n", "2"])
         .args(["--article-size", "100"])
         .args(["--par2", "0"])
         .arg("--check")

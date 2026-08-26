@@ -113,7 +113,7 @@ fn pesto_adopts_the_server_returned_message_id() {
         .args(["-s", "127.0.0.1"])
         .args(["-P", &addr.port().to_string()])
         .args(["-g", "alt.binaries.test"])
-        .args(["-n", "1"])
+        .args(["-n", "2"])
         .args(["--par2", "0"])
         .arg("--check")
         .args(["--check-delay", "0"])
