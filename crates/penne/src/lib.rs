@@ -12,8 +12,8 @@
 //! eventually, a web UI (à la SABnzbd) built on top of it. The web UI is out
 //! of scope until the CLI reaches feature parity with the roadmap.
 
-/// Shown by `--version`. `dev` on this branch (main is frozen at 0.5.0).
-pub const DISPLAY_VERSION: &str = "dev";
+/// Shown by `--version`.
+pub const DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod assemble;
 pub mod cache;

@@ -33,6 +33,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -108,6 +109,10 @@ pub struct CheckConfig {
     pub pipeline_depth: usize,
     /// Retry attempts per server before failing over to the next tier.
     pub retries: u32,
+    /// Stop scheduling work after the first article is conclusively missing.
+    /// A server failover pass still completes first, so a miss on a primary
+    /// alone never produces a false failure.
+    pub fail_fast: bool,
 }
 
 impl Default for CheckConfig {
@@ -116,6 +121,7 @@ impl Default for CheckConfig {
             method: CheckMethod::default(),
             pipeline_depth: DEFAULT_STAT_PIPELINE_DEPTH,
             retries: 3,
+            fail_fast: false,
         }
     }
 }
@@ -221,10 +227,18 @@ pub struct CheckOutcome {
     /// the last response being read, not including NZB parsing or queue
     /// construction).
     pub elapsed: Duration,
-    /// Total number of articles checked (segments in the queue).
+    /// Total number of articles requested (segments in the queue), including
+    /// any that a fail-fast run deliberately skipped.
     pub total_checked: u32,
     /// Articles confirmed present on at least one configured server.
     pub total_present: u32,
+    /// `true` when `CheckConfig::fail_fast` stopped the run after a
+    /// confirmed absence. Counts and per-file results then cover only the
+    /// work completed before stopping.
+    pub stopped_early: bool,
+    /// Segments deliberately not checked because `fail_fast` stopped the
+    /// scheduler. They are neither missing nor unreachable.
+    pub skipped: u32,
 }
 
 impl CheckOutcome {
@@ -232,7 +246,7 @@ impl CheckOutcome {
     /// `false` for both confirmed-missing segments and merely-unreachable
     /// ones, since neither case means the release is safely grabbable.
     pub fn is_complete(&self) -> bool {
-        self.missing.is_empty() && self.unreachable.is_empty()
+        !self.stopped_early && self.missing.is_empty() && self.unreachable.is_empty()
     }
 
     /// True when every segment got a definitive answer (present or
@@ -240,15 +254,16 @@ impl CheckOutcome {
     /// segment's fate is still unknown, so `missing` — even if empty —
     /// cannot yet be read as "this release is fully present".
     pub fn is_conclusive(&self) -> bool {
-        self.unreachable.is_empty()
+        !self.stopped_early && self.unreachable.is_empty()
     }
 
-    /// Articles checked per second, based on wall-clock elapsed time.
+    /// Articles actually checked per second, based on wall-clock elapsed
+    /// time. Deliberately skipped fail-fast items are not counted.
     /// Returns `0.0` when elapsed is zero (instantaneous or empty queue).
     pub fn articles_per_second(&self) -> f64 {
         let secs = self.elapsed.as_secs_f64();
         if secs > 0.0 {
-            self.total_checked as f64 / secs
+            (self.total_checked - self.skipped) as f64 / secs
         } else {
             0.0
         }
@@ -280,6 +295,8 @@ impl Default for CheckOutcome {
             elapsed: Duration::ZERO,
             total_checked: 0,
             total_present: 0,
+            stopped_early: false,
+            skipped: 0,
         }
     }
 }
@@ -365,6 +382,7 @@ pub async fn check_nzbs(
         .iter()
         .map(|q| q.files.iter().map(|f| f.segments.len() as u32).sum())
         .collect();
+    let stop = Arc::new(AtomicBool::new(false));
 
     let (item_tx, mut item_rx) = tokio::sync::mpsc::unbounded_channel::<ItemResolution>();
     let item_tx_opt = if outcome_tx.is_some() {
@@ -378,12 +396,14 @@ pub async fn check_nzbs(
         let totals_clone = totals.clone();
         let total_items_per_q_clone = total_items_per_q.clone();
         let start_time = start;
+        let tracker_stop = stop.clone();
 
         Some(tokio::spawn(async move {
             let mut resolved = vec![0u32; qs.len()];
             let mut present = vec![HashMap::<String, u32>::new(); qs.len()];
             let mut missing = vec![Vec::<MissingSegment>::new(); qs.len()];
             let mut unreachable = vec![Vec::<UnreachableSegment>::new(); qs.len()];
+            let mut sent = vec![false; qs.len()];
 
             while let Some(res) = item_rx.recv().await {
                 let q_idx = match &res {
@@ -416,8 +436,7 @@ pub async fn check_nzbs(
 
                 if resolved[q_idx] == total_items_per_q_clone[q_idx] {
                     let total_items = total_items_per_q_clone[q_idx];
-                    let total_present =
-                        total_items - missing[q_idx].len() as u32 - unreachable[q_idx].len() as u32;
+                    let total_present = present[q_idx].values().sum();
 
                     let files = qs[q_idx]
                         .files
@@ -437,9 +456,47 @@ pub async fn check_nzbs(
                         elapsed: start_time.elapsed(),
                         total_checked: total_items,
                         total_present,
+                        stopped_early: false,
+                        skipped: 0,
                     };
 
                     let _ = out_tx.send((q_idx, outcome));
+                    sent[q_idx] = true;
+                }
+            }
+
+            // With fail-fast, deliberately skipped items do not emit a
+            // resolution event. Send the partial per-NZB result once the
+            // workers have stopped so JSON callers still get one line.
+            if tracker_stop.load(Ordering::Relaxed) {
+                for q_idx in 0..qs.len() {
+                    if sent[q_idx] {
+                        continue;
+                    }
+                    let total_items = total_items_per_q_clone[q_idx];
+                    let files = qs[q_idx]
+                        .files
+                        .iter()
+                        .map(|f| FileCheck {
+                            name: f.name.clone(),
+                            total_segments: *totals_clone[q_idx].get(&f.name).unwrap_or(&0),
+                            present_segments: *present[q_idx].get(&f.name).unwrap_or(&0),
+                        })
+                        .collect();
+                    let _ = out_tx.send((
+                        q_idx,
+                        CheckOutcome {
+                            files,
+                            missing: std::mem::take(&mut missing[q_idx]),
+                            unreachable: std::mem::take(&mut unreachable[q_idx]),
+                            bytes_used: 0,
+                            elapsed: start_time.elapsed(),
+                            total_checked: total_items,
+                            total_present: present[q_idx].values().sum(),
+                            stopped_early: true,
+                            skipped: total_items - resolved[q_idx],
+                        },
+                    ));
                 }
             }
         }))
@@ -462,6 +519,7 @@ pub async fn check_nzbs(
             config,
             &progress,
             is_last_tier,
+            stop.clone(),
             item_tx_opt.clone(),
         )
         .await;
@@ -474,6 +532,8 @@ pub async fn check_nzbs(
 
     let mut missing_per_q: Vec<Vec<MissingSegment>> = vec![Vec::new(); queues.len()];
     let mut unreachable_per_q: Vec<Vec<UnreachableSegment>> = vec![Vec::new(); queues.len()];
+    let stopped_early = stop.load(Ordering::Relaxed);
+    let mut skipped_per_q = vec![0u32; queues.len()];
     for item in pending {
         // `confirmed_missing` was set the instant any tried tier returned a
         // definitive 430/423/420 for this item (see `WorkItem`'s doc
@@ -486,6 +546,8 @@ pub async fn check_nzbs(
                 part: item.part,
                 message_id: item.message_id,
             });
+        } else if stopped_early {
+            skipped_per_q[item.queue_idx] += 1;
         } else {
             unreachable_per_q[item.queue_idx].push(UnreachableSegment {
                 file_name: item.file_name,
@@ -508,8 +570,7 @@ pub async fn check_nzbs(
 
     for (q_idx, queue) in queues.iter().enumerate() {
         let total_items = total_items_per_q[q_idx];
-        let total_present =
-            total_items - missing_per_q[q_idx].len() as u32 - unreachable_per_q[q_idx].len() as u32;
+        let total_present = present[q_idx].values().sum();
 
         let files = queue
             .files
@@ -529,6 +590,8 @@ pub async fn check_nzbs(
             elapsed: start.elapsed(),
             total_checked: total_items,
             total_present,
+            stopped_early: stopped_early && skipped_per_q[q_idx] > 0,
+            skipped: skipped_per_q[q_idx],
         });
     }
 
@@ -574,6 +637,7 @@ async fn drain_one_tier(
     config: &CheckConfig,
     progress: &Option<CheckProgressSender>,
     is_last_tier: bool,
+    stop: Arc<AtomicBool>,
     item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
     let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
@@ -602,6 +666,8 @@ async fn drain_one_tier(
                 pipeline_depth,
                 progress.clone(),
                 is_last_tier,
+                config.fail_fast,
+                stop.clone(),
                 worker_count,
                 breaker.clone(),
                 item_tx.clone(),
@@ -626,6 +692,10 @@ async fn drain_one_tier(
     // confirmed them missing (`WorkItem::confirmed_missing`).
     let mut q = queue.lock().unwrap();
     while let Some(item) = q.pop_front() {
+        if stop.load(Ordering::Relaxed) {
+            leftover.push(item);
+            continue;
+        }
         if is_last_tier {
             emit(progress, false);
             if let Some(tx) = &item_tx {
@@ -675,6 +745,8 @@ async fn worker_loop(
     pipeline_depth: usize,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
+    fail_fast: bool,
+    stop: Arc<AtomicBool>,
     worker_count: usize,
     breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
@@ -688,6 +760,8 @@ async fn worker_loop(
                 pipeline_depth,
                 progress,
                 is_last_server,
+                fail_fast,
+                stop,
                 worker_count,
                 breaker,
                 item_tx,
@@ -702,6 +776,8 @@ async fn worker_loop(
                 retries,
                 progress,
                 is_last_server,
+                fail_fast,
+                stop,
                 breaker,
                 item_tx,
             )
@@ -718,6 +794,8 @@ async fn stat_worker_loop(
     pipeline_depth: usize,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
+    fail_fast: bool,
+    stop: Arc<AtomicBool>,
     worker_count: usize,
     breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
@@ -728,6 +806,9 @@ async fn stat_worker_loop(
     let mut bytes_used = 0u64;
 
     loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         if breaker.load(std::sync::atomic::Ordering::Relaxed) >= 5 {
             break;
         }
@@ -760,6 +841,9 @@ async fn stat_worker_loop(
                             emit(&progress, false);
                             if let Some(tx) = &item_tx {
                                 let _ = tx.send(ItemResolution::Missing(item.clone()));
+                            }
+                            if fail_fast {
+                                stop.store(true, Ordering::Relaxed);
                             }
                         }
                         leftover.push(item);
@@ -814,6 +898,8 @@ async fn single_item_worker_loop(
     retries: u32,
     progress: Option<CheckProgressSender>,
     is_last_server: bool,
+    fail_fast: bool,
+    stop: Arc<AtomicBool>,
     breaker: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     item_tx: Option<tokio::sync::mpsc::UnboundedSender<ItemResolution>>,
 ) -> (Vec<WorkItem>, Vec<WorkItem>, u64) {
@@ -823,6 +909,9 @@ async fn single_item_worker_loop(
     let mut bytes_used = 0u64;
 
     loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         if breaker.load(std::sync::atomic::Ordering::Relaxed) >= 5 {
             break;
         }
@@ -860,6 +949,9 @@ async fn single_item_worker_loop(
                     emit(&progress, false);
                     if let Some(tx) = &item_tx {
                         let _ = tx.send(ItemResolution::Missing(item.clone()));
+                    }
+                    if fail_fast {
+                        stop.store(true, Ordering::Relaxed);
                     }
                 }
                 leftover.push(item);

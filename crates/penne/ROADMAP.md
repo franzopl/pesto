@@ -57,6 +57,7 @@ testable state.
 | 16 | `sabnzbd`-inspired hardening — categorized, actionable NNTP connect/auth error messages; PAR2 quick-check deriving a file's expected CRC-32 from IFSC data alone (new `pesto::yenc::crc32_combine`), skipping a full re-hash on the common all-intact path; per-segment streaming writes, closing the memory-scaling gap Phase 14 left for single-large-file releases. |
 | 17 | Processing modes — `--mode {download,repair,unpack,delete}` gates PAR2 verify/repair, extraction, and a new post-extraction cleanup step behind `sabnzbd`-style cumulative processing levels; new `penne::cleanup::purge_archives_and_par2` deletes archive volumes and PAR2 recovery data once extraction succeeds. |
 | 18 | `HEAD`/`BODY` availability checks + `--sample` — `pesto::nntp::Connection::head` (RFC 3977 §6.2.2) and `penne::check::CheckMethod` let `--stat` pick `stat`/`head`/`body` instead of only ever trusting `STAT`'s index; `--sample <N>` bounds a `body` check to the first `N` segment(s) per file. Prompted by, and verified against, a real provider whose `STAT` (and, it turned out, `HEAD` too) reported a release fully present while every real download attempt — and a `body` check — failed. |
+| 19 | Fail-fast availability checks — `penne check --fail-fast` stops scheduling after a confirmed missing article while preserving server failover and draining already-pipelined NNTP requests cleanly; partial results explicitly report skipped segments. |
 
 ---
 
@@ -1389,6 +1390,25 @@ provider, the two had drifted apart.
       `body_method_catches_an_article_stat_lies_about` can reproduce the
       exact "index lies" bug this phase exists for; `penne::queue` gains
       unit tests for `sample`.
+
+---
+
+## Phase 19 — Fail-fast availability checks ✅
+
+- [x] **`penne check --fail-fast`** stops scheduling work after an article
+      is conclusively missing. A definitive `430` from a primary alone does
+      not stop the run: configured backup tiers still get their chance to
+      confirm the article, preserving the normal failover guarantee.
+- [x] **Protocol-safe early stop for every check method.** `STAT` finishes
+      requests already in a pipeline before workers stop taking new batches;
+      `HEAD` and `BODY` finish an article already in flight. No NNTP response
+      is abandoned mid-stream, regardless of `--method`.
+- [x] **Explicit partial results.** Human output and NDJSON expose
+      `stopped_early` and `skipped`, so unchecked articles are never
+      misreported as either confirmed missing or unreachable. README and
+      `penne check --help` describe the option and its trade-offs.
+- [x] Tests cover early termination and primary-to-backup failover, in
+      addition to the existing `STAT`/`HEAD`/`BODY` availability tests.
 
 ---
 
