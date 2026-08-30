@@ -39,9 +39,16 @@ cargo run --bin penne -- check path/to/release.nzb
 
 # You can also check multiple releases at once (they will share the connection pool)
 cargo run --bin penne -- check path/to/release1.nzb path/to/release2.nzb
+
+# Only need a pass/fail answer? Stop after the first confirmed missing article.
+cargo run --bin penne -- check path/to/release.nzb --fail-fast --quiet
 ```
 
 `penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = confirmed missing, 2 = fatal error, 3 = inconclusive). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead. See [`check`: dedicated availability-check subcommand](#check-dedicated-availability-check-subcommand) below for every flag and the full `--json` schema.
+
+Run `penne --help` to see the configuration, availability-check, and download
+workflows together. `penne check --help` and `penne help check` are equivalent
+ways to see availability-check-specific options and examples.
 
 A confirmed-missing article (a server returned a definitive `430`/`423`/`420`) is reported separately from an unreachable one (every tried server failed to connect or timed out before ever answering) — `missing` vs `unreachable` in the JSON output, `conclusive: false` when any segment falls in the latter bucket. This distinction matters for callers that act on a check's result (e.g. deciding whether to declare a release dead): a transient network hiccup must never be read as confirmed data loss.
 
@@ -388,6 +395,36 @@ penne check release.nzb --json --quiet > result.jsonl
 penne check *.nzb --fail-fast --quiet
 ```
 
+#### `--fail-fast`: stop once a release is known to be incomplete
+
+By default, `penne check` completes every requested segment so its summary
+can give an exact availability percentage and a complete missing-article
+list. Add `--fail-fast` when the only useful answer is “is at least one
+article definitely gone?”:
+
+```bash
+# Exit 0 when every checked NZB is complete; exit 1 as soon as an NZB is
+# conclusively known to be incomplete.
+penne check *.nzb --fail-fast --quiet
+
+# Same policy, but verify actual article delivery rather than a provider's
+# STAT index. This consumes article bandwidth for requests already started.
+penne check release.nzb --method body --fail-fast
+```
+
+It applies equally to `stat`, `head`, and `body`. It never treats a `430`
+from a primary as final while a configured failover server could still have
+the article: every applicable server is tried first. Once an article is
+confirmed absent everywhere, no new work is scheduled. `STAT` requests
+already pipelined are read to completion; an in-flight `HEAD` or `BODY` is
+also completed normally, so no NNTP response is abandoned mid-stream.
+
+The result is intentionally **partial**: `stopped_early: true` and a
+non-zero `skipped` count mean the unchecked articles are neither “missing”
+nor “unreachable”, and `complete`/`conclusive` are both `false`. Use the
+default mode when you need a percentage, a complete missing list, or a
+provider comparison with `--independent-servers`.
+
 Flags:
 
 | Flag | Default | Meaning |
@@ -443,12 +480,14 @@ given:
   "servers": ["news.example.com", "backup.example.com"],
   "complete": true,
   "conclusive": true,
+  "stopped_early": false,
   "total_articles": 6968,
   "present": 6968,
   "missing": 0,
   "missing_pct": 0.0,
   "unreachable": 0,
   "unreachable_pct": 0.0,
+  "skipped": 0,
   "files": [
     { "name": "movie.mkv", "total_segments": 200, "present_segments": 200 }
   ],
