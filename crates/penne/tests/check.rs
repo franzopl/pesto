@@ -272,6 +272,60 @@ async fn missing_segments_are_reported_per_file_and_overall() {
 }
 
 #[tokio::test]
+async fn fail_fast_stops_after_a_confirmed_missing_article() {
+    let addr = spawn_fake_server(HashSet::new());
+    let queue = queue_with(&[("movie.bin", &["gone@x", "later1@x", "later2@x"])]);
+    let config = CheckConfig {
+        pipeline_depth: 1,
+        fail_fast: true,
+        ..CheckConfig::new(CheckMethod::Stat, 0)
+    };
+
+    let outcome = check_queue(
+        &queue,
+        &[ServerTier::solo(server_entry(addr))],
+        &config,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.stopped_early);
+    assert_eq!(outcome.missing.len(), 1);
+    assert_eq!(outcome.missing[0].message_id, "gone@x");
+    assert_eq!(outcome.skipped, 2);
+    assert!(!outcome.is_complete());
+    assert!(!outcome.is_conclusive());
+}
+
+#[tokio::test]
+async fn fail_fast_still_uses_a_backup_server() {
+    let primary = spawn_fake_server(HashSet::new());
+    let backup = spawn_fake_server(["a1@x", "a2@x"].into_iter().collect());
+    let queue = queue_with(&[("movie.bin", &["a1@x", "a2@x"])]);
+    let config = CheckConfig {
+        fail_fast: true,
+        ..CheckConfig::new(CheckMethod::Stat, 0)
+    };
+
+    let outcome = check_queue(
+        &queue,
+        &[
+            ServerTier::solo(server_entry(primary)),
+            ServerTier::solo(server_entry(backup)),
+        ],
+        &config,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.is_complete());
+    assert!(!outcome.stopped_early);
+    assert!(outcome.missing.is_empty());
+}
+
+#[tokio::test]
 async fn falls_back_to_backup_server_for_segments_the_primary_lacks() {
     let primary = spawn_fake_server(HashSet::new()); // knows nothing
     let backup_known: HashSet<&str> = ["a1@x"].into_iter().collect();

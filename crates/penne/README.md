@@ -385,6 +385,7 @@ connection pool, so no per-file reconnect cost), **structured JSON output**,
 penne check path/to/release.nzb
 penne check release1.nzb release2.nzb --method head
 penne check release.nzb --json --quiet > result.jsonl
+penne check *.nzb --fail-fast --quiet
 ```
 
 Flags:
@@ -394,6 +395,7 @@ Flags:
 | `--method <stat\|head\|body>` | `stat` | Which NNTP command to check with — see the method descriptions under `--stat` above; same trade-offs apply here. |
 | `--sample <N>` | off (check every segment) | Check only `N` segment(s) per file, spread evenly — same semantics as `download --stat`'s `--sample`. |
 | `--pipeline-depth <N>` | `128` | How many `STAT` commands are pipelined per connection per round trip. Only affects `--method stat`; ignored for `head`/`body`, which don't pipeline (see `--stat` above for why). |
+| `--fail-fast` | off | Stop scheduling work after the first article confirmed missing on every applicable server. Requests already pipelined are completed cleanly, and remaining articles are reported as skipped; use this when only a pass/fail verdict matters. |
 | `--json` | off | Emit one JSON object per line (NDJSON) instead of the human-readable summary — see schema below. |
 | `-q`, `--quiet` | off | Suppress the live progress bar and per-segment `missing`/`unreachable` lines; only the final summary (or, with `--json`, the JSON lines themselves) is printed. |
 | `--server <NAME>` | every configured server | Use only the named `[[servers]]` entry (repeatable) — same as `download`'s `--server`. |
@@ -468,10 +470,12 @@ given:
 | `server` | The single hostname this line's result came from. Only present with `--independent-servers`, in place of `servers`. |
 | `complete` | `true` only if every segment was confirmed present — `false` for both confirmed-missing and merely-unreachable segments. |
 | `conclusive` | `true` if every segment got a definitive present/absent answer from some server. **Check this before trusting `missing`/`missing_pct` as a final verdict** — if `false`, at least one segment's fate is unknown, and `missing` alone isn't enough to declare the release dead. |
-| `total_articles` | Total segments checked. |
+| `stopped_early` | `true` when `--fail-fast` stopped after a confirmed missing article. A result with this field set is intentionally partial. |
+| `total_articles` | Total segments listed in the `.nzb`, including any reported as `skipped` by a fail-fast run. |
 | `present` | Segments confirmed present on at least one server. |
 | `missing` / `missing_pct` | Segments at least one server definitively denied (`430`/`423`/`420`) and none confirmed present — the only case that should be treated as confirmed data loss. |
 | `unreachable` / `unreachable_pct` | Segments no tried server ever gave a real answer for (connection failure, exhausted retries) — deliberately kept separate from `missing` so a transient network hiccup is never read as confirmed absence. |
+| `skipped` | Segments not checked because `--fail-fast` had already found a confirmed missing article. They are neither missing nor unreachable. |
 | `files` | Per-file breakdown, `.nzb` order: `name`, `total_segments`, `present_segments`. |
 | `missing_articles` | `{ file_name, part, message_id }` for each confirmed-missing segment. |
 | `unreachable_articles` | Same shape, for unreachable segments. |

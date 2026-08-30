@@ -179,6 +179,11 @@ enum Command {
         /// STAT commands pipelined per connection (default: 128).
         #[arg(long, default_value = "128")]
         pipeline_depth: usize,
+        /// Stop after the first article confirmed missing on every applicable
+        /// server. Already-pipelined requests finish cleanly; the remaining
+        /// articles are reported as skipped rather than missing.
+        #[arg(long)]
+        fail_fast: bool,
         /// Machine-readable JSON output.
         #[arg(long)]
         json: bool,
@@ -261,6 +266,7 @@ async fn main() -> Result<()> {
             method,
             sample,
             pipeline_depth,
+            fail_fast,
             json,
             quiet,
             server,
@@ -271,6 +277,7 @@ async fn main() -> Result<()> {
                 method,
                 sample,
                 pipeline_depth,
+                fail_fast,
                 json,
                 quiet,
                 cli.config.flatten(),
@@ -732,6 +739,7 @@ async fn check(
     method: CheckMethod,
     sample: Option<usize>,
     pipeline_depth: usize,
+    fail_fast: bool,
     json: bool,
     quiet: bool,
     config_path: Option<PathBuf>,
@@ -766,6 +774,7 @@ async fn check(
         method,
         pipeline_depth,
         retries: config.retries,
+        fail_fast,
     };
 
     let flat_servers: Vec<penne::config::ServerTier> = config
@@ -878,6 +887,7 @@ async fn check(
                     // this field split exists to prevent.
                     "complete": outcome.is_complete(),
                     "conclusive": outcome.is_conclusive(),
+                    "stopped_early": outcome.stopped_early,
                     "total_articles": outcome.total_checked,
                     "present": outcome.total_present,
                     "missing": outcome.missing_count(),
@@ -887,6 +897,7 @@ async fn check(
                         0.0
                     },
                     "unreachable": outcome.unreachable_count(),
+                    "skipped": outcome.skipped,
                     "unreachable_pct": if outcome.total_checked > 0 {
                         outcome.unreachable_count() as f64 / outcome.total_checked as f64 * 100.0
                     } else {
@@ -1031,6 +1042,12 @@ async fn check(
                          not counted as missing, but this check is inconclusive",
                         outcome.unreachable.len(),
                         unreachable_pct
+                    );
+                }
+                if outcome.stopped_early {
+                    println!(
+                        "  stopped early:    {} segment(s) skipped after confirmed missing article",
+                        outcome.skipped
                     );
                 }
                 println!(
