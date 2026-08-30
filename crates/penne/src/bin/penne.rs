@@ -37,7 +37,9 @@ Server credentials are read from a TOML config file. If --config is not \
 given, penne loads it from the OS-standard location: $XDG_CONFIG_HOME/penne/config.toml \
 (or, failing that, ~/.config/penne/config.toml) on Linux/macOS, or \
 %APPDATA%\\penne\\config.toml on Windows. Create that file interactively \
-with `penne --config`, or point at a specific file with `--config <FILE>`."
+with `penne --config`, or point at a specific file with `--config <FILE>`.",
+after_help = "QUICK START:\n  penne --config                         Configure a news server\n  penne check RELEASE.nzb                Verify availability without downloading\n  penne check RELEASE.nzb --fail-fast -q Stop at the first confirmed miss\n  penne download RELEASE.nzb             Download, repair, and extract\n\n\
+Run `penne <command> --help` (or `penne help <command>`) for command options."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -67,11 +69,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Inspect an NZB's files, segments, and size")]
     /// Parse a `.nzb` and print file/segment/size counts.
     Info {
         /// Path to the `.nzb` file.
         nzb: PathBuf,
     },
+    #[command(about = "Download, repair, and extract one or more NZBs")]
     /// Download and assemble the contents of one or more `.nzb` files. Exits
     /// 0 if every file ended up complete with no repair needed, 1 if PAR2
     /// repaired something but the end result is complete, 2 if data is still
@@ -157,6 +161,15 @@ enum Command {
         #[arg(long, short)]
         quiet: bool,
     },
+    #[command(
+        about = "Verify that NZB articles are available without downloading",
+        after_help = "EXAMPLES:\n  penne check RELEASE.nzb\n  penne check RELEASE.nzb --method head\n  penne check RELEASE.nzb --method body --fail-fast -q\n  penne check *.nzb --fail-fast --quiet\n\n\
+Use --method stat for the cheapest index check, head for header storage, or \
+body to verify a full article transfer. --fail-fast returns as soon as an \
+article is confirmed missing after failover, so it does not produce a full \
+availability percentage.\n\n\
+EXIT STATUS:\n  0  All checked articles are present\n  1  At least one article is confirmed missing\n  2  Fatal error (configuration, input, or I/O)\n  3  Inconclusive: an article could not be checked"
+    )]
     /// Check article availability across one or more `.nzb` files without
     /// downloading. Exits 0 if all articles are present, 1 if any are
     /// confirmed missing (a server returned a definitive "not present"),
@@ -179,9 +192,11 @@ enum Command {
         /// STAT commands pipelined per connection (default: 128).
         #[arg(long, default_value = "128")]
         pipeline_depth: usize,
-        /// Stop after the first article confirmed missing on every applicable
-        /// server. Already-pipelined requests finish cleanly; the remaining
-        /// articles are reported as skipped rather than missing.
+        /// Stop scheduling after an article is confirmed missing on every
+        /// applicable failover server. Works with stat, head, and body;
+        /// in-flight work finishes cleanly and the remaining articles are
+        /// reported as skipped, not missing. Use when only a pass/fail
+        /// verdict matters, not a complete availability percentage.
         #[arg(long)]
         fail_fast: bool,
         /// Machine-readable JSON output.
@@ -989,22 +1004,22 @@ async fn check(
                     println!("\n[{}/{}] {}", i + 1, queues.len(), nzb_name);
                 }
 
-                let mut incomplete_files = 0u32;
-                for f in &outcome.files {
-                    if f.is_complete() {
-                        println!(
-                            "  complete: {} ({}/{} segments)",
-                            f.name, f.present_segments, f.total_segments
-                        );
-                    } else {
-                        incomplete_files += 1;
-                        println!(
-                            "  INCOMPLETE: {} ({}/{} segments)",
-                            f.name, f.present_segments, f.total_segments
-                        );
-                    }
-                }
+                let incomplete_files =
+                    outcome.files.iter().filter(|f| !f.is_complete()).count() as u32;
                 if !quiet {
+                    for f in &outcome.files {
+                        if f.is_complete() {
+                            println!(
+                                "  complete: {} ({}/{} segments)",
+                                f.name, f.present_segments, f.total_segments
+                            );
+                        } else {
+                            println!(
+                                "  INCOMPLETE: {} ({}/{} segments)",
+                                f.name, f.present_segments, f.total_segments
+                            );
+                        }
+                    }
                     for seg in &outcome.missing {
                         println!("    missing: {} part {}", seg.file_name, seg.part);
                     }
@@ -1044,11 +1059,17 @@ async fn check(
                         unreachable_pct
                     );
                 }
-                if outcome.stopped_early {
-                    println!(
-                        "  stopped early:    {} segment(s) skipped after confirmed missing article",
-                        outcome.skipped
-                    );
+                if fail_fast && !outcome.missing.is_empty() {
+                    println!("  result:           INCOMPLETE — confirmed missing article");
+                    if outcome.stopped_early {
+                        println!(
+                            "  stopped early:    {} segment(s) not checked",
+                            outcome.skipped
+                        );
+                    }
+                    if let Some(seg) = outcome.missing.first() {
+                        println!("  first missing:    {} part {}", seg.file_name, seg.part);
+                    }
                 }
                 println!(
                     "  files complete:   {}/{}",

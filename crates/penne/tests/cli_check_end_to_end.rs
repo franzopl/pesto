@@ -178,4 +178,35 @@ fn quiet_suppresses_the_progress_banner_even_without_json() {
         !stderr.contains("checking"),
         "--quiet must still suppress the banner, got: {stderr}"
     );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("summary"),
+        "expected summary, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("complete: movie.bin"),
+        "--quiet must suppress per-file output, got: {stdout}"
+    );
+}
+
+#[test]
+fn fail_fast_quiet_summary_identifies_the_confirmed_miss() {
+    let addr = spawn_fake_stat_server(HashSet::new());
+    let dir = tempfile::tempdir().unwrap();
+    let nzb_path = write_nzb(dir.path());
+    let config_path = write_config(dir.path(), addr.port());
+
+    let output = run_penne_check(&nzb_path, &config_path, &["--fail-fast", "--quiet"]);
+    assert_eq!(output.status.code(), Some(1));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("INCOMPLETE — confirmed missing article"),
+        "expected explicit fail-fast verdict, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("first missing:    movie.bin part 1"),
+        "expected the first missing article, got: {stdout}"
+    );
 }
