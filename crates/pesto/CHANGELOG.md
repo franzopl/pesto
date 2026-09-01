@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-01
+
 ### Added
 
 - Added centralized, testable wire contracts for `none`, `light`,
