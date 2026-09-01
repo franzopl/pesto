@@ -1,0 +1,8 @@
+pesto v0.9.1 — fast, lean Usenet poster
+────────────────────────────────────────────────
+connections: 2 total (2 upload)
+PAR2: writing recovery volumes — pass 1/1 · 127/477 slices
+uploading: 24/24 articles · 292.4 KiB · 76.9 KiB/s
+✓ Upload complete — 24/24 articles accepted by the server
+  Not independently verified · elapsed 0:04
+wrote nzb: .pesto-client-e2e.sgPbGc/original.nzb

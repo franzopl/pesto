@@ -274,7 +274,6 @@ impl Config {
                 "file_counter=true contradicts --obfuscate={}; use full-shared or light when release-wide grouping is required",
                 match obfuscate {
                     ObfuscateMode::Full => "full",
-                    ObfuscateMode::HeaderFragmented => "header-fragmented",
                     ObfuscateMode::Article => "article",
                     _ => unreachable!("only private modes reject file counters"),
                 }

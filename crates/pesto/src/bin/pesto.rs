@@ -171,8 +171,7 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     nzb_dir: Option<PathBuf>,
 
-    /// Obfuscation mode: `none`, `full`, `full-shared`, `light`, or
-    /// `header-fragmented`. A bare
+    /// Obfuscation mode: `none`, `full`, `full-shared`, or `light`. A bare
     /// `--obfuscate` means `full`. `full-shared` reuses one random name
     /// across every file in the release (archive + PAR2 volumes) so
     /// indexers can still group them; `light` is the same, but the yEnc
@@ -1153,7 +1152,6 @@ async fn run_single_upload(
             ObfuscateMode::Full => "full",
             ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
-            ObfuscateMode::HeaderFragmented => "header-fragmented",
             ObfuscateMode::Article => "article",
         };
         let pre_groups_str = config.groups.join(":");
@@ -1219,7 +1217,6 @@ async fn run_single_upload(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::HeaderFragmented => "header-fragmented",
                 ObfuscateMode::Article => "article",
             },
             compress: compress_fmt,
@@ -1961,7 +1958,6 @@ async fn run_single_upload(
             ObfuscateMode::Full => "full",
             ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
-            ObfuscateMode::HeaderFragmented => "header-fragmented",
             ObfuscateMode::Article => "article",
         };
         // PESTO_GROUP/PESTO_GROUPS report the group(s) actually posted to
@@ -2726,7 +2722,6 @@ async fn run_batch(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::HeaderFragmented => "header-fragmented",
                 ObfuscateMode::Article => "article",
             };
             // The group(s) actually used across every episode in the season
@@ -3127,9 +3122,6 @@ fn add_obfuscation_tag(tags: &mut Vec<String>, obfuscate: &ObfuscateMode) {
         }
         ObfuscateMode::Light => {
             tags.push("obfuscated:light".to_string());
-        }
-        ObfuscateMode::HeaderFragmented => {
-            tags.push("obfuscated:header-fragmented".to_string());
         }
         ObfuscateMode::Article => {
             tags.push("obfuscated:article".to_string());
@@ -3857,7 +3849,6 @@ fn resume_flags_string(config: &Config) -> String {
         ObfuscateMode::Full => "full",
         ObfuscateMode::Light => "light",
         ObfuscateMode::FullShared => "full-shared",
-        ObfuscateMode::HeaderFragmented => "header-fragmented",
         ObfuscateMode::Article => "article",
     };
     let mut flags = format!(

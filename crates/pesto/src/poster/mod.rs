@@ -882,9 +882,11 @@ pub async fn post_files_inner(
                 let wn = client_path.clone();
                 (wn.clone(), wn, config.from.clone())
             }
-            ObfuscateMode::Full | ObfuscateMode::HeaderFragmented | ObfuscateMode::Article => {
-                (obfuscated_name(), obfuscated_name(), random_from())
-            }
+            ObfuscateMode::Full | ObfuscateMode::Article => (
+                obfuscated_name(),
+                obfuscated_yenc_name(&real_name),
+                random_from(),
+            ),
             ObfuscateMode::Light | ObfuscateMode::FullShared => {
                 let from = release_from.clone().unwrap_or_default();
                 let prefix = release_prefix.as_deref().unwrap_or_default();
@@ -1904,6 +1906,21 @@ fn par2_release_base(name: &str) -> &str {
         None => name,
     };
     par2_base(trimmed)
+}
+
+/// Return an opaque yEnc filename, retaining only `.par2` for recovery
+/// volumes. Download clients use that extension to classify and clean up PAR2
+/// data after repair; the random stem intentionally carries no real name.
+fn obfuscated_yenc_name(real_name: &str) -> String {
+    let name = obfuscated_name();
+    if Path::new(real_name)
+        .extension()
+        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("par2"))
+    {
+        format!("{name}.par2")
+    } else {
+        name
+    }
 }
 
 /// Canonical path presented to download clients and stored in PAR2 FileDesc.
@@ -2945,7 +2962,10 @@ async fn push_par2_file(
         let yenc = if shared.config.obfuscate == ObfuscateMode::Light {
             name.clone()
         } else {
-            obfuscated_name_with_prefix(prefix)
+            // NZBGet uses the yEnc name while collecting recovery volumes;
+            // retain only the technical extension so it cleans them up after
+            // repair without exposing the real volume name.
+            format!("{}.par2", obfuscated_name_with_prefix(prefix))
         };
         (name, yenc, shared.release_from.clone().unwrap_or_default())
     } else {
@@ -2954,10 +2974,11 @@ async fn push_par2_file(
                 let wn = client_path.clone();
                 (wn.clone(), wn, shared.config.from.clone())
             }
-            ObfuscateMode::Full
-            | ObfuscateMode::HeaderFragmented
-            | ObfuscateMode::Article
-            | ObfuscateMode::FullShared => (obfuscated_name(), obfuscated_name(), random_from()),
+            ObfuscateMode::Full | ObfuscateMode::Article | ObfuscateMode::FullShared => (
+                obfuscated_name(),
+                obfuscated_yenc_name(&real_name),
+                random_from(),
+            ),
             ObfuscateMode::Light => {
                 let name = obfuscated_name();
                 (name.clone(), name, random_from())
@@ -3655,17 +3676,17 @@ fn make_task(
     config: &Config,
 ) -> PostTask {
     let (subject_name, yenc_name, from, date) = match config.obfuscate {
-        ObfuscateMode::HeaderFragmented => (
+        ObfuscateMode::Full => (
             obfuscated_name(),
             meta.yenc_name.clone(),
             random_from(),
-            resolve_date(config.date.as_deref()),
+            meta.date.clone(),
         ),
         ObfuscateMode::Article => (
             obfuscated_name(),
-            obfuscated_name(),
+            obfuscated_yenc_name(&meta.real_name),
             random_from(),
-            resolve_date(config.date.as_deref()),
+            meta.date.clone(),
         ),
         _ => {
             let date = if config.date.as_deref() == Some("now") {

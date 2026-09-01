@@ -13,9 +13,9 @@ without its NZB?**
 | `none` | A header indexer can discover and assemble files by their real paths. | Standards-friendly public posting. |
 | `light` | A header/body indexer can group the release through a shared prefix and the deliberate Subject = yEnc-name signal. | Compatibility with indexers that require the exact-match fingerprint. |
 | `full-shared` | A header/body indexer can group the release through a shared prefix without Subject equalling yEnc `name=`. | Discoverability without that exact-match fingerprint. |
-| `full` | The NZB is required to connect files, while all parts of one file retain one wire identity. | Private default with conventional per-file yEnc assembly. |
-| `header-fragmented` | A header-only observer cannot associate segments, while a body-aware observer can group one physical file by its opaque yEnc name. | Extra header fragmentation without breaking conventional client assembly and PAR2 cleanup. |
+| `full` | A header-only observer cannot associate segments, while a body-aware observer can group one physical file by its opaque yEnc name. | Private default with conventional client assembly and PAR2 cleanup. |
 
+`header-fragmented` remains accepted as a compatibility alias for `full`.
 `article` remains hidden and experimental. Its legacy alias `paranoid` keeps
 the old strict behavior: Subject, From and yEnc name all change per article.
 It is deliberately not a SABnzbd/NZBGet-compatible mode for multipart PAR2
@@ -28,24 +28,28 @@ The quoted name below means the value inside Pesto's conventional
 `"name" yEnc (part/total)` Subject. NZB 1.1 has no `file@name` attribute;
 Pesto does not emit one.
 
-| Artifact | `none` | `light` | `full-shared` | `full` | `header-fragmented` |
+| Artifact | `none` | `light` | `full-shared` | `full` |
 |---|---|---|---|---|---|
-| NNTP Subject quoted name | canonical client path | release prefix/file suffix | release prefix/file suffix | random per file | random per article |
-| yEnc `name=` | canonical client path | identical to Subject name | same release prefix plus independent suffix | independent random per file | independent random per physical file |
-| From | configured value | random per release | random per release | random per file | random per article |
-| Date | omitted unless requested | same | same | same | same |
-| Message-ID | 128 random bits as 32 lowercase hex digits | same | same | same | same |
-| Message-ID domain | random per article unless configured | same | same | same | same |
-| Standalone PAR2 index posted | yes | yes | yes | no | no |
-| Recovery volumes posted | yes | yes | yes | yes | yes |
-| PAR2 FileDesc name | canonical client path using `/` | same | same | same | same |
-| NZB Subject quoted name | canonical client path | same | same | same | same |
+| NNTP Subject quoted name | canonical client path | release prefix/file suffix | release prefix/file suffix | random per article |
+| yEnc `name=` | canonical client path | identical to Subject name | same release prefix plus independent suffix | independent random per physical file |
+| From | configured value | random per release | random per release | random per article |
+| Date | omitted unless requested | same | same | same |
+| Message-ID | 128 random bits as 32 lowercase hex digits | same | same | same |
+| Message-ID domain | random per article unless configured | same | same | same |
+| Standalone PAR2 index posted | yes | yes | yes | no |
+| Recovery volumes posted | yes | yes | yes | yes |
+| PAR2 FileDesc name | canonical client path using `/` | same | same | same |
+| NZB Subject quoted name | canonical client path | same | same | same |
 
 The generated NZB's quoted Subject name is intentionally the client path in
 every mode. SABnzbd initially names the download from that value. NZBGet can
 also use it when the yEnc name looks obfuscated. PAR2 FileDesc remains the
 authoritative rename source for both clients and therefore carries the same
 relative path.
+
+For an obfuscated PAR2 recovery volume, Pesto keeps the random yEnc stem but
+adds only the `.par2` extension. This exposes no real filename and lets
+clients classify and remove recovery data after a successful repair.
 
 Pesto strips one common outer input directory because the downloader creates
 the job directory, preserves every directory below it, rejects `.`/`..`, empty
@@ -94,19 +98,18 @@ gate; the earlier failure of a 4.5 KiB file with its first article missing was
 the expected consequence of losing the complete 16 KiB par-rename fingerprint.
 
 The same follow-up exposed three interoperability defects. The PAR2 cleanup
-defect is addressed by the supported `header-fragmented` contract. Raw Unicode
+defect is addressed by the supported `full` contract. Raw Unicode
 paths now fail early with an actionable error instead of silently restoring
 under a corrupt name, and compressed posts use an ASCII external archive name.
 The archive root fix is verified for 7z/ZIP and RAR. The RAR regression test
 uses the proprietary CLI when it is installed and is skipped in environments
 where that external binary is unavailable:
 
-- After the successful repair, six downloaded recovery volumes remained in the
-  completed directory under opaque per-article yEnc names. NZBGet could use
-  their packets but could not recognize every assembled file as PAR2 for final
-  cleanup. `header-fragmented` uses one stable opaque yEnc name per physical
-  file, including each PAR2 volume, while keeping Subject and From fragmented
-  per article. This is intentionally not the legacy strict `article` mode.
+- `full` uses one stable opaque yEnc name per physical file,
+  including each PAR2 volume, while keeping Subject and From fragmented per
+  article. The recovery-volume yEnc name retains only `.par2` so NZBGet can
+  classify it for final cleanup. This is intentionally not the legacy strict
+  `article` mode.
 - A raw FileDesc path `Árvore/legenda-ação.txt` retained the correct contents
   but became the mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`. Inspection of
   NZBGet's exact bundled `par2cmdline-turbo` tag confirmed an unconditional
@@ -118,7 +121,7 @@ where that external binary is unavailable:
   basename, rather than the staging prefix, is the archive root.
 
 A controlled NNTP end-to-end run on 2026-09-01 posted a five-part
-`header-fragmented` fixture, forced two `STAT 430` replies, then accepted the
+`full` fixture, forced two `STAT 430` replies, then accepted the
 two reposts. The seven captured articles retained one yEnc name for the
 physical file while each repost received a fresh Subject and From. The run
 completed and wrote its NZB, covering the check/repost identity contract over
@@ -131,8 +134,8 @@ handling, but they do not define the NNTP/NZB posting contract.
 
 Resume state and version-2 spool entries persist the exact Subject, yEnc name,
 From and Date used for each article. Check/repost reuses that identity in every
-mode except `header-fragmented` and legacy `article`: both receive a new
-per-article Subject and From after a confirmed miss; `header-fragmented` keeps
+mode except `full` and legacy `article`: both receive a new
+per-article Subject and From after a confirmed miss; `full` keeps
 the file's yEnc name while legacy `article` rotates it too. Legacy obfuscated
 resume state lacks enough information
 to extend a file without violating its contract and is rejected with a

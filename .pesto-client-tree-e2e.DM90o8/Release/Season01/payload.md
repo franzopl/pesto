@@ -24,7 +24,6 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Basic usage](#basic-usage)
-- [SOCKS5 proxy](#socks5-proxy)
   - [Post a single file](#post-a-single-file)
   - [Post a directory](#post-a-directory)
   - [Multiple files](#multiple-files)
@@ -33,6 +32,10 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 - [PAR2 recovery data](#par2-recovery-data)
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
+  - [Upload resume](#upload-resume)
+  - [Post-verification via STAT](#post-verification-via-stat---check)
+  - [Rate limiting](#rate-limiting)
+  - [Dry run](#dry-run)
 - [NZB metadata](#nzb-metadata)
 - [All flags](#all-flags)
 - [Exit codes](#exit-codes)
@@ -54,12 +57,36 @@ Download the latest binary for your platform from the
 | Linux x86-64 (musl / Alpine) | `pesto-linux-x86_64-musl` |
 | Windows x86-64 | `pesto-windows-x86_64.exe` |
 
-These are plain binaries, not archives — download and copy the file to a
-directory on your `PATH` (e.g. `/usr/local/bin` on Linux, `C:\Windows\System32`
-on Windows), renaming it to `pesto`/`pesto.exe` if you want the short name.
-[`scripts/install.sh`](../../scripts/install.sh)/[`install.ps1`](../../scripts/install.ps1)
-do this for you (`curl ... | bash` / `irm ... | iex` — see each script's header
-for the one-liner).
+Copy the binary to a directory on your `PATH` (e.g. `/usr/local/bin` on
+Linux/macOS), marking it executable on Linux/macOS (`chmod +x`). On Windows,
+rename it to `pesto.exe` and place it anywhere on your `PATH`.
+
+### Install script (Windows / Linux)
+
+For a one-command setup that also creates the hooks folder, run one of:
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/franzopl/pesto/main/scripts/install.ps1 | iex
+```
+
+```bash
+# Linux
+curl -fsSL https://raw.githubusercontent.com/franzopl/pesto/main/scripts/install.sh | bash
+```
+
+This downloads the latest binary, installs it to a per-user directory
+(`%LOCALAPPDATA%\pesto\bin` / `~/.local/bin`), adds that directory to your
+`PATH`, creates the hooks folder (`%APPDATA%\pesto\hooks\` /
+`~/.config/pesto/hooks/`), and runs the `--config` wizard if you don't have a
+config yet. See [`scripts/install.ps1`](scripts/install.ps1) /
+[`scripts/install.sh`](scripts/install.sh) for the `-HookUrl`/`--hook-url`
+and `-ConfigUrl`/`--config-url` parameters distributors (e.g. an indexer
+pointing its users at a pre-filled hook) can use to skip manual file editing
+entirely. If the downloaded hook still contains the `YOUR_API_KEY`
+placeholder (see [`examples/hooks/`](examples/hooks/)), the installer prompts
+for it interactively and writes it into the hook file — pass
+`-NoApiKeyPrompt`/`--no-api-key-prompt` to skip that.
 
 ### Via cargo
 
@@ -68,20 +95,6 @@ cargo install pesto-poster
 ```
 
 The installed binary is named `pesto`.
-
-### Updating
-
-If you installed a prebuilt binary (not via `cargo install`), run:
-
-```bash
-pesto --update
-```
-
-This downloads the latest `pesto-v*` release for your platform, verifies its
-SHA256 against the `SHA256SUMS` file published alongside it, and replaces the
-running binary in place. It touches nothing else — no config, no NZBs.
-`cargo install pesto-poster` installs are unaffected; update those the same
-way you installed them (`cargo install pesto-poster` again).
 
 ### Build from source
 
@@ -114,6 +127,10 @@ self-contained. Some features require external tools:
 optional and its absence degrades gracefully — `--nfo` falls back to a
 directory listing instead.
 
+Blu-ray disc analysis (`--nfo` on a BDMV folder) is handled in-process by
+[`bdinfo-rs-core`](https://github.com/agentjp/bdinfo-rs) (LGPL-2.1), which is
+compiled into the pesto binary. No external BDInfo tool is required.
+
 ---
 
 ## Quick start
@@ -142,7 +159,6 @@ host        = "news.example.com"
 port        = 563          # default; 119 for plaintext
 ssl         = true         # default
 connections = 10           # parallel NNTP connections
-proxy       = "socks5://127.0.0.1:1080" # optional; socks5h:// and bare host:port also work
 
 [auth]
 username = "your_username"
@@ -157,37 +173,19 @@ par2    = 10               # % of PAR2 recovery data (0 = disabled)
 nzb_dir = "/home/user/nzbs"   # where .nzb files are saved
 ```
 
-
 Any config field can be overridden by a CLI flag for a single run.
 
-
 ### SOCKS5 proxy
-Route every NNTP connection through a SOCKS5 proxy with `--proxy` / `-p`, or
-set `proxy` at the top level or in `[server]`. Proxy credentials are supported,
-and Pesto sends the NNTP hostname to SOCKS5 for remote DNS resolution.
+
+Route every NNTP connection (including failover and verification connections) through SOCKS5 with `--proxy` / `-p`, or set `proxy = "socks5://host:port"` at the top level or under `[server]`. Bare `host:port` and `socks5h://` are accepted. The NNTP hostname is sent to the proxy for remote DNS resolution.
+
+Before any article is posted, pesto validates the SOCKS5 connection, proxy authentication, and NNTP connection. The active proxy remains visible in a dedicated `proxy` panel throughout the upload. Add `--proxy-check-ip` to display the public exit IP through the proxy; this optional check contacts `api.ipify.org`.
 
 ```bash
-# Local dynamic proxy via SSH
 ssh -D 1080 user@jump-host
 pesto -p 127.0.0.1:1080 movie.mkv
-
-# Authenticated commercial proxy
-pesto -p 'socks5://user:password@proxy.example:1080' movie.mkv
+# authenticated commercial proxy: --proxy socks5://user:pass@proxy.example:1080
 ```
-
-Before posting, Pesto verifies the SOCKS5 connection, proxy authentication, and
-NNTP authentication. The live terminal panel keeps a dedicated `proxy` box
-visible throughout the upload; it never prints proxy credentials. Add
-`--proxy-check-ip` to show the public exit IP (it contacts `api.ipify.org`).
-
-With more than one entry, `groups` is a pool of alternatives: one is picked
-at random each run to spread posts across the pool over time — it does not
-cross-post. To post the same article to several groups at once instead, join
-their names with `+` in a single entry, e.g. `groups = ["alt.a+alt.b"]`. The
-two can be mixed, e.g. `groups = ["alt.a+alt.b", "alt.c"]` picks between
-"cross-post to a and b" or "post to c alone" each run. (`,` is accepted as a
-deprecated alias for `+` within a `groups` array entry, with a warning —
-prefer `+` in new configs.)
 
 ### Multiple servers with automatic failover
 
@@ -239,6 +237,26 @@ a downloader can reconstruct the original layout. Files starting with `.` are
 included; symbolic links are skipped. The `.nzb` is named after the root folder
 (`MyShow.S01.nzb`).
 
+#### DVD / Blu-ray full-disc backups
+
+DVD and Blu-ray structures (e.g. `VIDEO_TS/`) often contain **0-byte
+placeholder files** (e.g. `VTS_02_0.VOB`). Download clients identify obfuscated
+files by their md5_16k hash and cannot match empty files — they will end up with
+the obfuscated name in the wrong location.
+
+pesto emits a warning when it detects 0-byte files in a release. The
+recommended approach for full-disc backups is to use RAR compression, which
+preserves the directory structure and is handled natively by all major download
+clients:
+
+```bash
+pesto --compress=rar --obfuscate ./VIDEO_TS/
+```
+
+Without compression, the download is still correct and complete; only the
+0-byte placeholder(s) need to be moved manually after download, or you can
+use `par2 repair` to reconstruct the full layout from the flat download folder.
+
 ### Multiple files
 
 ```bash
@@ -267,21 +285,37 @@ pesto \
 ## Obfuscation
 
 `--obfuscate` controls metadata visible on the wire; it does not encrypt
-content or promise anonymity. See the workspace's authoritative
-[`docs/obfuscation.md`](../../docs/obfuscation.md) for exact artifacts,
-compatibility gates and non-goals.
+content or promise anonymity. The authoritative mode and artifact contracts
+are documented in [docs/obfuscation.md](docs/obfuscation.md).
 
 | Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
-| `full` | random, unique per article | opaque random, stable per physical file | random per article | yes |
-| `full-shared` | shared prefix + real extension, same across the release | shared prefix + random suffix, per file | random, shared across the release | yes |
-| `light` | shared prefix, same across the release | identical to Subject | random, shared across the release | yes |
+| `full` | random, 10–30 chars, independent per file | random, 10–30 chars, independent per file | random per file | yes |
+| `full-shared` | one shared random prefix for the whole release | shared prefix + own random suffix per file | shared for the whole release | yes |
+| `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | yes |
+| `header-fragmented` | independent random name per article | opaque random name per physical file | random per article | yes |
 
-`full` randomises Subject and From independently for every article, while a
-physical file retains one opaque variable-length alphanumeric yEnc name for
-client-safe multipart assembly. The real file names are only in the `.nzb` you
-keep, or recoverable through the PAR2 set.
+`full` randomises everything on the wire using variable-length alphanumeric
+strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
+random TLD. The real file names are only in the `.nzb` you keep, or recoverable
+through the PAR2 set.
+
+Every mode above writes the canonical client path into the `.nzb` it generates,
+regardless of what went out on the wire — obfuscation only scrambles the
+actual NNTP article, and the `.nzb` is already a private file you hold
+through your own channel, so there's no reason to hide the name from
+yourself. PAR2 File Description packets carry that same path so SABnzbd and
+NZBGet can perform their normal PAR2 rename and restore nested directories.
+
+Pesto omits `Date:` by default in every mode and lets the server supply it.
+Use `--date now` or an explicit timestamp only when required. The legacy
+`--date random` behavior remains accepted with a deprecation warning; fake
+dates are not a sound privacy boundary.
+
+All modes use an opaque Message-ID local part containing 128 random bits and
+no clock or counter. The domain is random per article unless
+`--message-id-domain` is explicitly set.
 
 A bare `--obfuscate` (no value) means `full`.
 
@@ -295,47 +329,68 @@ pesto --obfuscate=full movie.mkv
 pesto --obfuscate --password movie.mkv
 ```
 
-### Shared-prefix mode
+### Full-shared mode (for indexer compatibility)
 
-Under plain `full`, Subjects and senders are independently random per article,
-and yEnc names only connect segments of one physical file. The archive and
-its PAR2 volumes therefore have no release-wide wire identity. Some public
-indexers rely on a shared base name to recognise that a PAR2 set belongs to a
-given release, so under `full` those posts often show up unindexed or split
-apart (see [issue #58]).
+`--obfuscate=full-shared` obfuscates filenames like `full` mode, but reuses a single
+random *Subject* prefix (real extension, or archive volume suffix, kept) across the
+entire release — all data files, PAR2 index, and recovery volumes. The yEnc body
+`name=` also carries that same shared prefix, plus its own random suffix, so an
+indexer reading only the yEnc body (not the Subject) can still recognise every
+article as part of the release — but the random suffix keeps the Subject and yEnc
+name from ever matching exactly (issue #106).
+This preserves the ability for Usenet indexers to group files together, while still
+keeping the release hidden from casual observation.
 
-`--obfuscate=full-shared` fixes that by generating one random *prefix* per run
-and reusing it — with the real extension (or archive volume suffix) kept — as
-the **Subject** of every file: the archive (or loose input files) and every
-PAR2 index/volume. The yEnc body `name=` carries that same prefix too, each
-with its own random suffix (`{prefix}-{random}`) rather than repeating the
-subject verbatim — an indexer that can only see the yEnc body (not the
-Subject) still recognises every article as part of the release, while the
-random suffix keeps the Subject and yEnc name from ever matching exactly
-(the fingerprint plain `full` avoids by keeping them fully independent — see
-[issue #106]). The real names still never touch the wire; only the
-*grouping* changes.
+Use this when you want obfuscation but need indexer grouping (e.g. posting to
+private trackers, or when your indexer has trouble with fully random names).
 
 ```bash
+# Full obfuscation with shared name across all files (indexer-friendly)
 pesto --obfuscate=full-shared movie.mkv
+
+# With PAR2 and compression
+pesto --obfuscate=full-shared --par2=5 --compress movie.mkv
+
+# Typical use: multi-episode season with file numbering
+pesto --obfuscate=full-shared --par2=5 --file-counter ./MyShow.S01/
 ```
 
-This is a distinct, explicit choice rather than the default for `full`: reusing
-one name across the whole release is exactly the kind of correlation that the
-legacy strict `article` mode (below) is designed to prevent, so pick `full-shared` only when
-indexer compatibility matters more than resistance to wire-metadata
-correlation.
+### Light mode (exact Subject/yEnc name match)
 
-[issue #58]: https://github.com/franzopl/pesto/issues/58
-[issue #106]: https://github.com/franzopl/pesto/issues/106
+`--obfuscate=light` is `full-shared` taken one step further: it shares the same
+random prefix across the whole release, but the yEnc body `name=` is that shared
+subject string *verbatim* — no independent random suffix. This was `full-shared`'s
+own behavior before `v0.6.1`; that release added the random suffix to close an
+exact-match fingerprint (Subject header == yEnc body name=) that identified posts
+made by this tool. Some indexers key their own release grouping off that exact
+match, though (reportedly including NZBIndex), so `light` restores it for anyone
+who needs that over avoiding the fingerprint (issue #106).
 
-### Legacy header-fragmented alias
+Like every other mode, `light`'s generated `.nzb` carries the canonical client
+path in the quoted part of `<file subject="...">`. Its deliberate exact-match
+fingerprint exists only on the NNTP wire.
 
-`--obfuscate=header-fragmented` is accepted as a compatibility alias for
-`--obfuscate=full`. It emits the same client-safe contract: each article has
-an independent Subject and From while every physical file retains one opaque
-yEnc `name=`. A body-aware observer can therefore group a physical file's
-articles by its yEnc name.
+```bash
+pesto --obfuscate=light movie.mkv
+
+# Typical use: multi-episode season with file numbering
+pesto --obfuscate=light --par2=5 --file-counter ./MyShow.S01/
+```
+
+| Mode | Wire names | Indexer grouping | Privacy |
+|------|-----------|------------------|---------|
+| `none` | Real filenames | ✓ Good | None |
+| `full-shared` | Shared random name | ✓ Good | Moderate |
+| `light` | Shared random name, Subject = yEnc name exactly | ✓ Good (strongest signal) | Moderate |
+| `full` | Per-file random names | ✗ Poor | High |
+| `header-fragmented` | Per-article headers, per-file opaque yEnc name | ✗ Header-only | High |
+
+### Header-fragmented mode
+
+`--obfuscate=header-fragmented` gives every article an independent Subject and
+From header while retaining one opaque yEnc `name=` for every physical file.
+That lets SABnzbd and NZBGet assemble and clean multipart data/PAR2 files, but
+a body-aware observer can group a physical file's articles by its yEnc name.
 
 ```bash
 pesto --obfuscate=header-fragmented movie.mkv
@@ -343,8 +398,45 @@ pesto --obfuscate=header-fragmented movie.mkv
 
 > **Legacy note:** `article` is hidden and experimental. It, and its
 > `paranoid` alias, retain the old strict behavior where Subject, yEnc name and
-> From all change per article. It is not compatible with conventional
+> From all change per article. That mode is not compatible with conventional
 > multipart PAR2 repair and cleanup.
+
+### Choosing a mode
+
+`--obfuscate` and `--password` protect two different things and don't affect
+each other's behavior at all: `--obfuscate` controls what's visible on the
+wire (Subject, yEnc `name=`, `From`) so header-scraping and search-by-title
+can't identify the release; `--password` (see
+[Compression and passwords](#compression-and-passwords) below) encrypts the
+archive's actual content, so downloading the raw articles without your `.nzb`
+doesn't get anyone a readable file. Combine them for both protections at
+once — neither weakens the other, and `--password` behaves identically
+regardless of which `--obfuscate` mode is active.
+
+| Mode | Subject | yEnc `name=` | `From` | Real name in `.nzb` | Indexer grouping | Tool fingerprint avoided | + `--password` |
+|------|---------|---------------|--------|----------------------|-------------------|--------------------------|-----------------|
+| `none` | real name | real name | config value | yes (trivially) | yes, by real name | n/a — nothing hidden | archive content encrypted; release still searchable by real name |
+| `full` | random, per file | random, per file (≠ Subject) | random, per file | yes | no — each file is its own unrelated identity | yes | archive content also encrypted; still only the `.nzb`/PAR2 recover it |
+| `full-shared` | shared prefix, whole release | shared prefix + own random suffix (≠ Subject) | shared, whole release | yes | yes, by shared prefix | yes | same, plus content encrypted |
+| `light` | shared prefix, whole release | **identical to Subject** | shared, whole release | yes | yes, strongest signal (exact Subject/yEnc match) | **no** — that exact match is the point | same, plus content encrypted |
+| `header-fragmented` | random, per **article** | opaque random, per **physical file** | random, per article | yes | only to a body-aware observer, per file | yes | same, plus content encrypted; conventional client assembly still works |
+
+Quick guidance:
+- **Public, no privacy need** → `none`.
+- **Maximum privacy, don't care about indexer grouping** → `full` (add
+  `--password` to also hide the content from anyone who somehow gets the raw
+  articles).
+- **Want obfuscation but need an indexer to recognise/repair the release as
+  one unit** → `full-shared` (the default recommendation) or `light` if your
+  indexer specifically needs an exact Subject/yEnc `name=` match to group
+  correctly (confirm empirically — `full-shared` is right for most).
+- **Extra header fragmentation while keeping conventional client cleanup** →
+  `header-fragmented`.
+
+The hidden legacy `article` mode (and its `paranoid` alias) retains the stricter
+per-article yEnc behavior for existing configurations. It has no conventional
+multipart PAR2 repair/cleanup guarantee and is not a replacement for
+`header-fragmented`.
 
 ---
 
@@ -371,20 +463,6 @@ pesto --compress movie.mkv
 pesto --compress=zip movie.mkv
 pesto --compress=rar movie.mkv
 ```
-
-### Volume-split archive
-
-```bash
-# Split into 1 GB volumes: stem.part01.rar, stem.part02.rar, ...
-pesto --compress=rar --compress-volume-size=1g movie.mkv
-
-# 7z volumes: stem.7z.001, stem.7z.002, ...
-pesto --compress=7z --compress-volume-size=1g movie.mkv
-```
-
-`--compress-volume-size` takes a number with an optional unit (`b`/`k`/`m`/`g`/`t`),
-e.g. `500m` or `4g`. Supported with `--compress=rar` and `--compress=7z`; rejected
-with `--compress=zip` (7z's zip backend has no volume support).
 
 ### Password-protected archive
 
@@ -420,6 +498,12 @@ pesto generates PAR2 parity files using its own pure-Rust implementation.
 Parity is computed in the same single read pass as posting, so it adds minimal
 overhead. The PAR2 files are uploaded alongside the data and referenced in the `.nzb`.
 
+`none`, `light`, and `full-shared` post the conventional standalone index and
+recovery volumes. `full` and `article` post recovery volumes only; every volume
+contains Main + FileDesc + IFSC metadata and is usable by standard PAR2 tools
+without the separate index. The real relative path remains visible to anyone
+who downloads a volume. No size-obscuring padding is added.
+
 ```bash
 # 10% recovery data (default when par2 is set in config)
 pesto movie.mkv
@@ -433,71 +517,15 @@ pesto --par2 0 movie.mkv
 # Generate PAR2 files next to the source without posting
 pesto --par2-only movie.mkv
 pesto --par2-only ./MyShow.S01/
-```
 
-### Memory budget
-
-Two flags, two scopes:
-
-- **`--memory-limit <SIZE|PCT|auto>`** bounds the whole process — PAR2,
-  uploads and the check queue together, as shares of one ceiling (PAR2 gets
-  60%). Accepts an absolute size (`"8 GiB"`), a percentage of host RAM
-  (`"70%"`), or `auto` (default): derive it from host RAM, any cgroup memory
-  limit, and this process's own address-space ceiling (`RLIMIT_AS` /
-  `ulimit -v`) — shared hosting and seedbox accounts commonly cap the latter
-  well below host RAM, invisible to the first two.
-- **`--par2-memory-limit <SIZE>`** bounds the PAR2 recovery-encoding pass
-  specifically, on top of (not instead of) the share above — whichever is
-  tighter wins. Most invocations only need `--memory-limit`; reach for this
-  one when PAR2 specifically needs a different number than its default
-  share, e.g. to deliberately force multiple passes on a very
-  memory-constrained host.
-
-A manually-set limit that doesn't fit safely inside the effective ceiling is
-rejected up front with an actionable error, instead of the process aborting
-partway through the upload with no explanation.
-
-The startup banner reports the numbers behind the decision:
-
-```
-memory: address-space limit 9.5 GiB | reserved for overhead (connections+threads+runtime) 4.0 GiB | PAR2 budget 2.8 GiB/pass
-```
-
-When `--memory-limit` is set explicitly, the banner also names the global
-ceiling it resolved to, so the two-flag split is never silent even though
-migrating from the old single-flag behavior is strictly safer by
-construction (a `--memory-limit` that used to mean "PAR2 may use this much"
-now means "the whole process may use this much" — PAR2's actual share is
-smaller, never larger).
-
-When the recovery data needed exceeds this budget, PAR2 generation splits
-into multiple passes — each one re-reads the source files from scratch. By
-default those extra passes run concurrently with posting (data files go out
-while later passes are still catching up), so on a memory-constrained host a
-large release's PAR2 index/volumes can end up posted a while after its data
-files. See `--par2-before-upload` below if that gap matters for how your
-target indexer groups a release's files together.
-
-### Generating PAR2 before posting
-
-By default pesto computes PAR2 recovery data concurrently with the upload —
-posting starts as soon as the first data article is ready, and PAR2 volumes
-get posted as their recovery data finishes, interleaved with the rest of the
-release. `--par2-before-upload` switches to a two-phase workflow instead,
-closer to tools like ParPar+nyuu: generate every PAR2 file first (index and
-volumes, nothing posted yet), then post the data files followed by the
-already-generated PAR2 files, back to back with no gap between them.
-
-```bash
+# Generate all PAR2 recovery data before posting anything, instead of
+# concurrently with the upload (the default) — posts the data files then
+# the already-generated PAR2 index/volumes back to back, no gap between
+# them. Useful on a memory-constrained host, where a large release's PAR2
+# generation can need multiple passes and end up posted a while after its
+# data files, which some indexers fail to group as one release.
 pesto --par2-before-upload movie.mkv
 ```
-
-This trades a longer wait before the first article goes out for a release
-whose articles all land within a tight time window on the wire — useful if
-you've observed an indexer failing to group a large release's PAR2 volumes
-with its data files, which can happen when generation needs multiple passes
-(see the memory budget note above) and the resulting gap outlasts however
-long that indexer waits before considering a release's file set complete.
 
 ### SIMD acceleration
 
@@ -516,6 +544,9 @@ CPU feature detection:
 The dispatch happens in `RecoveryEncoder::flush()` (`src/par2/encoder.rs`).
 Measured throughput on an i5-14400 at 10 % redundancy, 256 MiB workload:
 
+> **Benchmark context:** these are historical microbenchmark results. CPU governor
+> and boost settings affect absolute throughput; do not compare these values directly with measurements taken under different conditions.
+
 | Path | PAR2 encode speed |
 |------|----------------:|
 | Scalar | 317 MiB/s |
@@ -530,6 +561,8 @@ pesto features a world-class yEnc encoder utilizing SIMD expansion tables
 memory bandwidth of modern CPUs.
 
 Measured throughput on an Intel i5-10400 (line length 128):
+
+> **Benchmark context:** this historical result does not record a performance-governor run. CPU governor and boost settings affect absolute throughput.
 
 | Tool | yEnc throughput |
 |------|----------------:|
@@ -567,23 +600,11 @@ pesto --season ./Season01/
 pesto --season --jobs 2 ./Season01/
 ```
 
-### `--merge-season` — combine per-episode NZBs offline
-
-If a folder was posted with `--each` and you need a combined season NZB after
-the fact, use `--merge-season`. No server connection is required.
-
-```bash
-# Read all .nzb files in the directory, group by season, write one combined NZB per group
-pesto --merge-season ./nzb/uploaded/
-
-# Override the display name in the NZB <head>
-pesto --merge-season ./nzb/uploaded/ --nzb-title "Batwheels Season 2"
-```
-
-Files are grouped by their season identifier (`S01`, `S02`, …). Each group
-produces one output NZB named after the group key (e.g. `Batwheels.S02.nzb`)
-written beside the source files. The terminal prints each included episode with
-its file and segment counts.
+The combined season NZB is written only when every episode is complete and
+the batch was not cancelled. `--allow-incomplete-nzb` can permit an individual
+episode NZB with confirmed-missing articles, but it never permits a partial
+combined season NZB. POST failures and inconclusive checks also block the
+combined NZB in both the CLI and UpaPasta.
 
 ### `--watch` — daemon mode
 
@@ -591,16 +612,32 @@ its file and segment counts.
 # Watch a folder and post every new entry automatically (Ctrl-C / SIGTERM to stop)
 pesto --watch ./incoming/
 
-# Move completed entries to a done folder instead of deleting them
-pesto --watch ./incoming/ --watch-done ./done/
-
 # Post up to 3 entries in parallel with a 60-second poll interval
 pesto --watch ./incoming/ --jobs 3 --watch-interval 60
 ```
 
 Entries already present in the watched directory when `pesto` starts are ignored;
-only new arrivals are posted. Completed entries are moved to `--watch-done` or
-deleted if `--watch-done` is not set.
+only new arrivals are posted. By default, completed entries are left in place.
+
+### `--cleanup` and `--cleanup-to` — source cleanup after upload
+
+After a successful upload (with no failures or cancellation), automatically clean up the source files/directories:
+
+```bash
+# Delete sources after upload
+pesto --cleanup movie.mkv
+pesto --watch ./incoming/ --cleanup
+
+# Move sources to an archive directory after upload (safer than delete)
+pesto --cleanup-to ./archive/ movie.mkv
+pesto --each ./Season01/ --cleanup-to ./uploaded/
+pesto --watch ./incoming/ --cleanup-to ./archive/
+```
+
+Both flags work with any upload mode (`--watch`, `--each`, `--season`, or direct uploads).
+Use `--cleanup-to` for a non-destructive approach: sources remain accessible in the archive
+directory if you need to verify or re-post them. The `--cleanup` and `--cleanup-to` flags
+are mutually exclusive.
 
 ### `--ext` — restrict uploads to specific extensions
 
@@ -637,6 +674,14 @@ resume from a finished upload. `--resume` controls the other half: whether a
 *prior* run's saved state is actually loaded and its already-posted segments
 skipped. Without it, `pesto` always starts fresh, even if a `.pesto-state` file
 is sitting right there.
+
+Resume state also records whether each segment was confirmed and whether
+checking was disabled. A confirmed segment is skipped. With `--no-check`, a
+segment saved by a no-check run is also skipped. In every other case —
+including state written by older pesto versions before these fields existed —
+`--resume --check` first sends `STAT` for the saved `Message-ID`: `223` skips
+the segment, `430` posts it again, and an inconclusive reply leaves it
+unverified without posting a duplicate.
 
 ```bash
 pesto --resume movie.mkv
@@ -684,48 +729,115 @@ replayed under its original `Message-ID` instead of being re-encoded and
 posted under a new one — avoiding a duplicate article if the original `POST`
 had, in fact, gone through.
 
-### Post-verification via STAT
+### Per-upload logs
 
-```bash
-# After posting each article, confirm with STAT that the server registered it
-pesto --verify movie.mkv
+Every upload writes a DEBUG-level log to `<history_dir>/logs/` (default
+`~/.config/pesto/logs/`), named `<timestamp>_<name>.log`. This happens
+regardless of `-v`, so you can analyse any run afterwards — including which
+articles a server rejected and why (e.g. `441 437 ... TooOld`, `441 435`
+duplicate) — without having to reproduce it with `-vv`. Only the 50 most recent
+pesto logs are kept; older ones are pruned automatically. Files that don't match
+pesto's naming (e.g. legacy upapasta logs sharing the same directory) are never
+touched.
+
+Note that the `-v` flag and these logs are independent: `-v` controls what is
+printed to your terminal (stderr), while the saved log is always full DEBUG.
+Redirecting the terminal with `> file` captures **stdout only**, which is why a
+plain `pesto ... > log.txt` saves almost nothing — use the saved session log,
+`--log-file`, or `2>` instead.
+
+Disable the saved log per-run with `--no-session-log`, or permanently:
+```toml
+[output]
+session_log = false
 ```
 
-Failed STAT checks trigger automatic reposts. Off by default because it adds
-one round-trip per article.
+### Post-verification via STAT (`--check`)
 
-### Post-upload check and repost
+pesto verifies every posted article with a streaming `STAT` check, **on by
+default**. Each article that gets a clean `240` from its `POST` is queued for
+a `STAT` confirmation `--check-delay` seconds later (default **5**), using a
+small pool of connections dedicated to checking — carved out of
+`--connections`, not opened on top of it, so the total connection count never
+changes. This runs concurrently with the upload rather than as a separate
+pass afterward, so by the time the last file finishes posting most of the
+run's articles are typically already confirmed.
+
+The connection budget is strict. With `--connections N`, at least one slot is
+kept for posting and the check pool is capped at `N - 1`; for example,
+`--connections 10 --check-connections 10` runs with 9 check connections and
+1 posting connection. Checking therefore requires at least two total
+connections. Reposts and the final recovery pass reuse slots already held by
+the check pool and never open sockets beyond `--connections`.
+
+A miss is retried up to `--check-retries` times (default **3**, **20 s**
+apart). If it's still missing, pesto reposts it under a fresh `Message-ID`
+(so the `.nzb` stays valid) and queues the new copy for another round of
+checks. `--check-post-retries` (default **1**) caps how many times a single
+article can be reposted before it's given up on as permanently missing.
+
+Each check ends in one of three states: `223` is confirmed present; `430`
+after all retry and recovery rounds is confirmed missing; and a timeout,
+connection failure, authentication failure, or other unexpected server reply
+is **inconclusive**. An inconclusive check is not evidence that the article is
+missing, so pesto does not repost it as a confirmed miss. It blocks the NZB,
+post-upload hooks, cleanup, and a successful exit so that `--resume --check`
+can retry `STAT` for the same `Message-ID` without another `POST`.
+
+`--allow-incomplete-nzb` applies only to articles confirmed missing by `430`.
+It may publish that incomplete per-upload NZB and runs its hooks with
+`PESTO_INCOMPLETE=1`; it never overrides a POST failure or an inconclusive
+check.
+
+Disable the whole thing with `--no-check` if you'd rather skip verification
+entirely — faster, but you won't find out about missing articles until
+something tries to download the release.
 
 ```bash
-# After the whole upload finishes, STAT every article and repost any that are missing
-pesto --check movie.mkv
+# Default: the streaming check runs automatically
+pesto movie.mkv
 
-# Give a flaky provider more chances: 3 repost rounds, each followed by a fresh STAT pass
-pesto --check --check-post-retries 3 movie.mkv
+# Disable it
+pesto --no-check movie.mkv
+
+# Wait longer before the first STAT attempt (servers with slow propagation)
+pesto --check-delay 60 movie.mkv
+
+# More patience per article: 5 attempts, 20 s apart
+pesto --check-retries 5 movie.mkv
+
+# Cap the dedicated check pool at 8 connections
+pesto --check-connections 8 movie.mkv
 ```
 
-`--check` waits `--check-delay` seconds (default `30`) for propagation, then
-STATs every posted article. Anything missing is reposted under its original
-`Message-ID` and re-verified; `--check-post-retries` controls how many
-repost-then-verify rounds to try (default `1`) before giving up — some
-providers only make an article STAT-findable after receiving it more than
-once.
+The terminal shows check progress as a trailing band on the upload bar, plus
+a live tally of verified/pending/missing/reposted articles in its own box:
 
-If articles are still confirmed missing after every round, `pesto` refuses to
-write the `.nzb` and skips post-upload hooks — it never ships a release it
-couldn't confirm is fully retrievable. Pass `--allow-incomplete-nzb` to
-publish anyway (e.g. when PAR2 recovery is expected to cover the gap); the
-process still exits non-zero so scripts and hooks can tell the upload wasn't
-fully clean.
+```
+┌─ upload ────────────────────────────────────────┐
+│ [████████████████░░░░░░░░] 68%  2912/4281 seg    │
+│ 1.9 GiB/2.8 GiB · 42 MiB/s                        │
+│ ETA 0:21                                          │
+└────────────────────────────────────────────────┘
+┌─ check ─────────────────────────────────────────┐
+│ 2601 verified · 311 pending                       │
+│ elapsed 0:14                                      │
+└────────────────────────────────────────────────┘
+```
 
-Once every `--check-post-retries` round is exhausted, `pesto` makes one more
-automatic repost-and-verify attempt for whatever is still missing, as long as
-that's cheap — at most `--check-recover-max` articles (default `50`) and
-within `--check-recover-percent` of the release's total segments (default
-`15`), whichever cap is smaller. This resolves the common case of "posting
-finished, the check failed for a handful of articles" without requiring a
-separate `--resume` invocation. Set `--check-recover-max 0` to disable it and
-fall back to `--allow-incomplete-nzb`/`--resume` only.
+When articles are missing or get reposted, the check box's first line switches
+to `<verified> · <pending> · N missing` and appends `· N reposted`.
+
+| Flag | Config key | Default | Description |
+|------|-----------|---------|-------------|
+| `--check` / `--no-check` | `posting.check` | **on** | Run the streaming STAT check; `--no-check` disables it |
+| `--check-delay <SECS>` | `posting.check_delay` | `5` | Seconds to wait after an article posts before its first STAT check |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per posted copy; 20 s between each |
+| `--check-connections <N>` | `posting.check_connections` | auto (~8% of total, capped at 4) | Dedicated connections for the check queue, carved out of `--connections` |
+| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost attempts per article once its STAT retries are exhausted |
+| `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` anyway if articles are still confirmed missing after `--check-post-retries` |
+| `--check-recover-percent <N>` | `posting.check_recover_percent` | `15` | Skip the automatic final recovery pass below if still-missing articles exceed this percent of the release |
+| `--check-recover-max <N>` | `posting.check_recover_max` | `50` | After `--check-post-retries` is exhausted, automatically retry once more if at most this many articles (and within `--check-recover-percent`) are still missing; `0` disables |
 
 ### Rate limiting
 
@@ -871,13 +983,9 @@ Environment variables available to the pre-hook:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or legacy `article` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, `header-fragmented`, or legacy `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
-| `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
-| `PESTO_IMDB_ID` | Value of `--imdb-id` / `--imdb` (empty when not set) |
-| `PESTO_TVDB_ID` | Value of `--tvdb-id` / `--tvdb` (empty when not set) |
-| `PESTO_MAL_ID` | Value of `--mal-id` / `--mal` (empty when not set) |
 
 > `PESTO_NZB`, `PESTO_NFO`, and `PESTO_PASSWORD` are **not** available in the
 > pre-hook — the NZB and NFO don't exist yet, and the archive password is only
@@ -903,13 +1011,9 @@ following environment variables:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or legacy `article` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, `header-fragmented`, or legacy `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
-| `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
-| `PESTO_IMDB_ID` | Value of `--imdb-id` / `--imdb` (empty when not set) |
-| `PESTO_TVDB_ID` | Value of `--tvdb-id` / `--tvdb` (empty when not set) |
-| `PESTO_MAL_ID` | Value of `--mal-id` / `--mal` (empty when not set) |
 | `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
 
 Scripts must have the executable bit set on Unix (`chmod +x`). On Windows,
@@ -932,6 +1036,13 @@ Pass `--nfo` to generate a `.nfo` text file alongside the `.nzb`. pesto runs
 to a recursive directory listing. The path is exposed as `PESTO_NFO` to every
 hook script.
 
+For Blu-ray disc structures (`BDMV/` layout), pesto uses
+[`bdinfo-rs-core`](https://github.com/agentjp/bdinfo-rs) — a memory-safe,
+pure-Rust Blu-ray analyzer compiled directly into the binary. No external tool
+is needed. It handles playlist selection, stream analysis, and QUICK SUMMARY
+generation in-process. The mediainfo fallback path is kept for the rare case
+where the in-process scan fails on a severely damaged disc structure.
+
 NFO generation is a local operation — it works with `--dry-run` just as it
 does in a full upload run.
 
@@ -945,29 +1056,22 @@ pesto --dry-run --nfo movie.mkv   # generate NFO without touching the network
 The [`examples/hooks/`](examples/hooks/) directory contains ready-to-use hook
 scripts:
 
-| Script | Type | Platform | Description |
-|--------|------|----------|-------------|
-| [`print-vars.sh`](examples/hooks/print-vars.sh) | Post-upload | Unix | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
-| [`generic-indexer.sh`](examples/hooks/generic-indexer.sh) | Post-upload | Unix | Sends the NZB (and optional NFO) to any Newznab-compatible indexer via its REST API |
-| [`generic-indexer.bat`](examples/hooks/generic-indexer.bat) | Post-upload | Windows | Same as above — `.bat` version for `cmd.exe` |
-| [`generic-indexer.ps1`](examples/hooks/generic-indexer.ps1) | Post-upload | Windows | Same as above — PowerShell version with native JSON parsing (recommended on Windows) |
-| [`different-indexer.sh`](examples/hooks/different-indexer.sh) | Post-upload | Unix | Sends the NZB (and optional NFO) to an indexer that takes the API key as a query parameter and replies with a JSON `guid` |
-| [`different-indexer.ps1`](examples/hooks/different-indexer.ps1) | Post-upload | Windows | Same as above — PowerShell version |
-| [`newznab-dedup.sh`](examples/hooks/newznab-dedup.sh) | Pre-upload | Unix | Aborts the upload if a release with the same name already exists on a Newznab indexer (fail-open on network errors) |
-| [`newznab-dedup.ps1`](examples/hooks/newznab-dedup.ps1) | Pre-upload | Windows | Same as above — PowerShell version |
+| Script | Platform | Description |
+|--------|----------|-------------|
+| [`print-vars.sh`](examples/hooks/print-vars.sh) | Unix | Prints all `PESTO_*` variables — useful as a starting point or for debugging |
+| [`generic-indexer.sh`](examples/hooks/generic-indexer.sh) | Unix | Sends the NZB (and optional NFO) to any Newznab-compatible indexer via its REST API |
+| [`generic-indexer.bat`](examples/hooks/generic-indexer.bat) | Windows | Same as above — `.bat` version for `cmd.exe` |
+| [`generic-indexer.ps1`](examples/hooks/generic-indexer.ps1) | Windows | Same as above — PowerShell version with native JSON parsing (recommended on Windows) |
+| [`different-indexer.sh`](examples/hooks/different-indexer.sh) | Unix | Sends the NZB (and optional NFO) to an indexer that takes the API key as a query parameter and replies with a JSON `guid` |
+| [`different-indexer.ps1`](examples/hooks/different-indexer.ps1) | Windows | Same as above — PowerShell version |
 
-To install a **post-upload** hook on Unix:
+To install a hook on Unix:
 
 ```bash
 cp examples/hooks/generic-indexer.sh ~/.config/pesto/hooks/
 chmod +x ~/.config/pesto/hooks/generic-indexer.sh
-# edit API_KEY inside the file
+# edit API_KEY and INDEXER_URL inside the file
 ```
-
-`newznab-dedup.sh`/`.ps1` are **pre-upload** hooks instead — install them to
-`~/.config/pesto/pre-hooks/` (Unix) or `%APPDATA%\pesto\pre-hooks\` (Windows),
-not the `hooks/` directory above. See [Pre-upload hook](#pre-upload-hook) for
-details.
 
 To install a hook on Windows, copy the `.bat` or `.ps1` file to `%APPDATA%\pesto\hooks\` and edit the variables at the top of the file. For the PowerShell version, set `post_hook` in `config.toml`:
 
@@ -988,22 +1092,23 @@ picked up automatically — no config change needed.
 | Flag | Config key | Default | Description |
 |------|-----------|---------|-------------|
 | `-c`, `--config [PATH]` | — | auto | Load a TOML config; with no value, run the setup wizard |
-| `--update` | — | — | Download and install the latest release binary for this platform, then exit |
 | **Connection** | | | |
 | `--host <HOST>` | `server.host` | — | NNTP server hostname |
 | `--port <PORT>` | `server.port` | `563` | NNTP server port |
 | `--no-ssl` | `server.ssl` | TLS on | Disable TLS (plaintext) |
 | `--connections <N>` | `server.connections` | `4` | Parallel NNTP connections |
+| `-p`, `--proxy <URL>` | `proxy` or `server.proxy` | — | Route NNTP through SOCKS5 only (`socks5://host:port`) |
+| `--proxy-check-ip` | — | off | Display public exit IP through the SOCKS5 proxy (contacts api.ipify.org) |
 | `--retry-delay <SECS>` | `server.retry_delay` | `1` | Seconds between retries |
 | `--username <USER>` | `auth.username` | — | NNTP username |
 | `--auth-password <PASS>` | `auth.password` | — | NNTP password |
 | **Posting** | | | |
 | `--from <ADDRESS>` | `posting.from` | random | `From` header (omit = random per run) |
-| `--groups <G,...>` | `posting.groups` | — | Newsgroups; a pool to pick one from at random per run, or join with `+` in one entry to cross-post to all of them |
+| `--groups <G,...>` | `posting.groups` | — | Newsgroups, comma-separated |
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`; `header-fragmented` is a compatibility alias; bare flag = `full` (`article` hidden/experimental) |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`, `header-fragmented`; bare flag = `full` (`article` hidden/experimental, `paranoid` alias accepted) |
 | `--date <VALUE>` | `posting.date` | server-supplied | `now`, deprecated `random` (last 2 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
@@ -1018,24 +1123,21 @@ picked up automatically — no config change needed.
 | `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |
 | `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
-| `--memory-limit <SIZE\|PCT\|auto>` | `posting.memory_limit` | `auto` | Global memory budget for the whole process (PAR2/upload/check share it) |
-| `--par2-memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers specifically |
+| `--memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers |
 | `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
 | `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
-| `--verify` | `posting.verify` | off | Confirm each article with STAT |
-| `--check` | `posting.check` | off | Run a STAT pass over all articles after upload |
-| `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before STAT pass; implies `--check` |
-| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per article during check pass |
-| `--check-connections <N>` | `posting.check_connections` | same as upload | Parallel connections for STAT pass |
-| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost-then-verify rounds for articles still missing after `--check` |
-| `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` and run hooks even if some articles are still confirmed missing after `--check-post-retries` |
-| `--check-recover-percent <N>` | `posting.check_recover_percent` | `15` | Skip the automatic final recovery pass below if still-missing articles exceed this percent of the release |
-| `--check-recover-max <N>` | `posting.check_recover_max` | `50` | After `--check-post-retries` is exhausted, automatically retry once more if at most this many articles (and within `--check-recover-percent`) are still missing; `0` disables |
+| `--check` / `--no-check` | `posting.check` | **on** | Streaming STAT check, concurrent with the upload; `--no-check` disables it |
+| `--check-delay <SECS>` | `posting.check_delay` | `5` | Seconds to wait after an article posts before its first STAT check |
+| `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per posted copy; 20 s between each |
+| `--check-connections <N>` | `posting.check_connections` | auto (~8% of total, capped at 4) | Dedicated connections for the check queue, carved out of `--connections` |
+| `--check-post-retries <N>` | `posting.check_post_retries` | `1` | Repost attempts per article once its STAT retries are exhausted |
+| `--allow-incomplete-nzb` | `posting.allow_incomplete_nzb` | off | Write the `.nzb` anyway if articles are still confirmed missing after `--check-post-retries` |
+| `--check-recover-percent <N>` | `posting.check_recover_percent` | `15` | Skip the automatic final recovery pass if still-missing articles exceed this percent of the release |
+| `--check-recover-max <N>` | `posting.check_recover_max` | `50` | One extra repost-and-verify attempt after `--check-post-retries` is exhausted, if at most this many articles are still missing; `0` disables |
 | `--rate <RATE>` | `posting.upload_rate` | unlimited | Max upload rate (e.g. `"50 MiB/s"`) |
 | **Compression** | | | |
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
-| `--compress-volume-size <SIZE>` | `compression.volume_size` | off | Split the archive into volumes (e.g. `500m`, `4g`); `rar`/`7z` only, rejected with `--compress=zip` |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
@@ -1049,6 +1151,7 @@ picked up automatically — no config change needed.
 | `--no-overwrite` | — | — | Alias for `--nzb-conflict=rename` |
 | `-v`, `--verbose` | — | off | Increase log verbosity (`-v`=INFO, `-vv`=DEBUG, `-vvv`=TRACE) |
 | `--log-file <FILE>` | — | — | Redirect verbose logs to file (requires `-v`) |
+| `--no-session-log` | `output.session_log` | on | Disable the per-upload DEBUG log saved under `<history_dir>/logs/` |
 | `--nfo` / `--no-nfo` | `output.nfo` | off | Generate a `.nfo` file alongside the `.nzb` |
 | `--pre-hook <CMD>` | `output.pre_hook` | — | Shell command run before upload; non-zero exit aborts |
 | `--post-hook <CMD>` | `output.post_hook` | — | Shell command run after each successful upload |
@@ -1063,8 +1166,10 @@ picked up automatically — no config change needed.
 | `--merge-season <DIR>` | — | — | Merge per-episode NZBs in DIR into season NZBs (offline) |
 | `--jobs <N>` | — | `1` | Parallel uploads for `--each`/`--season` (0 = CPU count) |
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
-| `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |
+| `--watch-done <DIR>` | — | — | Move completed watch entries here (legacy; use `--cleanup-to` instead) |
 | `--watch-interval <SECS>` | — | `30` | Poll interval for `--watch` |
+| `--cleanup` | — | off | Delete successfully uploaded sources (files or directories) |
+| `--cleanup-to <DIR>` | — | — | Move successfully uploaded sources to a directory instead of deleting |
 | `--ext <EXT[,EXT...]>` | — | off | Only post files with these extensions (case-insensitive); drops non-matching top-level entries and files nested inside a directory |
 
 ---
@@ -1248,8 +1353,14 @@ disk. Not part of the internal event stream — always the very last line.
 
 ## Performance
 
-Release-validation medians on an i5-10400 (6 physical cores, AVX2), governor
-`performance`, three repetitions and eight mock-NNTP connections:
+The release benchmark uses real seeded corpora and a local mock NNTP server.
+Figures are medians; see [`bench/README.md`](bench/README.md) for the complete
+methodology, RSD, hardware fingerprints, raw data, and limitations.
+
+### Post-only and end-to-end
+
+Medialab i5-10400 (6 physical cores, AVX2), governor `performance`, three
+repetitions, eight connections. Nyuu 0.4.2 and ParPar 0.4.5.
 
 | workload | scenario | pesto | competitor | result |
 |---|---|---:|---:|---:|
@@ -1258,30 +1369,48 @@ Release-validation medians on an i5-10400 (6 physical cores, AVX2), governor
 | movie-1080p | full two-phase, 0 ms | 265.5 MiB/s | ParPar+Nyuu 283.4 MiB/s | 6.3% gap |
 | movie-1080p | full streaming, 30 ms | **82.8 MiB/s** | ParPar+Nyuu two-phase 68.2 MiB/s | **1.21x** |
 | many-small | post-only, 0 ms | **1760.6 MiB/s** | Nyuu 505.6 MiB/s | **3.48x** |
+| many-small | full two-phase, 0 ms | **244.0 MiB/s** | ParPar+Nyuu 161.3 MiB/s | **1.51x** |
 
-Nyuu was 0.4.2 and ParPar 0.4.5. At 30 ms the pure-posting row is
-latency-limited; Pesto's default streaming pipeline overlaps PAR2 creation
-with upload, while `--par2-before-upload` provides the like-for-like
-two-phase comparison.
+At 30 ms, the post-only rows are latency-limited and Pesto/Nyuu converge as
+expected. Pesto's default streaming pipeline can overlap PAR2 creation with
+posting; the like-for-like competitor row is `--par2-before-upload`.
 
-On c7i.2xlarge (4 physical cores, AVX-512+GFNI), five measured repetitions
-after one excluded warmup, Parmesan created the 6 GiB movie recovery set at
-**553.2 MiB/s** against ParPar 0.4.6 at 577.8 MiB/s (4.3% gap), while
-`many-small` reached **464.3 vs 234.9 MiB/s (1.98x)**. All nine official
-cross-tool correctness checks passed.
+### PAR2 create
+
+AWS c7i.2xlarge (4 physical cores, AVX-512+GFNI), five measured repetitions
+after one excluded warmup, 200 recovery blocks and a 1 GiB memory limit.
+ParPar 0.4.6.
+
+| workload | Parmesan | ParPar | result |
+|---|---:|---:|---:|
+| movie-1080p | **553.2 MiB/s** | 577.8 MiB/s | 4.3% gap |
+| many-small | **464.3 MiB/s** | 234.9 MiB/s | **1.98x** |
+
+The 4.3% movie gap is practical parity. All nine official cross-tool checks
+passed, including byte-exact Parmesan↔par2cmdline repair and independent yEnc
+wire reconstruction.
 
 ### Reproduce on your machine
 
 ```bash
 cargo build --release
-./bench/run.sh --list
-./bench/run.sh par2 e2e correctness \
-  --workload many-small --workload movie-1080p \
-  --scale 1.0 --reps 3 --latencies 0,30 --yes
+./bench/run.sh --list    # what would run, and which competitors are installed
+./bench/run.sh micro     # yEnc + PAR2 microbenchmarks (no test corpus needed)
+./bench/run.sh           # everything: micro, pipeline stages, full uploads
 ```
 
-See [`bench/README.md`](../../bench/README.md) for the complete methodology,
-hardware fingerprints, competitor versions, raw data, and limitations.
+No Usenet account is needed. Test corpora are generated from fixed seeds, so
+the input bytes are identical on any machine, and all posting runs go to a
+local mock NNTP server — which also means the end-to-end numbers can be taken
+with a simulated round-trip time (`--latencies 0,30`) instead of whatever the
+network was doing that afternoon.
+
+Each run writes `report.md` (tables), `summary.csv`, `raw.csv` and
+`results.json` under `bench/results/<host>/<timestamp>/`, alongside a
+`system.json` recording the CPU, SIMD tier, core count and every tool version.
+
+The exact release-validation command and committed artifacts are in
+[`bench/README.md`](bench/README.md).
 
 ---
 

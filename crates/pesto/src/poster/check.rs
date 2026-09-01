@@ -706,11 +706,11 @@ async fn repost_one(
     };
     let file_crc32 = (seg.part == seg.total).then_some(seg.full_crc32);
     let (wire_subject, wire_yenc, from, date) = match config.obfuscate {
-        ObfuscateMode::HeaderFragmented => (
+        ObfuscateMode::Full => (
             obfuscated_name(),
             seg.wire_yenc_name.to_string(),
             random_from(),
-            super::resolve_date(config.date.as_deref()),
+            seg.date.clone(),
         ),
         ObfuscateMode::Article => (
             obfuscated_name(),

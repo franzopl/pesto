@@ -195,7 +195,7 @@ fn article_obfuscation_gives_every_segment_independent_wire_identity() {
 }
 
 #[test]
-fn header_fragmented_keeps_yenc_stable_per_physical_file() {
+fn full_keeps_yenc_stable_per_physical_file() {
     let (addr, articles) = spawn_capturing_server();
     let dir = tempfile::tempdir().unwrap();
     let xdg_home = tempfile::tempdir().unwrap();
@@ -214,7 +214,7 @@ fn header_fragmented_keeps_yenc_stable_per_physical_file() {
         .args(["--recovery-count", "1"])
         .args(["--article-size", "4000"])
         .arg("--no-hooks")
-        .arg("--obfuscate=header-fragmented")
+        .arg("--obfuscate=full")
         .args(["-o", out.to_str().unwrap()])
         .arg(&input)
         .output()
@@ -236,12 +236,12 @@ fn header_fragmented_keeps_yenc_stable_per_physical_file() {
             .collect::<std::collections::HashSet<_>>()
             .len(),
         subject_names.len(),
-        "header-fragmented Subject repeated: {subjects:?}"
+        "full Subject repeated: {subjects:?}"
     );
     assert_eq!(
         froms.iter().collect::<std::collections::HashSet<_>>().len(),
         froms.len(),
-        "header-fragmented From repeated: {froms:?}"
+        "full From repeated: {froms:?}"
     );
 
     let mut yenc_counts = std::collections::HashMap::<&str, usize>::new();
@@ -257,5 +257,14 @@ fn header_fragmented_keeps_yenc_stable_per_physical_file() {
         yenc_counts.values().copied().max(),
         Some(5),
         "all five data segments must retain one yEnc name: {yenc_counts:?}"
+    );
+    let par2_names: Vec<_> = yenc_counts
+        .keys()
+        .filter(|name| name.ends_with(".par2"))
+        .collect();
+    assert_eq!(
+        par2_names.len(),
+        1,
+        "the opaque PAR2 yEnc name must retain its technical extension for client cleanup: {yenc_counts:?}"
     );
 }

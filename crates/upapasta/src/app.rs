@@ -125,7 +125,6 @@ pub fn obf_label(mode: ObfuscateMode) -> &'static str {
         ObfuscateMode::Full => "Full",
         ObfuscateMode::FullShared => "Full (shared)",
         ObfuscateMode::Light => "Light (shared, matching)",
-        ObfuscateMode::HeaderFragmented => "Header-fragmented",
         ObfuscateMode::Article => "Article (experimental)",
     }
 }
@@ -2340,8 +2339,7 @@ impl App {
             None => Full,
             Full => FullShared,
             FullShared => Light,
-            Light => HeaderFragmented,
-            HeaderFragmented => None,
+            Light => None,
             Article => None,
         });
         self.status_bar.set("Obfuscate mode changed");
@@ -2580,8 +2578,7 @@ impl App {
             ObfuscateMode::None => ObfuscateMode::Full,
             ObfuscateMode::Full => ObfuscateMode::FullShared,
             ObfuscateMode::FullShared => ObfuscateMode::Light,
-            ObfuscateMode::Light => ObfuscateMode::HeaderFragmented,
-            ObfuscateMode::HeaderFragmented => ObfuscateMode::None,
+            ObfuscateMode::Light => ObfuscateMode::None,
             ObfuscateMode::Article => ObfuscateMode::None,
         };
         self.config_state.overrides.obfuscate = Some(next);
@@ -2782,9 +2779,6 @@ impl App {
             }
             ObfuscateMode::Light => {
                 "Light: like Full (shared), but subject and yEnc name match exactly"
-            }
-            ObfuscateMode::HeaderFragmented => {
-                "Header-fragmented: random headers per article, one opaque yEnc name per file"
             }
             ObfuscateMode::Article => {
                 "Article: unique subject + yEnc name + poster per article (experimental)"

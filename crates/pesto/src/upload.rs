@@ -457,7 +457,6 @@ pub async fn run_upload(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::HeaderFragmented => "header-fragmented",
                 ObfuscateMode::Article => "article",
             }
             .to_string(),
