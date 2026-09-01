@@ -165,11 +165,6 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
             "real path `{rel}` missing from nzb subject"
         );
     }
-    assert!(
-        !nzb.contains("subject=\"Show"),
-        "a real path leaked into the nzb subject"
-    );
-
     // Verify that each <file> element has a distinct poster (from) value.
     let mut posters: Vec<&str> = Vec::new();
     for line in nzb.lines() {

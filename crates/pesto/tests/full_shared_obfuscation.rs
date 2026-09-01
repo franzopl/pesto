@@ -170,11 +170,12 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
         );
     }
 
-    // Verify the real filenames match what was uploaded.
+    // Distinct top-level input roots are part of the client path; only one
+    // common outer release root is removed.
     for real_name in &expected {
         assert!(
             filenames.contains(&real_name.as_str()),
-            "real filename `{real_name}` not found in segment subjects"
+            "client path `{real_name}` not found in segment subjects"
         );
     }
 
@@ -189,7 +190,7 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
     for rel in &expected {
         assert!(
             nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
-            "real path `{rel}` missing from nzb subject"
+            "client path `{rel}` missing from nzb subject"
         );
     }
 
@@ -775,7 +776,7 @@ async fn light_obfuscation_par2_set_shares_prefix_and_matches_subject_exactly() 
 /// file pesto writes for you wouldn't match what's actually searchable/
 /// verifiable out there.
 #[tokio::test]
-async fn light_obfuscation_nzb_subject_mirrors_the_wire_subject() {
+async fn light_obfuscation_nzb_keeps_the_authoritative_client_path() {
     let root = std::env::temp_dir().join(format!("pesto_light_nzb_subject_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -810,13 +811,13 @@ async fn light_obfuscation_nzb_subject_mirrors_the_wire_subject() {
         config.obfuscate,
     );
     assert!(
-        !nzb.contains("movie.mkv"),
-        "the real filename must not appear anywhere in a light .nzb"
+        nzb.contains("movie.mkv"),
+        "the authoritative NZB must preserve the client path in light mode"
     );
     assert!(
-        nzb.contains(seg.wire_name.as_ref()),
-        "the .nzb subject should carry the wire name `{}`",
-        seg.wire_name
+        !nzb.contains(seg.wire_name.as_ref()),
+        "the private NZB must not replace the client path with wire name `{}`",
+        seg.wire_name,
     );
 
     std::fs::remove_dir_all(&root).ok();

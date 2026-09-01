@@ -243,6 +243,29 @@ pub fn volume_suffix(real_name: &str) -> Option<&str> {
     None
 }
 
+/// Translate the private, on-disk archive name used while compressing an
+/// obfuscated upload into the stable name download clients must see.
+///
+/// Compression may use a random `physical_stem` so an interrupted upload can
+/// find and reuse its scratch archive without exposing that identity on NNTP.
+/// The poster already assigns an independent wire Subject and yEnc name, so
+/// leaking the scratch stem into the NZB or PAR2 FileDesc is both unnecessary
+/// and contrary to the client-path contract. The complete archive suffix is
+/// retained for single files and split volumes alike (`.7z`, `.7z.001`,
+/// `.part01.rar`, and so on).
+pub fn client_archive_name(path: &Path, physical_stem: &str, client_stem: &str) -> String {
+    let physical_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let suffix = physical_name
+        .strip_prefix(physical_stem)
+        .filter(|suffix| suffix.starts_with('.'))
+        .map(str::to_owned);
+    suffix.map_or(physical_name, |suffix| format!("{client_stem}{suffix}"))
+}
+
 /// Find the volume files `7z -v` produced for `archive_name` (the full file
 /// name including its `.7z`/`.zip` extension), e.g. `stem.7z.001`,
 /// `stem.7z.002`, ... sorted in volume order (zero-padded, sorts correctly
@@ -541,6 +564,29 @@ mod tests {
         ] {
             assert_eq!(volume_suffix(name), None, "expected `{name}` to be None");
         }
+    }
+
+    #[test]
+    fn client_archive_name_hides_private_scratch_stem() {
+        for (physical, expected) in [
+            ("random.7z", "Release.7z"),
+            ("random.7z.001", "Release.7z.001"),
+            ("random.part01.rar", "Release.part01.rar"),
+            ("random.zip", "Release.zip"),
+        ] {
+            assert_eq!(
+                client_archive_name(Path::new(physical), "random", "Release"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn client_archive_name_falls_back_for_unexpected_output() {
+        assert_eq!(
+            client_archive_name(Path::new("other.7z"), "random", "Release"),
+            "other.7z"
+        );
     }
 
     #[test]

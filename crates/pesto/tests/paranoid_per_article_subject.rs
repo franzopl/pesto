@@ -1,5 +1,5 @@
-//! `--obfuscate=paranoid` promises that every individual article gets its own
-//! unique Subject (and From), so segments can't be grouped by wire metadata
+//! `--obfuscate=article` promises that every individual article gets its own
+//! unique Subject, yEnc name and From, so segments cannot be deterministically grouped
 //! alone — see `PostTask::subject_name`'s doc comment in `poster/mod.rs`
 //! ("In paranoid mode each article gets a unique value"). A single
 //! multi-segment file must therefore post each of its segments under a
@@ -93,13 +93,22 @@ fn handle_connection(stream: TcpStream, articles: Arc<Mutex<Vec<Vec<u8>>>>) {
     }
 }
 
-fn subject_of(article: &[u8]) -> String {
+fn header_of(article: &[u8], header: &str) -> String {
     String::from_utf8_lossy(article)
         .lines()
-        .find_map(|l| l.strip_prefix("Subject: "))
-        .expect("article must have a Subject header")
+        .find_map(|line| line.strip_prefix(header))
+        .unwrap_or_else(|| panic!("article must have a {header} header"))
         .trim_end_matches('\r')
         .to_string()
+}
+
+fn yenc_name_of(article: &[u8]) -> String {
+    String::from_utf8_lossy(article)
+        .lines()
+        .find(|line| line.starts_with("=ybegin "))
+        .and_then(|line| line.rsplit_once(" name="))
+        .map(|(_, name)| name.trim_end_matches('\r').to_string())
+        .expect("article must have a yEnc name")
 }
 
 /// The quoted name token inside a `"<name>" yEnc (n/m)` subject — the part
@@ -117,7 +126,7 @@ fn quoted_name(subject: &str) -> &str {
 }
 
 #[test]
-fn paranoid_obfuscation_gives_every_segment_its_own_subject() {
+fn article_obfuscation_gives_every_segment_independent_wire_identity() {
     let (addr, articles) = spawn_capturing_server();
     let dir = tempfile::tempdir().unwrap();
     let xdg_home = tempfile::tempdir().unwrap();
@@ -138,7 +147,7 @@ fn paranoid_obfuscation_gives_every_segment_its_own_subject() {
         .args(["--recovery-count", "1"])
         .args(["--article-size", "4000"])
         .arg("--no-hooks")
-        .arg("--obfuscate=paranoid")
+        .arg("--obfuscate=article")
         .args(["-o", out.to_str().unwrap()])
         .arg(&input)
         .output()
@@ -156,7 +165,7 @@ fn paranoid_obfuscation_gives_every_segment_its_own_subject() {
         articles.len()
     );
 
-    let subjects: Vec<String> = articles.iter().map(|a| subject_of(a)).collect();
+    let subjects: Vec<String> = articles.iter().map(|a| header_of(a, "Subject: ")).collect();
     let names: Vec<&str> = subjects.iter().map(|s| quoted_name(s)).collect();
     let mut unique = names.clone();
     unique.sort();
@@ -164,8 +173,22 @@ fn paranoid_obfuscation_gives_every_segment_its_own_subject() {
     assert_eq!(
         unique.len(),
         names.len(),
-        "paranoid mode must give every segment of the same file an \
+        "article mode must give every segment of the same file an \
          independent Subject (the quoted name token, not just the \
          mechanical (part/total) suffix); got duplicates among: {subjects:?}"
     );
+
+    let yenc_names: Vec<String> = articles.iter().map(|a| yenc_name_of(a)).collect();
+    let froms: Vec<String> = articles.iter().map(|a| header_of(a, "From: ")).collect();
+    for values in [&yenc_names, &froms] {
+        let unique: std::collections::HashSet<_> = values.iter().collect();
+        assert_eq!(
+            unique.len(),
+            values.len(),
+            "article identity repeated: {values:?}"
+        );
+    }
+    for (subject, yenc) in names.iter().zip(&yenc_names) {
+        assert_ne!(*subject, yenc, "Subject and yEnc name must be independent");
+    }
 }

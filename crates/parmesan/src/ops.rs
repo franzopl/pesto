@@ -252,7 +252,12 @@ pub fn calculate_geometry(
     let recovery_count = if let Some(n) = options.recovery_count {
         n
     } else {
-        (total_slices * options.recovery_pct as usize) / 100
+        let proportional = (total_slices * options.recovery_pct as usize) / 100;
+        if options.recovery_pct > 0 && total_slices > 0 {
+            proportional.max(1)
+        } else {
+            proportional
+        }
     };
 
     if total_slices > 32768 {
@@ -669,6 +674,26 @@ mod tests {
         o.slice_size = Some(512 * 1024);
         let (slice_size, _, _) = calculate_geometry(&files, &o).unwrap();
         assert_eq!(slice_size, 512 * 1024);
+    }
+
+    #[test]
+    fn positive_percentage_produces_recovery_for_tiny_set() {
+        let files = make_files(&[1]);
+        let mut o = opts();
+        o.recovery_pct = 1;
+        let (_, total_slices, recovery_count) = calculate_geometry(&files, &o).unwrap();
+        assert_eq!(total_slices, 1);
+        assert_eq!(recovery_count, 1);
+    }
+
+    #[test]
+    fn explicit_zero_recovery_count_remains_zero() {
+        let files = make_files(&[1]);
+        let mut o = opts();
+        o.recovery_pct = 10;
+        o.recovery_count = Some(0);
+        let (_, _, recovery_count) = calculate_geometry(&files, &o).unwrap();
+        assert_eq!(recovery_count, 0);
     }
 
     #[test]

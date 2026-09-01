@@ -1118,7 +1118,7 @@ fn run_selected_hook(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::Paranoid => "paranoid",
+                ObfuscateMode::Article => "article",
             }
             .to_string(),
             par2: cfg.par2,
@@ -1993,7 +1993,7 @@ async fn run_season_hooks(
             ObfuscateMode::Full => "full",
             ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
-            ObfuscateMode::Paranoid => "paranoid",
+            ObfuscateMode::Article => "article",
         }
         .to_string(),
         par2: config.par2,

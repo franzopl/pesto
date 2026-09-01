@@ -377,10 +377,9 @@ struct Cli {
     #[arg(long, alias = "mal", value_name = "ID")]
     mal_id: Option<String>,
 
-    /// `Date:` header for each article: `now` (current time), `random`
-    /// (random time within the last 2 hours), or a fixed RFC 2822 timestamp.
-    /// Omit to let the server supply the date. When obfuscation is active
-    /// and no date is set, the default changes to `random` [config: posting.date].
+    /// `Date:` header for each article: `now` (current time), deprecated
+    /// `random` (within the last 2 hours), or a fixed RFC 2822 timestamp.
+    /// Omit to let the server supply the date [config: posting.date].
     #[arg(long, value_name = "DATE")]
     date: Option<String>,
 
@@ -398,7 +397,8 @@ struct Cli {
     /// none`, `full-shared` and `light`, which already accept cross-file
     /// correlation by wire metadata as part of their own design (bare
     /// filename, or a shared prefix/From); off by default for
-    /// `full`/`paranoid`, whose whole point is preventing exactly that. Pass
+    /// `full`/`article`, where an explicit counter is rejected because it
+    /// contradicts the mode contract. Pass
     /// --no-file-counter to force it off regardless of mode. See
     /// `ROADMAP.md` "Subject file counter" [config: posting.file_counter].
     #[arg(long)]
@@ -1152,7 +1152,7 @@ async fn run_single_upload(
             ObfuscateMode::Full => "full",
             ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
-            ObfuscateMode::Paranoid => "paranoid",
+            ObfuscateMode::Article => "article",
         };
         let pre_groups_str = config.groups.join(":");
         let pre_tags_str = config.nzb_tags.join(" ");
@@ -1217,7 +1217,7 @@ async fn run_single_upload(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::Paranoid => "paranoid",
+                ObfuscateMode::Article => "article",
             },
             compress: compress_fmt,
             password: effective_password.as_deref(),
@@ -1353,7 +1353,7 @@ async fn run_single_upload(
             eprintln!("note: rar password protection requires the `rar` binary in PATH");
         }
 
-        let archive_stem = upload_root(&inputs)
+        let client_archive_stem = upload_root(&inputs)
             .or_else(|| {
                 inputs.first().map(|f| {
                     PathBuf::from(&f.name)
@@ -1379,7 +1379,7 @@ async fn run_single_upload(
         let archive_stem = if config.obfuscate != ObfuscateMode::None {
             reuse_or_generate_archive_stem(resume_path.as_deref(), config)
         } else {
-            archive_stem
+            client_archive_stem.clone()
         };
 
         let tmp_base = config
@@ -1472,11 +1472,11 @@ async fn run_single_upload(
         inputs = std::iter::once(result.path)
             .chain(result.extra_paths)
             .map(|path| {
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+                let name = pesto::compress::client_archive_name(
+                    &path,
+                    &archive_stem,
+                    &client_archive_stem,
+                );
                 pesto::walk::InputFile { path, name }
             })
             .collect();
@@ -1957,7 +1957,7 @@ async fn run_single_upload(
             ObfuscateMode::Full => "full",
             ObfuscateMode::Light => "light",
             ObfuscateMode::FullShared => "full-shared",
-            ObfuscateMode::Paranoid => "paranoid",
+            ObfuscateMode::Article => "article",
         };
         // PESTO_GROUP/PESTO_GROUPS report the group(s) actually posted to
         // (`outcome.groups`, chosen at random by `pick_post_group` from the
@@ -2721,7 +2721,7 @@ async fn run_batch(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::Paranoid => "paranoid",
+                ObfuscateMode::Article => "article",
             };
             // The group(s) actually used across every episode in the season
             // — every episode is now forced onto the same pre-picked target
@@ -3122,8 +3122,8 @@ fn add_obfuscation_tag(tags: &mut Vec<String>, obfuscate: &ObfuscateMode) {
         ObfuscateMode::Light => {
             tags.push("obfuscated:light".to_string());
         }
-        ObfuscateMode::Paranoid => {
-            tags.push("obfuscated:paranoid".to_string());
+        ObfuscateMode::Article => {
+            tags.push("obfuscated:article".to_string());
         }
         ObfuscateMode::FullShared => {
             tags.push("obfuscated:full-shared".to_string());
@@ -3848,7 +3848,7 @@ fn resume_flags_string(config: &Config) -> String {
         ObfuscateMode::Full => "full",
         ObfuscateMode::Light => "light",
         ObfuscateMode::FullShared => "full-shared",
-        ObfuscateMode::Paranoid => "paranoid",
+        ObfuscateMode::Article => "article",
     };
     let mut flags = format!(
         "--article-size {} --obfuscate={obfuscate} --par2 {}",

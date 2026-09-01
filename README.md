@@ -284,51 +284,48 @@ pesto \
 
 ## Obfuscation
 
-`--obfuscate` controls what appears on the wire. Nothing prevents Usenet indexers
-from cataloguing plain posts; obfuscation hides the content from them.
+`--obfuscate` controls metadata visible on the wire; it does not encrypt
+content or promise anonymity. The authoritative mode and artifact contracts
+are documented in [docs/obfuscation.md](docs/obfuscation.md).
 
 | Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, 10–30 chars, independent per file | random, 10–30 chars, independent per file | random per file | yes |
 | `full-shared` | one shared random prefix for the whole release | shared prefix + own random suffix per file | shared for the whole release | yes |
-| `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | **no** — see below |
+| `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | yes |
+| `article` *(experimental)* | independent random name per article | independent random name per article | random per article | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
 random TLD. The real file names are only in the `.nzb` you keep, or recoverable
 through the PAR2 set.
 
-Every mode above writes the real filename into the `.nzb` it generates,
+Every mode above writes the canonical client path into the `.nzb` it generates,
 regardless of what went out on the wire — obfuscation only scrambles the
 actual NNTP article, and the `.nzb` is already a private file you hold
 through your own channel, so there's no reason to hide the name from
-yourself. `light` is the one exception: since its whole point is letting an
-indexer recognise and repair the release from the wire alone (issue #106),
-its `.nzb` mirrors that same wire subject instead of the real name, so the
-file you keep locally matches what's actually findable/verifiable through
-the indexer. The real filename is still recoverable — PAR2 File Description
-packets always embed it, independent of `--obfuscate` — so a download client
-that processes PAR2 still restores it, just not straight from the `.nzb`.
+yourself. PAR2 File Description packets carry that same path so SABnzbd and
+NZBGet can perform their normal PAR2 rename and restore nested directories.
 
-When obfuscation is active, pesto also randomises the `Date:` header of each
-article to a time within the last 2 hours. This prevents articles in the same
-batch from sharing an identical timestamp, which would make them trivially
-groupable even when every other field is randomised. The window is kept short
-because some servers reject articles whose `Date` is too far in the past
-(e.g. blocknews returns `441 437 ... TooOld`); a wider window tripped that limit
-for a small random subset of articles. You can override this with `--date now`
-or an explicit timestamp if needed.
+Pesto omits `Date:` by default in every mode and lets the server supply it.
+Use `--date now` or an explicit timestamp only when required. The legacy
+`--date random` behavior remains accepted with a deprecation warning; fake
+dates are not a sound privacy boundary.
+
+All modes use an opaque Message-ID local part containing 128 random bits and
+no clock or counter. The domain is random per article unless
+`--message-id-domain` is explicitly set.
 
 A bare `--obfuscate` (no value) means `full`.
 
 ```bash
-# Full obfuscation — nothing on the wire reveals the content
+# Private default — names do not identify files, but content is not encrypted
 pesto --obfuscate movie.mkv
 # same as:
 pesto --obfuscate=full movie.mkv
 
-# Combine with compression for maximum privacy
+# Add archive encryption to protect content too
 pesto --obfuscate --password movie.mkv
 ```
 
@@ -369,11 +366,9 @@ made by this tool. Some indexers key their own release grouping off that exact
 match, though (reportedly including NZBIndex), so `light` restores it for anyone
 who needs that over avoiding the fingerprint (issue #106).
 
-Unlike every other mode, `light`'s generated `.nzb` carries the *wire* subject
-in its `<file subject="...">` attribute instead of the real filename — see the
-"Real path in `.nzb`" note in the table above. Opening it directly in a
-download client shows the random name until PAR2 verify/repair restores the
-real one from the recovery set's File Description packets.
+Like every other mode, `light`'s generated `.nzb` carries the canonical client
+path in the quoted part of `<file subject="...">`. Its deliberate exact-match
+fingerprint exists only on the NNTP wire.
 
 ```bash
 pesto --obfuscate=light movie.mkv
@@ -388,21 +383,21 @@ pesto --obfuscate=light --par2=5 --file-counter ./MyShow.S01/
 | `full-shared` | Shared random name | ✓ Good | Moderate |
 | `light` | Shared random name, Subject = yEnc name exactly | ✓ Good (strongest signal) | Moderate |
 | `full` | Per-file random names | ✗ Poor | High |
-| `paranoid` | Per-article random names | ✗ None | Maximum |
+| `article` *(experimental)* | Per-article random names | ✗ None | Highest metadata fragmentation |
 
-### Paranoid mode (experimental)
+### Article mode (experimental)
 
-`--obfuscate=paranoid` goes one step further: every individual article gets its
-own unique subject and `From` header, making it impossible to group segments by
-wire metadata alone. The NZB is required to download.
+`--obfuscate=article` gives every article an independent Subject, yEnc `name=`
+and From header. The NZB is required for deterministic assembly, but size,
+timing, yEnc geometry and content can still correlate the articles.
 
 ```bash
-pesto --obfuscate=paranoid movie.mkv
+pesto --obfuscate=article movie.mkv
 ```
 
-> **Note:** `paranoid` is not listed in `--help` and is considered experimental.
-> Use it only if you understand the implications — the NZB file is the only way
-> to reassemble the download.
+> **Note:** `article` is not listed in `--help` and stays experimental until
+> current SABnzbd and NZBGet end-to-end compatibility gates pass. The legacy
+> value `paranoid` remains accepted as an alias.
 
 ### Choosing a mode
 
@@ -421,8 +416,8 @@ regardless of which `--obfuscate` mode is active.
 | `none` | real name | real name | config value | yes (trivially) | yes, by real name | n/a — nothing hidden | archive content encrypted; release still searchable by real name |
 | `full` | random, per file | random, per file (≠ Subject) | random, per file | yes | no — each file is its own unrelated identity | yes | archive content also encrypted; still only the `.nzb`/PAR2 recover it |
 | `full-shared` | shared prefix, whole release | shared prefix + own random suffix (≠ Subject) | shared, whole release | yes | yes, by shared prefix | yes | same, plus content encrypted |
-| `light` | shared prefix, whole release | **identical to Subject** | shared, whole release | **no — mirrors the wire subject** (issue #106) | yes, strongest signal (exact Subject/yEnc match) | **no** — that exact match is the point | same, plus content encrypted |
-| `paranoid` *(experimental)* | random, per **article** | random, per file (≠ Subject, fixed across that file's segments) | random, per article | yes | none — not even one file's own segments group by wire metadata | yes | same, plus content encrypted; `.nzb` is the only way to reassemble either way |
+| `light` | shared prefix, whole release | **identical to Subject** | shared, whole release | yes | yes, strongest signal (exact Subject/yEnc match) | **no** — that exact match is the point | same, plus content encrypted |
+| `article` *(experimental)* | random, per **article** | independent random, per **article** | random, per article | yes | none by declared wire identity | yes | same, plus content encrypted; `.nzb` is required for deterministic assembly |
 
 Quick guidance:
 - **Public, no privacy need** → `none`.
@@ -433,8 +428,8 @@ Quick guidance:
   one unit** → `full-shared` (the default recommendation) or `light` if your
   indexer specifically needs an exact Subject/yEnc `name=` match to group
   correctly (confirm empirically — `full-shared` is right for most).
-- **Maximum resistance to wire-metadata correlation, willing to depend
-  entirely on the `.nzb`** → `paranoid` (experimental).
+- **Maximum metadata fragmentation, willing to depend entirely on the
+  `.nzb`** → `article` (experimental and hidden).
 
 ---
 
@@ -481,7 +476,7 @@ inside the `.nzb` so that NZBGet and SABnzbd can extract automatically.
 ### Combined: obfuscation + password
 
 ```bash
-# Full obfuscation and a random archive password (maximum privacy)
+# Full obfuscation and a random archive password
 pesto --obfuscate --password movie.mkv
 
 # Same, but explicit password and a directory input
@@ -495,6 +490,12 @@ pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 pesto generates PAR2 parity files using its own pure-Rust implementation.
 Parity is computed in the same single read pass as posting, so it adds minimal
 overhead. The PAR2 files are uploaded alongside the data and referenced in the `.nzb`.
+
+`none`, `light`, and `full-shared` post the conventional standalone index and
+recovery volumes. `full` and `article` post recovery volumes only; every volume
+contains Main + FileDesc + IFSC metadata and is usable by standard PAR2 tools
+without the separate index. The real relative path remains visible to anyone
+who downloads a volume. No size-obscuring padding is added.
 
 ```bash
 # 10% recovery data (default when par2 is set in config)
@@ -975,7 +976,7 @@ Environment variables available to the pre-hook:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, `light`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 
@@ -1003,7 +1004,7 @@ following environment variables:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, `light`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
@@ -1100,8 +1101,8 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `full`, `full-shared`, `light`; bare flag = `full` (`paranoid` experimental) |
-| `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random` (last 24 h), or an RFC 2822 timestamp |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`; bare flag = `full` (`article` hidden/experimental, `paranoid` alias accepted) |
+| `--date <VALUE>` | `posting.date` | server-supplied | `now`, deprecated `random` (last 2 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
 | `--pipeline-depth <N>` | `posting.pipeline_depth` | `0` | Articles to pipeline per connection (`0` = adaptive) |

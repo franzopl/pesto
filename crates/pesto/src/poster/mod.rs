@@ -22,7 +22,9 @@ use crate::article::{
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionBroker, ConnectionPool, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
-use crate::resume::{resume_action, ResumeAction, ResumeState, SegmentRecord};
+use crate::resume::{
+    resume_action, PersistedWireIdentity, ResumeAction, ResumeState, SegmentRecord,
+};
 use crate::walk::{natural_cmp, InputFile};
 use crate::yenc;
 use parmesan::encoder::{FileHasher, FileHashes, RecoveryEncoder};
@@ -161,7 +163,7 @@ async fn release_slots(broker: Option<&ConnectionBroker>, slots: Vec<ConnectionS
 /// `Shared::results`, once again as a `check::QueueItem` in the streaming
 /// check queue's per-server heap while it awaits its `STAT` — and these three
 /// fields are identical across every segment of the same file (or, for
-/// `from` outside paranoid mode, the whole run). Measured on an
+/// `from` outside article mode, the whole run). Measured on an
 /// 83.4 GiB / 116 619-segment run, the two copies together cost ~150 MiB;
 /// sharing these three turns the second copy's allocation for them into a
 /// refcount bump. `file_name`/`message_id` stay owned `String` — they're
@@ -185,6 +187,10 @@ pub struct PostedSegment {
     /// one article needs reposting. Empty for segments reconstructed from a
     /// parsed `.nzb` (`nzb::parse`), which never re-encode.
     pub wire_name: Arc<str>,
+    /// The exact yEnc `=ybegin name=` used for this segment. This is separate
+    /// from `wire_name` because every mode except `none`/`light` deliberately
+    /// avoids making Subject and yEnc name identical.
+    pub wire_yenc_name: Arc<str>,
     pub file_size: u64,
     pub part: u32,
     pub total: u32,
@@ -226,6 +232,8 @@ pub struct FailedTask {
     /// Published name (relative path / base name) used for NZB metadata and
     /// logging. Not a filesystem path — see [`FailedTask::file_path`].
     pub file_name: String,
+    /// Canonical relative path restored by NZB/PAR2 clients.
+    pub client_path: String,
     /// Absolute filesystem path of the source file, preserved so the end-of-run
     /// retry can re-read the segment regardless of the current working
     /// directory. `file_name` alone is insufficient (issue #23).
@@ -239,7 +247,7 @@ pub struct FailedTask {
     pub message_id: String,
     pub subject_name: String,
     /// The yEnc `=ybegin ... name=` value the in-run attempt used —
-    /// independent of `subject_name` under `Full`/`Paranoid`/`FullShared`
+    /// independent of `subject_name` under `Full`/`Article`/`FullShared`
     /// obfuscation (see `poster/mod.rs`'s `ObfuscateMode` match arms).
     /// Carried through so a repost doesn't fall back to reusing
     /// `subject_name` for both, which would reintroduce the exact-match
@@ -348,6 +356,7 @@ pub fn should_write_season_nzb(
 struct FileMeta {
     path: PathBuf,
     real_name: String,
+    client_path: String,
     subject_name: String,
     yenc_name: String,
     /// Poster identity for this file. In obfuscate mode a fresh random
@@ -429,14 +438,17 @@ struct PostTask {
     total: u32,
     offset: u64,
     data: Vec<u8>,
-    /// Per-article subject token. In paranoid mode each article gets a unique
+    /// Per-article subject token. In article mode each article gets a unique
     /// value; otherwise this mirrors `meta.subject_name`.
     subject_name: String,
-    /// Per-article From header. In paranoid mode each article gets a unique
+    /// Per-article yEnc `name=`. In article mode this is unique per segment;
+    /// otherwise it mirrors `meta.yenc_name`.
+    yenc_name: String,
+    /// Per-article From header. In article mode each article gets a unique
     /// identity; otherwise this mirrors `meta.from`.
     from: String,
     /// Date header for this article: `(rfc_string, unix_timestamp)`.
-    /// In paranoid mode each article gets a unique value; otherwise this
+    /// In article mode each article gets a unique value; otherwise this
     /// mirrors `meta.date`.
     date: (Option<String>, Option<u64>),
     /// CRC-32 of the whole file, appended (as `crc32=`) to the `=yend` line —
@@ -446,6 +458,21 @@ struct PostTask {
     /// same read the article body comes from), so no separate whole-file
     /// pre-pass is needed before posting can start.
     file_crc32: Option<u32>,
+}
+
+fn persisted_identity(
+    subject_name: &str,
+    yenc_name: &str,
+    from: &str,
+    date: &(Option<String>, Option<u64>),
+) -> PersistedWireIdentity {
+    PersistedWireIdentity {
+        subject_name: subject_name.to_owned(),
+        yenc_name: yenc_name.to_owned(),
+        from: from.to_owned(),
+        date: date.0.clone(),
+        unix_date: date.1,
+    }
 }
 
 /// Encoded article ready for NNTP (nyuu `Post` after `generate`).
@@ -676,6 +703,17 @@ pub async fn post_files_inner(
     external_pause: Option<Arc<AtomicBool>>,
 ) -> Result<PostOutcome> {
     configure_rayon(config.threads);
+    if config.file_counter && !config.obfuscate.policy().allow_file_counter {
+        bail!(
+            "file_counter=true contradicts private obfuscation mode {:?}",
+            config.obfuscate
+        );
+    }
+    if let Some(domain) = &config.message_id_domain {
+        if !crate::article::valid_message_id_domain(domain) {
+            bail!("invalid message_id_domain `{domain}`");
+        }
+    }
 
     // Resume state is tracked in memory for *every* run that could plausibly
     // need it (not gated behind --resume), so a run that ends incomplete
@@ -728,6 +766,13 @@ pub async fn post_files_inner(
                  (--article-size/--obfuscate/--compress/--par2/--file-counter) — ignoring it \
                  and starting fresh"
             );
+        } else if had_segments
+            && config.obfuscate != ObfuscateMode::None
+            && state.has_legacy_wire_identities()
+        {
+            bail!(
+                "resume state predates persisted wire identities; this obfuscated upload cannot safely append or repost segments — finish it with the original Pesto version or start a new upload"
+            );
         } else if had_segments {
             eprintln!(
                 "resuming: {} segment(s) already posted, skipping",
@@ -767,7 +812,18 @@ pub async fn post_files_inner(
         (None, None)
     };
 
+    let common_release_root = files
+        .first()
+        .and_then(|file| file.name.split_once('/').map(|(root, _)| root))
+        .filter(|root| {
+            files.iter().all(|file| {
+                file.name
+                    .split_once('/')
+                    .is_some_and(|(candidate, _)| candidate == *root)
+            })
+        });
     let mut metas = Vec::with_capacity(files.len());
+    let mut client_paths = std::collections::HashSet::with_capacity(files.len());
     for (idx, input) in files.iter().enumerate() {
         let path = &input.path;
         let md = tokio::fs::metadata(path)
@@ -779,6 +835,10 @@ pub async fn post_files_inner(
         // `real_name` is the published name: a relative path like
         // `season01/ep01.mkv` for files found inside a directory argument.
         let real_name = input.name.clone();
+        let client_path = normalize_client_path(&real_name, common_release_root)?.to_owned();
+        if !client_paths.insert(client_path.clone()) {
+            bail!("multiple inputs normalize to the same client path `{client_path}`");
+        }
         let size = md.len();
 
         if let Some(resume) = &resume_arc {
@@ -819,92 +879,75 @@ pub async fn post_files_inner(
         }
         let (subject_name, yenc_name, from) = match config.obfuscate {
             ObfuscateMode::None => {
-                let wn = wire_name(&real_name).to_string();
+                let wn = client_path.clone();
                 (wn.clone(), wn, config.from.clone())
             }
-            ObfuscateMode::Full | ObfuscateMode::Paranoid => {
-                // 0-byte files have no content to protect; use the real name
-                // so download clients (e.g. SABnzbd) can place them correctly
-                // without needing md5_16k matching (which fails for empty files).
-                if size == 0 {
-                    let wn = wire_name(&real_name).to_string();
-                    (wn.clone(), wn, random_from())
-                } else {
-                    // Independently-random subject and yEnc name: reusing the
-                    // same string for both leaves an exact-match signature
-                    // (Subject header == yEnc body name=) that fingerprints
-                    // this specific tool's obfuscation, undermining part of
-                    // what obfuscation is for.
-                    (obfuscated_name(), obfuscated_name(), random_from())
-                }
+            ObfuscateMode::Full | ObfuscateMode::Article => {
+                (obfuscated_name(), obfuscated_name(), random_from())
             }
             ObfuscateMode::Light | ObfuscateMode::FullShared => {
                 let from = release_from.clone().unwrap_or_default();
-                if size == 0 {
-                    let wn = wire_name(&real_name).to_string();
-                    (wn.clone(), wn, from)
+                let prefix = release_prefix.as_deref().unwrap_or_default();
+                // A `--compress-volume-size` archive part carries a
+                // volume suffix (`.partNN.rar`, `.7z.NNN`) that indexers
+                // key their "same release" grouping off of — preserve it
+                // verbatim instead of the generic numbered suffix below,
+                // or the release fails to group under full-shared/light
+                // obfuscation (issue #68).
+                let name = if let Some(suffix) = crate::compress::volume_suffix(&real_name) {
+                    format!("{prefix}{suffix}")
                 } else {
-                    let prefix = release_prefix.as_deref().unwrap_or_default();
-                    // A `--compress-volume-size` archive part carries a
-                    // volume suffix (`.partNN.rar`, `.7z.NNN`) that indexers
-                    // key their "same release" grouping off of — preserve it
-                    // verbatim instead of the generic numbered suffix below,
-                    // or the release fails to group under full-shared/light
-                    // obfuscation (issue #68).
-                    let name = if let Some(suffix) = crate::compress::volume_suffix(&real_name) {
-                        format!("{prefix}{suffix}")
+                    let ext = Path::new(&real_name)
+                        .extension()
+                        .map(|e| format!(".{}", e.to_string_lossy()))
+                        .unwrap_or_default();
+                    // A single-file release (the common case: one archive,
+                    // or one loose file) keeps a bare `prefix.ext`;
+                    // multiple unrelated files use a `.partNN` marker
+                    // ahead of the extension instead of a bare `-NN`
+                    // suffix. Indexer subject-cleaning regexes (e.g.
+                    // nZEDb's `CollectionsCleaning::generic()`) strip a
+                    // known `\.part\d*(\.rar)?` prefix together with the
+                    // trailing extension as one unit — the same way they
+                    // already strip `.volNNN+NNN.par2` — so every file
+                    // collapses back to the same collection key. A bare
+                    // `-NN` before the extension isn't part of that
+                    // pattern and survives cleaning, giving each file its
+                    // own key and defeating the grouping `full-shared`/
+                    // `light` exist for (confirmed empirically: real
+                    // upload's `.par2`/`.volNNN+NNN.par2` set grouped on
+                    // binsearch, its loose `-NN.mkv` files did not).
+                    if files.len() == 1 {
+                        format!("{prefix}{ext}")
                     } else {
-                        let ext = Path::new(&real_name)
-                            .extension()
-                            .map(|e| format!(".{}", e.to_string_lossy()))
-                            .unwrap_or_default();
-                        // A single-file release (the common case: one archive,
-                        // or one loose file) keeps a bare `prefix.ext`;
-                        // multiple unrelated files use a `.partNN` marker
-                        // ahead of the extension instead of a bare `-NN`
-                        // suffix. Indexer subject-cleaning regexes (e.g.
-                        // nZEDb's `CollectionsCleaning::generic()`) strip a
-                        // known `\.part\d*(\.rar)?` prefix together with the
-                        // trailing extension as one unit — the same way they
-                        // already strip `.volNNN+NNN.par2` — so every file
-                        // collapses back to the same collection key. A bare
-                        // `-NN` before the extension isn't part of that
-                        // pattern and survives cleaning, giving each file its
-                        // own key and defeating the grouping `full-shared`/
-                        // `light` exist for (confirmed empirically: real
-                        // upload's `.par2`/`.volNNN+NNN.par2` set grouped on
-                        // binsearch, its loose `-NN.mkv` files did not).
-                        if files.len() == 1 {
-                            format!("{prefix}{ext}")
-                        } else {
-                            format!("{prefix}.part{:02}{ext}", idx + 1)
-                        }
-                    };
-                    // The shared prefix stays on the subject — that's what
-                    // indexers actually key "same release" grouping off of
-                    // (issue #58/#68, both subject-based). Under `light`,
-                    // the yEnc body name= is that same string verbatim
-                    // (issue #106's "option 1" — restores full-shared's
-                    // pre-0.6.1 behavior for indexers that key grouping off
-                    // an exact Subject/yEnc-name match). Under `full-shared`,
-                    // the yEnc name= starts with that same prefix but adds
-                    // its own random suffix instead: an indexer that can
-                    // only see the yEnc body still recognises the article as
-                    // part of the release, while the random suffix avoids
-                    // an exact Subject/yEnc match.
-                    let yenc_name = if config.obfuscate == ObfuscateMode::Light {
-                        name.clone()
-                    } else {
-                        obfuscated_name_with_prefix(prefix)
-                    };
-                    (name, yenc_name, from)
-                }
+                        format!("{prefix}.part{:02}{ext}", idx + 1)
+                    }
+                };
+                // The shared prefix stays on the subject — that's what
+                // indexers actually key "same release" grouping off of
+                // (issue #58/#68, both subject-based). Under `light`,
+                // the yEnc body name= is that same string verbatim
+                // (issue #106's "option 1" — restores full-shared's
+                // pre-0.6.1 behavior for indexers that key grouping off
+                // an exact Subject/yEnc-name match). Under `full-shared`,
+                // the yEnc name= starts with that same prefix but adds
+                // its own random suffix instead: an indexer that can
+                // only see the yEnc body still recognises the article as
+                // part of the release, while the random suffix avoids
+                // an exact Subject/yEnc match.
+                let yenc_name = if config.obfuscate == ObfuscateMode::Light {
+                    name.clone()
+                } else {
+                    obfuscated_name_with_prefix(prefix)
+                };
+                (name, yenc_name, from)
             }
         };
         let date = resolve_date(config.date.as_deref());
         metas.push(Arc::new(FileMeta {
             path: path.clone(),
             real_name,
+            client_path,
             subject_name,
             yenc_name,
             from,
@@ -925,9 +968,9 @@ pub async fn post_files_inner(
         let mut keyed = Vec::with_capacity(metas.len());
         for meta in &metas {
             let md5_16k = file_md5_16k(&meta.path, meta.size).await?;
-            // Use wire_name so the File ID matches what the PAR2 packets will
-            // store — the sort order for recovery blocks must be consistent.
-            let file_id = packet::compute_file_id(&md5_16k, meta.size, wire_name(&meta.real_name));
+            // Use the canonical client path so File ID ordering and FileDesc
+            // serialization cannot disagree.
+            let file_id = packet::compute_file_id(&md5_16k, meta.size, &meta.client_path);
             keyed.push((file_id, meta.clone()));
         }
         keyed.sort_by_key(|(file_id, _)| *file_id);
@@ -1050,7 +1093,8 @@ pub async fn post_files_inner(
     // never writes an index or volumes at all.
     let total_files: u32 = if config.file_counter {
         let par2_file_count = if recovery_count > 0 {
-            1 + layout::plan_volumes(recovery_count as u32).len()
+            usize::from(config.obfuscate.policy().publish_par2_index)
+                + layout::plan_volumes(recovery_count as u32).len()
         } else {
             0
         };
@@ -1114,8 +1158,10 @@ pub async fn post_files_inner(
             // Small fixed overhead for the index file's Main/FileDesc/IFSC
             // packets — negligible next to recovery_bytes, not worth
             // computing exactly for a progress estimate.
-            let index_est = metas.len() as u64 * 128 + 4096;
-            let bytes_hint = recovery_bytes + packet_overhead + index_est;
+            let base_est = metas.len() as u64 * 128 + 4096;
+            let metadata_copies = layout::plan_volumes(recovery_count as u32).len() as u64
+                + u64::from(config.obfuscate.policy().publish_par2_index);
+            let bytes_hint = recovery_bytes + packet_overhead + base_est * metadata_copies;
             let segments_hint = yenc::segments(bytes_hint, config.article_size).len() as u64;
             (bytes_hint, segments_hint)
         } else {
@@ -1149,7 +1195,7 @@ pub async fn post_files_inner(
     let zero_byte_names: Vec<&str> = metas
         .iter()
         .filter(|m| m.size == 0)
-        .map(|m| wire_name(&m.real_name))
+        .map(|m| m.client_path.as_str())
         .collect();
     if !zero_byte_names.is_empty() {
         let names = zero_byte_names.join(", ");
@@ -1389,6 +1435,12 @@ pub async fn post_files_inner(
                         confirmed: false,
                         check_disabled: !shared.config.check,
                         server_idx: seg.server_idx,
+                        wire_identity: Some(persisted_identity(
+                            &seg.wire_name,
+                            &seg.wire_yenc_name,
+                            &seg.from,
+                            &seg.date,
+                        )),
                     },
                 );
             }
@@ -1508,6 +1560,12 @@ pub async fn post_files_inner(
                             confirmed: true,
                             check_disabled: false,
                             server_idx: seg.server_idx,
+                            wire_identity: Some(persisted_identity(
+                                &seg.wire_name,
+                                &seg.wire_yenc_name,
+                                &seg.from,
+                                &seg.date,
+                            )),
                         },
                     );
                 }
@@ -1521,6 +1579,12 @@ pub async fn post_files_inner(
                             confirmed: false,
                             check_disabled: false,
                             server_idx: seg.server_idx,
+                            wire_identity: Some(persisted_identity(
+                                &seg.wire_name,
+                                &seg.wire_yenc_name,
+                                &seg.from,
+                                &seg.date,
+                            )),
                         },
                     );
                 }
@@ -1842,22 +1906,29 @@ fn par2_release_base(name: &str) -> &str {
     par2_base(trimmed)
 }
 
-/// Strip the first path component (the release/top-level directory name).
-///
-/// The first component of a directory upload's `real_name` is the release
-/// folder itself (e.g. `"Season01"` in `"Season01/ep01.mkv"`). Download
-/// clients create a folder for the release, so only the path *within* that
-/// folder is meaningful for yEnc `name=` and PAR2 file descriptions. Matching
-/// both lets `par2 repair` find files when run from the release download dir.
-///
-/// `"Season01/ep01.mkv"` → `"ep01.mkv"`
-/// `"Release/VIDEO_TS/file.vob"` → `"VIDEO_TS/file.vob"`
-/// `"movie.mkv"` → `"movie.mkv"` (no slash → unchanged)
-fn wire_name(name: &str) -> &str {
-    match name.find('/') {
-        Some(pos) => &name[pos + 1..],
-        None => name,
+/// Canonical path presented to download clients and stored in PAR2 FileDesc.
+/// The outer upload directory is the NZB job directory, so it is removed;
+/// everything below it is preserved with POSIX separators for SABnzbd,
+/// NZBGet and the PAR2 format.
+fn normalize_client_path<'a>(name: &'a str, release_root: Option<&str>) -> Result<&'a str> {
+    if name.is_empty() || name.starts_with('/') || name.contains('\\') || name.contains('\0') {
+        bail!("invalid published path `{name}`");
     }
+    let path = match release_root {
+        Some(root) => name
+            .strip_prefix(root)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .unwrap_or(name),
+        None => name,
+    };
+    if path.is_empty()
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        bail!("published path `{name}` does not produce a safe relative client path");
+    }
+    Ok(path)
 }
 
 /// MD5 of a file's first 16 KiB — the PAR2 "16k hash" half of a File ID.
@@ -2528,8 +2599,7 @@ async fn producer(
                     // release root (first component stripped). Download clients
                     // create the release folder; `par2 repair` run from inside
                     // it must find files without an extra path prefix.
-                    let fid =
-                        packet::compute_file_id(&fh.md5_16k, fh.length, wire_name(&meta.real_name));
+                    let fid = packet::compute_file_id(&fh.md5_16k, fh.length, &meta.client_path);
                     file_ids.push(fid);
                     final_hashes.push(fh);
                 }
@@ -2556,7 +2626,7 @@ async fn producer(
                             &fh.md5_full,
                             &fh.md5_16k,
                             fh.length,
-                            wire_name(&metas[idx].real_name),
+                            &metas[idx].client_path,
                         ),
                     );
                     let pkt_ifsc = packet::serialize_packet(
@@ -2582,22 +2652,23 @@ async fn producer(
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
                 tokio::fs::write(&index_path, &base_packets).await?;
                 if let Some(tx) = &tx_opt {
-                    // In `FullShared` mode, root the wire name at the release
-                    // prefix instead of the (possibly real) on-disk base name,
-                    // so this index file groups with the rest of the release.
-                    let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-                    // The index file is the release's first file after the
-                    // data files — see `Shared::total_files`'s doc comment.
-                    let file_index = metas.len() as u32 + 1;
-                    push_par2_file(
-                        &index_path,
-                        index_name,
-                        wire_override,
-                        file_index,
-                        &shared,
-                        tx,
-                    )
-                    .await?;
+                    if shared.config.obfuscate.policy().publish_par2_index {
+                        // In discovery modes the standalone index remains the
+                        // cheapest way for indexers and clients to discover
+                        // the recovery set.
+                        let wire_override =
+                            shared.release_prefix.as_deref().map(layout::index_name);
+                        let file_index = metas.len() as u32 + 1;
+                        push_par2_file(
+                            &index_path,
+                            index_name,
+                            wire_override,
+                            file_index,
+                            &shared,
+                            tx,
+                        )
+                        .await?;
+                    }
                 }
             }
 
@@ -2636,9 +2707,9 @@ async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        // Volumes follow the data files and the index file
-                        // (+1), in `plan_volumes`' order (+vol_idx).
-                        let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+                        let index_offset =
+                            u32::from(shared.config.obfuscate.policy().publish_par2_index);
+                        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
                         push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
                             .await?;
                     }
@@ -2677,19 +2748,21 @@ async fn post_pregenerated_release(
     }
     post_data_files(metas, tx, shared).await?;
 
-    let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
-    let index_path = par2_dir.join(&index_name);
-    let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-    let file_index = metas.len() as u32 + 1;
-    push_par2_file(
-        &index_path,
-        index_name,
-        wire_override,
-        file_index,
-        shared,
-        tx,
-    )
-    .await?;
+    if shared.config.obfuscate.policy().publish_par2_index {
+        let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
+        let index_path = par2_dir.join(&index_name);
+        let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
+        let file_index = metas.len() as u32 + 1;
+        push_par2_file(
+            &index_path,
+            index_name,
+            wire_override,
+            file_index,
+            shared,
+            tx,
+        )
+        .await?;
+    }
 
     let volumes = layout::plan_volumes(recovery_count as u32);
     for (vol_idx, vol) in volumes.iter().enumerate() {
@@ -2699,7 +2772,8 @@ async fn post_pregenerated_release(
             .release_prefix
             .as_deref()
             .map(|prefix| layout::volume_name(prefix, *vol));
-        let file_index = metas.len() as u32 + 2 + vol_idx as u32;
+        let index_offset = u32::from(shared.config.obfuscate.policy().publish_par2_index);
+        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
         push_par2_file(&vol_path, vol_name, wire_override, file_index, shared, tx).await?;
     }
     Ok(())
@@ -2845,6 +2919,7 @@ async fn push_par2_file(
     tx: &TaskDispatcher<PostTask>,
 ) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
+    let client_path = normalize_client_path(&real_name, None)?.to_owned();
     let segments = yenc::segments(size, shared.config.article_size);
     let total = segments.len() as u32;
 
@@ -2871,10 +2946,10 @@ async fn push_par2_file(
     } else {
         match shared.config.obfuscate {
             ObfuscateMode::None => {
-                let wn = wire_name(&real_name).to_string();
+                let wn = client_path.clone();
                 (wn.clone(), wn, shared.config.from.clone())
             }
-            ObfuscateMode::Full | ObfuscateMode::Paranoid | ObfuscateMode::FullShared => {
+            ObfuscateMode::Full | ObfuscateMode::Article | ObfuscateMode::FullShared => {
                 (obfuscated_name(), obfuscated_name(), random_from())
             }
             ObfuscateMode::Light => {
@@ -2888,6 +2963,7 @@ async fn push_par2_file(
     let meta = Arc::new(FileMeta {
         path: path.clone(),
         real_name,
+        client_path,
         subject_name,
         yenc_name,
         from,
@@ -2991,7 +3067,7 @@ async fn encode_worker(
 
 /// Resume skip / spool / yEnc. `None` means the segment is already done
 /// (skipped or re-queued for STAT of a stored id).
-async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArticle> {
+async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<ReadyArticle> {
     if let Some(resume) = &shared.resume {
         let existing = resume
             .lock()
@@ -3002,18 +3078,39 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
             ResumeAction::Post => {}
             action @ (ResumeAction::Skip | ResumeAction::ReStatStoredId) => {
                 let existing = existing.expect("skip/re-STAT arms require a record");
+                let wire_subject = existing
+                    .wire_identity
+                    .as_ref()
+                    .map(|i| i.subject_name.as_str())
+                    .unwrap_or(&task.subject_name);
+                let wire_yenc = existing
+                    .wire_identity
+                    .as_ref()
+                    .map(|i| i.yenc_name.as_str())
+                    .unwrap_or(&task.yenc_name);
+                let from = existing
+                    .wire_identity
+                    .as_ref()
+                    .map(|i| i.from.as_str())
+                    .unwrap_or(&task.from);
+                let date = existing
+                    .wire_identity
+                    .as_ref()
+                    .map(|i| (i.date.clone(), i.unix_date))
+                    .unwrap_or_else(|| task.date.clone());
                 let seg = PostedSegment {
                     file_name: task.meta.real_name.clone(),
                     file_path: Arc::from(task.meta.path.as_path()),
-                    subject_name: Arc::from(task.meta.real_name.as_str()),
-                    wire_name: Arc::from(task.subject_name.as_str()),
+                    subject_name: Arc::from(task.meta.client_path.as_str()),
+                    wire_name: Arc::from(wire_subject),
+                    wire_yenc_name: Arc::from(wire_yenc),
                     file_size: task.meta.size,
                     part: task.part,
                     total: task.total,
                     message_id: existing.message_id,
                     bytes: existing.bytes,
-                    from: Arc::from(task.from.as_str()),
-                    date: task.date.clone(),
+                    from: Arc::from(from),
+                    date,
                     full_crc32: task.file_crc32.unwrap_or(0),
                     server_idx: existing.server_idx,
                     file_index: task.meta.file_index,
@@ -3041,8 +3138,31 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
         .spool_dir
         .as_ref()
         .and_then(|dir| crate::spool::read(dir, &task.meta.real_name, task.part));
+    let spooled = match spooled {
+        Some(entry)
+            if shared.config.obfuscate != ObfuscateMode::None && entry.wire_identity.is_none() =>
+        {
+            // PST1 did not record the logical Subject/yEnc/From values next
+            // to the raw bytes. Replaying it would post one identity while
+            // recording another in resume/check state. Re-encoding is cheap
+            // and gives the segment one coherent identity.
+            warn!(
+                file = %task.meta.real_name,
+                part = task.part,
+                "ignoring legacy spool entry without obfuscated wire identity"
+            );
+            None
+        }
+        entry => entry,
+    };
 
     let (message_id, headers, encoded, encode_time) = if let Some(spooled) = spooled {
+        if let Some(identity) = spooled.wire_identity {
+            task.subject_name = identity.subject_name;
+            task.yenc_name = identity.yenc_name;
+            task.from = identity.from;
+            task.date = (identity.date, identity.unix_date);
+        }
         let encoded = yenc::EncodedPart {
             number: task.part,
             total: task.total,
@@ -3057,7 +3177,7 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
         let file_crc32 = task.file_crc32;
         let mut encode_buf = shared.acquire_encode_buf();
         let encoded = yenc::encode_part_into(
-            &task.meta.yenc_name,
+            &task.yenc_name,
             task.meta.size,
             yenc::PartSpec {
                 number: task.part,
@@ -3090,13 +3210,16 @@ async fn prepare_ready(shared: &Arc<Shared>, task: PostTask) -> Option<ReadyArti
         };
         let headers = article.build_headers();
         if let Some(dir) = &shared.spool_dir {
-            if let Err(e) = crate::spool::write(
+            let identity =
+                persisted_identity(&task.subject_name, &task.yenc_name, &task.from, &task.date);
+            if let Err(e) = crate::spool::write_with_identity(
                 dir,
                 &task.meta.real_name,
                 task.part,
                 &message_id,
                 &headers,
                 &encoded.body,
+                &identity,
             )
             .await
             {
@@ -3228,8 +3351,9 @@ async fn worker(
                     file_name: p.task.meta.real_name.clone(),
                     file_path: Arc::from(p.task.meta.path.as_path()),
                     // NZB uses the real filename, not wire subject (may be obfuscated).
-                    subject_name: Arc::from(p.task.meta.real_name.as_str()),
+                    subject_name: Arc::from(p.task.meta.client_path.as_str()),
                     wire_name: Arc::from(p.task.subject_name.as_str()),
+                    wire_yenc_name: Arc::from(p.task.yenc_name.as_str()),
                     file_size: p.task.meta.size,
                     part: p.task.part,
                     total: p.task.total,
@@ -3514,7 +3638,7 @@ async fn worker(
 }
 
 /// Build a `PostTask`, generating per-article subject and From when in
-/// `ObfuscateMode::Paranoid`; otherwise copies them from `FileMeta`.
+/// `ObfuscateMode::Article`; otherwise copies them from `FileMeta`.
 fn make_task(
     meta: Arc<FileMeta>,
     part: u32,
@@ -3524,14 +3648,20 @@ fn make_task(
     file_crc32: Option<u32>,
     config: &Config,
 ) -> PostTask {
-    let (subject_name, from, date) = if config.obfuscate == ObfuscateMode::Paranoid {
+    let (subject_name, yenc_name, from, date) = if config.obfuscate == ObfuscateMode::Article {
         let date = resolve_date(config.date.as_deref());
-        (obfuscated_name(), random_from(), date)
+        (obfuscated_name(), obfuscated_name(), random_from(), date)
     } else {
+        let date = if config.date.as_deref() == Some("now") {
+            resolve_date(Some("now"))
+        } else {
+            meta.date.clone()
+        };
         (
             meta.subject_name.clone(),
+            meta.yenc_name.clone(),
             meta.from.clone(),
-            meta.date.clone(),
+            date,
         )
     };
     PostTask {
@@ -3541,6 +3671,7 @@ fn make_task(
         offset,
         data,
         subject_name,
+        yenc_name,
         from,
         date,
         file_crc32,
@@ -3611,9 +3742,7 @@ fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
             // whose Date is too far in the past (e.g. blocknews returns
             // `441 437 ... TooOld`). A wider window (24h) tripped that limit
             // for a small random subset of articles on every obfuscated run.
-            use std::collections::hash_map::RandomState;
-            use std::hash::{BuildHasher, Hasher};
-            let r = RandomState::new().build_hasher().finish();
+            let r = rand_u64();
             let offset_secs = r % (2 * 3600);
             let t = SystemTime::now()
                 .checked_sub(Duration::from_secs(offset_secs))
@@ -3670,6 +3799,12 @@ fn commit_result(
                     confirmed: false,
                     check_disabled: !shared.config.check,
                     server_idx,
+                    wire_identity: Some(persisted_identity(
+                        &task.subject_name,
+                        &task.yenc_name,
+                        &task.from,
+                        &date,
+                    )),
                 },
             );
         }
@@ -3681,8 +3816,9 @@ fn commit_result(
             file_name: task.meta.real_name.clone(),
             file_path: Arc::from(task.meta.path.as_path()),
             // NZB uses the real filename for proper client-side renaming.
-            subject_name: Arc::from(task.meta.real_name.as_str()),
+            subject_name: Arc::from(task.meta.client_path.as_str()),
             wire_name: Arc::from(task.subject_name.as_str()),
+            wire_yenc_name: Arc::from(task.yenc_name.as_str()),
             file_size: task.meta.size,
             part: task.part,
             total: task.total,
@@ -3781,10 +3917,11 @@ fn record_failure(
     shared.failures.lock().unwrap().push(description);
     shared.failed_tasks.lock().unwrap().push(FailedTask {
         file_name: meta.real_name.clone(),
+        client_path: meta.client_path.clone(),
         file_path: meta.path.clone(),
         message_id,
         subject_name: task.subject_name.clone(),
-        yenc_name: meta.yenc_name.clone(),
+        yenc_name: task.yenc_name.clone(),
         file_size: meta.size,
         part: task.part,
         total: task.total,
@@ -3937,8 +4074,9 @@ pub async fn repost_failed_tasks(
                 file_name: task.file_name.clone(),
                 file_path: Arc::from(task.file_path.as_path()),
                 // NZB uses the real filename, not obfuscated wire subject.
-                subject_name: Arc::from(task.file_name.as_str()),
+                subject_name: Arc::from(task.client_path.as_str()),
                 wire_name: Arc::from(task.subject_name.as_str()),
+                wire_yenc_name: Arc::from(task.yenc_name.as_str()),
                 file_size: task.file_size,
                 part: task.part,
                 total: task.total,
@@ -4645,27 +4783,40 @@ mod tests {
         assert_eq!(target_label(&servers, 200), "4 servers (200 conn)");
     }
 
-    // ── wire_name ─────────────────────────────────────────────────────────────
+    // ── normalize_client_path ─────────────────────────────────────────────────
 
     #[test]
-    fn wire_name_strips_single_directory_prefix() {
-        assert_eq!(wire_name("Season01/ep01.mkv"), "ep01.mkv");
+    fn client_path_strips_one_common_release_root() {
+        assert_eq!(
+            normalize_client_path("Release/Season01/ep01.mkv", Some("Release")).unwrap(),
+            "Season01/ep01.mkv"
+        );
     }
 
     #[test]
-    fn wire_name_strips_only_first_component() {
-        assert_eq!(wire_name("Release/VIDEO_TS/file.vob"), "VIDEO_TS/file.vob");
+    fn client_path_preserves_distinct_top_level_roots() {
+        assert_eq!(
+            normalize_client_path("ShowA/s01/ep01.mkv", None).unwrap(),
+            "ShowA/s01/ep01.mkv"
+        );
     }
 
     #[test]
-    fn wire_name_no_slash_unchanged() {
-        assert_eq!(wire_name("movie.mkv"), "movie.mkv");
-        assert_eq!(wire_name("Release.par2"), "Release.par2");
+    fn client_path_keeps_loose_file_unchanged() {
+        assert_eq!(
+            normalize_client_path("movie.mkv", None).unwrap(),
+            "movie.mkv"
+        );
     }
 
     #[test]
-    fn wire_name_empty_string() {
-        assert_eq!(wire_name(""), "");
+    fn client_path_rejects_unsafe_components_and_separators() {
+        for name in ["", "/abs.bin", "Release/../x", "Release//x", "a\\b"] {
+            assert!(
+                normalize_client_path(name, Some("Release")).is_err(),
+                "{name}"
+            );
+        }
     }
 
     // ── par2_base ─────────────────────────────────────────────────────────────
@@ -5188,6 +5339,7 @@ mod tests {
         FileMeta {
             path: path.to_path_buf(),
             real_name: name.into(),
+            client_path: name.into(),
             subject_name: name.into(),
             yenc_name: name.into(),
             from: String::new(),
@@ -5392,6 +5544,7 @@ mod tests {
             offset: 0,
             data: vec![],
             subject_name: "ep.mkv".into(),
+            yenc_name: "ep.mkv".into(),
             from: String::new(),
             date: (None, None),
             file_crc32: None,
@@ -5470,7 +5623,8 @@ mod tests {
 
         let outcome = post_files(&config, &files).await.unwrap();
         assert_eq!(outcome.segments.len(), 1);
-        // NZB subject_name: for Full/Paranoid obfuscation with hash subjects, nzb_subject_name
+        // The NZB name remains the canonical client path even when the NNTP
+        // Subject is independently obfuscated.
         // returns the real file_name (secret.mkv) so download clients can rename correctly.
         assert_eq!(outcome.segments[0].file_name, "secret.mkv");
         assert_eq!(outcome.segments[0].subject_name.as_ref(), "secret.mkv");

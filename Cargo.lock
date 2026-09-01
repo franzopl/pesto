@@ -1689,6 +1689,7 @@ dependencies = [
  "md-5",
  "parmesan-par2",
  "proptest",
+ "rand",
  "rayon",
  "reqwest",
  "self-replace",

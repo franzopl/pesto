@@ -111,7 +111,7 @@ fn handle_connection(stream: TcpStream, stat_count: Arc<AtomicUsize>, articles: 
     }
 }
 
-fn config(addr: SocketAddr) -> Config {
+fn config(addr: SocketAddr, obfuscate: ObfuscateMode) -> Config {
     Config {
         host: addr.ip().to_string(),
         port: addr.port(),
@@ -128,7 +128,7 @@ fn config(addr: SocketAddr) -> Config {
         timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
         proxy: None,
         proxy_check_ip: false,
-        obfuscate: ObfuscateMode::Full,
+        obfuscate,
         dry_run: false,
         par2: 0,
         par2_slice_size: None,
@@ -207,7 +207,7 @@ async fn check_repost_of_a_missing_article_stays_obfuscated() {
     let input = dir.join(REAL_NAME);
     std::fs::write(&input, vec![7u8; 50_000]).unwrap();
 
-    let cfg = config(addr);
+    let cfg = config(addr, ObfuscateMode::Full);
     let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
     let outcome = post_files_with_progress(&cfg, &inputs, None, None, None)
         .await
@@ -231,7 +231,68 @@ async fn check_repost_of_a_missing_article_stays_obfuscated() {
         assert!(
             !text.contains(REAL_NAME),
             "article #{i} must not contain the real filename anywhere \
-             under --obfuscate=full:\n{text}"
+            under --obfuscate=full:\n{text}"
         );
+    }
+    let identities: Vec<_> = articles
+        .iter()
+        .map(|article| wire_identity(article))
+        .collect();
+    assert!(identities.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_ne!(identities[0].0, identities[0].1);
+}
+
+fn wire_identity(article: &[u8]) -> (String, String, String) {
+    let text = String::from_utf8_lossy(article);
+    let header = |prefix: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap()
+            .trim_end_matches('\r')
+            .to_string()
+    };
+    let subject = header("Subject: ");
+    let subject_name = subject
+        .split_once('"')
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(name, _)| name.to_string())
+        .unwrap();
+    let yenc_name = text
+        .lines()
+        .find(|line| line.starts_with("=ybegin "))
+        .and_then(|line| line.rsplit_once(" name="))
+        .map(|(_, name)| name.trim_end_matches('\r').to_string())
+        .unwrap();
+    (subject_name, yenc_name, header("From: "))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn article_repost_rotates_subject_yenc_and_from_together() {
+    let (addr, _stat_count, articles) = spawn_mock_server();
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join(REAL_NAME);
+    std::fs::write(&input, vec![7u8; 50_000]).unwrap();
+
+    let cfg = config(addr, ObfuscateMode::Article);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let outcome = post_files_with_progress(&cfg, &inputs, None, None, None)
+        .await
+        .unwrap();
+    assert!(outcome.still_missing.is_empty());
+
+    let articles = articles.lock().unwrap();
+    assert_eq!(articles.len(), 3);
+    let identities: Vec<_> = articles
+        .iter()
+        .map(|article| wire_identity(article))
+        .collect();
+    let unique: std::collections::HashSet<_> = identities.iter().collect();
+    assert_eq!(
+        unique.len(),
+        identities.len(),
+        "repost identity repeated: {identities:?}"
+    );
+    for (subject, yenc, _) in identities {
+        assert_ne!(subject, yenc);
     }
 }

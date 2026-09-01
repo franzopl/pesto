@@ -160,7 +160,7 @@ pub enum ObfuscateMode {
     /// what changes is that Usenet indexers can once again recognise the
     /// PAR2 set and the content as one release, which plain `full` prevents
     /// (see GitHub issue #58). This trades away resistance to correlation by
-    /// wire metadata for indexer compatibility — the opposite trade `paranoid`
+    /// wire metadata for indexer compatibility — the opposite trade `article`
     /// makes — so it is a distinct mode rather than a `full` variant. The yEnc
     /// `name=` starts with that same shared prefix but adds its own random
     /// suffix rather than repeating the Subject verbatim (see `light` below
@@ -178,11 +178,93 @@ pub enum ObfuscateMode {
     /// for anyone who needs that over avoiding the fingerprint (see GitHub
     /// issue #106).
     Light,
-    /// Like `full` but each individual article gets a unique subject and From
-    /// header, making segment grouping by wire metadata impossible.
-    /// Experimental — requires the NZB to download.
+    /// Each article gets independent Subject, yEnc name and From identities.
+    /// The NZB is required for deterministic assembly, although article sizes,
+    /// timing and yEnc geometry can still permit heuristic correlation.
+    #[serde(alias = "paranoid")]
+    #[value(alias = "paranoid")]
     #[value(hide = true)]
-    Paranoid,
+    Article,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentityScope {
+    RealPath,
+    Release,
+    File,
+    Article,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NameRelation {
+    Same,
+    SharedPrefix,
+    Independent,
+}
+
+/// The complete wire/privacy contract for an obfuscation mode. Keeping these
+/// decisions together prevents posting, resume and PAR2 paths from drifting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObfuscationPolicy {
+    pub subject_scope: IdentityScope,
+    pub yenc_scope: IdentityScope,
+    pub from_scope: IdentityScope,
+    pub subject_yenc_relation: NameRelation,
+    pub shared_release_prefix: bool,
+    pub publish_par2_index: bool,
+    pub allow_file_counter: bool,
+}
+
+impl ObfuscateMode {
+    pub(crate) const fn policy(self) -> ObfuscationPolicy {
+        match self {
+            Self::None => ObfuscationPolicy {
+                subject_scope: IdentityScope::RealPath,
+                yenc_scope: IdentityScope::RealPath,
+                from_scope: IdentityScope::Release,
+                subject_yenc_relation: NameRelation::Same,
+                shared_release_prefix: false,
+                publish_par2_index: true,
+                allow_file_counter: true,
+            },
+            Self::Light => ObfuscationPolicy {
+                subject_scope: IdentityScope::Release,
+                yenc_scope: IdentityScope::Release,
+                from_scope: IdentityScope::Release,
+                subject_yenc_relation: NameRelation::Same,
+                shared_release_prefix: true,
+                publish_par2_index: true,
+                allow_file_counter: true,
+            },
+            Self::FullShared => ObfuscationPolicy {
+                subject_scope: IdentityScope::Release,
+                yenc_scope: IdentityScope::Release,
+                from_scope: IdentityScope::Release,
+                subject_yenc_relation: NameRelation::SharedPrefix,
+                shared_release_prefix: true,
+                publish_par2_index: true,
+                allow_file_counter: true,
+            },
+            Self::Full => ObfuscationPolicy {
+                subject_scope: IdentityScope::File,
+                yenc_scope: IdentityScope::File,
+                from_scope: IdentityScope::File,
+                subject_yenc_relation: NameRelation::Independent,
+                shared_release_prefix: false,
+                publish_par2_index: false,
+                allow_file_counter: false,
+            },
+            Self::Article => ObfuscationPolicy {
+                subject_scope: IdentityScope::Article,
+                yenc_scope: IdentityScope::Article,
+                from_scope: IdentityScope::Article,
+                subject_yenc_relation: NameRelation::Independent,
+                shared_release_prefix: false,
+                publish_par2_index: false,
+                allow_file_counter: false,
+            },
+        }
+    }
 }
 
 /// A per-server entry as parsed from `[[servers]]` in the TOML file.
@@ -240,7 +322,8 @@ pub struct PostingSection {
     pub par2: Option<u8>,
     /// Maximum upload rate as a human-readable string, e.g. `"50 MiB/s"`.
     pub upload_rate: Option<String>,
-    /// `Date:` header mode: `"now"`, `"random"`, or an RFC 2822 timestamp.
+    /// `Date:` header mode: `"now"`, deprecated `"random"`, or an RFC 2822
+    /// timestamp. When absent, the posting server supplies the header.
     pub date: Option<String>,
     /// Add `X-No-Archive: yes` to every posted article.
     pub no_archive: Option<bool>,

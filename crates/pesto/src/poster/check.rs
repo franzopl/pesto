@@ -31,11 +31,11 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::article::{default_subject, generate_message_id, Article};
-use crate::config::Config;
+use crate::article::{default_subject, generate_message_id, obfuscated_name, random_from, Article};
+use crate::config::{Config, ObfuscateMode};
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::{ProgressEvent, ProgressSender};
-use crate::resume::{ResumeState, SegmentRecord};
+use crate::resume::{PersistedWireIdentity, ResumeState, SegmentRecord};
 use crate::yenc;
 
 use super::PostedSegment;
@@ -215,6 +215,13 @@ impl Inner {
                     confirmed: false,
                     check_disabled: false,
                     server_idx: seg.server_idx,
+                    wire_identity: Some(PersistedWireIdentity {
+                        subject_name: seg.wire_name.to_string(),
+                        yenc_name: seg.wire_yenc_name.to_string(),
+                        from: seg.from.to_string(),
+                        date: seg.date.0.clone(),
+                        unix_date: seg.date.1,
+                    }),
                 },
             );
         }
@@ -698,26 +705,41 @@ async fn repost_one(
         offset,
     };
     let file_crc32 = (seg.part == seg.total).then_some(seg.full_crc32);
+    let (wire_subject, wire_yenc, from, date) = if config.obfuscate == ObfuscateMode::Article {
+        (
+            obfuscated_name(),
+            obfuscated_name(),
+            random_from(),
+            super::resolve_date(config.date.as_deref()),
+        )
+    } else {
+        (
+            seg.wire_name.to_string(),
+            seg.wire_yenc_name.to_string(),
+            seg.from.to_string(),
+            seg.date.clone(),
+        )
+    };
     // `seg.subject_name` is always the *real* filename (see `PostedSegment`'s
     // doc comment) — using it here would repost an obfuscated release under
     // its real name, undoing `--obfuscate` the moment one article needs a
     // repost. `wire_name` carries the identity actually posted with.
     let encoded = yenc::encode_part(
-        &seg.wire_name,
+        &wire_yenc,
         seg.file_size,
         spec,
         &buf,
         config.line_length,
         file_crc32,
     );
-    let (rfc_date, _ts) = &seg.date;
+    let (rfc_date, _ts) = &date;
     let mut message_id = generate_message_id(config.message_id_domain.as_deref());
     let article = Article {
         message_id: message_id.clone(),
-        from: seg.from.to_string(),
+        from: from.clone(),
         newsgroups: groups.to_vec(),
         subject: default_subject(
-            &seg.wire_name,
+            &wire_subject,
             seg.part,
             seg.total,
             (seg.total_files > 0).then_some((seg.file_index, seg.total_files)),
@@ -748,14 +770,15 @@ async fn repost_one(
                         file_name: seg.file_name.clone(),
                         file_path: seg.file_path.clone(),
                         subject_name: seg.subject_name.clone(),
-                        wire_name: seg.wire_name.clone(),
+                        wire_name: Arc::from(wire_subject.as_str()),
+                        wire_yenc_name: Arc::from(wire_yenc.as_str()),
                         file_size: seg.file_size,
                         part: seg.part,
                         total: seg.total,
                         message_id,
                         bytes: wire_bytes,
-                        from: seg.from.clone(),
-                        date: seg.date.clone(),
+                        from: Arc::from(from.as_str()),
+                        date: date.clone(),
                         full_crc32: seg.full_crc32,
                         server_idx: slot.server_idx(),
                         file_index: seg.file_index,

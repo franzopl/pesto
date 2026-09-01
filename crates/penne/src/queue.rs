@@ -155,6 +155,7 @@ mod tests {
             file_path: std::path::Path::new(name).into(),
             subject_name: name.into(),
             wire_name: name.into(),
+            wire_yenc_name: name.into(),
             file_size: 1000,
             part,
             total,

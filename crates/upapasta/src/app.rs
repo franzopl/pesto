@@ -125,7 +125,7 @@ pub fn obf_label(mode: ObfuscateMode) -> &'static str {
         ObfuscateMode::Full => "Full",
         ObfuscateMode::FullShared => "Full (shared)",
         ObfuscateMode::Light => "Light (shared, matching)",
-        ObfuscateMode::Paranoid => "Paranoid",
+        ObfuscateMode::Article => "Article (experimental)",
     }
 }
 
@@ -2340,7 +2340,7 @@ impl App {
             Full => FullShared,
             FullShared => Light,
             Light => None,
-            Paranoid => None,
+            Article => None,
         });
         self.status_bar.set("Obfuscate mode changed");
     }
@@ -2579,7 +2579,7 @@ impl App {
             ObfuscateMode::Full => ObfuscateMode::FullShared,
             ObfuscateMode::FullShared => ObfuscateMode::Light,
             ObfuscateMode::Light => ObfuscateMode::None,
-            ObfuscateMode::Paranoid => ObfuscateMode::None,
+            ObfuscateMode::Article => ObfuscateMode::None,
         };
         self.config_state.overrides.obfuscate = Some(next);
     }
@@ -2780,8 +2780,8 @@ impl App {
             ObfuscateMode::Light => {
                 "Light: like Full (shared), but subject and yEnc name match exactly"
             }
-            ObfuscateMode::Paranoid => {
-                "Paranoid: unique subject + poster per article (experimental)"
+            ObfuscateMode::Article => {
+                "Article: unique subject + yEnc name + poster per article (experimental)"
             }
         }
     }

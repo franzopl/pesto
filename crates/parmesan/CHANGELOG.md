@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A positive percentage now produces at least one recovery block for every
+  non-empty recovery set instead of silently flooring tiny inputs to zero.
+  An explicit recovery count of zero still disables recovery output.
+
 ## [0.5.6] - 2026-08-22
 
 ### Added

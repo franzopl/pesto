@@ -94,11 +94,15 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
         vol_file.write_all(&rec_pkt).unwrap();
     }
 
-    // Verify using par2cmdline
+    // Private obfuscation modes do not publish the standalone index. Remove
+    // it and prove the self-describing recovery volume is sufficient by itself.
+    std::fs::remove_file(&index_path).unwrap();
+
+    // Verify using par2cmdline, starting from the recovery volume.
     let result = Command::new("par2")
         .arg("verify")
         .arg("-q")
-        .arg(&index_path)
+        .arg(&vol_path)
         .current_dir(&dir)
         .output();
 
@@ -126,7 +130,7 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
     let verify_fail = Command::new("par2")
         .arg("verify")
         .arg("-q")
-        .arg(&index_path)
+        .arg(&vol_path)
         .current_dir(&dir)
         .status()
         .unwrap();
@@ -139,7 +143,7 @@ fn generates_valid_par2_repaired_by_par2cmdline() {
     let repair = Command::new("par2")
         .arg("repair")
         .arg("-q")
-        .arg(&index_path)
+        .arg(&vol_path)
         .current_dir(&dir)
         .status()
         .unwrap();

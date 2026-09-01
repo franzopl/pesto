@@ -266,14 +266,18 @@ pesto \
 
 ## Obfuscation
 
-`--obfuscate` controls what appears on the wire. Nothing prevents Usenet indexers
-from cataloguing plain posts; obfuscation hides the content from them.
+`--obfuscate` controls metadata visible on the wire; it does not encrypt
+content or promise anonymity. See the workspace's authoritative
+[`docs/obfuscation.md`](../../docs/obfuscation.md) for exact artifacts,
+compatibility gates and non-goals.
 
 | Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, 10–30 chars, unique per file | random, unique per file | random per file | yes |
 | `full-shared` | shared prefix + real extension, same across the release | shared prefix + random suffix, per file | random, shared across the release | yes |
+| `light` | shared prefix, same across the release | identical to Subject | random, shared across the release | yes |
+| `article` *(experimental)* | random per article | independent random per article | random per article | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
@@ -283,12 +287,12 @@ through the PAR2 set.
 A bare `--obfuscate` (no value) means `full`.
 
 ```bash
-# Full obfuscation — nothing on the wire reveals the content
+# Private default — names do not identify files, but content is not encrypted
 pesto --obfuscate movie.mkv
 # same as:
 pesto --obfuscate=full movie.mkv
 
-# Combine with compression for maximum privacy
+# Add archive encryption to protect content too
 pesto --obfuscate --password movie.mkv
 ```
 
@@ -318,26 +322,26 @@ pesto --obfuscate=full-shared movie.mkv
 
 This is a distinct, explicit choice rather than the default for `full`: reusing
 one name across the whole release is exactly the kind of correlation that
-`paranoid` mode (below) is designed to prevent, so pick `full-shared` only when
+`article` mode (below) is designed to prevent, so pick `full-shared` only when
 indexer compatibility matters more than resistance to wire-metadata
 correlation.
 
 [issue #58]: https://github.com/franzopl/pesto/issues/58
 [issue #106]: https://github.com/franzopl/pesto/issues/106
 
-### Paranoid mode (experimental)
+### Article mode (experimental)
 
-`--obfuscate=paranoid` goes one step further: every individual article gets its
-own unique subject and `From` header, making it impossible to group segments by
-wire metadata alone. The NZB is required to download.
+`--obfuscate=article` gives every article an independent Subject, yEnc `name=`
+and From value. The NZB is required for deterministic assembly, although size,
+timing, yEnc geometry and content can still correlate articles.
 
 ```bash
-pesto --obfuscate=paranoid movie.mkv
+pesto --obfuscate=article movie.mkv
 ```
 
-> **Note:** `paranoid` is not listed in `--help` and is considered experimental.
-> Use it only if you understand the implications — the NZB file is the only way
-> to reassemble the download.
+> **Note:** `article` is hidden and experimental until SABnzbd and NZBGet
+> end-to-end gates pass. The legacy value `paranoid` is still accepted as an
+> alias.
 
 ---
 
@@ -398,7 +402,7 @@ inside the `.nzb` so that NZBGet and SABnzbd can extract automatically.
 ### Combined: obfuscation + password
 
 ```bash
-# Full obfuscation and a random archive password (maximum privacy)
+# Full obfuscation and a random archive password
 pesto --obfuscate --password movie.mkv
 
 # Same, but explicit password and a directory input
@@ -864,7 +868,7 @@ Environment variables available to the pre-hook:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
@@ -896,7 +900,7 @@ following environment variables:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `full`, `full-shared`, or `paranoid` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
@@ -996,8 +1000,8 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `full` or `full-shared`; bare flag = `full` |
-| `--date <VALUE>` | `posting.date` | server-supplied (random when obfuscating) | `now`, `random`, or an RFC 2822 timestamp |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`; bare flag = `full` (`article` hidden/experimental) |
+| `--date <VALUE>` | `posting.date` | server-supplied | `now`, deprecated `random` (last 2 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
 | `--pipeline-depth <N>` | `posting.pipeline_depth` | `0` | Articles to pipeline per connection (`0` = adaptive) |
