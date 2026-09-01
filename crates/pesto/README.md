@@ -277,7 +277,7 @@ compatibility gates and non-goals.
 | `full` | random, 10–30 chars, unique per file | random, unique per file | random per file | yes |
 | `full-shared` | shared prefix + real extension, same across the release | shared prefix + random suffix, per file | random, shared across the release | yes |
 | `light` | shared prefix, same across the release | identical to Subject | random, shared across the release | yes |
-| `article` *(experimental)* | random per article | independent random per article | random per article | yes |
+| `header-fragmented` | random per article | opaque random per physical file | random per article | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
@@ -321,27 +321,29 @@ pesto --obfuscate=full-shared movie.mkv
 ```
 
 This is a distinct, explicit choice rather than the default for `full`: reusing
-one name across the whole release is exactly the kind of correlation that
-`article` mode (below) is designed to prevent, so pick `full-shared` only when
+one name across the whole release is exactly the kind of correlation that the
+legacy strict `article` mode (below) is designed to prevent, so pick `full-shared` only when
 indexer compatibility matters more than resistance to wire-metadata
 correlation.
 
 [issue #58]: https://github.com/franzopl/pesto/issues/58
 [issue #106]: https://github.com/franzopl/pesto/issues/106
 
-### Article mode (experimental)
+### Header-fragmented mode
 
-`--obfuscate=article` gives every article an independent Subject, yEnc `name=`
-and From value. The NZB is required for deterministic assembly, although size,
-timing, yEnc geometry and content can still correlate articles.
+`--obfuscate=header-fragmented` gives every article an independent Subject and
+From value while retaining one opaque yEnc `name=` for every physical file.
+This keeps normal SABnzbd/NZBGet assembly and PAR2 cleanup working, but a
+body-aware observer can group a physical file's articles by its yEnc name.
 
 ```bash
-pesto --obfuscate=article movie.mkv
+pesto --obfuscate=header-fragmented movie.mkv
 ```
 
-> **Note:** `article` is hidden and experimental until SABnzbd and NZBGet
-> end-to-end gates pass. The legacy value `paranoid` is still accepted as an
-> alias.
+> **Legacy note:** `article` is hidden and experimental. It, and its
+> `paranoid` alias, retain the old strict behavior where Subject, yEnc name and
+> From all change per article. It is not compatible with conventional
+> multipart PAR2 repair and cleanup.
 
 ---
 
@@ -868,7 +870,7 @@ Environment variables available to the pre-hook:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or `article` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, `header-fragmented`, or legacy `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
@@ -900,7 +902,7 @@ following environment variables:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or `article` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, `header-fragmented`, or legacy `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_TMDB_ID` | Value of `--tmdb` / `--tmdb-id` (empty when not set) |
@@ -1000,7 +1002,7 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`; bare flag = `full` (`article` hidden/experimental) |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`, `header-fragmented`; bare flag = `full` (`article` hidden/experimental) |
 | `--date <VALUE>` | `posting.date` | server-supplied | `now`, deprecated `random` (last 2 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |

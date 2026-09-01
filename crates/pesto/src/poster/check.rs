@@ -705,20 +705,25 @@ async fn repost_one(
         offset,
     };
     let file_crc32 = (seg.part == seg.total).then_some(seg.full_crc32);
-    let (wire_subject, wire_yenc, from, date) = if config.obfuscate == ObfuscateMode::Article {
-        (
+    let (wire_subject, wire_yenc, from, date) = match config.obfuscate {
+        ObfuscateMode::HeaderFragmented => (
             obfuscated_name(),
             seg.wire_yenc_name.to_string(),
             random_from(),
             super::resolve_date(config.date.as_deref()),
-        )
-    } else {
-        (
+        ),
+        ObfuscateMode::Article => (
+            obfuscated_name(),
+            obfuscated_name(),
+            random_from(),
+            super::resolve_date(config.date.as_deref()),
+        ),
+        _ => (
             seg.wire_name.to_string(),
             seg.wire_yenc_name.to_string(),
             seg.from.to_string(),
             seg.date.clone(),
-        )
+        ),
     };
     // `seg.subject_name` is always the *real* filename (see `PostedSegment`'s
     // doc comment) — using it here would repost an obfuscated release under

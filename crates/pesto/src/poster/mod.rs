@@ -882,7 +882,7 @@ pub async fn post_files_inner(
                 let wn = client_path.clone();
                 (wn.clone(), wn, config.from.clone())
             }
-            ObfuscateMode::Full | ObfuscateMode::Article => {
+            ObfuscateMode::Full | ObfuscateMode::HeaderFragmented | ObfuscateMode::Article => {
                 (obfuscated_name(), obfuscated_name(), random_from())
             }
             ObfuscateMode::Light | ObfuscateMode::FullShared => {
@@ -1928,6 +1928,11 @@ fn normalize_client_path<'a>(name: &'a str, release_root: Option<&str>) -> Resul
     {
         bail!("published path `{name}` does not produce a safe relative client path");
     }
+    if !path.is_ascii() {
+        bail!(
+            "published path `{name}` is not ASCII; use --compress=7z to preserve Unicode names inside an archive"
+        );
+    }
     Ok(path)
 }
 
@@ -2949,9 +2954,10 @@ async fn push_par2_file(
                 let wn = client_path.clone();
                 (wn.clone(), wn, shared.config.from.clone())
             }
-            ObfuscateMode::Full | ObfuscateMode::Article | ObfuscateMode::FullShared => {
-                (obfuscated_name(), obfuscated_name(), random_from())
-            }
+            ObfuscateMode::Full
+            | ObfuscateMode::HeaderFragmented
+            | ObfuscateMode::Article
+            | ObfuscateMode::FullShared => (obfuscated_name(), obfuscated_name(), random_from()),
             ObfuscateMode::Light => {
                 let name = obfuscated_name();
                 (name.clone(), name, random_from())
@@ -3637,8 +3643,8 @@ async fn worker(
     slot
 }
 
-/// Build a `PostTask`, generating per-article subject and From when in
-/// `ObfuscateMode::Article`; otherwise copies them from `FileMeta`.
+/// Build a `PostTask`, generating per-article identities for the two
+/// article-level modes; otherwise copies them from `FileMeta`.
 fn make_task(
     meta: Arc<FileMeta>,
     part: u32,
@@ -3648,26 +3654,32 @@ fn make_task(
     file_crc32: Option<u32>,
     config: &Config,
 ) -> PostTask {
-    let (subject_name, yenc_name, from, date) = if config.obfuscate == ObfuscateMode::Article {
-        let date = resolve_date(config.date.as_deref());
-        (
+    let (subject_name, yenc_name, from, date) = match config.obfuscate {
+        ObfuscateMode::HeaderFragmented => (
             obfuscated_name(),
             meta.yenc_name.clone(),
             random_from(),
-            date,
-        )
-    } else {
-        let date = if config.date.as_deref() == Some("now") {
-            resolve_date(Some("now"))
-        } else {
-            meta.date.clone()
-        };
-        (
-            meta.subject_name.clone(),
-            meta.yenc_name.clone(),
-            meta.from.clone(),
-            date,
-        )
+            resolve_date(config.date.as_deref()),
+        ),
+        ObfuscateMode::Article => (
+            obfuscated_name(),
+            obfuscated_name(),
+            random_from(),
+            resolve_date(config.date.as_deref()),
+        ),
+        _ => {
+            let date = if config.date.as_deref() == Some("now") {
+                resolve_date(Some("now"))
+            } else {
+                meta.date.clone()
+            };
+            (
+                meta.subject_name.clone(),
+                meta.yenc_name.clone(),
+                meta.from.clone(),
+                date,
+            )
+        }
     };
     PostTask {
         meta,
@@ -4816,7 +4828,14 @@ mod tests {
 
     #[test]
     fn client_path_rejects_unsafe_components_and_separators() {
-        for name in ["", "/abs.bin", "Release/../x", "Release//x", "a\\b"] {
+        for name in [
+            "",
+            "/abs.bin",
+            "Release/../x",
+            "Release//x",
+            "a\\b",
+            "Árvore/legenda.txt",
+        ] {
             assert!(
                 normalize_client_path(name, Some("Release")).is_err(),
                 "{name}"

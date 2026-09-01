@@ -296,3 +296,34 @@ async fn article_repost_rotates_subject_yenc_and_from_together() {
         assert_ne!(subject, yenc);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn header_fragmented_repost_rotates_headers_but_keeps_yenc_name() {
+    let (addr, _stat_count, articles) = spawn_mock_server();
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join(REAL_NAME);
+    std::fs::write(&input, vec![7u8; 50_000]).unwrap();
+
+    let cfg = config(addr, ObfuscateMode::HeaderFragmented);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let outcome = post_files_with_progress(&cfg, &inputs, None, None, None)
+        .await
+        .unwrap();
+    assert!(outcome.still_missing.is_empty());
+
+    let articles = articles.lock().unwrap();
+    assert_eq!(articles.len(), 3);
+    let identities: Vec<_> = articles
+        .iter()
+        .map(|article| wire_identity(article))
+        .collect();
+    let subjects: std::collections::HashSet<_> =
+        identities.iter().map(|(subject, _, _)| subject).collect();
+    let froms: std::collections::HashSet<_> = identities.iter().map(|(_, _, from)| from).collect();
+    assert_eq!(subjects.len(), identities.len());
+    assert_eq!(froms.len(), identities.len());
+    assert!(
+        identities.windows(2).all(|pair| pair[0].1 == pair[1].1),
+        "header-fragmented repost must retain its physical file yEnc identity: {identities:?}"
+    );
+}

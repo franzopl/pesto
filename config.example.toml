@@ -108,9 +108,11 @@ groups = ["alt.binaries.test"]
 #                 verbatim (same as the subject) instead of adding its own
 #                 random suffix, for indexers that key grouping off an exact
 #                 subject/yEnc-name match
-#   "article"     independent subject, yEnc name and sender per article;
-#                 experimental and hidden until SABnzbd/NZBGet e2e passes
-#                 (legacy value "paranoid" remains accepted as an alias)
+#   "header-fragmented" independent subject and sender per article, with one
+#                 opaque yEnc name per physical file; compatible with normal
+#                 SABnzbd/NZBGet assembly but body-aware grouping remains possible
+#   "article"     legacy strict per-article subject, yEnc name and sender;
+#                 hidden/experimental (legacy alias "paranoid" remains accepted)
 # obfuscate = "none"
 
 # par2 — percentage of PAR2 recovery data to generate. 0 disables it.
@@ -304,7 +306,7 @@ groups = ["alt.binaries.test"]
 #   PESTO_NZB_TITLE    — value of --nzb-title (empty when not set)
 #   PESTO_NZB_NAME     — deprecated alias of PESTO_NZB_TITLE, same value
 #   PESTO_OBFUSCATE    — obfuscation mode in use: none, light, full-shared,
-#                        full, or article
+#                        full, header-fragmented, or article
 #   PESTO_PAR2         — PAR2 redundancy percentage (e.g. 10)
 #   PESTO_TAGS         — space-separated list of NZB tags (empty when none)
 #   PESTO_TMDB_ID      — value of --tmdb / --tmdb-id (empty when not set)

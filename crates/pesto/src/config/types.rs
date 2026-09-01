@@ -178,11 +178,17 @@ pub enum ObfuscateMode {
     /// for anyone who needs that over avoiding the fingerprint (see GitHub
     /// issue #106).
     Light,
-    /// Each article gets independent Subject, yEnc name and From identities.
-    /// The NZB is required for deterministic assembly, although article sizes,
-    /// timing and yEnc geometry can still permit heuristic correlation.
+    /// Each article gets an independent Subject and From while every physical
+    /// file keeps one opaque yEnc name. This is safe for conventional client
+    /// assembly, but a body-aware observer can group a file's articles.
+    #[serde(rename = "header-fragmented")]
+    HeaderFragmented,
+    /// Legacy experimental mode: each article gets independent Subject, yEnc
+    /// name and From identities. It deliberately remains hidden because
+    /// multipart PAR2 cleanup is not compatible with conventional clients.
     #[serde(alias = "paranoid")]
     #[value(alias = "paranoid")]
+    #[value(hide = true)]
     Article,
 }
 
@@ -253,9 +259,18 @@ impl ObfuscateMode {
                 publish_par2_index: false,
                 allow_file_counter: false,
             },
-            Self::Article => ObfuscationPolicy {
+            Self::HeaderFragmented => ObfuscationPolicy {
                 subject_scope: IdentityScope::Article,
                 yenc_scope: IdentityScope::File,
+                from_scope: IdentityScope::Article,
+                subject_yenc_relation: NameRelation::Independent,
+                shared_release_prefix: false,
+                publish_par2_index: false,
+                allow_file_counter: false,
+            },
+            Self::Article => ObfuscationPolicy {
+                subject_scope: IdentityScope::Article,
+                yenc_scope: IdentityScope::Article,
                 from_scope: IdentityScope::Article,
                 subject_yenc_relation: NameRelation::Independent,
                 shared_release_prefix: false,

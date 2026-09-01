@@ -67,6 +67,15 @@ fn paranoid_toml_value_remains_an_alias_for_article() {
 }
 
 #[test]
+fn header_fragmented_toml_value_is_distinct_from_legacy_article() {
+    let file: FileConfig = toml::from_str("[posting]\nobfuscate = 'header-fragmented'\n").unwrap();
+    assert_eq!(
+        file.posting.obfuscate,
+        Some(ObfuscateMode::HeaderFragmented)
+    );
+}
+
+#[test]
 fn parse_rate_bare_bytes() {
     assert_eq!(parse_upload_rate("1024").unwrap(), 1024);
 }
@@ -780,6 +789,7 @@ fn file_counter_defaults_follow_mode_policy() {
         (ObfuscateMode::FullShared, true),
         (ObfuscateMode::Light, true),
         (ObfuscateMode::Full, false),
+        (ObfuscateMode::HeaderFragmented, false),
         (ObfuscateMode::Article, false),
     ] {
         let cfg = Config::resolve(
@@ -821,9 +831,19 @@ fn obfuscation_policy_locks_the_five_wire_contracts() {
     assert_eq!(full.subject_yenc_relation, NameRelation::Independent);
     assert!(!full.publish_par2_index && !full.allow_file_counter);
 
+    let header_fragmented = ObfuscateMode::HeaderFragmented.policy();
+    assert_eq!(header_fragmented.subject_scope, IdentityScope::Article);
+    assert_eq!(header_fragmented.yenc_scope, IdentityScope::File);
+    assert_eq!(header_fragmented.from_scope, IdentityScope::Article);
+    assert_eq!(
+        header_fragmented.subject_yenc_relation,
+        NameRelation::Independent
+    );
+    assert!(!header_fragmented.publish_par2_index && !header_fragmented.allow_file_counter);
+
     let article = ObfuscateMode::Article.policy();
     assert_eq!(article.subject_scope, IdentityScope::Article);
-    assert_eq!(article.yenc_scope, IdentityScope::File);
+    assert_eq!(article.yenc_scope, IdentityScope::Article);
     assert_eq!(article.from_scope, IdentityScope::Article);
     assert_eq!(article.subject_yenc_relation, NameRelation::Independent);
     assert!(!article.publish_par2_index && !article.allow_file_counter);
@@ -860,6 +880,7 @@ fn obfuscation_no_longer_enables_random_date_implicitly() {
         ObfuscateMode::Light,
         ObfuscateMode::FullShared,
         ObfuscateMode::Full,
+        ObfuscateMode::HeaderFragmented,
         ObfuscateMode::Article,
     ] {
         let cfg = Config::resolve(

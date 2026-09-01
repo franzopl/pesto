@@ -266,6 +266,20 @@ pub fn client_archive_name(path: &Path, physical_stem: &str, client_stem: &str) 
     suffix.map_or(physical_name, |suffix| format!("{client_stem}{suffix}"))
 }
 
+/// Return the portable external archive stem used in NZB and PAR2 metadata.
+///
+/// PAR2's base File Description name is ASCII, and NZBGet's bundled
+/// par2cmdline currently treats those bytes as Latin-1. Keeping the archive
+/// name ASCII prevents a compressed upload from reintroducing that ambiguity;
+/// non-ASCII source names are still retained inside formats that support them.
+pub fn portable_archive_stem(stem: &str) -> String {
+    if !stem.is_empty() && stem.is_ascii() {
+        stem.to_owned()
+    } else {
+        "archive".to_owned()
+    }
+}
+
 /// Find the volume files `7z -v` produced for `archive_name` (the full file
 /// name including its `.7z`/`.zip` extension), e.g. `stem.7z.001`,
 /// `stem.7z.002`, ... sorted in volume order (zero-padded, sorts correctly
@@ -356,7 +370,9 @@ fn compress_with_7z(
         let abs = if input.is_absolute() {
             input.clone()
         } else {
-            std::env::current_dir().unwrap_or_default().join(input)
+            std::env::current_dir()
+                .context("resolving the current directory for a 7z input")?
+                .join(input)
         };
         cmd.arg(abs);
     }
@@ -395,7 +411,14 @@ fn compress_with_rar(
 
     cmd.arg(archive_path);
     for input in inputs {
-        cmd.arg(input);
+        let abs = if input.is_absolute() {
+            input.clone()
+        } else {
+            std::env::current_dir()
+                .context("resolving the current directory for a RAR input")?
+                .join(input)
+        };
+        cmd.arg(abs);
     }
 
     run_command(cmd, "rar")
@@ -595,6 +618,13 @@ mod tests {
     }
 
     #[test]
+    fn portable_archive_stem_avoids_non_ascii_par2_metadata() {
+        assert_eq!(portable_archive_stem("Release-01"), "Release-01");
+        assert_eq!(portable_archive_stem("Árvore"), "archive");
+        assert_eq!(portable_archive_stem(""), "archive");
+    }
+
+    #[test]
     fn rar_volume_size_larger_than_content_falls_back_to_single_file() {
         if find_binary("rar").is_none() {
             eprintln!("skipping: rar CLI not installed");
@@ -748,12 +778,15 @@ mod tests {
             .arg(&result.path)
             .output()
             .unwrap();
+        assert!(
+            output.status.success(),
+            "7z list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!stdout.contains(".tmp/archive-source"));
         assert!(
-            stdout.contains("my_release/input.bin")
-                || stdout.contains(r"my_release\input.bin")
-                || stdout.contains("my_release")
+            stdout.contains("my_release/input.bin") || stdout.contains(r"my_release\input.bin")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
