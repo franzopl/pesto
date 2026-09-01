@@ -708,7 +708,7 @@ async fn repost_one(
     let (wire_subject, wire_yenc, from, date) = if config.obfuscate == ObfuscateMode::Article {
         (
             obfuscated_name(),
-            obfuscated_name(),
+            seg.wire_yenc_name.to_string(),
             random_from(),
             super::resolve_date(config.date.as_deref()),
         )

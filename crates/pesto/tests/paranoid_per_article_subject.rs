@@ -180,14 +180,15 @@ fn article_obfuscation_gives_every_segment_independent_wire_identity() {
 
     let yenc_names: Vec<String> = articles.iter().map(|a| yenc_name_of(a)).collect();
     let froms: Vec<String> = articles.iter().map(|a| header_of(a, "From: ")).collect();
-    for values in [&yenc_names, &froms] {
-        let unique: std::collections::HashSet<_> = values.iter().collect();
-        assert_eq!(
-            unique.len(),
-            values.len(),
-            "article identity repeated: {values:?}"
-        );
-    }
+    let from_unique: std::collections::HashSet<_> = froms.iter().collect();
+    assert_eq!(from_unique.len(), froms.len(), "from repeated: {froms:?}");
+
+    let yenc_unique: std::collections::HashSet<_> = yenc_names.iter().collect();
+    assert_eq!(
+        yenc_unique.len(),
+        2,
+        "yenc names should be unique per file (data and par2), not per article"
+    );
     for (subject, yenc) in names.iter().zip(&yenc_names) {
         assert_ne!(*subject, yenc, "Subject and yEnc name must be independent");
     }

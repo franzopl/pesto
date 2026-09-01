@@ -97,9 +97,7 @@ wire identity can be found:
 - After the successful repair, six downloaded recovery volumes remained in the
   completed directory under opaque per-article yEnc names. NZBGet could use
   their packets but could not recognize every assembled file as PAR2 for final
-  cleanup. A stable yEnc name per file fixes that behavior but gives each file
-  the same grouping property as `full`, eliminating `article`'s unique reason
-  to exist.
+  cleanup. A stable yEnc name per file fixes that behavior, so `article` mode now uses a single, stable yEnc name per physical file (including PAR2 volumes) across all its articles while keeping the Subject and From fragmented per article.
 - A raw FileDesc path `Árvore/legenda-ação.txt` retained the correct contents
   but became the mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`. Inspection of
   NZBGet's exact bundled `par2cmdline-turbo` tag confirmed an unconditional

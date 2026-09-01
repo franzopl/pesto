@@ -183,7 +183,6 @@ pub enum ObfuscateMode {
     /// timing and yEnc geometry can still permit heuristic correlation.
     #[serde(alias = "paranoid")]
     #[value(alias = "paranoid")]
-    #[value(hide = true)]
     Article,
 }
 
@@ -256,7 +255,7 @@ impl ObfuscateMode {
             },
             Self::Article => ObfuscationPolicy {
                 subject_scope: IdentityScope::Article,
-                yenc_scope: IdentityScope::Article,
+                yenc_scope: IdentityScope::File,
                 from_scope: IdentityScope::Article,
                 subject_yenc_relation: NameRelation::Independent,
                 shared_release_prefix: false,

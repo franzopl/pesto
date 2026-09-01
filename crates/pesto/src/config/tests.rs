@@ -823,7 +823,7 @@ fn obfuscation_policy_locks_the_five_wire_contracts() {
 
     let article = ObfuscateMode::Article.policy();
     assert_eq!(article.subject_scope, IdentityScope::Article);
-    assert_eq!(article.yenc_scope, IdentityScope::Article);
+    assert_eq!(article.yenc_scope, IdentityScope::File);
     assert_eq!(article.from_scope, IdentityScope::Article);
     assert_eq!(article.subject_yenc_relation, NameRelation::Independent);
     assert!(!article.publish_par2_index && !article.allow_file_counter);

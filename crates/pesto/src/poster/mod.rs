@@ -3650,7 +3650,12 @@ fn make_task(
 ) -> PostTask {
     let (subject_name, yenc_name, from, date) = if config.obfuscate == ObfuscateMode::Article {
         let date = resolve_date(config.date.as_deref());
-        (obfuscated_name(), obfuscated_name(), random_from(), date)
+        (
+            obfuscated_name(),
+            meta.yenc_name.clone(),
+            random_from(),
+            date,
+        )
     } else {
         let date = if config.date.as_deref() == Some("now") {
             resolve_date(Some("now"))

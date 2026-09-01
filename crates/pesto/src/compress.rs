@@ -353,7 +353,12 @@ fn compress_with_7z(
 
     cmd.arg(archive_path);
     for input in inputs {
-        cmd.arg(input);
+        let abs = if input.is_absolute() {
+            input.clone()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(input)
+        };
+        cmd.arg(abs);
     }
 
     run_command(cmd, "7z")
@@ -714,5 +719,42 @@ mod tests {
             assert_eq!(expected.extension(), *s);
         }
         assert_eq!(ArchiveFormat::parse("tar"), None);
+    }
+    #[test]
+    fn sevenzip_basename_only_contract() {
+        if find_binary("7z").is_none() {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("pesto_compress_7z_layout_{}", std::process::id()));
+        let staging_dir = dir.join(".tmp/archive-source/my_release");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let src = staging_dir.join("input.bin");
+        std::fs::write(&src, "test").unwrap();
+
+        let result = compress(
+            &[staging_dir],
+            "stem",
+            &dir,
+            ArchiveFormat::SevenZip,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Check archive contents using 7z l
+        let output = std::process::Command::new("7z")
+            .arg("l")
+            .arg(&result.path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains(".tmp/archive-source"));
+        assert!(
+            stdout.contains("my_release/input.bin")
+                || stdout.contains(r"my_release\input.bin")
+                || stdout.contains("my_release")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
