@@ -72,15 +72,33 @@ The automated compatibility gate proves `par2cmdline` can verify and repair
 using a recovery volume after the index is deleted. A live SABnzbd 5.1.1 test
 on 2026-09-01 also passed raw-file reassembly, 7z extraction, nested UTF-8
 paths, repair of a deliberately missing data article using recovery volumes
-only, and FileDesc rename from deliberately false NZB Subject names. `article`
-stays hidden until NZBGet also passes the same end-to-end matrix:
+only, and FileDesc rename from deliberately false NZB Subject names.
 
-- a multi-segment payload whose segments all have different Subject, yEnc
-  `name=` and From values;
-- a nested directory and Unicode filename;
-- one missing article that is reposted and checked;
-- PAR2 rename and repair from volumes only;
-- both raw-file and compressed/archive upload paths.
+A live NZBGet 26.1 test on the same date, with `FileNaming=auto`,
+`ParRename=yes`, `ParCheck=auto` and `Unpack=yes`, passed multi-segment
+`article` reassembly, volume-only FileDesc rename from deliberately false NZB
+Subject names, content hashes, and 7z extraction (including a UTF-8 path inside
+the archive). It also found two remaining raw-file gates, so `article` remains
+hidden:
+
+- Without `UniFileN`, NZBGet double-transcoded a UTF-8 FileDesc path: the file
+  contents were correct, but `Árvore/legenda-ação.txt` was written with the
+  mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`.
+- Removing the first article from a 4.5 KiB file prevented NZBGet's 16 KiB MD5
+  par-rename match. It consequently treated the whole file as missing and the
+  37 available recovery blocks could not supply the 71 blocks requested. A
+  fixture larger than 16 KiB with damage after the matching prefix is still
+  required to exercise ordinary partial-file repair.
+
+Before `article` is unhidden, the remaining end-to-end matrix is therefore:
+
+- emit and consume interoperable Unicode PAR2 path metadata on NZBGet (and
+  retain the already-passing SABnzbd behavior);
+- repair a larger raw file after an article beyond its first 16 KiB is missing,
+  using recovery volumes only;
+- download and extract a newly posted archive produced after the canonical
+  archive-name fix, rather than relying on the passing pre-fix archive fixture;
+- cover a missing article's repost/check identity in a live posting run.
 
 MultiPar and QuickPar are useful Windows compatibility gates for PAR2 path
 handling, but they do not define the NNTP/NZB posting contract.
