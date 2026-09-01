@@ -1353,7 +1353,7 @@ async fn run_single_upload(
             eprintln!("note: rar password protection requires the `rar` binary in PATH");
         }
 
-        let archive_stem = upload_root(&inputs)
+        let client_archive_stem = upload_root(&inputs)
             .or_else(|| {
                 inputs.first().map(|f| {
                     PathBuf::from(&f.name)
@@ -1379,7 +1379,7 @@ async fn run_single_upload(
         let archive_stem = if config.obfuscate != ObfuscateMode::None {
             reuse_or_generate_archive_stem(resume_path.as_deref(), config)
         } else {
-            archive_stem
+            client_archive_stem.clone()
         };
 
         let tmp_base = config
@@ -1472,11 +1472,11 @@ async fn run_single_upload(
         inputs = std::iter::once(result.path)
             .chain(result.extra_paths)
             .map(|path| {
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+                let name = pesto::compress::client_archive_name(
+                    &path,
+                    &archive_stem,
+                    &client_archive_stem,
+                );
                 pesto::walk::InputFile { path, name }
             })
             .collect();

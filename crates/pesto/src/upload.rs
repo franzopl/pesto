@@ -79,7 +79,7 @@ pub async fn run_upload(
             anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
         })?;
 
-        let archive_stem = upload_root(&inputs)
+        let client_archive_stem = upload_root(&inputs)
             .or_else(|| {
                 inputs.first().map(|f| {
                     PathBuf::from(&f.name)
@@ -94,7 +94,7 @@ pub async fn run_upload(
         let archive_stem = if config.obfuscate != ObfuscateMode::None {
             crate::article::obfuscated_name()
         } else {
-            archive_stem
+            client_archive_stem.clone()
         };
 
         let tmp_dir = std::env::temp_dir().join(format!(
@@ -137,7 +137,7 @@ pub async fn run_upload(
         });
 
         let compress_inputs = fs_paths;
-        let compress_stem = archive_stem;
+        let compress_stem = archive_stem.clone();
         let compress_dest = tmp_dir;
         let compress_pass = effective_password.clone();
         let compress_volume_size = config.compress_volume_size.clone();
@@ -160,11 +160,11 @@ pub async fn run_upload(
         inputs = std::iter::once(result.path)
             .chain(result.extra_paths)
             .map(|path| {
-                let name = path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+                let name = crate::compress::client_archive_name(
+                    &path,
+                    &archive_stem,
+                    &client_archive_stem,
+                );
                 crate::walk::InputFile { path, name }
             })
             .collect();

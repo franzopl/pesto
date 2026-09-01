@@ -69,8 +69,11 @@ cryptographic concealment: an indexer that downloads any recovery volume can
 still read the real paths and 16 KiB hashes.
 
 The automated compatibility gate proves `par2cmdline` can verify and repair
-using a recovery volume after the index is deleted. `article` stays hidden
-until end-to-end downloads also pass on current SABnzbd and NZBGet with:
+using a recovery volume after the index is deleted. A live SABnzbd 5.1.1 test
+on 2026-09-01 also passed raw-file reassembly, 7z extraction, nested UTF-8
+paths, and repair of a deliberately missing data article using recovery
+volumes only. `article` stays hidden until NZBGet also passes the same
+end-to-end matrix:
 
 - a multi-segment payload whose segments all have different Subject, yEnc
   `name=` and From values;

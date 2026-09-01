@@ -40,8 +40,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 - Legacy obfuscated resume state without persisted wire identities is rejected
   rather than silently splitting a file across identities. Legacy spool
   entries are re-encoded. Existing NZBs require no migration.
-- `article` remains hidden until SABnzbd and NZBGet pass the documented
-  multi-segment, nested-path, repost, rename, and volume-only PAR2 gates.
+- SABnzbd 5.1.1 passes the documented `article` raw-file, 7z extraction,
+  nested UTF-8 path, per-segment identity, and volume-only PAR2 repair gates.
+  `article` remains hidden until NZBGet passes the same end-to-end matrix.
+
+### Fixed
+
+- Compressed obfuscated uploads no longer expose their random local scratch
+  archive name in the NZB Subject or PAR2 FileDesc. Clients now consistently
+  receive the canonical archive name while NNTP headers remain obfuscated.
 
 ## [0.9.1] — 2026-08-25
 
