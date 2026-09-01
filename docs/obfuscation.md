@@ -48,11 +48,17 @@ relative path.
 Pesto strips one common outer input directory because the downloader creates
 the job directory, preserves every directory below it, rejects `.`/`..`, empty
 components, absolute paths and backslashes, and serializes `/` separators.
-FileDesc names are UTF-8 bytes. This interoperates with the repository's
-par2cmdline Unicode round-trip test, but Parmesan does not currently emit the
-optional PAR2 Unicode filename (`UniFileN`) packet. Windows-native MultiPar,
-QuickPar, SABnzbd and NZBGet Unicode/path behavior remains an explicit external
-test gate rather than an assumed guarantee.
+FileDesc names are currently UTF-8 bytes, but the [PAR2
+specification](https://parchive.sourceforge.net/docs/specifications/parity-volume-spec/article-spec.html)
+defines the core File Description name as ASCII and reserves the optional
+`UniFileN` packet for a Unicode override. That is not a portable encoding
+contract: NZBGet 26.1's bundled `par2cmdline-turbo` v1.4.0
+[interprets the core bytes as Latin-1 and converts them to
+UTF-8](https://github.com/nzbgetcom/par2cmdline-turbo/blob/333913c529dbaae07c88dcdd690564cb680a59ae/src/descriptionpacket.cpp#L87-L113),
+and the tagged source tree has no `UniFileN` reader. Parmesan must not claim
+exact cross-client Unicode restoration until every target client has an
+exercised encoding strategy. Windows-native MultiPar and QuickPar also remain
+explicit external gates rather than assumed compatibility.
 
 ## PAR2 layout
 
@@ -77,27 +83,44 @@ only, and FileDesc rename from deliberately false NZB Subject names.
 A live NZBGet 26.1 test on the same date, with `FileNaming=auto`,
 `ParRename=yes`, `ParCheck=auto` and `Unpack=yes`, passed multi-segment
 `article` reassembly, volume-only FileDesc rename from deliberately false NZB
-Subject names, content hashes, and 7z extraction (including a UTF-8 path inside
-the archive). It also found two remaining raw-file gates, so `article` remains
-hidden:
+Subject names, content hashes, and 7z extraction. A follow-up public fixture
+also removed article 4 from an eight-article, 64 KiB raw file, leaving its first
+24 KiB intact: NZBGet downloaded recovery volumes, reported `SUCCESS/PAR`, and
+restored the exact SHA-256 hash. This is the representative partial-file repair
+gate; the earlier failure of a 4.5 KiB file with its first article missing was
+the expected consequence of losing the complete 16 KiB par-rename fingerprint.
 
-- Without `UniFileN`, NZBGet double-transcoded a UTF-8 FileDesc path: the file
-  contents were correct, but `Árvore/legenda-ação.txt` was written with the
-  mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`.
-- Removing the first article from a 4.5 KiB file prevented NZBGet's 16 KiB MD5
-  par-rename match. It consequently treated the whole file as missing and the
-  37 available recovery blocks could not supply the 71 blocks requested. A
-  fixture larger than 16 KiB with damage after the matching prefix is still
-  required to exercise ordinary partial-file repair.
+The same follow-up exposed three interoperability defects, so `article`
+remains hidden and should be removed or merged into `full` unless a client-safe
+wire identity can be found:
 
-Before `article` is unhidden, the remaining end-to-end matrix is therefore:
+- After the successful repair, six downloaded recovery volumes remained in the
+  completed directory under opaque per-article yEnc names. NZBGet could use
+  their packets but could not recognize every assembled file as PAR2 for final
+  cleanup. A stable yEnc name per file fixes that behavior but gives each file
+  the same grouping property as `full`, eliminating `article`'s unique reason
+  to exist.
+- A raw FileDesc path `Árvore/legenda-ação.txt` retained the correct contents
+  but became the mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`. Inspection of
+  NZBGet's exact bundled `par2cmdline-turbo` tag confirmed an unconditional
+  Latin-1-to-UTF-8 conversion and no `UniFileN` reader, so emitting `UniFileN`
+  alone would not fix this client. Exact Unicode paths did survive inside 7z.
+- A newly posted archive passed `SUCCESS/UNPACK`, canonical rename to
+  `archive-source.7z`, extraction, and hash verification. However, 7z stored
+  the caller's relative staging prefix (`.tmp/archive-source/...`) despite
+  `compress()` promising basename-only roots. Archive creation must normalize
+  its working directory and input arguments before this path/privacy contract
+  is considered met.
 
-- emit and consume interoperable Unicode PAR2 path metadata on NZBGet (and
-  retain the already-passing SABnzbd behavior);
-- repair a larger raw file after an article beyond its first 16 KiB is missing,
-  using recovery volumes only;
-- download and extract a newly posted archive produced after the canonical
-  archive-name fix, rather than relying on the passing pre-fix archive fixture;
+Before `article` can be reconsidered, the remaining end-to-end matrix is
+therefore:
+
+- choose and test an honest raw-path encoding policy: exact Unicode cannot be
+  promised to NZBGet 26.1 through its current PAR2 reader, while an ASCII
+  fallback plus `UniFileN` would preserve safety but not exact names there;
+- make multi-segment PAR2 recovery files recognizable and disposable by
+  NZBGet without weakening the mode into `full`, or retire `article`;
+- make 7z/ZIP/RAR archive roots match the basename-only compression contract;
 - cover a missing article's repost/check identity in a live posting run.
 
 MultiPar and QuickPar are useful Windows compatibility gates for PAR2 path
