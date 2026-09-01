@@ -289,6 +289,52 @@ async fn par2_before_upload_off_by_default_still_posts_successfully() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn private_modes_never_publish_the_standalone_par2_index() {
+    for par2_before_upload in [false, true] {
+        let subjects = Arc::new(Mutex::new(Vec::new()));
+        let addr = spawn_recording_server(subjects);
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("private.bin");
+        std::fs::write(&input, content(7, 8192 * 4)).unwrap();
+
+        let mut cfg = config(addr, par2_before_upload);
+        cfg.obfuscate = ObfuscateMode::Full;
+        cfg.par2_memory_limit = Some(64 * 1024 * 1024);
+        let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+        let outcome = post_files(&cfg, &inputs).await.unwrap();
+
+        let posted_files: std::collections::HashSet<_> = outcome
+            .segments
+            .iter()
+            .map(|segment| segment.file_name.as_str())
+            .collect();
+        assert!(
+            posted_files
+                .iter()
+                .any(|name| name.contains(".vol") && name.ends_with(".par2")),
+            "private mode must still publish recovery volumes: {posted_files:?}"
+        );
+        assert!(
+            posted_files
+                .iter()
+                .all(|name| !name.ends_with(".par2") || name.contains(".vol")),
+            "private mode published a standalone PAR2 index: {posted_files:?}"
+        );
+
+        // The encoder may keep an index in its private scratch directory;
+        // publication, not local materialisation, is the security boundary.
+        assert!(std::fs::read_dir(&outcome.par2_temp_dir)
+            .unwrap()
+            .flatten()
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.ends_with(".par2") && !name.contains(".vol")
+            }));
+        std::fs::remove_dir_all(&outcome.par2_temp_dir).ok();
+    }
+}
+
 /// Resume must skip already-posted segments the same way it does for the
 /// default streaming pipeline — including PAR2 index/volume segments, which
 /// `--par2-before-upload` posts via the same generic worker-level resume

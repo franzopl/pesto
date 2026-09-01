@@ -12,6 +12,37 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+
+- Added centralized, testable wire contracts for `none`, `light`,
+  `full-shared`, `full`, and the hidden experimental `article` mode. The old
+  `paranoid` value remains accepted as an alias.
+- Resume and version-2 spool records now persist the exact Subject, yEnc name,
+  From, and Date identity used by each obfuscated article.
+
+### Changed
+
+- Message-ID local parts are now opaque 128-bit random values without the old
+  timestamp/counter grammar. Existing NZBs and Message-IDs remain readable.
+- Obfuscation no longer implicitly enables randomized Date headers. Date is
+  omitted by default; explicit `random` remains temporarily accepted with a
+  deprecation warning.
+- Generated NZB subjects and PAR2 FileDesc packets now consistently use one
+  validated canonical client path, including nested directories.
+- `full` and `article` no longer post the standalone PAR2 index. Recovery
+  volumes retain Main, FileDesc, and IFSC packets and work without the index;
+  discovery modes retain the conventional index.
+- Release-wide Subject file counters are rejected in `full` and `article`
+  because they contradict those modes' correlation contract.
+
+### Compatibility
+
+- Legacy obfuscated resume state without persisted wire identities is rejected
+  rather than silently splitting a file across identities. Legacy spool
+  entries are re-encoded. Existing NZBs require no migration.
+- `article` remains hidden until SABnzbd and NZBGet pass the documented
+  multi-segment, nested-path, repost, rename, and volume-only PAR2 gates.
+
 ## [0.9.1] — 2026-08-25
 
 ### Changed

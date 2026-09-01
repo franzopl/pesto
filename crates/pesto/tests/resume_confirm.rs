@@ -342,6 +342,7 @@ async fn t13_new_schema_three_arms() {
             confirmed: true,
             check_disabled: false,
             server_idx: 0,
+            wire_identity: None,
         },
     );
     prior.record_with(
@@ -353,6 +354,7 @@ async fn t13_new_schema_three_arms() {
             confirmed: false,
             check_disabled: false,
             server_idx: 0,
+            wire_identity: None,
         },
     );
     prior.save(&state_path).unwrap();

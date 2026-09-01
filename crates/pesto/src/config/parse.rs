@@ -264,6 +264,34 @@ impl Config {
         };
         super::validation::validate_groups(&groups)?;
 
+        let obfuscate = cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default();
+        let file_counter = cli
+            .file_counter
+            .or(file.posting.file_counter)
+            .unwrap_or_else(|| obfuscate.policy().allow_file_counter);
+        if file_counter && !obfuscate.policy().allow_file_counter {
+            anyhow::bail!(
+                "file_counter=true contradicts --obfuscate={}; use full-shared or light when release-wide grouping is required",
+                match obfuscate {
+                    ObfuscateMode::Full => "full",
+                    ObfuscateMode::Article => "article",
+                    _ => unreachable!("only private modes reject file counters"),
+                }
+            );
+        }
+        let date = cli.date.or(file.posting.date);
+        if date.as_deref() == Some("random") {
+            eprintln!(
+                "warning: posting.date=random is deprecated; omit Date or use `now`/a fixed RFC 2822 value"
+            );
+        }
+        let message_id_domain = cli.message_id_domain.or(file.posting.message_id_domain);
+        if let Some(domain) = &message_id_domain {
+            if !crate::article::valid_message_id_domain(domain) {
+                anyhow::bail!("invalid message_id_domain `{domain}`");
+            }
+        }
+
         Ok(Config {
             host,
             port,
@@ -291,7 +319,7 @@ impl Config {
                 .or(file.posting.retries)
                 .unwrap_or(DEFAULT_RETRIES)
                 .max(1),
-            obfuscate: cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default(),
+            obfuscate,
             dry_run,
             par2: cli.par2.or(file.posting.par2).unwrap_or(DEFAULT_PAR2),
             par2_memory_limit: {
@@ -412,38 +440,10 @@ impl Config {
             notify_webhook: file.notify.webhook_url,
             notify_ntfy: file.notify.ntfy_topic,
             notify: cli.notify,
-            date: {
-                let explicit = cli.date.or(file.posting.date);
-                let obfuscate = cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default();
-                if explicit.is_none() && obfuscate != ObfuscateMode::None {
-                    Some("random".to_string())
-                } else {
-                    explicit
-                }
-            },
+            date,
             no_archive: cli.no_archive.or(file.posting.no_archive).unwrap_or(false),
-            file_counter: {
-                let explicit = cli.file_counter.or(file.posting.file_counter);
-                match explicit {
-                    Some(v) => v,
-                    None => {
-                        let obfuscate =
-                            cli.obfuscate.or(file.posting.obfuscate).unwrap_or_default();
-                        // `None`, `FullShared` and `Light` already accept
-                        // cross-file correlation by wire metadata (bare
-                        // filename, or a shared prefix/From) as part of their
-                        // own design, so the counter adds no new correlation
-                        // vector there — unlike `Full`/`Paranoid`, whose whole
-                        // point is preventing exactly that. See ROADMAP.md
-                        // "Subject file counter".
-                        matches!(
-                            obfuscate,
-                            ObfuscateMode::None | ObfuscateMode::FullShared | ObfuscateMode::Light
-                        )
-                    }
-                }
-            },
-            message_id_domain: cli.message_id_domain.or(file.posting.message_id_domain),
+            file_counter,
+            message_id_domain,
             pre_hooks: {
                 // CLI flags take precedence over config file; single `pre_hook`
                 // and array `pre_hooks` are merged so old configs still work.

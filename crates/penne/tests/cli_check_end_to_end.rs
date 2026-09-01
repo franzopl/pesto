@@ -74,6 +74,7 @@ fn write_nzb(dir: &Path) -> std::path::PathBuf {
         file_path: Path::new("movie.bin").into(),
         subject_name: "movie.bin".into(),
         wire_name: "movie.bin".into(),
+        wire_yenc_name: "movie.bin".into(),
         file_size: 100,
         part: 1,
         total: 1,

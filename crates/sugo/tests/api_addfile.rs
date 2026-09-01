@@ -15,6 +15,7 @@ fn minimal_nzb_bytes() -> Vec<u8> {
         file_path: std::path::Path::new("release.bin").into(),
         subject_name: "release.bin".into(),
         wire_name: "release.bin".into(),
+        wire_yenc_name: "release.bin".into(),
         file_size: 10,
         part: 1,
         total: 1,

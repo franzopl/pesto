@@ -2,36 +2,49 @@
 //! `Message-ID`, `Date`) wrapped around a yEnc-encoded body, plus unique
 //! `Message-ID` generation.
 
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Process-wide counter ensuring two `Message-ID`s from the same process never
-/// collide, even within the same nanosecond.
-static MESSAGE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+use rand::Rng;
 
-/// Generate a `Message-ID` of the form `<timestamp.seq.random@domain>`.
+/// Generate an opaque `Message-ID` with a 128-bit random local-part.
 ///
 /// When `fixed_domain` is `Some`, that value is used as the domain; otherwise
 /// a freshly randomised label is generated so no fixed identifier leaks through
-/// the Message-ID header.
+/// the Message-ID header. The local-part deliberately contains no clock or
+/// counter: download clients treat it as opaque, while exposing either value
+/// gives a passive observer a reliable posting-order fingerprint.
 pub fn generate_message_id(fixed_domain: Option<&str>) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = MESSAGE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let random = RandomState::new().build_hasher().finish();
+    let random: u128 = rand::random();
     let domain = match fixed_domain {
         Some(d) => d.to_string(),
         None => {
-            let label = random_alpha(8 + rand_u64() as usize % 8); // 8..=15 chars
-            let tld = ["com", "net", "org"][rand_u64() as usize % 3];
+            let mut rng = rand::rng();
+            let label = random_alpha(rng.random_range(8..=15));
+            let tld = ["com", "net", "org"][rng.random_range(0..3)];
             format!("{label}.{tld}")
         }
     };
-    format!("<{nanos:x}.{seq:x}.{random:x}@{domain}>")
+    format!("<{random:032x}@{domain}>")
+}
+
+pub(crate) fn valid_message_id_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
 }
 
 /// Format a `SystemTime` as an RFC 2822 date string (e.g.
@@ -169,7 +182,7 @@ impl Article {
 /// that would identify it as pesto-generated. Inspired by juicenet's schizo
 /// mode variable-length randomisation.
 pub fn obfuscated_name() -> String {
-    let len = 10 + (rand_u64() as usize % 21); // 10..=30 chars
+    let len = rand::rng().random_range(10..=30);
     random_alnum(len)
 }
 
@@ -182,30 +195,22 @@ pub fn obfuscated_name() -> String {
 /// independent yEnc name left indexers with no wire-visible signal at all to
 /// group the release by, once the Subject/yEnc match was removed).
 pub fn obfuscated_name_with_prefix(prefix: &str) -> String {
-    let len = 8 + (rand_u64() as usize % 15); // 8..=22 chars
+    let len = rand::rng().random_range(8..=22);
     format!("{prefix}-{}", random_alnum(len))
 }
 
-/// A fresh source of randomness. `RandomState` is seeded by the OS on every
-/// construction, so each call yields an unrelated 64-bit value — the same
-/// trick used for `Message-ID`s, which keeps `pesto` free of an RNG crate.
+/// A fresh 64-bit value from rand's thread-local cryptographic generator.
 pub(crate) fn rand_u64() -> u64 {
-    RandomState::new().build_hasher().finish()
+    rand::random()
 }
 
 /// Build a string of `len` random alphanumeric characters (`[A-Za-z0-9]`).
 fn random_alnum(len: usize) -> String {
     const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::rng();
     let mut s = String::with_capacity(len);
-    let (mut bits, mut left) = (0u64, 0u32);
     for _ in 0..len {
-        if left < 8 {
-            bits = rand_u64();
-            left = 64;
-        }
-        s.push(ALNUM[(bits & 0xff) as usize % ALNUM.len()] as char);
-        bits >>= 8;
-        left -= 8;
+        s.push(ALNUM[rng.random_range(0..ALNUM.len())] as char);
     }
     s
 }
@@ -213,16 +218,10 @@ fn random_alnum(len: usize) -> String {
 /// Build a string of `len` random lowercase ASCII letters.
 fn random_alpha(len: usize) -> String {
     const ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::rng();
     let mut s = String::with_capacity(len);
-    let (mut bits, mut left) = (0u64, 0u32);
     for _ in 0..len {
-        if left < 8 {
-            bits = rand_u64();
-            left = 64;
-        }
-        s.push(ALPHA[(bits & 0xff) as usize % ALPHA.len()] as char);
-        bits >>= 8;
-        left -= 8;
+        s.push(ALPHA[rng.random_range(0..ALPHA.len())] as char);
     }
     s
 }
@@ -233,10 +232,11 @@ fn random_alpha(len: usize) -> String {
 /// a random 2–5 char string instead of a real TLD, matching juicenet's schizo
 /// mode to avoid fingerprinting by TLD pattern.
 pub fn random_from() -> String {
-    let name = random_alpha(5 + (rand_u64() as usize % 8)); // 5..=12 chars
-    let local = random_alnum(10 + (rand_u64() as usize % 11)); // 10..=20 chars
-    let domain = random_alnum(5 + (rand_u64() as usize % 6)); // 5..=10 chars
-    let tld = random_alpha(2 + (rand_u64() as usize % 4)); // 2..=5 chars
+    let mut rng = rand::rng();
+    let name = random_alpha(rng.random_range(5..=12));
+    let local = random_alnum(rng.random_range(10..=20));
+    let domain = random_alnum(rng.random_range(5..=10));
+    let tld = random_alpha(rng.random_range(2..=5));
     let mut display = name;
     display[..1].make_ascii_uppercase();
     format!("{display} <{local}@{domain}.{tld}>")
@@ -303,10 +303,53 @@ mod tests {
     }
 
     #[test]
+    fn message_id_domain_validation_rejects_header_injection_and_bad_labels() {
+        for valid in ["example.com", "news-01.example", "localhost"] {
+            assert!(valid_message_id_domain(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            ".example",
+            "example.",
+            "-bad.example",
+            "bad-.example",
+            "a b",
+            "x\r\nSubject: leak",
+        ] {
+            assert!(!valid_message_id_domain(invalid), "{invalid}");
+        }
+    }
+
+    #[test]
     fn message_ids_are_unique() {
         let a = generate_message_id(None);
         let b = generate_message_id(None);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn message_id_local_part_is_opaque_128_bit_hex() {
+        let id = generate_message_id(Some("example.com"));
+        let local = id
+            .strip_prefix('<')
+            .and_then(|id| id.strip_suffix("@example.com>"))
+            .unwrap();
+        assert_eq!(local.len(), 32);
+        assert!(local
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(
+            !local.contains('.'),
+            "legacy clock/counter separators leaked"
+        );
+    }
+
+    #[test]
+    fn message_ids_remain_unique_across_a_large_batch() {
+        let mut ids = std::collections::HashSet::with_capacity(10_000);
+        for _ in 0..10_000 {
+            assert!(ids.insert(generate_message_id(Some("example.com"))));
+        }
     }
 
     #[test]

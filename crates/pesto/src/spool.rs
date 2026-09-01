@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::resume::PersistedWireIdentity;
+
+const V2_MAGIC: &[u8; 4] = b"PST2";
+
 /// Directory holding spooled articles for one upload session — a sibling of
 /// the `.pesto-state` file (not nested inside it, since that path is a
 /// plain file), so both can be inspected or deleted independently.
@@ -39,6 +43,7 @@ pub struct SpooledArticle {
     pub message_id: String,
     pub headers: Vec<u8>,
     pub body: Vec<u8>,
+    pub wire_identity: Option<PersistedWireIdentity>,
 }
 
 /// Persist a fully-encoded article to the spool, creating the directory on
@@ -53,15 +58,64 @@ pub async fn write(
     headers: &[u8],
     body: &[u8],
 ) -> Result<()> {
+    write_inner(dir, file_name, part, message_id, headers, body, None).await
+}
+
+/// Versioned spool writer used by the poster. Unlike the legacy public
+/// helper, this records the logical wire identity alongside the exact bytes
+/// so resume metadata cannot disagree with a replayed article.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_with_identity(
+    dir: &Path,
+    file_name: &str,
+    part: u32,
+    message_id: &str,
+    headers: &[u8],
+    body: &[u8],
+    wire_identity: &PersistedWireIdentity,
+) -> Result<()> {
+    write_inner(
+        dir,
+        file_name,
+        part,
+        message_id,
+        headers,
+        body,
+        Some(wire_identity),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_inner(
+    dir: &Path,
+    file_name: &str,
+    part: u32,
+    message_id: &str,
+    headers: &[u8],
+    body: &[u8],
+    wire_identity: Option<&PersistedWireIdentity>,
+) -> Result<()> {
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("creating spool directory `{}`", dir.display()))?;
-    // Layout: [u32 LE id_len][id bytes][u32 LE headers_len][headers][body].
-    // Hand-rolled instead of pulling in a serialization crate — the body is
-    // raw (non-UTF-8) yEnc bytes, and this format only ever needs one
-    // reader/writer (this module), so there's nothing a general-purpose
-    // format would buy here.
-    let mut buf = Vec::with_capacity(4 + message_id.len() + 4 + headers.len() + body.len());
+    // PST2 layout: [magic][u32 identity_len][identity JSON], followed by the
+    // legacy [u32 id_len][id][u32 headers_len][headers][body] payload. The
+    // body is raw (non-UTF-8) yEnc bytes, so the small binary envelope avoids
+    // copying it through a general-purpose serialization format.
+    let identity = wire_identity
+        .map(serde_json::to_vec)
+        .transpose()
+        .context("serialising spool wire identity")?;
+    let identity_len = identity.as_ref().map_or(0, Vec::len);
+    let mut buf = Vec::with_capacity(
+        V2_MAGIC.len() + 4 + identity_len + 4 + message_id.len() + 4 + headers.len() + body.len(),
+    );
+    if let Some(identity) = identity {
+        buf.extend_from_slice(V2_MAGIC);
+        buf.extend_from_slice(&(identity.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&identity);
+    }
     buf.extend_from_slice(&(message_id.len() as u32).to_le_bytes());
     buf.extend_from_slice(message_id.as_bytes());
     buf.extend_from_slice(&(headers.len() as u32).to_le_bytes());
@@ -75,6 +129,16 @@ pub async fn write(
 
 fn parse(buf: &[u8]) -> Option<SpooledArticle> {
     let mut pos = 0usize;
+    let wire_identity = if buf.starts_with(V2_MAGIC) {
+        pos += V2_MAGIC.len();
+        let identity_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        let identity = serde_json::from_slice(buf.get(pos..pos + identity_len)?).ok()?;
+        pos += identity_len;
+        Some(identity)
+    } else {
+        None
+    };
     let id_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
     let message_id = String::from_utf8(buf.get(pos..pos + id_len)?.to_vec()).ok()?;
@@ -88,6 +152,7 @@ fn parse(buf: &[u8]) -> Option<SpooledArticle> {
         message_id,
         headers,
         body,
+        wire_identity,
     })
 }
 
@@ -139,6 +204,35 @@ mod tests {
             entry.body,
             b"=ybegin ...\r\nnot valid utf8 \xff\xfe\r\n=yend"
         );
+        assert!(entry.wire_identity.is_none());
+    }
+
+    #[test]
+    fn versioned_spool_round_trips_wire_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("release.pesto-spool");
+        let identity = PersistedWireIdentity {
+            subject_name: "subject-token".into(),
+            yenc_name: "yenc-token".into(),
+            from: "Poster <opaque@example.com>".into(),
+            date: None,
+            unix_date: None,
+        };
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(write_with_identity(
+                &spool,
+                "movie.bin",
+                1,
+                "id@example.com",
+                b"headers",
+                b"body",
+                &identity,
+            ))
+            .unwrap();
+
+        let entry = read(&spool, "movie.bin", 1).unwrap();
+        assert_eq!(entry.wire_identity, Some(identity));
     }
 
     #[test]

@@ -456,7 +456,7 @@ pub async fn run_upload(
                 ObfuscateMode::Full => "full",
                 ObfuscateMode::Light => "light",
                 ObfuscateMode::FullShared => "full-shared",
-                ObfuscateMode::Paranoid => "paranoid",
+                ObfuscateMode::Article => "article",
             }
             .to_string(),
             par2: config.par2,

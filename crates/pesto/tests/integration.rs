@@ -703,7 +703,24 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
             mtime: a_mtime,
         },
     );
-    prior.record("a.bin", 1, "a-part1@prior-run.example", 60);
+    prior.record_with(
+        "a.bin",
+        1,
+        pesto::resume::SegmentRecord {
+            message_id: "a-part1@prior-run.example".into(),
+            bytes: 60,
+            confirmed: true,
+            check_disabled: false,
+            server_idx: 0,
+            wire_identity: Some(pesto::resume::PersistedWireIdentity {
+                subject_name: "PriorPrefix123.part01.bin".into(),
+                yenc_name: "PriorPrefix123-independent".into(),
+                from: "prior@sender.example".into(),
+                date: None,
+                unix_date: None,
+            }),
+        },
+    );
     prior.set_release_identity(
         "PriorPrefix123".to_string(),
         "prior@sender.example".to_string(),

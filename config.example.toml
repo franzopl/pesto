@@ -108,6 +108,9 @@ groups = ["alt.binaries.test"]
 #                 verbatim (same as the subject) instead of adding its own
 #                 random suffix, for indexers that key grouping off an exact
 #                 subject/yEnc-name match
+#   "article"     independent subject, yEnc name and sender per article;
+#                 experimental and hidden until SABnzbd/NZBGet e2e passes
+#                 (legacy value "paranoid" remains accepted as an alias)
 # obfuscate = "none"
 
 # par2 — percentage of PAR2 recovery data to generate. 0 disables it.
@@ -180,11 +183,11 @@ groups = ["alt.binaries.test"]
 
 # date — value for the `Date:` header on each article. Options:
 #   "now"    current UTC time at the moment of posting
-#   "random" a random time within the last 2 hours (default when obfuscate is set)
+#   "random" deprecated: a random time within the last 2 hours
 #   A fixed RFC 2822 timestamp: "Mon, 01 Jan 2024 12:00:00 +0000"
-# When omitted without obfuscation, pesto does not set the Date header and lets
-# the server supply it. When obfuscate is set, "random" is used automatically.
-# date = "random"
+# When omitted in every mode, pesto does not set the Date header and lets the
+# server supply it. Fake dates do not provide a sound privacy boundary.
+# date = "now"
 
 # no_archive — add `X-No-Archive: yes` to every posted article. Default: false.
 # no_archive = false
@@ -195,10 +198,9 @@ groups = ["alt.binaries.test"]
 # tools (e.g. nyuu) emit this by default and some indexers may key their
 # grouping heuristics off it. Default depends on `obfuscate`: on for `none`,
 # `full-shared` and `light` (which already accept cross-file correlation by
-# wire metadata as part of their own design), off for `full`/`paranoid`
-# (whose whole point is preventing exactly that). Set explicitly here to
-# override the mode-based default either way. See ROADMAP.md "Subject file
-# counter".
+# wire metadata as part of their own design), off for `full`/`article`.
+# Enabling it in a private mode is rejected because that would contradict the
+# mode contract. See docs/obfuscation.md.
 # file_counter = false
 
 # message_id_domain — fixed domain used in the Message-ID of every article.
@@ -301,7 +303,8 @@ groups = ["alt.binaries.test"]
 #   PESTO_CATEGORY     — value of --nzb-category (empty when not set)
 #   PESTO_NZB_TITLE    — value of --nzb-title (empty when not set)
 #   PESTO_NZB_NAME     — deprecated alias of PESTO_NZB_TITLE, same value
-#   PESTO_OBFUSCATE    — obfuscation mode in use: none, full, or paranoid
+#   PESTO_OBFUSCATE    — obfuscation mode in use: none, light, full-shared,
+#                        full, or article
 #   PESTO_PAR2         — PAR2 redundancy percentage (e.g. 10)
 #   PESTO_TAGS         — space-separated list of NZB tags (empty when none)
 #   PESTO_TMDB_ID      — value of --tmdb / --tmdb-id (empty when not set)

@@ -166,6 +166,20 @@ pub struct SegmentRecord {
     /// so STAT retargets the right host. Pre-schema JSON → 0.
     #[serde(default)]
     pub server_idx: usize,
+    /// Exact headers/body identity used by the accepted article. Older state
+    /// files deserialize this as `None`; they remain usable for STAT/skip but
+    /// must not silently invent names when a private-mode repost is required.
+    #[serde(default)]
+    pub wire_identity: Option<PersistedWireIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedWireIdentity {
+    pub subject_name: String,
+    pub yenc_name: String,
+    pub from: String,
+    pub date: Option<String>,
+    pub unix_date: Option<u64>,
 }
 
 /// Persistent state for a single upload session.
@@ -348,6 +362,7 @@ impl ResumeState {
                 confirmed: false,
                 check_disabled: false,
                 server_idx: 0,
+                wire_identity: None,
             },
         );
     }
@@ -381,6 +396,15 @@ impl ResumeState {
 
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+
+    /// Whether any recorded article predates exact Subject/yEnc/From
+    /// persistence. Such records are safe to STAT, but an interrupted
+    /// obfuscated file cannot be completed without splitting its wire identity.
+    pub fn has_legacy_wire_identities(&self) -> bool {
+        self.segments
+            .values()
+            .any(|record| record.wire_identity.is_none())
     }
 }
 
@@ -666,6 +690,7 @@ mod tests {
                 confirmed: false,
                 check_disabled: true,
                 server_idx: 2,
+                wire_identity: None,
             },
         );
         s.record("a.bin", 2, "id2@x", 50);
@@ -685,6 +710,7 @@ mod tests {
             confirmed: true,
             check_disabled: false,
             server_idx: 0,
+            wire_identity: None,
         };
         let unconfirmed = SegmentRecord {
             confirmed: false,
@@ -723,6 +749,7 @@ mod tests {
                 confirmed: false,
                 check_disabled: true,
                 server_idx: 0,
+                wire_identity: None,
             },
         );
         let rec = s.get("a.bin", 1).unwrap();
