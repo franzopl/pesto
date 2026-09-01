@@ -1,4 +1,4 @@
-//! `--obfuscate=article` promises that every individual article gets its own
+//! Legacy `--obfuscate=article` promises that every individual article gets its own
 //! unique Subject, yEnc name and From, so segments cannot be deterministically grouped
 //! alone — see `PostTask::subject_name`'s doc comment in `poster/mod.rs`
 //! ("In paranoid mode each article gets a unique value"). A single
@@ -180,15 +180,91 @@ fn article_obfuscation_gives_every_segment_independent_wire_identity() {
 
     let yenc_names: Vec<String> = articles.iter().map(|a| yenc_name_of(a)).collect();
     let froms: Vec<String> = articles.iter().map(|a| header_of(a, "From: ")).collect();
-    for values in [&yenc_names, &froms] {
-        let unique: std::collections::HashSet<_> = values.iter().collect();
-        assert_eq!(
-            unique.len(),
-            values.len(),
-            "article identity repeated: {values:?}"
-        );
-    }
+    let from_unique: std::collections::HashSet<_> = froms.iter().collect();
+    assert_eq!(from_unique.len(), froms.len(), "from repeated: {froms:?}");
+
+    let yenc_unique: std::collections::HashSet<_> = yenc_names.iter().collect();
+    assert_eq!(
+        yenc_unique.len(),
+        yenc_names.len(),
+        "yEnc name repeated: {yenc_names:?}"
+    );
     for (subject, yenc) in names.iter().zip(&yenc_names) {
         assert_ne!(*subject, yenc, "Subject and yEnc name must be independent");
     }
+}
+
+#[test]
+fn full_keeps_yenc_stable_per_physical_file() {
+    let (addr, articles) = spawn_capturing_server();
+    let dir = tempfile::tempdir().unwrap();
+    let xdg_home = tempfile::tempdir().unwrap();
+    let input = dir.path().join("movie.bin");
+    std::fs::write(&input, vec![0xABu8; 20_000]).unwrap();
+    let out = dir.path().join("out.nzb");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_pesto"))
+        .env("XDG_CONFIG_HOME", xdg_home.path())
+        .arg("--no-ssl")
+        .args(["-s", "127.0.0.1"])
+        .args(["-P", &addr.port().to_string()])
+        .args(["-g", "alt.binaries.test"])
+        .args(["-n", "4"])
+        .args(["--par2", "10"])
+        .args(["--recovery-count", "1"])
+        .args(["--article-size", "4000"])
+        .arg("--no-hooks")
+        .arg("--obfuscate=full")
+        .args(["-o", out.to_str().unwrap()])
+        .arg(&input)
+        .output()
+        .expect("failed to run pesto");
+    assert!(
+        output.status.success(),
+        "pesto failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let articles = articles.lock().unwrap();
+    let subjects: Vec<String> = articles.iter().map(|a| header_of(a, "Subject: ")).collect();
+    let subject_names: Vec<&str> = subjects.iter().map(|s| quoted_name(s)).collect();
+    let froms: Vec<String> = articles.iter().map(|a| header_of(a, "From: ")).collect();
+    let yenc_names: Vec<String> = articles.iter().map(|a| yenc_name_of(a)).collect();
+    assert_eq!(
+        subject_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        subject_names.len(),
+        "full Subject repeated: {subjects:?}"
+    );
+    assert_eq!(
+        froms.iter().collect::<std::collections::HashSet<_>>().len(),
+        froms.len(),
+        "full From repeated: {froms:?}"
+    );
+
+    let mut yenc_counts = std::collections::HashMap::<&str, usize>::new();
+    for name in &yenc_names {
+        *yenc_counts.entry(name).or_default() += 1;
+    }
+    assert_eq!(
+        yenc_counts.len(),
+        2,
+        "expected one yEnc name for the data file and one for its PAR2 volume: {yenc_counts:?}"
+    );
+    assert_eq!(
+        yenc_counts.values().copied().max(),
+        Some(5),
+        "all five data segments must retain one yEnc name: {yenc_counts:?}"
+    );
+    let par2_names: Vec<_> = yenc_counts
+        .keys()
+        .filter(|name| name.ends_with(".par2"))
+        .collect();
+    assert_eq!(
+        par2_names.len(),
+        1,
+        "the opaque PAR2 yEnc name must retain its technical extension for client cleanup: {yenc_counts:?}"
+    );
 }

@@ -238,8 +238,26 @@ async fn check_repost_of_a_missing_article_stays_obfuscated() {
         .iter()
         .map(|article| wire_identity(article))
         .collect();
-    assert!(identities.windows(2).all(|pair| pair[0] == pair[1]));
-    assert_ne!(identities[0].0, identities[0].1);
+    assert!(
+        identities.windows(2).all(|pair| pair[0].1 == pair[1].1),
+        "full repost must retain its physical-file yEnc identity: {identities:?}"
+    );
+    assert_eq!(
+        identities
+            .iter()
+            .map(|(subject, _, _)| subject)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        identities.len()
+    );
+    assert_eq!(
+        identities
+            .iter()
+            .map(|(_, _, from)| from)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        identities.len()
+    );
 }
 
 fn wire_identity(article: &[u8]) -> (String, String, String) {
@@ -295,4 +313,35 @@ async fn article_repost_rotates_subject_yenc_and_from_together() {
     for (subject, yenc, _) in identities {
         assert_ne!(subject, yenc);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_repost_rotates_headers_but_keeps_yenc_name() {
+    let (addr, _stat_count, articles) = spawn_mock_server();
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join(REAL_NAME);
+    std::fs::write(&input, vec![7u8; 50_000]).unwrap();
+
+    let cfg = config(addr, ObfuscateMode::Full);
+    let inputs = expand_inputs(std::slice::from_ref(&input)).unwrap();
+    let outcome = post_files_with_progress(&cfg, &inputs, None, None, None)
+        .await
+        .unwrap();
+    assert!(outcome.still_missing.is_empty());
+
+    let articles = articles.lock().unwrap();
+    assert_eq!(articles.len(), 3);
+    let identities: Vec<_> = articles
+        .iter()
+        .map(|article| wire_identity(article))
+        .collect();
+    let subjects: std::collections::HashSet<_> =
+        identities.iter().map(|(subject, _, _)| subject).collect();
+    let froms: std::collections::HashSet<_> = identities.iter().map(|(_, _, from)| from).collect();
+    assert_eq!(subjects.len(), identities.len());
+    assert_eq!(froms.len(), identities.len());
+    assert!(
+        identities.windows(2).all(|pair| pair[0].1 == pair[1].1),
+        "full repost must retain its physical file yEnc identity: {identities:?}"
+    );
 }

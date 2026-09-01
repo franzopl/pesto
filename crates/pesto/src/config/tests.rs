@@ -67,6 +67,12 @@ fn paranoid_toml_value_remains_an_alias_for_article() {
 }
 
 #[test]
+fn header_fragmented_toml_value_is_an_alias_for_full() {
+    let file: FileConfig = toml::from_str("[posting]\nobfuscate = 'header-fragmented'\n").unwrap();
+    assert_eq!(file.posting.obfuscate, Some(ObfuscateMode::Full));
+}
+
+#[test]
 fn parse_rate_bare_bytes() {
     assert_eq!(parse_upload_rate("1024").unwrap(), 1024);
 }
@@ -815,9 +821,9 @@ fn obfuscation_policy_locks_the_five_wire_contracts() {
     assert_eq!(shared.subject_yenc_relation, NameRelation::SharedPrefix);
 
     let full = ObfuscateMode::Full.policy();
-    assert_eq!(full.subject_scope, IdentityScope::File);
+    assert_eq!(full.subject_scope, IdentityScope::Article);
     assert_eq!(full.yenc_scope, IdentityScope::File);
-    assert_eq!(full.from_scope, IdentityScope::File);
+    assert_eq!(full.from_scope, IdentityScope::Article);
     assert_eq!(full.subject_yenc_relation, NameRelation::Independent);
     assert!(!full.publish_par2_index && !full.allow_file_counter);
 

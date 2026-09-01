@@ -171,7 +171,7 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     nzb_dir: Option<PathBuf>,
 
-    /// Obfuscation mode: `none`, `full`, `full-shared`, `light`. A bare
+    /// Obfuscation mode: `none`, `full`, `full-shared`, or `light`. A bare
     /// `--obfuscate` means `full`. `full-shared` reuses one random name
     /// across every file in the release (archive + PAR2 volumes) so
     /// indexers can still group them; `light` is the same, but the yEnc
@@ -1364,6 +1364,7 @@ async fn run_single_upload(
                 })
             })
             .unwrap_or_else(|| "archive".to_string());
+        let client_archive_stem = pesto::compress::portable_archive_stem(&client_archive_stem);
 
         // The obfuscated archive name is normally regenerated fresh on every
         // run — but that means a --resume run can never match this file's

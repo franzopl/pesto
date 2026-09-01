@@ -1,0 +1,12 @@
+pesto v0.9.1 — fast, lean Usenet poster
+────────────────────────────────────────────────
+connections: 2 total (2 upload)
+memory: address-space limit none detected | reserved for overhead (connections+threads+runtime) 1.0 GiB | PAR2 budget 13.1 GiB/pass
+PAR2: Reading sources — pass 1/1 · 1025/1771 slices
+computing PAR2 recovery data
+PAR2: computing recovery data — pass 1/1
+PAR2: writing recovery volumes — pass 1/1 · 520/885 slices
+uploading: 44/44 articles · 576.5 KiB · 72.1 KiB/s
+✓ Upload complete — 44/44 articles accepted by the server
+  Not independently verified · elapsed 0:08
+wrote nzb: .pesto-client-tree-e2e.DM90o8/original.nzb

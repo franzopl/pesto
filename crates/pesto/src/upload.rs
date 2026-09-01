@@ -90,6 +90,7 @@ pub async fn run_upload(
                 })
             })
             .unwrap_or_else(|| "archive".to_string());
+        let client_archive_stem = crate::compress::portable_archive_stem(&client_archive_stem);
 
         let archive_stem = if config.obfuscate != ObfuscateMode::None {
             crate::article::obfuscated_name()

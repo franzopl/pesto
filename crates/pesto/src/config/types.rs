@@ -151,8 +151,12 @@ pub enum ObfuscateMode {
     /// No obfuscation: the real file name appears in the subject and yEnc header.
     #[default]
     None,
-    /// Randomise subject and yEnc `name=` on the wire; the NZB always carries
-    /// the real filename so download clients work without PAR2 recovery.
+    /// Private default: every article gets a fresh Subject and From while a
+    /// physical file keeps one opaque yEnc name for client-safe assembly.
+    ///
+    /// `header-fragmented` remains accepted as a compatibility alias.
+    #[serde(alias = "header-fragmented")]
+    #[value(alias = "header-fragmented")]
     Full,
     /// Like `full`, but every file posted in the same run (archive parts and
     /// PAR2 volumes alike) shares one random prefix instead of each getting
@@ -178,9 +182,9 @@ pub enum ObfuscateMode {
     /// for anyone who needs that over avoiding the fingerprint (see GitHub
     /// issue #106).
     Light,
-    /// Each article gets independent Subject, yEnc name and From identities.
-    /// The NZB is required for deterministic assembly, although article sizes,
-    /// timing and yEnc geometry can still permit heuristic correlation.
+    /// Legacy experimental mode: each article gets independent Subject, yEnc
+    /// name and From identities. It deliberately remains hidden because
+    /// multipart PAR2 cleanup is not compatible with conventional clients.
     #[serde(alias = "paranoid")]
     #[value(alias = "paranoid")]
     #[value(hide = true)]
@@ -246,9 +250,9 @@ impl ObfuscateMode {
                 allow_file_counter: true,
             },
             Self::Full => ObfuscationPolicy {
-                subject_scope: IdentityScope::File,
+                subject_scope: IdentityScope::Article,
                 yenc_scope: IdentityScope::File,
-                from_scope: IdentityScope::File,
+                from_scope: IdentityScope::Article,
                 subject_yenc_relation: NameRelation::Independent,
                 shared_release_prefix: false,
                 publish_par2_index: false,
