@@ -17,6 +17,7 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 - Added centralized, testable wire contracts for `none`, `light`,
   `full-shared`, `full`, and the hidden experimental `article` mode. The old
   `paranoid` value remains accepted as an alias.
+- Unhid the `article` (legacy `paranoid`) obfuscation mode as a public experimental mode.
 - Resume and version-2 spool records now persist the exact Subject, yEnc name,
   From, and Date identity used by each obfuscated article.
 
@@ -27,6 +28,11 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 - Obfuscation no longer implicitly enables randomized Date headers. Date is
   omitted by default; explicit `random` remains temporarily accepted with a
   deprecation warning.
+- `full` mode has been redefined to use independent Subject and From headers per
+  article, while keeping the yEnc `name=` stable per physical file. This provides
+  strong header fragmentation while remaining compatible with NZBGet PAR2 cleanup.
+- Recovery volumes under `full` mode now retain the `.par2` extension in their
+  opaque yEnc names so clients can properly classify and remove them after repair.
 - Generated NZB subjects and PAR2 FileDesc packets now consistently use one
   validated canonical client path, including nested directories.
 - `full` and `article` no longer post the standalone PAR2 index. Recovery
@@ -44,12 +50,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   nested UTF-8 path, per-segment identity, volume-only PAR2 repair, and
   FileDesc rename gates. `article` remains hidden until NZBGet passes the same
   end-to-end matrix.
+- `header-fragmented` is now accepted as a configuration alias for `full`.
 
 ### Fixed
 
 - Compressed obfuscated uploads no longer expose their random local scratch
   archive name in the NZB Subject or PAR2 FileDesc. Clients now consistently
   receive the canonical archive name while NNTP headers remain obfuscated.
+- Resolved a 7z compression issue where the staging prefix was included in the archive
+  by converting inputs to absolute paths before invoking 7z.
 
 ## [0.9.1] — 2026-08-25
 
