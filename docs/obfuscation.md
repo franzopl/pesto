@@ -71,9 +71,9 @@ still read the real paths and 16 KiB hashes.
 The automated compatibility gate proves `par2cmdline` can verify and repair
 using a recovery volume after the index is deleted. A live SABnzbd 5.1.1 test
 on 2026-09-01 also passed raw-file reassembly, 7z extraction, nested UTF-8
-paths, and repair of a deliberately missing data article using recovery
-volumes only. `article` stays hidden until NZBGet also passes the same
-end-to-end matrix:
+paths, repair of a deliberately missing data article using recovery volumes
+only, and FileDesc rename from deliberately false NZB Subject names. `article`
+stays hidden until NZBGet also passes the same end-to-end matrix:
 
 - a multi-segment payload whose segments all have different Subject, yEnc
   `name=` and From values;

@@ -41,8 +41,9 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   rather than silently splitting a file across identities. Legacy spool
   entries are re-encoded. Existing NZBs require no migration.
 - SABnzbd 5.1.1 passes the documented `article` raw-file, 7z extraction,
-  nested UTF-8 path, per-segment identity, and volume-only PAR2 repair gates.
-  `article` remains hidden until NZBGet passes the same end-to-end matrix.
+  nested UTF-8 path, per-segment identity, volume-only PAR2 repair, and
+  FileDesc rename gates. `article` remains hidden until NZBGet passes the same
+  end-to-end matrix.
 
 ### Fixed
 
