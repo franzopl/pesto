@@ -790,4 +790,38 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn rar_basename_only_contract() {
+        if find_binary("rar").is_none() {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("pesto_compress_rar_layout_{}", std::process::id()));
+        let staging_dir = dir.join(".tmp/archive-source/my_release");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let src = staging_dir.join("input.bin");
+        std::fs::write(&src, "test").unwrap();
+
+        let result =
+            compress(&[staging_dir], "stem", &dir, ArchiveFormat::Rar, None, None).unwrap();
+
+        let output = std::process::Command::new("rar")
+            .arg("lb")
+            .arg(&result.path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "RAR list failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains(".tmp/archive-source"));
+        assert!(
+            stdout.contains("my_release/input.bin") || stdout.contains(r"my_release\input.bin"),
+            "RAR must preserve the input basename as the archive root: {stdout}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -97,8 +97,9 @@ The same follow-up exposed three interoperability defects. The PAR2 cleanup
 defect is addressed by the supported `header-fragmented` contract. Raw Unicode
 paths now fail early with an actionable error instead of silently restoring
 under a corrupt name, and compressed posts use an ASCII external archive name.
-The archive root fix is verified for 7z/ZIP; RAR remains an external
-compatibility gate because its proprietary CLI is not part of CI:
+The archive root fix is verified for 7z/ZIP and RAR. The RAR regression test
+uses the proprietary CLI when it is installed and is skipped in environments
+where that external binary is unavailable:
 
 - After the successful repair, six downloaded recovery volumes remained in the
   completed directory under opaque per-article yEnc names. NZBGet could use
@@ -113,12 +114,15 @@ compatibility gate because its proprietary CLI is not part of CI:
 - A newly posted archive passed `SUCCESS/UNPACK`, canonical rename to
   `archive-source.7z`, extraction, and hash verification. Pesto passes
   absolute compressor inputs to prevent its private staging prefix from being
-  stored as an archive root; this has a 7z/ZIP regression test. RAR needs the
-  same external client test before it is claimed compatible.
+  stored as an archive root; 7z/ZIP and RAR tests assert that the input
+  basename, rather than the staging prefix, is the archive root.
 
-Before claiming additional cross-client path compatibility, run a live RAR
-root-layout test and cover a missing article's repost/check identity in a live
-posting run.
+A controlled NNTP end-to-end run on 2026-09-01 posted a five-part
+`header-fragmented` fixture, forced two `STAT 430` replies, then accepted the
+two reposts. The seven captured articles retained one yEnc name for the
+physical file while each repost received a fresh Subject and From. The run
+completed and wrote its NZB, covering the check/repost identity contract over
+the actual client/server protocol.
 
 MultiPar and QuickPar are useful Windows compatibility gates for PAR2 path
 handling, but they do not define the NNTP/NZB posting contract.
