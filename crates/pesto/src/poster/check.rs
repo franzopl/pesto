@@ -234,8 +234,23 @@ impl Inner {
 pub struct CheckCoordinatorHandle {
     tx: Option<mpsc::UnboundedSender<PostedSegment>>,
     inner: Arc<Inner>,
-    feeder: tokio::task::JoinHandle<()>,
+    feeder: Option<tokio::task::JoinHandle<()>>,
     workers: Vec<tokio::task::JoinHandle<ConnectionSlot>>,
+}
+
+impl Drop for CheckCoordinatorHandle {
+    fn drop(&mut self) {
+        // A force-abort drops the coordinator from its owner task. Abort all
+        // children explicitly: dropping a JoinHandle alone detaches it, which
+        // would leave a silent STAT/repost waiting on its NNTP timeout.
+        self.tx.take();
+        if let Some(feeder) = &self.feeder {
+            feeder.abort();
+        }
+        for worker in &self.workers {
+            worker.abort();
+        }
+    }
 }
 
 impl CheckCoordinatorHandle {
@@ -277,9 +292,11 @@ impl CheckCoordinatorHandle {
     /// checked out for recovery and are returned to the caller as one set.
     pub async fn finish_and_drain(mut self) -> CheckDrain {
         drop(self.tx.take());
-        let _ = self.feeder.await;
+        if let Some(feeder) = self.feeder.take() {
+            let _ = feeder.await;
+        }
         let mut slots = Vec::with_capacity(self.workers.len());
-        for w in self.workers {
+        for w in std::mem::take(&mut self.workers) {
             if let Ok(slot) = w.await {
                 slots.push(slot);
             }
@@ -382,7 +399,7 @@ pub fn spawn_check_coordinator(
     CheckCoordinatorHandle {
         tx: Some(tx),
         inner,
-        feeder,
+        feeder: Some(feeder),
         workers,
     }
 }

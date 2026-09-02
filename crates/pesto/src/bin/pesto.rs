@@ -49,7 +49,10 @@ given, pesto loads it from the OS-standard location: $XDG_CONFIG_HOME/pesto/conf
 build never checks. Create that file interactively with `pesto --config`,
 which prints the exact path it wrote to.
 
-Any config value can be overridden by the matching flag below.";
+Any config value can be overridden by the matching flag below.
+
+Ctrl-C or SIGTERM once stops gracefully; press it again to abort immediately.
+Progress is saved for --resume in either case.";
 
 /// Examples printed after the option list.
 const AFTER_HELP: &str = "\
@@ -1709,27 +1712,14 @@ async fn run_single_upload(
     // If the user specified a destination (--out or nzb_dir), a hardlink (or
     // copy when cross-device) is placed there so re-uploads never collide.
     let out: Option<PathBuf> = if let Some(stem) = nzb_out_path {
-        if !cancelled || config.resume {
-            Some(nzb_archive_path(&stem).await)
-        } else {
-            if outcome.failure_reason.is_some() {
-                eprintln!("upload failed — skipping nzb output");
-            } else {
-                eprintln!("interrupted — skipping nzb output");
-            }
-            None
-        }
+        Some(nzb_archive_path(&stem).await)
     } else {
         None
     };
 
     // nzb_reported_path: the path shown to the user and passed to hooks/history.
     // It is the user-dest (hardlink) when set, otherwise the archive copy.
-    let mut nzb_reported_path: Option<PathBuf> = if cancelled && !config.resume {
-        None
-    } else {
-        nzb_user_dest.clone().or_else(|| out.clone())
-    };
+    let mut nzb_reported_path: Option<PathBuf> = nzb_user_dest.clone().or_else(|| out.clone());
 
     let _nzb_xml: Option<String> = if let Some(out) = &out {
         if !config.par2_only {

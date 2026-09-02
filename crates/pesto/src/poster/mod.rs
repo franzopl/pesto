@@ -1286,7 +1286,7 @@ pub async fn post_files_inner(
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
-    let check_coordinator = if !check_slots.is_empty() {
+    let mut check_coordinator = if !check_slots.is_empty() {
         Some(spawn_check_coordinator(
             config.clone(),
             shared.post_group.clone(),
@@ -1350,29 +1350,55 @@ pub async fn post_files_inner(
         None
     };
 
+    // The second signal (or the first signal's deadline) is deliberately
+    // handled here rather than inside every NNTP read/write: aborting these
+    // tasks drops their `TcpStream`s immediately, while preserving the
+    // single final resume-state persistence path below.
+    let mut force_abort = crate::cancel::abort_requested();
+    if force_abort {
+        shared.cancelled.store(true, Ordering::Release);
+        shared.emit(ProgressEvent::Aborted);
+    }
+
     // Producer (or, when PAR2 was already generated above, the
     // already-generated-files poster) runs in this thread. Skipped entirely
     // if the generation phase above already failed — nothing valid to post.
-    if failure_reason.is_none() {
-        let result = if will_defer {
-            let result = match tx_opt.as_ref() {
-                Some(tx) => {
-                    post_pregenerated_release(&metas, &par2_dir, recovery_count, tx, &shared).await
+    if failure_reason.is_none() && !force_abort {
+        let producer_shared = shared.clone();
+        let producer_result: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<()>> + Send>,
+        > = if will_defer {
+            Box::pin(async move {
+                match tx_opt.as_ref() {
+                    Some(tx) => {
+                        post_pregenerated_release(
+                            &metas,
+                            &par2_dir,
+                            recovery_count,
+                            tx,
+                            &producer_shared,
+                        )
+                        .await
+                    }
+                    None => Ok(()),
                 }
-                None => Ok(()),
-            };
-            // Unlike `producer`, which owns (and so drops) `tx_opt` itself,
-            // `post_pregenerated_release` only borrows `tx` — drop the real
-            // owner explicitly now that posting is done. Without this the
-            // channel never closes, `rx.recv()` in each worker never sees
-            // the end of the stream, and the join loop below hangs forever
-            // waiting for workers that are just idling.
-            drop(tx_opt);
-            result
+                // `tx_opt` is owned by this future, so it closes here
+                // even when a force-abort cancels the future.
+            })
         } else {
-            producer(metas, tx_opt, shared.clone(), total_conns).await
+            Box::pin(producer(metas, tx_opt, producer_shared, total_conns))
         };
-        if let Err(e) = result {
+        let result = tokio::select! {
+            result = producer_result => Some(result),
+            _ = crate::cancel::aborted() => {
+                force_abort = true;
+                None
+            }
+        };
+        if force_abort {
+            shared.cancelled.store(true, Ordering::Release);
+            shared.emit(ProgressEvent::Aborted);
+        } else if let Some(Err(e)) = result {
             let description = format!("producer error: {e:#}");
             // `Failed` alone only reaches `--output-format json` consumers; log
             // it too so the reason survives in the session log file even when
@@ -1387,12 +1413,49 @@ pub async fn post_files_inner(
         }
     }
 
-    for handle in encode_handles {
-        let _ = handle.await;
+    if !force_abort {
+        while let Some(mut handle) = encode_handles.pop() {
+            tokio::select! {
+                _ = &mut handle => {},
+                _ = crate::cancel::aborted() => {
+                    handle.abort();
+                    force_abort = true;
+                    shared.cancelled.store(true, Ordering::Release);
+                    shared.emit(ProgressEvent::Aborted);
+                    break;
+                }
+            }
+        }
     }
-    for handle in handles {
-        if let Ok(slot) = handle.await {
-            post_slots.push(slot);
+    if force_abort {
+        for handle in encode_handles {
+            handle.abort();
+        }
+        for handle in handles {
+            handle.abort();
+        }
+        shared.cancelled.store(true, Ordering::Release);
+    } else {
+        while let Some(mut handle) = handles.pop() {
+            tokio::select! {
+                result = &mut handle => {
+                    if let Ok(slot) = result {
+                        post_slots.push(slot);
+                    }
+                }
+                _ = crate::cancel::aborted() => {
+                    handle.abort();
+                    force_abort = true;
+                    break;
+                }
+            }
+        }
+        if force_abort {
+            for handle in handles {
+                handle.abort();
+            }
+            shared.cancelled.store(true, Ordering::Release);
+            shared.emit(ProgressEvent::Aborted);
         }
     }
 
@@ -1469,10 +1532,26 @@ pub async fn post_files_inner(
     // leaving this sender alive would hang `finish_and_drain` forever.
     let _ = shared.check_tx.lock().unwrap().take();
     crate::memory::set_phase(crate::memory::Phase::Check);
-    let drain = if let Some(mut coordinator) = check_coordinator {
+    let drain = if force_abort {
+        // Dropping the coordinator aborts all STAT/repost tasks (its Drop
+        // implementation must not merely detach them), so no NNTP timeout
+        // can delay resume persistence.
+        drop(check_coordinator.take());
+        check::CheckDrain::default()
+    } else if let Some(mut coordinator) = check_coordinator.take() {
         // Ownership transfer: no checkin in between post-join and scale_up.
         coordinator.scale_up(std::mem::take(&mut post_slots));
-        coordinator.finish_and_drain().await
+        let mut drain_handle = tokio::spawn(async move { coordinator.finish_and_drain().await });
+        tokio::select! {
+            result = &mut drain_handle => result.unwrap_or_default(),
+            _ = crate::cancel::aborted() => {
+                drain_handle.abort();
+                let _ = drain_handle.await;
+                shared.cancelled.store(true, Ordering::Release);
+                shared.emit(ProgressEvent::Aborted);
+                check::CheckDrain::default()
+            }
+        }
     } else {
         check::CheckDrain {
             slots: std::mem::take(&mut post_slots),

@@ -624,6 +624,15 @@ their own release or bundled into one.
 
 ## Reliability
 
+### Interrupting an upload
+
+Press Ctrl-C (or send SIGTERM) once to stop queueing new articles and finish
+the articles already in flight. Press it again to abort immediately: pesto
+drops active NNTP connections, writes the partial NZB and `.pesto-state`, and
+exits 130. If graceful shutdown is still waiting after about 10 seconds, it
+escalates automatically. In both cases, run again with `--resume` to skip
+confirmed segments.
+
 ### Upload resume
 
 If a posting run is interrupted (Ctrl-C, network failure, articles still
@@ -1171,10 +1180,20 @@ A segment failed permanently after exhausting all retries.
 #### `interrupted`
 
 Emitted when Ctrl-C is received. The run is winding down; a `finished` event
-follows once in-flight segments complete.
+follows once in-flight segments complete. A second signal (or the ten-second
+graceful-shutdown deadline) emits `aborted` before `finished`.
 
 ```json
 {"type":"interrupted"}
+```
+
+#### `aborted`
+
+Emitted when pesto drops in-flight NNTP I/O during an escalated interrupt. The
+partial resume state is saved before the following `finished` event.
+
+```json
+{"type":"aborted"}
 ```
 
 #### `compress_started`
