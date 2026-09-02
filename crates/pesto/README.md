@@ -276,12 +276,13 @@ compatibility gates and non-goals.
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, unique per article | opaque random, stable per physical file | random per article | yes |
 | `full-shared` | shared prefix + real extension, same across the release | shared prefix + random suffix, per file | random, shared across the release | yes |
-| `light` | shared prefix, same across the release | identical to Subject | random, shared across the release | yes |
+| `light` | shared prefix, same across the release | identical to Subject | random, shared across the release | wire Subject |
 
 `full` randomises Subject and From independently for every article, while a
 physical file retains one opaque variable-length alphanumeric yEnc name for
 client-safe multipart assembly. The real file names are only in the `.nzb` you
-keep, or recoverable through the PAR2 set.
+keep, or recoverable through the PAR2 set. `light` instead repeats its opaque
+wire Subject in the NZB so the same token is searchable on public indexers.
 
 A bare `--obfuscate` (no value) means `full`.
 

@@ -293,20 +293,22 @@ are documented in [docs/obfuscation.md](docs/obfuscation.md).
 | `none` (default) | real name | real name | config value | yes |
 | `full` | random, 10–30 chars, independent per file | random, 10–30 chars, independent per file | random per file | yes |
 | `full-shared` | one shared random prefix for the whole release | shared prefix + own random suffix per file | shared for the whole release | yes |
-| `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | yes |
+| `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | wire Subject |
 | `header-fragmented` | independent random name per article | opaque random name per physical file | random per article | yes |
 
 `full` randomises everything on the wire using variable-length alphanumeric
 strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
 random TLD. The real file names are only in the `.nzb` you keep, or recoverable
-through the PAR2 set.
+through the PAR2 set. `light` is the deliberate exception: its NZB repeats the
+wire Subject so the same opaque token can be searched on public indexers.
 
-Every mode above writes the canonical client path into the `.nzb` it generates,
-regardless of what went out on the wire — obfuscation only scrambles the
-actual NNTP article, and the `.nzb` is already a private file you hold
-through your own channel, so there's no reason to hide the name from
-yourself. PAR2 File Description packets carry that same path so SABnzbd and
-NZBGet can perform their normal PAR2 rename and restore nested directories.
+Every mode above except `light` writes the canonical client path into the
+`.nzb` it generates, regardless of what went out on the wire. `light` instead
+mirrors its opaque wire Subject so the NZB supplies the same search token used
+by public indexers. With `--compress`, that token also names the 7z/RAR archive
+and its PAR2 FileDesc records; use a password to keep the archive's payload
+names private. The other modes keep the client path in PAR2 File Description
+packets so SABnzbd and NZBGet can perform their normal rename.
 
 Pesto omits `Date:` by default in every mode and lets the server supply it.
 Use `--date now` or an explicit timestamp only when required. The legacy
@@ -366,9 +368,11 @@ made by this tool. Some indexers key their own release grouping off that exact
 match, though (reportedly including NZBIndex), so `light` restores it for anyone
 who needs that over avoiding the fingerprint (issue #106).
 
-Like every other mode, `light`'s generated `.nzb` carries the canonical client
-path in the quoted part of `<file subject="...">`. Its deliberate exact-match
-fingerprint exists only on the NNTP wire.
+`light`'s generated `.nzb` carries the same opaque Subject in its
+`<file subject="...">` attribute. A recipient can use that one token to find
+the posting in a public indexer; with a password-protected 7z or RAR upload,
+the archive and PAR2 FileDesc use the same token while the real payload names
+stay inside encrypted archive headers.
 
 ```bash
 pesto --obfuscate=light movie.mkv
