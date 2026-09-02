@@ -73,6 +73,9 @@ pub async fn run_upload(
     });
     let effective_password: Option<String> = config.compress_password.clone();
     let compress_temp_dir: Option<PathBuf>;
+    // See the CLI pipeline: `light` compression publishes one opaque archive
+    // identity consistently in the wire headers, NZB and PAR2 metadata.
+    let mut light_compressed_prefix: Option<String> = None;
 
     if let Some(fmt_str) = &compress_format_str {
         let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
@@ -97,6 +100,9 @@ pub async fn run_upload(
         } else {
             client_archive_stem.clone()
         };
+        if config.obfuscate == ObfuscateMode::Light {
+            light_compressed_prefix = Some(archive_stem.clone());
+        }
 
         let tmp_dir = std::env::temp_dir().join(format!(
             "pesto_compress_{}_{}",
@@ -161,11 +167,13 @@ pub async fn run_upload(
         inputs = std::iter::once(result.path)
             .chain(result.extra_paths)
             .map(|path| {
-                let name = crate::compress::client_archive_name(
-                    &path,
-                    &archive_stem,
-                    &client_archive_stem,
-                );
+                let published_stem = if config.obfuscate == ObfuscateMode::Light {
+                    &archive_stem
+                } else {
+                    &client_archive_stem
+                };
+                let name =
+                    crate::compress::client_archive_name(&path, &archive_stem, published_stem);
                 crate::walk::InputFile { path, name }
             })
             .collect();
@@ -227,7 +235,7 @@ pub async fn run_upload(
 
     // ── Post ─────────────────────────────────────────────────────────────────
     let post_tx = progress_tx.clone();
-    let outcome = crate::poster::post_files_inner(
+    let outcome = crate::poster::post_files_inner_with_release_prefix(
         config,
         &inputs,
         post_tx,
@@ -236,6 +244,7 @@ pub async fn run_upload(
         Some(entry_label),
         None,
         pause,
+        light_compressed_prefix.as_deref(),
     )
     .await?;
     // ─────────────────────────────────────────────────────────────────────────

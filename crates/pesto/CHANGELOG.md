@@ -12,6 +12,15 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-02
+
+### Fixed
+
+- Restored `--obfuscate=light`'s shareable Subject contract: generated NZBs
+  now mirror the wire Subject. For compressed uploads, the random archive stem
+  is reused by the wire, NZB, and PAR2 FileDesc, so one opaque token plus the
+  archive password is sufficient to locate and identify the release.
+
 ## [0.10.1] — 2026-09-01
 
 ### Added

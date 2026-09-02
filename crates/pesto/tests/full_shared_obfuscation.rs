@@ -766,17 +766,11 @@ async fn light_obfuscation_par2_set_shares_prefix_and_matches_subject_exactly() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Under every other `--obfuscate` mode, the generated `.nzb` carries the
-/// real filename regardless of what went out on the wire (see
-/// `nzb::generate`'s doc comment) — that's deliberate, so the file you keep
-/// privately is readable without needing the indexer or PAR2 recovery.
-/// `light` exists specifically so the release can be found/repaired through
-/// an indexer using nothing but what's visible on the wire (issue #106), so
-/// its own `.nzb` must mirror that same wire subject instead — otherwise the
-/// file pesto writes for you wouldn't match what's actually searchable/
-/// verifiable out there.
+/// `light` exists specifically so a recipient can find a release using the
+/// Subject carried in its NZB (issue #106). Its NZB must therefore mirror the
+/// wire Subject rather than replace that share token with the local path.
 #[tokio::test]
-async fn light_obfuscation_nzb_keeps_the_authoritative_client_path() {
+async fn light_obfuscation_nzb_subject_mirrors_the_wire_subject() {
     let root = std::env::temp_dir().join(format!("pesto_light_nzb_subject_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -811,12 +805,12 @@ async fn light_obfuscation_nzb_keeps_the_authoritative_client_path() {
         config.obfuscate,
     );
     assert!(
-        nzb.contains("movie.mkv"),
-        "the authoritative NZB must preserve the client path in light mode"
+        !nzb.contains("movie.mkv"),
+        "the real filename must not appear in a light NZB"
     );
     assert!(
-        !nzb.contains(seg.wire_name.as_ref()),
-        "the private NZB must not replace the client path with wire name `{}`",
+        nzb.contains(seg.wire_name.as_ref()),
+        "the NZB subject must carry wire name `{}`",
         seg.wire_name,
     );
 

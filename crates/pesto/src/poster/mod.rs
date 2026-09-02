@@ -702,6 +702,36 @@ pub async fn post_files_inner(
     broker: Option<Arc<ConnectionBroker>>,
     external_pause: Option<Arc<AtomicBool>>,
 ) -> Result<PostOutcome> {
+    post_files_inner_with_release_prefix(
+        config,
+        files,
+        events,
+        resume_state_path,
+        external_cancel,
+        entry_label,
+        broker,
+        external_pause,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`post_files_inner`] used by the upload pipelines to supply an
+/// opaque shared identity created before posting (currently a compressed
+/// `light` archive stem). External callers should use [`post_files_inner`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn post_files_inner_with_release_prefix(
+    config: &Config,
+    files: &[InputFile],
+    events: Option<ProgressSender>,
+    resume_state_path: Option<&Path>,
+    external_cancel: Option<Arc<AtomicBool>>,
+    entry_label: Option<&str>,
+    broker: Option<Arc<ConnectionBroker>>,
+    external_pause: Option<Arc<AtomicBool>>,
+    release_prefix_override: Option<&str>,
+) -> Result<PostOutcome> {
     configure_rayon(config.threads);
     if config.file_counter && !config.obfuscate.policy().allow_file_counter {
         bail!(
@@ -800,7 +830,21 @@ pub async fn post_files_inner(
                 .release_identity()
                 .map(|(p, f)| (p.to_string(), f.to_string()))
         });
-        let (prefix, from) = reused.unwrap_or_else(|| (obfuscated_name(), random_from()));
+        // A compressed `light` upload can supply its already-random archive
+        // stem here. That makes the archive filename, the wire Subject/yEnc
+        // name, the NZB subject and the PAR2 FileDesc one shareable identity
+        // instead of creating a second random wire-only token. A persisted
+        // identity always wins for an interrupted pre-change upload: changing
+        // its wire identity would make its already-posted segments unusable.
+        let (prefix, from) = reused.unwrap_or_else(|| {
+            (
+                release_prefix_override
+                    .filter(|prefix| !prefix.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(obfuscated_name),
+                random_from(),
+            )
+        });
         if let Some(resume) = &resume_arc {
             resume
                 .lock()
@@ -5431,6 +5475,44 @@ mod tests {
         assert!(outcome.failures.is_empty());
         assert!(!outcome.cancelled);
         assert_eq!(outcome.segments[0].file_name, "sample.bin");
+    }
+
+    #[tokio::test]
+    async fn light_release_override_unifies_a_compressed_volume_identity() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("scratch-bytes");
+        std::fs::write(&source, vec![0u8; 1500]).unwrap();
+        let files = vec![InputFile {
+            path: source,
+            name: "shareToken.7z.001".into(),
+        }];
+        let mut config = dry_run_config();
+        config.obfuscate = ObfuscateMode::Light;
+
+        let outcome = post_files_inner_with_release_prefix(
+            &config,
+            &files,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("shareToken"),
+        )
+        .await
+        .unwrap();
+        let segment = &outcome.segments[0];
+        assert_eq!(segment.subject_name.as_ref(), "shareToken.7z.001");
+        assert_eq!(segment.wire_name.as_ref(), "shareToken.7z.001");
+
+        let nzb = crate::nzb::generate(
+            &config.groups,
+            &outcome.segments,
+            &crate::nzb::NzbMeta::default(),
+            config.obfuscate,
+        );
+        assert!(nzb.contains("shareToken.7z.001"));
     }
 
     #[tokio::test]

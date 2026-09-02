@@ -610,6 +610,16 @@ mod tests {
     }
 
     #[test]
+    fn client_archive_name_can_publish_the_opaque_archive_stem() {
+        for name in ["random.7z", "random.7z.001", "random.part01.rar"] {
+            assert_eq!(
+                client_archive_name(Path::new(name), "random", "random"),
+                name
+            );
+        }
+    }
+
+    #[test]
     fn client_archive_name_falls_back_for_unexpected_output() {
         assert_eq!(
             client_archive_name(Path::new("other.7z"), "random", "Release"),

@@ -1347,6 +1347,9 @@ async fn run_single_upload(
     });
 
     let compress_temp_dir: Option<PathBuf>;
+    // `light` makes a compressed archive's opaque filename the one public
+    // share token: it is reused for the wire, NZB and PAR2 metadata below.
+    let mut light_compressed_prefix: Option<String> = None;
     if let Some(fmt_str) = &compress_format_str {
         let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
             anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
@@ -1385,6 +1388,9 @@ async fn run_single_upload(
         } else {
             client_archive_stem.clone()
         };
+        if config.obfuscate == ObfuscateMode::Light {
+            light_compressed_prefix = Some(archive_stem.clone());
+        }
 
         let tmp_base = config
             .compress_temp_dir
@@ -1476,11 +1482,13 @@ async fn run_single_upload(
         inputs = std::iter::once(result.path)
             .chain(result.extra_paths)
             .map(|path| {
-                let name = pesto::compress::client_archive_name(
-                    &path,
-                    &archive_stem,
-                    &client_archive_stem,
-                );
+                let published_stem = if config.obfuscate == ObfuscateMode::Light {
+                    &archive_stem
+                } else {
+                    &client_archive_stem
+                };
+                let name =
+                    pesto::compress::client_archive_name(&path, &archive_stem, published_stem);
                 pesto::walk::InputFile { path, name }
             })
             .collect();
@@ -1502,7 +1510,7 @@ async fn run_single_upload(
     let posted_paths: Vec<PathBuf> = inputs.iter().map(|f| f.path.clone()).collect();
 
     let t_post = std::time::Instant::now();
-    let outcome = pesto::poster::post_files_inner(
+    let outcome = pesto::poster::post_files_inner_with_release_prefix(
         config,
         &inputs,
         Some(progress_tx),
@@ -1511,6 +1519,7 @@ async fn run_single_upload(
         Some(entry_label),
         broker,
         None,
+        light_compressed_prefix.as_deref(),
     )
     .await?;
     let _ = renderer.await;

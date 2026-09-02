@@ -39,13 +39,17 @@ Pesto does not emit one.
 | Standalone PAR2 index posted | yes | yes | yes | no |
 | Recovery volumes posted | yes | yes | yes | yes |
 | PAR2 FileDesc name | canonical client path using `/` | same | same | same |
-| NZB Subject quoted name | canonical client path | same | same | same |
+| NZB Subject quoted name | canonical client path | wire Subject name | canonical client path | canonical client path |
 
 The generated NZB's quoted Subject name is intentionally the client path in
-every mode. SABnzbd initially names the download from that value. NZBGet can
-also use it when the yEnc name looks obfuscated. PAR2 FileDesc remains the
-authoritative rename source for both clients and therefore carries the same
-relative path.
+every mode except `light`. `light` mirrors the wire Subject so its opaque name
+is a shareable indexer-search token. With `--compress` it also becomes the
+archive and PAR2 FileDesc name, leaving one identity for the archive, NZB,
+wire and recovery set; password-protected 7z/RAR archives retain the real
+payload names inside their encrypted headers. SABnzbd initially names the
+download from the NZB value, while NZBGet can also use it when the yEnc name
+looks obfuscated. PAR2 FileDesc remains the authoritative rename source for
+the modes that retain a canonical client path.
 
 For an obfuscated PAR2 recovery volume, Pesto keeps the random yEnc stem but
 adds only the `.par2` extension. This exposes no real filename and lets
