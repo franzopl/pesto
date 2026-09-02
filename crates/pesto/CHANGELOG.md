@@ -12,6 +12,27 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-01
+
+### Added
+
+- JSON progress now emits `aborted` when an interrupt escalates to an immediate
+  I/O abort, before the terminal `finished` event.
+
+### Changed
+
+- Ctrl-C and SIGTERM now use a two-stage shutdown: the first signal drains
+  in-flight articles gracefully, while a second signal or a 10-second deadline
+  drops active NNTP connections and saves resumable progress immediately.
+- Interrupted uploads now retain a partial NZB for confirmed articles alongside
+  their `.pesto-state`, even when `--resume` was not set for that run.
+
+### Fixed
+
+- A second Ctrl-C/SIGTERM is no longer swallowed after graceful shutdown has
+  started, preventing a stalled NNTP command from keeping a process alive until
+  its normal command timeout.
+
 ## [0.10.0] — 2026-09-01
 
 ### Added

@@ -280,94 +280,90 @@ pub async fn run_upload(
     ) == crate::poster::NzbWriteDecision::Refuse;
 
     // ── Write NZB ────────────────────────────────────────────────────────────
-    let nzb_path: Option<PathBuf> = if (cancelled && !config.resume)
-        || outcome.segments.is_empty()
-        || config.dry_run
-        || config.par2_only
-        || write_blocked
-    {
-        None
-    } else if let Some(base) = nzb_base {
-        let out = versioned_nzb_path(&base).await;
-        let nzb_meta = crate::nzb::NzbMeta {
-            name: config.nzb_title.clone().or_else(|| {
-                entry_paths
-                    .first()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-            }),
-            password: config
-                .nzb_password
-                .clone()
-                .or_else(|| effective_password.clone()),
-            category: config.nzb_category.clone(),
-            tmdb_id: config.tmdb_id.clone(),
-            imdb_id: config.imdb_id.clone(),
-            tvdb_id: config.tvdb_id.clone(),
-            mal_id: config.mal_id.clone(),
-            tags: config.nzb_tags.clone(),
-        };
-        crate::memory::set_phase(crate::memory::Phase::Nzb);
-        let xml = crate::nzb::generate(
-            &outcome.groups,
-            &outcome.segments,
-            &nzb_meta,
-            config.obfuscate,
-        );
-        match tokio::fs::write(&out, &xml).await {
-            Ok(()) => {
-                emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
+    let nzb_path: Option<PathBuf> =
+        if outcome.segments.is_empty() || config.dry_run || config.par2_only || write_blocked {
+            None
+        } else if let Some(base) = nzb_base {
+            let out = versioned_nzb_path(&base).await;
+            let nzb_meta = crate::nzb::NzbMeta {
+                name: config.nzb_title.clone().or_else(|| {
+                    entry_paths
+                        .first()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                }),
+                password: config
+                    .nzb_password
+                    .clone()
+                    .or_else(|| effective_password.clone()),
+                category: config.nzb_category.clone(),
+                tmdb_id: config.tmdb_id.clone(),
+                imdb_id: config.imdb_id.clone(),
+                tvdb_id: config.tvdb_id.clone(),
+                mal_id: config.mal_id.clone(),
+                tags: config.nzb_tags.clone(),
+            };
+            crate::memory::set_phase(crate::memory::Phase::Nzb);
+            let xml = crate::nzb::generate(
+                &outcome.groups,
+                &outcome.segments,
+                &nzb_meta,
+                config.obfuscate,
+            );
+            match tokio::fs::write(&out, &xml).await {
+                Ok(()) => {
+                    emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));
 
-                if write_history && !config.dry_run {
-                    let par2_str;
-                    let par2_pct = if config.par2 > 0 {
-                        par2_str = format!("{}%", config.par2);
-                        Some(par2_str.as_str())
-                    } else {
-                        None
-                    };
-                    // The server(s) that actually accepted an article
-                    // (`outcome.servers`), not just the statically
-                    // configured primary — see the analogous comment on
-                    // `group` below.
-                    let history_servers_str = outcome.servers.join(", ");
-                    let wire_subjects_vec = crate::nzb::wire_subjects(&outcome.segments);
-                    crate::history::record_upload(
-                        &crate::history::UploadRecord {
-                            name: entry_label,
-                            obfuscated_name: if config.obfuscate != ObfuscateMode::None {
-                                Some(entry_label)
-                            } else {
-                                None
+                    if write_history && !config.dry_run {
+                        let par2_str;
+                        let par2_pct = if config.par2 > 0 {
+                            par2_str = format!("{}%", config.par2);
+                            Some(par2_str.as_str())
+                        } else {
+                            None
+                        };
+                        // The server(s) that actually accepted an article
+                        // (`outcome.servers`), not just the statically
+                        // configured primary — see the analogous comment on
+                        // `group` below.
+                        let history_servers_str = outcome.servers.join(", ");
+                        let wire_subjects_vec = crate::nzb::wire_subjects(&outcome.segments);
+                        crate::history::record_upload(
+                            &crate::history::UploadRecord {
+                                name: entry_label,
+                                obfuscated_name: if config.obfuscate != ObfuscateMode::None {
+                                    Some(entry_label)
+                                } else {
+                                    None
+                                },
+                                password: effective_password.as_deref(),
+                                total_bytes,
+                                // The group actually posted to (`pick_post_group`
+                                // chose one at random from `config.groups`), not
+                                // the configured list's static first entry.
+                                group: outcome.groups.first().map(String::as_str),
+                                server: (!history_servers_str.is_empty())
+                                    .then_some(history_servers_str.as_str()),
+                                par2_redundancy: par2_pct,
+                                duration_secs: upload_start.elapsed().as_secs_f64(),
+                                nzb_path: Some(&out.display().to_string()),
+                                subject: config.nzb_title.as_deref().or(Some(entry_label)),
+                                wire_subjects: &wire_subjects_vec,
                             },
-                            password: effective_password.as_deref(),
-                            total_bytes,
-                            // The group actually posted to (`pick_post_group`
-                            // chose one at random from `config.groups`), not
-                            // the configured list's static first entry.
-                            group: outcome.groups.first().map(String::as_str),
-                            server: (!history_servers_str.is_empty())
-                                .then_some(history_servers_str.as_str()),
-                            par2_redundancy: par2_pct,
-                            duration_secs: upload_start.elapsed().as_secs_f64(),
-                            nzb_path: Some(&out.display().to_string()),
-                            subject: config.nzb_title.as_deref().or(Some(entry_label)),
-                            wire_subjects: &wire_subjects_vec,
-                        },
-                        config.history_dir.as_deref(),
-                    );
-                }
+                            config.history_dir.as_deref(),
+                        );
+                    }
 
-                Some(out)
+                    Some(out)
+                }
+                Err(e) => {
+                    emit_status(&progress_tx, format!("failed to write nzb: {e}"));
+                    None
+                }
             }
-            Err(e) => {
-                emit_status(&progress_tx, format!("failed to write nzb: {e}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Notifications ────────────────────────────────────────────────────────

@@ -110,6 +110,9 @@ pub enum ProgressEvent {
     PostRetryRecovered { count: u64, previously_failed: bool },
     /// Ctrl-C was received; the run is winding down.
     Interrupted,
+    /// A second Ctrl-C/SIGTERM, or the graceful-shutdown deadline, dropped
+    /// in-flight I/O. Resume state is still persisted before `Finished`.
+    Aborted,
     /// An external pause flag was set: every posting worker is suspended at
     /// the next segment-batch boundary, connections kept alive rather than
     /// torn down. See `poster::post_files_inner`'s `external_pause`.
@@ -395,6 +398,9 @@ async fn json_emit_loop(mut rx: ProgressReceiver) {
                     }
                     ProgressEvent::Interrupted => {
                         let _ = writeln!(out, r#"{{"type":"interrupted"}}"#);
+                    }
+                    ProgressEvent::Aborted => {
+                        let _ = writeln!(out, r#"{{"type":"aborted"}}"#);
                     }
                     ProgressEvent::Paused => {
                         let _ = writeln!(out, r#"{{"type":"paused"}}"#);

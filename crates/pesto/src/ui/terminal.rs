@@ -172,6 +172,7 @@ struct RenderState {
     /// Number of typed retry-queue signals awaiting their detailed `Failed` event.
     post_retry_queued_events: u64,
     interrupted: bool,
+    aborted: bool,
     /// Set by `ProgressEvent::Failed` (e.g. a producer error such as the
     /// `--memory-limit` address-space check bailing). Printed alongside the
     /// "interrupted" note so a run that dies before posting anything doesn't
@@ -350,6 +351,7 @@ impl RenderState {
             recovered_check_retries: 0,
             post_retry_queued_events: 0,
             interrupted: false,
+            aborted: false,
             failed_description: None,
             status: String::new(),
             proxy_status: None,
@@ -561,6 +563,10 @@ impl RenderState {
                 }
             }
             ProgressEvent::Interrupted => self.interrupted = true,
+            ProgressEvent::Aborted => {
+                self.interrupted = true;
+                self.aborted = true;
+            }
             // No CLI flag drives external_pause yet (embedder-only, see
             // ROADMAP.new.md Phase 2) — reuse the existing status line so a
             // future embedder-triggered pause still renders sensibly here.
@@ -1902,8 +1908,12 @@ impl RenderState {
         // of file names) still can't make the panel grow without limit.
         if let Some(desc) = &self.failed_description {
             lines.extend(wrapped_note("⚠ ", desc, width));
+        } else if self.aborted {
+            lines.push("⚠ abort — dropping connections, saving resume state".to_string());
         } else if self.interrupted {
-            lines.push("⚠ interrupt received — finishing in-flight segments".to_string());
+            lines.push(
+                "⚠ interrupt — finishing in-flight articles · Ctrl+C again to abort".to_string(),
+            );
         } else if !self.status.is_empty() {
             let elapsed_str = if let Some(since) = self.status_since {
                 format!(" · {}", format_duration(since.elapsed().as_secs_f64()))
@@ -3155,6 +3165,19 @@ mod tests {
             summary.iter().any(|l| l.contains("too many input slices")),
             "the actual failure reason should be visible in the final summary: {summary:?}"
         );
+    }
+
+    #[test]
+    fn abort_note_replaces_the_graceful_interrupt_hint() {
+        let mut state = started_state(false);
+        state.apply(ProgressEvent::Interrupted);
+        let graceful = state.panel_lines(false, 120).join("\n");
+        assert!(graceful.contains("Ctrl+C again to abort"));
+
+        state.apply(ProgressEvent::Aborted);
+        let aborted = state.panel_lines(false, 120).join("\n");
+        assert!(aborted.contains("dropping connections, saving resume state"));
+        assert!(!aborted.contains("Ctrl+C again to abort"));
     }
 
     #[test]
