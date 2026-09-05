@@ -12,6 +12,17 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-09-05
+
+### Changed
+
+- Verbose output now reports the effective PAR2 scratch directory when it is
+  created, summarizes the files materialised there, and confirms its removal.
+  Scratch creation/write errors include the affected path, while cleanup
+  failures are warned instead of being silently discarded. Documentation now
+  clarifies that recovery is computed in RAM before the short-lived directory
+  appears. Fixes #183.
+
 ## [0.10.2] — 2026-09-02
 
 ### Fixed

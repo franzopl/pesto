@@ -231,12 +231,12 @@ struct Cli {
     #[arg(long)]
     memory_report: bool,
 
-    /// Directory where intermediate PAR2 files are written during posting,
-    /// before they're read back and posted. Defaults to the OS temp
-    /// directory (e.g. /tmp), which may sit on a different filesystem —
-    /// with less free space or a stricter disk quota — than the destination
-    /// disk. Ignored with --par2-only, which writes PAR2 files next to the
-    /// sources instead [config: posting.par2_temp_dir].
+    /// Base for a per-run directory holding intermediate PAR2 files. Recovery
+    /// is computed in RAM first; the directory is created when the PAR2 files
+    /// are materialised and removed after posting/checks/retries. Use -v to
+    /// see its effective path. Defaults to the OS temp directory (e.g. /tmp).
+    /// Ignored with --par2-only, which writes PAR2 files next to the sources
+    /// instead [config: posting.par2_temp_dir].
     #[arg(long, value_name = "DIR")]
     par2_temp_dir: Option<String>,
 
@@ -2012,7 +2012,7 @@ async fn run_single_upload(
     // is it safe to remove the PAR2 temp dir. See `par2_temp_dir`'s doc
     // comment for why this used to happen too early.
     if !config.par2_only {
-        let _ = tokio::fs::remove_dir_all(&outcome.par2_temp_dir).await;
+        outcome.cleanup_par2_temp_dir().await;
     }
 
     // 26g — per-phase timing summary (only when -v is active)

@@ -479,6 +479,21 @@ large release's PAR2 index/volumes can end up posted a while after its data
 files. See `--par2-before-upload` below if that gap matters for how your
 target indexer groups a release's files together.
 
+### PAR2 scratch directory
+
+During a normal posting run, `--par2-temp-dir <DIR>` (or
+`posting.par2_temp_dir` in the configuration file) selects the base directory
+for intermediate PAR2 files. Pesto creates a unique
+`parmesan_<pid>_<run_id>` directory underneath it, writes the PAR2 index and
+recovery volumes there, reads those files back for posting/checks/retries, and
+then removes the per-run directory. The configured base directory is retained.
+
+PAR2 recovery is computed in RAM before these files are materialised, so the
+directory does not exist during most of the PAR2 computation and may be
+short-lived on a fast system. Run with `-v` to see the effective path, written
+file count and byte count, and cleanup result. `--par2-only` does not use this
+scratch directory; it writes PAR2 files next to the sources.
+
 ### Generating PAR2 before posting
 
 By default pesto computes PAR2 recovery data concurrently with the upload —

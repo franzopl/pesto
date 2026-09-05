@@ -103,9 +103,10 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("movie.bin");
+    let configured_par2_base = dir.join("configured-par2-base");
     std::fs::write(&input, content(0)).unwrap();
 
-    let config = Config {
+    let mut config = Config {
         host: "127.0.0.1".to_string(),
         port: addr.port(),
         ssl: false,
@@ -129,7 +130,7 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         par2_recovery_count: None,
         par2_memory_limit: Some(1_000_000_000),
         memory_limit: None,
-        par2_temp_dir: None,
+        par2_temp_dir: Some(configured_par2_base.clone()),
         compress_temp_dir: None,
         par2_only: false,
         par2_before_upload: false,
@@ -210,6 +211,11 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
     // running --check afterward can still re-read them to repost a segment
     // STAT couldn't find.
     let par2_dir = &outcome.par2_temp_dir;
+    assert_eq!(
+        par2_dir.parent(),
+        Some(configured_par2_base.as_path()),
+        "PAR2 files must be materialised under the configured base"
+    );
     assert!(
         par2_dir.exists(),
         "outcome.par2_temp_dir ({}) must still exist right after post_files() \
@@ -217,6 +223,35 @@ async fn par2_temp_dir_is_not_deleted_by_post_files() {
         par2_dir.display()
     );
 
-    let _ = std::fs::remove_dir_all(par2_dir);
+    outcome.cleanup_par2_temp_dir().await;
+    assert!(
+        !par2_dir.exists(),
+        "per-run PAR2 scratch directory should be removed"
+    );
+    assert!(
+        configured_par2_base.exists(),
+        "cleanup must preserve the configured base directory"
+    );
+
+    // A configured base that cannot contain a directory must fail clearly at
+    // that exact path. It must never fall back to the OS temp directory,
+    // because that could unexpectedly exhaust a different filesystem.
+    let invalid_base = dir.join("not-a-directory");
+    std::fs::write(&invalid_base, b"file blocks create_dir_all").unwrap();
+    config.par2_temp_dir = Some(invalid_base.clone());
+    let failed = post_files(&config, &inputs).await.unwrap();
+    let reason = failed
+        .failure_reason
+        .as_deref()
+        .expect("invalid configured PAR2 base should surface a producer error");
+    assert!(
+        reason.contains("creating PAR2 scratch directory"),
+        "error should identify the failed lifecycle operation: {reason}"
+    );
+    assert!(
+        reason.contains(&invalid_base.display().to_string()),
+        "error should include the configured path: {reason}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
