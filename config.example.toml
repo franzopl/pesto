@@ -119,11 +119,15 @@ groups = ["alt.binaries.test"]
 # Default: 10.
 # par2 = 10
 
-# par2_temp_dir — directory where intermediate PAR2 files are written during
-# posting, before they're read back and posted. Default: the OS temp
-# directory (e.g. /tmp), which may sit on a different filesystem — with less
-# free space or a stricter disk quota — than the destination disk. Ignored
-# with --par2-only, which writes PAR2 files next to the sources instead.
+# par2_temp_dir — base directory where a per-run `parmesan_<pid>_<run_id>`
+# directory is created for intermediate PAR2 files. PAR2 recovery is computed
+# in RAM first; this directory appears only when the index and recovery
+# volumes are materialised for posting, and the per-run directory is removed
+# after posting, checks and retries finish. The configured base itself is
+# preserved. Default: the OS temp directory (e.g. /tmp), which may sit on a
+# different filesystem — with less free space or a stricter disk quota — than
+# the destination disk. Ignored with --par2-only, which writes PAR2 files next
+# to the sources instead. Use -v to see the effective path and lifecycle.
 # par2_temp_dir = "/path/on/destination/disk/tmp"
 
 # par2_before_upload — generate all PAR2 recovery data before posting

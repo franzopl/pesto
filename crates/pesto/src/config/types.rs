@@ -390,13 +390,14 @@ pub struct PostingSection {
     /// `pesto::memory::budget` — bounded together with (not looser than)
     /// `par2_memory_limit` and the RLIMIT_AS-specific pass-sizing model.
     pub memory_limit: Option<String>,
-    /// Base directory for the intermediate PAR2 files written during a
-    /// normal posting run, before they're read back and posted. Default:
-    /// the OS temp directory (`std::env::temp_dir()`, usually `/tmp` or
-    /// `$TMPDIR`), which may sit on a different filesystem — with less free
-    /// space or a stricter quota — than the destination disk. Ignored when
-    /// `--par2-only` is set, since PAR2 files are then written next to the
-    /// sources instead of a scratch directory.
+    /// Base directory for the per-run directory holding intermediate PAR2
+    /// files. Recovery data is computed in RAM first; the directory appears
+    /// only while the index and volumes are materialised, posted, checked and
+    /// retried, then the per-run directory is removed. Default: the OS temp
+    /// directory (`std::env::temp_dir()`, usually `/tmp` or `$TMPDIR`), which
+    /// may sit on a different filesystem — with less free space or a stricter
+    /// quota — than the destination disk. Ignored when `--par2-only` is set,
+    /// since PAR2 files are then written next to the sources.
     pub par2_temp_dir: Option<String>,
     /// Generate all PAR2 recovery data before posting anything, instead of
     /// computing it concurrently with the data upload (the default). Every

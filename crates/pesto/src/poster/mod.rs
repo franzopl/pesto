@@ -313,6 +313,16 @@ pub struct PostOutcome {
     pub par2_temp_dir: PathBuf,
 }
 
+impl PostOutcome {
+    /// Remove this run's PAR2 scratch directory after every consumer has
+    /// finished reading it. A missing directory is an expected no-op when
+    /// PAR2 generation was disabled or did not reach materialisation.
+    /// Cleanup failures are logged but do not invalidate the upload outcome.
+    pub async fn cleanup_par2_temp_dir(&self) {
+        cleanup_par2_temp_dir(&self.par2_temp_dir).await;
+    }
+}
+
 /// Whether the NZB (and NFO / post-hooks) should be written for this run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NzbWriteDecision {
@@ -1855,6 +1865,30 @@ pub fn par2_temp_dir(base: Option<&Path>, run_id: u64) -> PathBuf {
     base.join(format!("parmesan_{}_{run_id}", std::process::id()))
 }
 
+/// Remove a per-run PAR2 scratch directory once every consumer has finished
+/// reading it. A missing directory is an expected no-op when PAR2 generation
+/// was disabled or did not reach the materialisation phase. Other cleanup
+/// failures do not invalidate an otherwise successful upload, but are logged
+/// so operators can find and remove leaked scratch data.
+async fn cleanup_par2_temp_dir(path: &Path) {
+    let started = Instant::now();
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => info!(
+            path = %path.display(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "PAR2 scratch directory removed"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            debug!(path = %path.display(), "PAR2 scratch directory was not created")
+        }
+        Err(error) => warn!(
+            path = %path.display(),
+            error = %error,
+            "failed to remove PAR2 scratch directory"
+        ),
+    }
+}
+
 /// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure
 /// SIMD/ALU work; sibling hyperthreads contend for the same execution ports
 /// and add almost nothing, so one worker per logical CPU only heats the
@@ -2469,6 +2503,9 @@ async fn producer(
     let mut par2_dir = None;
     let mut base_packets = Vec::new();
     let mut rsid = [0u8; 16];
+    let mut par2_materialize_started = None;
+    let mut par2_materialized_files = 0usize;
+    let mut par2_materialized_bytes = 0u64;
 
     for (pass_idx, (exp_start, rec_count)) in passes.iter().copied().enumerate() {
         if rec_count > 0 {
@@ -2785,17 +2822,35 @@ async fn producer(
 
                 if shared.config.par2_only {
                     par2_dir = Some(par2_output_dir(&metas[0]));
+                    info!(
+                        path = %par2_dir.as_ref().unwrap().display(),
+                        configured_scratch_base = shared.config.par2_temp_dir.is_some(),
+                        "PAR2-only output directory selected; PAR2 scratch configuration is not used"
+                    );
                 } else {
                     par2_dir = Some(par2_temp_dir(
                         shared.config.par2_temp_dir.as_deref(),
                         shared.run_id,
                     ));
-                    tokio::fs::create_dir_all(par2_dir.as_ref().unwrap()).await?;
+                    let dir = par2_dir.as_ref().unwrap();
+                    tokio::fs::create_dir_all(dir).await.with_context(|| {
+                        format!("creating PAR2 scratch directory `{}`", dir.display())
+                    })?;
+                    par2_materialize_started = Some(Instant::now());
+                    info!(
+                        path = %dir.display(),
+                        configured_base = shared.config.par2_temp_dir.is_some(),
+                        "PAR2 scratch directory created"
+                    );
                 }
 
                 let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
                 let index_path = par2_dir.as_ref().unwrap().join(&index_name);
-                tokio::fs::write(&index_path, &base_packets).await?;
+                tokio::fs::write(&index_path, &base_packets)
+                    .await
+                    .with_context(|| format!("writing PAR2 index `{}`", index_path.display()))?;
+                par2_materialized_files += 1;
+                par2_materialized_bytes += base_packets.len() as u64;
                 if let Some(tx) = &tx_opt {
                     if shared.config.obfuscate.policy().publish_par2_index {
                         // In discovery modes the standalone index remains the
@@ -2832,10 +2887,17 @@ async fn producer(
                     .create(true)
                     .append(true)
                     .open(&vol_path)
-                    .await?;
+                    .await
+                    .with_context(|| {
+                        format!("opening PAR2 recovery volume `{}`", vol_path.display())
+                    })?;
 
                 if slice.exponent == vol.first {
-                    file.write_all(&base_packets).await?;
+                    file.write_all(&base_packets).await.with_context(|| {
+                        format!("writing PAR2 recovery volume `{}`", vol_path.display())
+                    })?;
+                    par2_materialized_files += 1;
+                    par2_materialized_bytes += base_packets.len() as u64;
                 }
 
                 let pkt = packet::serialize_packet(
@@ -2843,7 +2905,10 @@ async fn producer(
                     &packet::TYPE_RECOVERY,
                     &packet::recovery_body(slice.exponent, &slice.data),
                 );
-                file.write_all(&pkt).await?;
+                file.write_all(&pkt).await.with_context(|| {
+                    format!("writing PAR2 recovery volume `{}`", vol_path.display())
+                })?;
+                par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
                 if slice.exponent == vol.first + vol.count - 1 {
@@ -2864,6 +2929,18 @@ async fn producer(
                 elapsed_ms = t_par2_write.elapsed().as_millis(),
                 phase = "par2_write",
                 "phase done"
+            );
+        }
+    }
+
+    if let (Some(dir), Some(started)) = (&par2_dir, par2_materialize_started) {
+        if !shared.config.par2_only {
+            info!(
+                path = %dir.display(),
+                files = par2_materialized_files,
+                bytes = par2_materialized_bytes,
+                elapsed_ms = started.elapsed().as_millis(),
+                "PAR2 scratch files ready"
             );
         }
     }

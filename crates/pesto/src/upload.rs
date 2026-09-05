@@ -498,7 +498,7 @@ pub async fn run_upload(
     // See `poster::par2_temp_dir`'s doc comment for why this used to happen
     // too early.
     if !config.par2_only {
-        let _ = tokio::fs::remove_dir_all(&outcome.par2_temp_dir).await;
+        outcome.cleanup_par2_temp_dir().await;
     }
 
     Ok(UploadOutcome {
