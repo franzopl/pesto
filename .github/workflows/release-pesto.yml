@@ -23,8 +23,11 @@ jobs:
     strategy:
       matrix:
         include:
+          # Ubuntu 22.04 (glibc 2.35) so the gnu artifact runs on Debian 12
+          # (bookworm, glibc 2.36) — the Docker runtime — and on newer hosts.
+          # ubuntu-latest is 24.04 (glibc 2.39), which bookworm cannot load.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact: pesto
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
@@ -143,3 +146,59 @@ jobs:
             pesto-windows-x86_64.exe
             SHA256SUMS
           body_path: /tmp/release-body.md
+
+  # GHCR image uses the linux-gnu artifact from `build`, not a second LTO
+  # compile, so `ghcr.io/franzopl/pesto:<semver>` is the same binary as
+  # `pesto-linux-x86_64` on the GitHub Release (issue #185).
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux-gnu binary
+        uses: actions/download-artifact@v4
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: .
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/franzopl/pesto
+          tags: |
+            type=match,pattern=pesto-v(\d+\.\d+\.\d+),group=1
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime-prebuilt
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PESTO_BIN=pesto
+
+      - name: Confirm image
+        run: |
+          VERSION="${GITHUB_REF_NAME#pesto-v}"
+          docker pull "ghcr.io/franzopl/pesto:${VERSION}"
+          docker run --rm "ghcr.io/franzopl/pesto:${VERSION}" --version

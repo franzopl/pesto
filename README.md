@@ -20,6 +20,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
 ## Contents
 
 - [Installing](#installing)
+  - [Docker (watch daemon)](#docker-watch-daemon)
 - [Build from source](#build-from-source)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
@@ -95,6 +96,59 @@ cargo install pesto-poster
 ```
 
 The installed binary is named `pesto`.
+
+### Docker (watch daemon)
+
+Run `pesto --watch` as a container instead of a host service. The image is
+**pesto CLI only** (not upapasta, penne, or sugo).
+
+```bash
+docker pull ghcr.io/franzopl/pesto:latest
+docker run --rm ghcr.io/franzopl/pesto:latest --version
+```
+
+Each `pesto-v*` GitHub Release also publishes `ghcr.io/franzopl/pesto:<semver>`
+and `:latest` (`linux/amd64`). The image binary is the same glibc artifact as
+`pesto-linux-x86_64`. The first package may be private until a maintainer
+marks it public (`docker login ghcr.io` until then).
+
+Build from source:
+
+```bash
+docker build -t pesto .
+docker run --rm pesto --version
+```
+
+Compose example (config / incoming / nzb / archive bind mounts, non-root,
+`stop_grace_period: 30m`):
+
+```bash
+mkdir -p docker/config/pesto docker/incoming docker/nzb docker/archive
+cp docker/config.toml.example docker/config/pesto/config.toml
+# edit credentials — they are never baked into the image
+
+docker compose -f docker/compose.yaml up -d
+```
+
+The compose file uses `--nzb-dir /data/nzb`, not `--out` (`--out` is a file
+path). `--compress=rar` is not in the image; 7z/zip are (`p7zip-full`).
+
+**Signals.** SIGTERM tells `--watch` to stop polling. After 10 seconds pesto
+aborts in-flight NNTP I/O and persists resume state — it does not keep
+uploading a large release to completion. `stop_grace_period: 30m` only
+prevents Docker's default 10s SIGKILL from racing that shutdown.
+
+**Existing files.** `--watch` ignores entries already in the directory at
+startup. After a restart, drain leftovers with:
+
+```bash
+docker compose -f docker/compose.yaml --profile drain run --rm pesto-drain
+```
+
+or `pesto --each /data/incoming --cleanup-to /data/archive` (plus `--nzb-dir`).
+
+Full volume layout, uid notes, and hook caveats:
+[`docker/README.md`](docker/README.md).
 
 ### Build from source
 
@@ -637,6 +691,7 @@ pesto --watch ./incoming/ --jobs 3 --watch-interval 60
 
 Entries already present in the watched directory when `pesto` starts are ignored;
 only new arrivals are posted. By default, completed entries are left in place.
+To run `--watch` as a container, see [Docker (watch daemon)](#docker-watch-daemon).
 
 ### `--cleanup` and `--cleanup-to` — source cleanup after upload
 

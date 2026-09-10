@@ -1,0 +1,12 @@
+# Allowlist. This working tree holds tens of GB of local media and bench
+# corpora; gitignore-style `*.mkv` does **not** recurse in Docker (only
+# the repo root), so a denylist leaked ~1.3GB into the first build.
+# Cargo only needs the workspace; GHCR `--target runtime-prebuilt` also
+# needs the linux-gnu binary named `pesto` at the context root.
+
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!crates/**
+!pesto

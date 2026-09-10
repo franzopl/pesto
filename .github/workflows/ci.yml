@@ -59,3 +59,15 @@ jobs:
         run: cargo clippy -p pesto-poster -p parmesan-par2 --all-targets -- -D warnings
       - name: Test (pesto + parmesan)
         run: cargo test -p pesto-poster -p parmesan-par2 --lib
+
+  # Packaging only: Compose validity + the Debian runtime stage. The full
+  # from-source image is `docker build` locally; GHCR is published from the
+  # linux-gnu release artifact (see release-pesto.yml).
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose file
+        run: docker compose -f docker/compose.yaml config --quiet
+      - name: Build runtime base
+        run: docker build --target runtime-base -t pesto:runtime-base .
