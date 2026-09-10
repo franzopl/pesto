@@ -12,6 +12,19 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+
+- Docker image and Compose example for `pesto --watch` as a long-lived
+  daemon (`Dockerfile`, `docker/compose.yaml`). Each `pesto-v*` tag also
+  publishes `ghcr.io/franzopl/pesto:<semver>` from the linux-gnu release
+  artifact. See #185.
+
+### Changed
+
+- The `pesto-linux-x86_64` GitHub Release artifact is built on Ubuntu 22.04
+  (glibc 2.35) so it runs on Debian 12 and inside the Docker image. Musl
+  and Windows artifacts are unchanged.
+
 ## [0.10.3] — 2026-09-05
 
 ### Changed

@@ -1,0 +1,71 @@
+# pesto --watch daemon (issue #185).
+#
+# From the repository root:
+#   docker compose -f docker/compose.yaml up -d
+#
+# Bind-mount paths are relative to this file (`docker/`). Create them first:
+#   mkdir -p docker/config/pesto docker/incoming docker/nzb docker/archive
+#   cp docker/config.toml.example docker/config/pesto/config.toml
+#
+# `--nzb-dir` is a directory. Do not point `--out` at the nzb folder
+# (`--out` is a file path; that yields EISDIR / Access denied).
+
+name: pesto
+
+x-pesto-common: &pesto-common
+  image: ghcr.io/franzopl/pesto:latest
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  user: "1000:1000"
+  init: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment:
+    XDG_CONFIG_HOME: /config
+    TMPDIR: /tmp
+  tmpfs:
+    - /tmp:uid=1000,gid=1000,mode=1777
+  volumes:
+    - ./config:/config
+    - ./incoming:/data/incoming
+    - ./nzb:/data/nzb
+    - ./archive:/data/archive
+  # Optional: expose a cgroup memory.max so pesto's PAR2 planner sees a cap.
+  # mem_limit: 8g
+
+services:
+  pesto:
+    <<: *pesto-common
+    restart: unless-stopped
+    # Docker's default 10s SIGKILL races pesto's own 10s I/O-abort deadline
+    # (GRACEFUL_SHUTDOWN_DEADLINE) and can skip resume-state persistence.
+    # SIGTERM still cancels in-flight NNTP I/O after 10s; this grace only
+    # keeps Docker from killing the process while watch drains tasks.
+    stop_grace_period: 30m
+    command:
+      - --watch
+      - /data/incoming
+      - --nzb-dir
+      - /data/nzb
+      - --cleanup-to
+      - /data/archive
+      - --watch-interval
+      - "30"
+
+  # One-shot drain of leftovers in incoming. `--watch` ignores entries
+  # already present at startup, so after a restart run:
+  #   docker compose -f docker/compose.yaml --profile drain run --rm pesto-drain
+  pesto-drain:
+    <<: *pesto-common
+    profiles: ["drain"]
+    restart: "no"
+    command:
+      - --each
+      - /data/incoming
+      - --nzb-dir
+      - /data/nzb
+      - --cleanup-to
+      - /data/archive

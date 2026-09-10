@@ -1,0 +1,26 @@
+# Bind-mount this file as `/config/pesto/config.toml`.
+#
+#   mkdir -p docker/config/pesto
+#   cp docker/config.toml.example docker/config/pesto/config.toml
+#
+# Do not bake credentials into the image. Paths below match docker/compose.yaml.
+# Full option list: ../config.example.toml
+
+[server]
+host = "news.example.com"
+# port = 563
+# ssl = true
+# connections = 4
+
+[auth]
+username = "your_username"
+password = "your_password"
+
+[posting]
+groups = ["alt.binaries.test"]
+# par2 = 10
+# obfuscate = "none"
+
+[output]
+# Compose already passes --nzb-dir /data/nzb; this is the config equivalent.
+nzb_dir = "/data/nzb"

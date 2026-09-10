@@ -1,0 +1,5 @@
+# Host bind mounts created next to compose.yaml.
+config/
+incoming/
+nzb/
+archive/
