@@ -3753,7 +3753,7 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     let label = cli
         .files
         .first()
-        .map(release_label)
+        .map(|p| release_label(p))
         .unwrap_or_else(|| format!("{}", std::process::id()));
     let result = run_single_upload(
         &params,
