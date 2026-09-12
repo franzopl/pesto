@@ -2393,6 +2393,64 @@ impl Drop for CompressTempCleanup {
     }
 }
 
+/// Human-readable entry label for hooks (`PESTO_NAME`), banners, and history.
+///
+/// Strips only known media/archive extensions so `Show.S01E01.mkv` becomes
+/// `Show.S01E01`. Dots inside a scene name (`Show.S01E01.720p.BluRay-Group`)
+/// are kept — `file_stem()` would chop them. `--season`/`--each` used to
+/// pass the raw filename, so indexer pre-hooks searched for `….mkv` and
+/// missed an existing release whose name has no extension.
+fn release_label(path: &Path) -> String {
+    const STRIP_EXTS: &[&str] = &[
+        "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "flv", "webm", "mpg", "mpeg", "vob",
+        "iso", "nzb", "zip", "rar", "7z", "tar", "gz", "bz2", "cbz", "cbr", "pdf", "epub",
+    ];
+    path.file_name()
+        .map(|s| {
+            let name = s.to_string_lossy();
+            let p = Path::new(s);
+            match p.extension().and_then(|e| e.to_str()) {
+                Some(ext) if STRIP_EXTS.contains(&ext.to_ascii_lowercase().as_str()) => {
+                    p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
+                }
+                _ => name.into_owned(),
+            }
+        })
+        .unwrap_or_else(|| "entry".to_string())
+}
+
+#[cfg(test)]
+mod release_label_tests {
+    use super::release_label;
+    use std::path::Path;
+
+    #[test]
+    fn strips_mkv_from_season_episode_file() {
+        assert_eq!(
+            release_label(Path::new("/tv/Show.S01E01.1080p.mkv")),
+            "Show.S01E01.1080p"
+        );
+    }
+
+    #[test]
+    fn keeps_scene_name_without_media_extension() {
+        assert_eq!(
+            release_label(Path::new("/tv/Show.S01E01.720p.BluRay-Group")),
+            "Show.S01E01.720p.BluRay-Group"
+        );
+    }
+
+    #[test]
+    fn strips_extension_case_insensitively() {
+        assert_eq!(release_label(Path::new("Movie.MKV")), "Movie");
+    }
+
+    #[test]
+    fn keeps_directory_like_names() {
+        assert_eq!(release_label(Path::new("/season/Episode01")), "Episode01");
+    }
+}
+
 async fn run_batch(
     params: Arc<UploadParams>,
     dirs: &[PathBuf],
@@ -2485,10 +2543,7 @@ async fn run_batch(
         let task_cancel = cancel.clone();
         let task_password = season_password.clone();
         let task_broker = broker.clone();
-        let label = entry
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "entry".to_string());
+        let label = release_label(&entry);
 
         info!(
             entry = entry_idx + 1,
@@ -3005,10 +3060,7 @@ async fn run_watch(
                     let params = Arc::clone(&params);
                     let watch_done = watch_done.map(PathBuf::from);
                     let tx = result_tx.clone();
-                    let label = entry
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "entry".to_string());
+                    let label = release_label(&entry);
                     let task_cancel = cancel.clone();
                     let explicit_out = explicit_out.clone();
 
@@ -3696,30 +3748,12 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
     }
 
     // ── Single upload (normal mode) ───────────────────────────────────────────
-    // Derive a human-readable label from the first input path without any
-    // blocking filesystem calls (no is_dir/stat in the async executor).
-    // file_name() returns the last path component; we strip a known extension
-    // Strip the extension only for known media file types. Release names that
-    // contain dots (e.g. "Show.S01E01.720p.BluRay-Group") must not be trimmed
-    // by file_stem(), which would drop everything after the last dot.
-    const STRIP_EXTS: &[&str] = &[
-        "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "flv", "webm", "mpg", "mpeg", "vob",
-        "iso", "nzb", "zip", "rar", "7z", "tar", "gz", "bz2", "cbz", "cbr", "pdf", "epub",
-    ];
+    // Same label helper as `--season`/`--each` (no is_dir/stat on the
+    // async executor). See `release_label`.
     let label = cli
         .files
         .first()
-        .and_then(|p| p.file_name())
-        .map(|s| {
-            let name = s.to_string_lossy();
-            let p = std::path::Path::new(s);
-            match p.extension().and_then(|e| e.to_str()) {
-                Some(ext) if STRIP_EXTS.contains(&ext.to_ascii_lowercase().as_str()) => {
-                    p.file_stem().unwrap_or(s).to_string_lossy().into_owned()
-                }
-                _ => name.into_owned(),
-            }
-        })
+        .map(|p| release_label(p))
         .unwrap_or_else(|| format!("{}", std::process::id()));
     let result = run_single_upload(
         &params,

@@ -12,6 +12,11 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-09-12
+
+### Fixed
+- **`--season`/`--each` kept the media extension in `PESTO_NAME`.** Batch entries used the raw filename (`Show.S01E01.mkv`), while a single-file upload already stripped known extensions. Indexer pre-hooks that exact-match a Newznab search then queried `….mkv` and missed the existing release (stored without the extension). `--season`/`--each`/`--watch` now share the same `release_label` helper as the single-file path.
+
 ### Added
 
 - Docker image and Compose example for `pesto --watch` as a long-lived
