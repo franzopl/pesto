@@ -1,6 +1,7 @@
 pub mod affine;
 pub mod affine2x;
 pub mod altmap;
+pub mod create;
 pub mod decoder;
 pub mod encoder;
 pub mod gf16;

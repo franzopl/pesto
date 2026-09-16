@@ -583,3 +583,100 @@ inside the repository; nothing requires a separate site.
       one documents the *release* process (version bumps, crates.io,
       GitHub releases); this one would be about day-to-day changelog
       hygiene per change.
+
+---
+
+## Phase 27 — Stable High-Level Creation API (#188)
+
+`parmesan-par2` can create a complete recovery set, but that orchestration is
+currently implemented by the CLI. Consumers embedding the crate must assemble
+packets, volumes, hashing, and encoder passes themselves. This phase exposes a
+small, stable library API that performs the same work without spawning the
+`parmesan` binary.
+
+**Scope and principles:**
+
+- The CLI and the public API must use one creation engine; neither may grow a
+  separate implementation.
+- The normal API accepts filesystem paths and returns structured output. The
+  low-level encoder and packet APIs remain available for expert callers.
+- The library never prints to stdout or stderr. Progress is reported through
+  structured events.
+- Output must be preflighted and staged so failures and cancellation do not
+  leave a partial recovery set in the destination directory.
+- A library operation must not configure Rayon globally. Its requested thread
+  count applies only to that operation.
+
+**Explicit non-goals for this phase:** generic `Read` inputs, remote/object
+storage backends, custom volume layouts, an async callback framework, and
+manual SIMD/layout selection in the high-level API. Each would expand the
+public contract without helping the primary embedding use case.
+
+| Step | Depends on | Complexity |
+|------|------------|------------|
+| 27a | — | S |
+| 27b | 27a | L |
+| 27c | 27b | M |
+| 27d | 27c | M |
+| 27e | 27d | M |
+| 27f | 27e | S |
+
+### 27a — Public API contract (Complexity: Low)
+
+- [x] Design `parmesan::create` around `CreateRequest`, `Recovery`,
+      `CreateReport`, `CreateEvent`, and a non-exhaustive public error type.
+- [x] Make percentage recovery and exact recovery-block counts mutually
+      exclusive in the type model.
+- [x] Define default output naming, directory expansion, overwrite policy,
+      cancellation behavior, and the report's stable fields before exposing
+      the API.
+- [x] Add compile-tested API examples to lock in ergonomic use by a separate
+      Rust application.
+
+### 27b — Shared creation engine (Complexity: High)
+
+- [x] Extract file discovery, canonical File ID ordering, geometry planning,
+      multi-pass encoding, packet construction, and volume writing from
+      `main.rs` into a library-owned creation engine.
+- [x] Make `parmesan create` a thin Clap-to-request adapter over that engine,
+      retaining its existing observable behavior and output names.
+- [x] Preserve current correctness behavior for empty files, exact-multiple
+      slices, slice windows, recovery offsets, and memory-limited passes.
+
+### 27c — Transactional output handling (Complexity: Medium)
+
+- [x] Resolve every final output path and refuse collisions before expensive
+      input reads when overwrite is disabled.
+- [x] Write index and recovery volumes into a same-filesystem staging area;
+      publish only after successful completion.
+- [x] Remove staged files on error or cancellation and return the actual
+      published paths in `CreateReport`.
+- [ ] Test I/O failure, pre-existing output, cancellation, and cleanup paths.
+
+### 27d — Progress, cancellation, and resource isolation (Complexity: Medium)
+
+- [x] Emit phase, pass, byte-read, and completed-volume events without
+      terminal output from library code.
+- [x] Support cooperative cancellation at file-read boundaries and guarantee
+      staging cleanup.
+- [x] Run the operation on a private Rayon pool so `threads` never mutates or
+      depends on the host process's global Rayon configuration.
+
+### 27e — Public API and compatibility tests (Complexity: Medium)
+
+- [x] Publish `create()` and an optional progress-aware entry point using the
+      extracted engine.
+- [x] Add integration tests that use only public API types for single and
+      multiple files, recursive directories, empty files, memory-limited
+      passes, recovery offsets, and output reporting.
+- [x] Verify that API and CLI outputs are identical for representative
+      fixtures, then retain the existing optional `par2cmdline`
+      interoperability matrix.
+
+### 27f — Documentation and release (Complexity: Low)
+
+- [x] Add a runnable library example to the README and crate-level rustdoc.
+- [x] Document API stability, error behavior, resource ownership, and the
+      distinction between the high-level and expert-level APIs.
+- [x] Update the changelog and release a compatible incremental crate version
+      after `fmt`, Clippy, tests, and compatibility checks pass.

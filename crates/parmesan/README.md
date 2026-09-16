@@ -12,6 +12,39 @@ other PAR2 tools (verified against `par2cmdline` — see
 It is designed to be used both as a CLI binary and as a library embedded in
 [pesto](https://github.com/franzopl/pesto), a fast Usenet poster.
 
+## Library usage
+
+Applications can create a complete recovery set directly, without spawning
+the `parmesan` executable or assembling PAR2 packets and volumes themselves:
+
+```rust,no_run
+use parmesan::create::{create, CreateRequest, Recovery};
+
+# async fn example() -> anyhow::Result<()> {
+let report = create(
+    CreateRequest::from_paths(["movie.mkv", "release.nfo"])
+        .output_dir("recovery")
+        .recovery(Recovery::Percentage(10)),
+)
+.await?;
+
+println!("index: {}", report.index_path.unwrap().display());
+# Ok(())
+# }
+```
+
+Use `create_with_progress` when the embedding application needs structured
+events for a TUI, GUI, or job monitor. Library calls never print progress to
+the terminal. `create_cancellable` and
+`create_with_progress_and_cancellation` accept a cloneable
+`CreateCancellation` handle; cancellation removes staged output before
+returning. Handle failures through `CreateError::kind` (`InvalidRequest`,
+`Cancelled`, `OutputExists`, `Io`, or `Other`) rather than parsing messages.
+
+The high-level API owns only the requested creation operation and its private
+compute pool. Advanced integrations that need direct packet or encoder
+control can continue to use the lower-level modules.
+
 ## Usage (CLI)
 
 ```
