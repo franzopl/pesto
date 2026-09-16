@@ -1,6 +1,7 @@
 use crate::encoder::{FileHashes, RecoveryEncoder, RecoverySlice};
 use crate::packet::SliceChecksum;
 use std::collections::TryReserveError;
+use std::sync::Arc;
 
 /// A unit of work for the [`Par2Worker`].
 pub enum Par2Work {
@@ -52,6 +53,30 @@ impl Par2Worker {
     /// size the encoder's buffers against a memory budget should keep this
     /// small (it's pipelining slack, not part of that budget).
     pub fn spawn(enc: RecoveryEncoder, compute_hashes: bool, channel_depth: usize) -> Self {
+        Self::spawn_inner(enc, compute_hashes, channel_depth, None)
+    }
+
+    /// Like [`Self::spawn`], but runs encoder work in `thread_pool` rather
+    /// than Rayon’s process-global pool.
+    ///
+    /// Applications embedding Parmesan should use this variant when they need
+    /// an operation-specific thread limit and must not interfere with Rayon
+    /// work owned by the rest of their process.
+    pub fn spawn_with_thread_pool(
+        enc: RecoveryEncoder,
+        compute_hashes: bool,
+        channel_depth: usize,
+        thread_pool: Arc<rayon::ThreadPool>,
+    ) -> Self {
+        Self::spawn_inner(enc, compute_hashes, channel_depth, Some(thread_pool))
+    }
+
+    fn spawn_inner(
+        enc: RecoveryEncoder,
+        compute_hashes: bool,
+        channel_depth: usize,
+        thread_pool: Option<Arc<rayon::ThreadPool>>,
+    ) -> Self {
         let channel_depth = channel_depth.max(2); // at least double-buffered
         let (tx, rx) = std::sync::mpsc::sync_channel::<Par2Work>(channel_depth);
         // Recycle path is unbounded on purpose. The encoder flushes 128 slices
@@ -113,17 +138,26 @@ impl Par2Worker {
             };
 
             // Step 2: This thread acts as the RS encoder. It consumes slices
-            // from the hasher thread and performs Reed-Solomon flushes.
-            let mut enc = enc;
-            while let Ok(slice) = rs_rx.recv() {
-                enc.add_slice(slice);
-                // After add_slice, if a flush was triggered, free_buffers holds
-                // the recycled slices. Ferry them back to the producer.
-                for buf in enc.drain_free_buffers() {
-                    let _ = free_tx.send(buf);
+            // from the hasher thread and performs Reed-Solomon flushes. A
+            // caller-provided pool isolates an embedded operation from the
+            // host process's global Rayon configuration.
+            let encode = move || {
+                let mut enc = enc;
+                while let Ok(slice) = rs_rx.recv() {
+                    enc.add_slice(slice);
+                    // After add_slice, if a flush was triggered, free_buffers holds
+                    // the recycled slices. Ferry them back to the producer.
+                    for buf in enc.drain_free_buffers() {
+                        let _ = free_tx.send(buf);
+                    }
                 }
-            }
-            let (slices, checksums) = enc.finish();
+                enc.finish()
+            };
+            let (slices, checksums) = if let Some(thread_pool) = thread_pool {
+                thread_pool.install(encode)
+            } else {
+                encode()
+            };
             let hashes = if compute_hashes {
                 match hash_rx.recv() {
                     Ok(hashes) => hashes,

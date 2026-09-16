@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-16
+
+### Added
+
+- Added `parmesan::create`, a high-level async API for producing a complete
+  PAR2 set directly from filesystem paths. It returns structured reports and
+  typed error categories, supports progress events and cooperative
+  cancellation, stages output before publication, and isolates its Rayon pool
+  from the embedding process.
+
 ### Fixed
 
 - A positive percentage now produces at least one recovery block for every

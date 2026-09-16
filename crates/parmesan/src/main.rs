@@ -2,19 +2,15 @@ mod memory;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use md5::{Digest, Md5};
-use parmesan::ops::{
-    calculate_geometry, ingest_files, ingest_files_ex, plan_memory_layout, sort_files_by_file_id,
-    CreateOptions, IngestHashes, InputFile, SliceWindow,
+use parmesan::create::{
+    create_with_options, CreateEvent, CreateRequest, EngineOptions, OutputPolicy, Recovery,
+    SliceStrategy,
 };
 use parmesan::recovery_set::RecoverySet;
 use parmesan::repair::{self, RepairOptions};
 use parmesan::verify::{self, FileStatus, VerifyReport};
-use parmesan::worker::Par2Worker;
-use parmesan::{encoder, encoder::RecoveryEncoder, layout, packet, EncoderLayout, SimdPath};
+use parmesan::{EncoderLayout, SimdPath};
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
-use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -163,46 +159,6 @@ fn parse_size(s: &str) -> Result<u64> {
     Ok((value * multiplier) as u64)
 }
 
-fn collect_files(paths: &[PathBuf], recurse: bool) -> Result<Vec<InputFile>> {
-    let mut input_files = Vec::new();
-    for path in paths {
-        let md = std::fs::metadata(path).with_context(|| format!("stat `{}`", path.display()))?;
-        if md.is_dir() {
-            if !recurse {
-                anyhow::bail!(
-                    "`{}` is a directory; use --recurse (-R) to expand directories",
-                    path.display()
-                );
-            }
-            for entry in WalkDir::new(path)
-                .follow_links(false)
-                .sort_by_file_name()
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-            {
-                let size = entry.metadata()?.len();
-                input_files.push(InputFile {
-                    path: entry.path().to_path_buf(),
-                    display_name: entry.file_name().to_string_lossy().into_owned(),
-                    size,
-                });
-            }
-        } else {
-            input_files.push(InputFile {
-                path: path.clone(),
-                display_name: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                size: md.len(),
-            });
-        }
-    }
-    Ok(input_files)
-}
-
 /// Subcommand names that must never be preceded by an implicit `create`.
 const KNOWN_FIRST_ARGS: [&str; 8] = [
     "create",
@@ -242,334 +198,107 @@ fn main() -> Result<()> {
     })
 }
 
-fn make_encoder(
-    layout: EncoderLayout,
-    slice_size: usize,
-    total_slices: usize,
-    first_exponent: u32,
-    count: usize,
-) -> RecoveryEncoder {
-    match layout {
-        EncoderLayout::Smart => {
-            RecoveryEncoder::new_smart(slice_size, total_slices, first_exponent, count)
-        }
-        EncoderLayout::Normal => {
-            RecoveryEncoder::new(slice_size, total_slices, first_exponent, count)
-        }
-        EncoderLayout::Affine => {
-            RecoveryEncoder::new_affine(slice_size, total_slices, first_exponent, count)
-        }
-        EncoderLayout::Affine512 => {
-            RecoveryEncoder::new_affine512(slice_size, total_slices, first_exponent, count)
-        }
-        EncoderLayout::Shuffle2x => {
-            RecoveryEncoder::new_shuffle2x(slice_size, total_slices, first_exponent, count)
-        }
-    }
-}
-
 async fn run_create(cli: CreateArgs) -> Result<()> {
-    let mut input_files = collect_files(&cli.files, cli.recurse)?;
-    if input_files.is_empty() {
-        anyhow::bail!("no input files found");
-    }
-    // The default output base name follows the first file as given on the
-    // command line — a naming choice, independent of Reed-Solomon ordering.
-    // Captured before the sort below so it doesn't start depending on file
-    // content.
-    let default_base_name = input_files[0].display_name.clone();
-    // Reed-Solomon coefficients are assigned by ascending File ID, per the
-    // PAR2 spec — not by command-line/directory order. See
-    // `ops::sort_files_by_file_id` for why this matters for multi-file sets.
-    tokio::task::block_in_place(|| sort_files_by_file_id(&mut input_files))?;
-
-    let options = CreateOptions {
-        slice_size: cli
-            .slice_size
-            .as_deref()
-            .map(parse_size)
-            .transpose()?
-            .map(|s| s as usize),
-        slice_count: cli.slice_count,
-        recovery_count: cli.recovery_count,
-        recovery_pct: cli.recovery_pct,
-        memory_limit: parse_size(&cli.memory_limit)? as usize,
-        threads: cli.threads.unwrap_or(0),
-        simd: cli.simd,
+    let recovery = match cli.recovery_count {
+        Some(count) => Recovery::Blocks(
+            u16::try_from(count).context("recovery block count must not exceed 65535")?,
+        ),
+        None => Recovery::Percentage(cli.recovery_pct),
     };
-
-    let (slice_size, total_slices, recovery_count) = calculate_geometry(&input_files, &options)?;
-
-    if !cli.quiet {
-        println!("PAR2 Geometry:");
-        println!("  Input files    : {}", input_files.len());
-        println!("  Input slices   : {total_slices}");
-        println!("  Recovery blocks: {recovery_count}");
-        println!("  Slice size     : {slice_size} bytes");
-        if cli.recovery_offset > 0 {
-            println!("  Recovery offset: {}", cli.recovery_offset);
-        }
-    }
-
-    // Configure Rayon
-    let rayon_threads = if options.threads > 0 {
-        options.threads
-    } else {
-        parmesan::performance_core_count()
+    let slice_strategy = match (cli.slice_size.as_deref(), cli.slice_count) {
+        (Some(size), _) => SliceStrategy::Size(parse_size(size)? as usize),
+        (None, Some(count)) => SliceStrategy::Count(count),
+        (None, None) => SliceStrategy::Automatic,
     };
-    let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(rayon_threads)
-        .build_global();
-
-    let out_dir = cli.out_dir.clone().unwrap_or_else(|| PathBuf::from("."));
-    if !out_dir.exists() {
-        std::fs::create_dir_all(&out_dir)?;
-    }
-
-    let base_name = cli.base_name.clone().unwrap_or(default_base_name);
-
-    let creator_string = if cli.comment.is_empty() {
-        "parmesan".to_owned()
-    } else {
-        format!("parmesan | {}", cli.comment.join(" | "))
-    };
-
-    let mut all_checksums: Vec<Vec<packet::SliceChecksum>> = vec![Vec::new(); input_files.len()];
-
-    let mem_plan = plan_memory_layout(slice_size, recovery_count, options.memory_limit);
-    if !cli.quiet && mem_plan.slice_chunk < slice_size {
-        println!(
-            "  Memory plan    : slice-chunk {} bytes × {} recovery (limit {})",
-            mem_plan.slice_chunk, mem_plan.recovery_per_pass, options.memory_limit
-        );
-    }
-    // `cursor` tracks our position within the generated recovery set; the
-    // on-disk exponent of each block is `recovery_offset + cursor`.
-    let mut cursor = 0usize;
-
-    let mut base_packets = Vec::new();
-    let mut rsid = [0u8; 16];
-
-    while cursor < recovery_count {
-        let count = (recovery_count - cursor).min(mem_plan.recovery_per_pass.max(1));
-        let pass_idx = cursor / mem_plan.recovery_per_pass.max(1);
-        let first_exponent = (cli.recovery_offset + cursor) as u32;
-
-        if !cli.quiet {
-            println!(
-                "\nPass {} (recovery blocks {}-{}):",
-                pass_idx + 1,
-                first_exponent,
-                first_exponent + count as u32 - 1
-            );
-        }
-
-        let chunked = mem_plan.slice_chunk < slice_size;
-        let (recovery_slices, slice_checksums, hashes) = if chunked {
-            let mut ingest_h = IngestHashes::default();
-            let mut acc: Vec<Vec<u8>> = vec![Vec::new(); count];
-            let mut off = 0usize;
-            while off < slice_size {
-                let win = mem_plan.slice_chunk.min(slice_size - off);
-                let mut enc = make_encoder(cli.encoder, win, total_slices, first_exponent, count);
-                enc = enc.with_simd_path(options.simd);
-                enc = enc.with_flush_limit(
-                    (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
-                );
-                let worker = Par2Worker::spawn(enc, false, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
-                let hash_slot = (pass_idx == 0 && off == 0).then_some(&mut ingest_h);
-                ingest_files_ex(
-                    &input_files,
-                    &worker,
-                    slice_size,
-                    None,
-                    |_| Ok(()),
-                    Some(SliceWindow {
-                        offset: off,
-                        len: win,
-                    }),
-                    hash_slot,
-                )
-                .await?;
-                let (part, _, _) = tokio::task::block_in_place(|| worker.finish());
-                for (i, sl) in part.into_iter().enumerate() {
-                    acc[i].extend_from_slice(&sl.data);
-                }
-                off += win;
-            }
-            let slices: Vec<encoder::RecoverySlice> = acc
-                .into_iter()
-                .enumerate()
-                .map(|(i, data)| encoder::RecoverySlice {
-                    exponent: first_exponent + i as u32,
-                    data,
-                })
-                .collect();
-            (slices, ingest_h.checksums, ingest_h.hashes)
+    let memory_limit = parse_size(&cli.memory_limit)? as usize;
+    let mut request = CreateRequest::from_paths(&cli.files)
+        .recovery(recovery)
+        .slice_strategy(slice_strategy)
+        .memory_limit(memory_limit)
+        .output_policy(if cli.overwrite {
+            OutputPolicy::ReplaceExisting
         } else {
-            let mut enc =
-                make_encoder(cli.encoder, slice_size, total_slices, first_exponent, count);
-            if pass_idx == 0 {
-                enc = enc.with_checksums();
-            }
-            enc = enc.with_simd_path(options.simd);
-            enc = enc.with_flush_limit(
-                (options.memory_limit / 4).clamp(256 * 1024 * 1024, 1024 * 1024 * 1024),
-            );
-            let worker =
-                Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
-            ingest_files(&input_files, &worker, slice_size).await?;
-            tokio::task::block_in_place(|| worker.finish())
-        };
-
-        if pass_idx == 0 {
-            // An empty file contributes zero input slices (PAR2 spec: slice
-            // count is `ceil(length / slice_size)`), so `ingest_files` sends
-            // the worker nothing for it and the worker returns no hash for it
-            // either. It still needs a File Description packet, so its hashes
-            // are synthesized here — the MD5 of no bytes — and the worker's
-            // hashes are consumed as a stream over the *non-empty* files only.
-            //
-            // Indexing `hashes` by file position instead used to panic with
-            // `index out of bounds` on any set containing an empty file, which
-            // a release folder with a placeholder or a stub `.nfo` produces
-            // routinely. `pesto`'s own poster already does it this way; see
-            // `crates/pesto/src/poster/mod.rs`.
-            //
-            // Note this is a deliberate divergence from par2cmdline, which
-            // refuses to protect zero-length files at all ("Skipping 0 byte
-            // file") and reports a zero-length File Description entry it did
-            // not write as damaged. Including the entry keeps the recovery set
-            // a complete description of what was posted — the property `pesto`
-            // needs, since the file is in the NZB either way — at the cost of
-            // that one cosmetic disagreement on verify.
-            //
-            // Decision (issue #135): keep this behavior — match `pesto`, not
-            // `par2cmdline`. See `ROADMAP.new.md`'s "Deferred / intentionally
-            // not implemented" section for the recorded rationale.
-            let md5_empty: [u8; 16] = Md5::digest([]).into();
-            let mut worker_hashes = hashes.into_iter();
-            let all_hashes: Vec<encoder::FileHashes> = input_files
-                .iter()
-                .map(|f| {
-                    if f.size == 0 {
-                        encoder::FileHashes {
-                            md5_full: md5_empty,
-                            md5_16k: md5_empty,
-                            length: 0,
-                        }
-                    } else {
-                        worker_hashes
-                            .next()
-                            .expect("worker returned fewer hashes than non-empty input files")
-                    }
-                })
-                .collect();
-
-            let mut cs_iter = slice_checksums.into_iter();
-            for (idx, f) in input_files.iter().enumerate() {
-                let n = (f.size as usize).div_ceil(slice_size);
-                all_checksums[idx] = cs_iter.by_ref().take(n).collect();
-            }
-
-            let mut file_ids = Vec::new();
-            for (idx, f) in input_files.iter().enumerate() {
-                file_ids.push(packet::compute_file_id(
-                    &all_hashes[idx].md5_16k,
-                    f.size,
-                    &f.display_name,
-                ));
-            }
-
-            let main_b = packet::main_body(slice_size as u64, &file_ids);
-            rsid = packet::recovery_set_id(&main_b);
-            base_packets.extend(packet::serialize_packet(&rsid, &packet::TYPE_MAIN, &main_b));
-            base_packets.extend(packet::serialize_packet(
-                &rsid,
-                &packet::TYPE_CREATOR,
-                &packet::creator_body(&creator_string),
-            ));
-
-            for (idx, f) in input_files.iter().enumerate() {
-                let fid = &file_ids[idx];
-                base_packets.extend(packet::serialize_packet(
-                    &rsid,
-                    &packet::TYPE_FILE_DESC,
-                    &packet::file_description_body(
-                        fid,
-                        &all_hashes[idx].md5_full,
-                        &all_hashes[idx].md5_16k,
-                        f.size,
-                        &f.display_name,
-                    ),
-                ));
-                base_packets.extend(packet::serialize_packet(
-                    &rsid,
-                    &packet::TYPE_IFSC,
-                    &packet::ifsc_body(fid, &all_checksums[idx]),
-                ));
-            }
-
-            if !cli.no_index {
-                let index_name = layout::index_name(&base_name);
-                let index_path = out_dir.join(&index_name);
-                if !cli.overwrite && index_path.exists() {
-                    anyhow::bail!(
-                        "output file already exists: `{}`; use --overwrite to replace it",
-                        index_path.display()
-                    );
-                }
-                std::fs::write(&index_path, &base_packets)?;
-                if !cli.quiet {
-                    println!("Wrote {}", index_path.display());
-                }
-            }
-        }
-
-        let volumes = layout::plan_volumes(recovery_count as u32);
-
-        // Serialize packets in batches to exploit SIMD MD5-MB
-        let recovery_packets = packet::serialize_recovery_packets(&rsid, &recovery_slices);
-
-        for (slice, pkt) in recovery_slices.iter().zip(recovery_packets) {
-            let abs_exp = slice.exponent;
-            // Map the absolute exponent back to a position in the layout
-            // (which was planned from 0, but our exponents start at recovery_offset).
-            let layout_exp = abs_exp - cli.recovery_offset as u32;
-            let vol = volumes
-                .iter()
-                .find(|v| layout_exp >= v.first && layout_exp < v.first + v.count)
-                .unwrap();
-
-            let vol_name = layout::volume_name(&base_name, *vol);
-            let vol_path = out_dir.join(&vol_name);
-
-            if layout_exp == vol.first {
-                // First slice of the volume — check overwrite and open fresh.
-                if !cli.overwrite && vol_path.exists() {
-                    anyhow::bail!(
-                        "output file already exists: `{}`; use --overwrite to replace it",
-                        vol_path.display()
-                    );
-                }
-                tokio::fs::write(&vol_path, &base_packets).await?;
-            }
-
-            let mut f = tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&vol_path)
-                .await?;
-            f.write_all(&pkt).await?;
-
-            if layout_exp == vol.first + vol.count - 1 && !cli.quiet {
-                println!("Finished {}", vol_path.display());
-            }
-        }
-
-        cursor += count;
+            OutputPolicy::FailIfExists
+        })
+        .creator(if cli.comment.is_empty() {
+            "parmesan".to_owned()
+        } else {
+            format!("parmesan | {}", cli.comment.join(" | "))
+        })
+        .recovery_offset(
+            u32::try_from(cli.recovery_offset)
+                .context("recovery offset exceeds the PAR2 exponent range")?,
+        );
+    if let Some(out_dir) = &cli.out_dir {
+        request = request.output_dir(out_dir);
+    }
+    if let Some(base_name) = &cli.base_name {
+        request = request.base_name(base_name);
+    }
+    if let Some(threads) = cli.threads.and_then(std::num::NonZeroUsize::new) {
+        request = request.threads(threads);
+    }
+    if cli.recurse {
+        request = request.recurse();
     }
 
-    if !cli.quiet {
+    let quiet = cli.quiet;
+    create_with_options(
+        request,
+        EngineOptions {
+            simd: cli.simd,
+            layout: cli.encoder,
+            write_index: !cli.no_index,
+        },
+        |event| {
+            if quiet {
+                return;
+            }
+            match event {
+                CreateEvent::Planned {
+                    input_files,
+                    geometry,
+                    ..
+                } => {
+                    println!("PAR2 Geometry:");
+                    println!("  Input files    : {input_files}");
+                    println!("  Input slices   : {}", geometry.input_slices);
+                    println!("  Recovery blocks: {}", geometry.recovery_blocks);
+                    println!("  Slice size     : {} bytes", geometry.slice_size);
+                    if cli.recovery_offset > 0 {
+                        println!("  Recovery offset: {}", cli.recovery_offset);
+                    }
+                    let memory_plan = parmesan::ops::plan_memory_layout(
+                        geometry.slice_size,
+                        geometry.recovery_blocks,
+                        memory_limit,
+                    );
+                    if memory_plan.slice_chunk < geometry.slice_size {
+                        println!(
+                            "  Memory plan    : slice-chunk {} bytes × {} recovery (limit {})",
+                            memory_plan.slice_chunk, memory_plan.recovery_per_pass, memory_limit
+                        );
+                    }
+                }
+                CreateEvent::PassStarted {
+                    pass,
+                    first_exponent,
+                    recovery_blocks,
+                } => println!(
+                    "\nPass {} (recovery blocks {}-{}):",
+                    pass + 1,
+                    first_exponent,
+                    first_exponent + recovery_blocks as u32 - 1
+                ),
+                CreateEvent::IndexWritten { path } => println!("Wrote {}", path.display()),
+                CreateEvent::VolumeWritten { path } => println!("Finished {}", path.display()),
+                CreateEvent::BytesRead { .. } => {}
+                _ => {}
+            }
+        },
+    )
+    .await?;
+    if !quiet {
         println!("\nAll recovery volumes created successfully.");
     }
     Ok(())
