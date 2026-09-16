@@ -41,9 +41,9 @@ fn each_processes_entries_in_natural_order() {
     assert_eq!(
         labels,
         vec![
-            "── Show.S01E01.mkv ──",
-            "── Show.S01E02.mkv ──",
-            "── Show.S01E10.mkv ──",
+            "── Show.S01E01 ──",
+            "── Show.S01E02 ──",
+            "── Show.S01E10 ──",
         ],
         "unexpected order in stdout:\n{}",
         stdout

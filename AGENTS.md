@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 **This is the canonical guide for all agents working in this monorepo.**
 
