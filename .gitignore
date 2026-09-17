@@ -18,6 +18,10 @@ config.toml
 *.nzb
 *.mkv
 test_results/
+# Locally generated end-to-end client/SABnzbd fixtures and reports.
+/.pesto-client-*/
+/.sab-e2e-*/
+/.sab-rename-e2e-*/
 screenshot-*.png
 Terapia atraves da Escrita*/
 file10G.bin
