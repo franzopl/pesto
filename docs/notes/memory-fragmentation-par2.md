@@ -10,4 +10,5 @@ The memory bloat stems from how `pesto`'s ingestion loop interacts with `parmesa
 4. **Dropped Global Buffers**: In `full-two-phase` mode (`defer_posting = true`), the main article buffers (`buf`) acquired from the `Shared::pool` are bypassed and dropped without ever hitting the network worker's `release_buffer`. This means the global Tokio pool also suffers continuous allocations without re-use.
 
 #### Recommendation
+
 We need to abandon the custom manual file-by-file ingestion loop in `pesto`'s `producer` for PAR2 generation. Instead, `pesto` should delegate to `parmesan`'s optimized `ops::ingest_files` routine (introduced in `parmesan` PR #131), which packs small files together, skips the async overhead, and correctly avoids exploding memory boundaries.
