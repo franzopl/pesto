@@ -165,7 +165,7 @@ Steps:
 
 - [x] Inventory every top-level type and function in `bin/pesto.rs` and assign
   one owner in the target layout.
-- [ ] Extract CLI declarations and `Cli::overrides` without changing flags,
+- [x] Extract CLI declarations and `Cli::overrides` without changing flags,
   help text or defaults.
 - [x] Extract cleanup mode and its tests.
 - [x] Extract NZB destination, archive-path and path-expansion behavior.
@@ -476,19 +476,23 @@ Next action: completed in the following progress entry.
   archive destinations and tilde expansion.
 - Added `crates/pesto/src/bin/pesto/cleanup.rs` for cleanup policy, watch-mode
   cleanup coordination and the ten focused regression tests.
-- Kept a temporary explicit module path while the binary entry point remains
-  `src/bin/pesto.rs`; this disappears when the entry point moves into the
-  `src/bin/pesto/` directory.
-- Reduced the CLI baseline from 4,993 to 4,670 lines. The extracted `output.rs`
-  and `cleanup.rs` modules contain 67 and 230 lines respectively.
+- Moved the binary entry point to `crates/pesto/src/bin/pesto/main.rs`, its
+  final module directory, and removed the temporary explicit module paths.
+- Added `crates/pesto/src/bin/pesto/cli.rs` for all Clap declarations and
+  conversion to configuration overrides. Only fields consumed by the parent
+  dispatcher are visible outside the module.
+- Reduced the entrypoint baseline from 4,993 to 3,894 lines. The extracted
+  `cli.rs`, `output.rs` and `cleanup.rs` modules contain 776, 67 and 230 lines
+  respectively.
 
 Validation completed:
 
 - `bash scripts/check-source-size.sh`: passed.
 - `cargo check -p pesto-poster --all-targets`: passed.
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
+- `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: move the Clap declarations and `Cli::overrides` into
-`crates/pesto/src/bin/pesto/cli.rs` without changing any flag, default or help
-text. The parent module will import `Cli`; fields used by dispatch must receive
-the narrowest visibility that Rust's module boundary allows.
+Next action: inspect `pesto::hooks` against the CLI-specific hook runner, then
+extract `HookEnv` and command/script execution into
+`crates/pesto/src/bin/pesto/hooks.rs` without changing ordering, environment
+variables, failure policy or platform-specific command selection.
