@@ -171,12 +171,12 @@ Steps:
 - [x] Extract NZB destination, archive-path and path-expansion behavior.
 - [x] Extract hook environment construction and execution. Reuse
   `pesto::hooks` only where semantics are already identical.
-- [ ] Extract batch/season behavior.
+- [x] Extract batch/season behavior.
   - [x] Extract input filtering, season NZB destination and release labels with
     their focused tests.
   - [x] Extract season PAR2 generation/upload with its progress regression
     test.
-  - [ ] Extract batch orchestration and remaining batch tests.
+  - [x] Extract batch orchestration and remaining batch tests.
 - [ ] Extract watch behavior.
 - [ ] Convert `run_single_upload` into named stages with a small context/result
   type instead of a monolithic function.
@@ -497,9 +497,14 @@ Next action: completed in the following progress entry.
   and its internal upload lifecycle, together with the progress regression
   test. The module remains separate from `batch.rs` so pure entry-selection
   policy does not depend on upload machinery.
-- Reduced the entrypoint baseline from 4,993 to 3,099 lines. The extracted
-  `cli.rs`, `batch.rs`, `hooks.rs`, `season.rs`, `output.rs` and `cleanup.rs`
-  modules contain 776, 313, 280, 247, 67 and 230 lines respectively.
+- Moved the batch job scheduler, shared connection broker, consolidated season
+  NZB/NFO/hooks flow and compression-temp cleanup guard into `batch.rs`.
+  Focused batch tests now live in `batch/tests.rs`, keeping the production
+  module below the 800-line guardrail without weakening cohesion.
+- Reduced the entrypoint baseline from 4,993 to 2,584 lines. The extracted
+  `cli.rs`, `batch.rs`, `batch/tests.rs`, `hooks.rs`, `season.rs`, `output.rs`
+  and `cleanup.rs` modules contain 776, 588, 224, 280, 247, 67 and 230 lines
+  respectively.
 
 Validation completed:
 
@@ -508,8 +513,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: extract `force_season_group`, `CompressTempCleanup` and
-`run_batch` into `batch.rs`, then move their remaining focused tests. Preserve
-the current concurrency, cancellation, season-NZB and cleanup behavior; keep
-`UploadParams` and `UploadResult` in the parent until the single-upload
-lifecycle moves to `upload.rs`.
+Next action: extract watch-mode state, retry/stability policy and orchestration
+into `watch.rs`, moving its focused tests with it. Keep calls into `run_batch`
+and `run_single_upload` as parent-owned boundaries until `upload.rs` exists,
+and preserve watch cleanup and cancellation behavior exactly.

@@ -1,10 +1,22 @@
 //! Pure input and naming policy for batch and season uploads.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use pesto::config::ObfuscateMode;
+use pesto::nntp::pool::ConnectionBroker;
+use pesto::nzb::NzbMeta;
+use pesto::poster::PostedSegment;
+use tracing::info;
 
 use super::output::expand_tilde;
+use super::season::post_season_par2_volumes;
+use super::{
+    add_obfuscation_tag, nfo_metadata_header, resolve_entry_password, run_all_hooks,
+    run_single_upload, HookEnv, UploadParams,
+};
 
 fn is_artifact_entry(path: &Path) -> bool {
     path.extension()
@@ -68,10 +80,7 @@ pub(super) fn top_level_entries(dir: &Path, ext_filter: &[String]) -> Result<Vec
     Ok(entries)
 }
 
-/// Post season PAR2 volumes and return the resulting segments.
-///
-/// Generates and posts global PAR2 recovery volumes covering all episodes,
-/// then collects the posted segments for inclusion in the consolidated season NZB.
+/// Derive the destination of a consolidated `--season` NZB.
 pub(super) fn derive_season_nzb_path(
     explicit_out: Option<&Path>,
     entry: &Path,
@@ -101,20 +110,7 @@ pub(super) fn derive_season_nzb_path(
     }
 }
 
-/// For a `--season` batch, force every episode's `Config::groups` onto the
-/// same pre-picked single-entry target, so they all land on the same
-/// newsgroup(s) instead of each episode's own internal `pick_post_group`
-/// call (inside `poster::post_files`) re-rolling independently — which used
-/// to leave the merged season NZB's `<groups>` list as just the union of
-/// whatever each episode randomly landed on, rather than one group (or
-/// cross-post set) every episode actually shares.
-///
-/// Resolved once here, exactly like `season_password` in `run_batch`, then
-/// forced onto `Config::groups` as a single already-picked entry: with only
-/// one configured entry, `pick_post_group`'s own call inside `post_files`
-/// has nothing left to randomize, so every episode deterministically
-/// reproduces this same pick. A no-op (returns `params` unchanged) outside
-/// `--season`, or when there are no configured groups to pick from.
+/// Build the human-readable entry label used by hooks, banners and history.
 pub(super) fn release_label(path: &Path) -> String {
     const STRIP_EXTS: &[&str] = &[
         "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "flv", "webm", "mpg", "mpeg", "vob",
@@ -132,6 +128,428 @@ pub(super) fn release_label(path: &Path) -> String {
             }
         })
         .unwrap_or_else(|| "entry".to_string())
+}
+
+/// Force every episode in a season batch onto one pre-picked newsgroup target.
+/// Plain `--each` runs keep their original group pool unchanged.
+fn force_season_group(params: Arc<UploadParams>, is_season: bool) -> Arc<UploadParams> {
+    if !is_season {
+        return params;
+    }
+    let forced_target = pesto::poster::pick_post_group(&params.config.groups);
+    if forced_target.is_empty() {
+        return params;
+    }
+    let mut forced_config = (*params.config).clone();
+    forced_config.groups = vec![forced_target.join("+")];
+    let mut forced_params = (*params).clone();
+    forced_params.config = Arc::new(forced_config);
+    Arc::new(forced_params)
+}
+
+/// Removes every collected directory on drop.
+///
+/// A `--season` batch defers each episode's compress-temp cleanup (see
+/// `run_single_upload`'s `keep_compress_temp`) so the archive bytes are
+/// still on disk when the season's global PAR2 step reads them afterward.
+/// Wrapping the collected dirs in this guard means they're still removed —
+/// via `Drop` — even if `run_batch` returns early (e.g. the season NZB
+/// write's `?`) before reaching the end of the season-merge block.
+struct CompressTempCleanup(Vec<PathBuf>);
+
+impl Drop for CompressTempCleanup {
+    fn drop(&mut self) {
+        for dir in &self.0 {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Run `--each` / `--season` batch orchestration over the collected entries.
+pub(super) async fn run_batch(
+    params: Arc<UploadParams>,
+    dirs: &[PathBuf],
+    jobs: usize,
+    season_nzb: Option<PathBuf>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(Vec<PostedSegment>, bool, bool)> {
+    // Collect all entries from every directory argument.
+    let mut entries: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        let md = std::fs::metadata(dir).with_context(|| format!("reading `{}`", dir.display()))?;
+        if md.is_dir() {
+            entries.extend(top_level_entries(dir, &params.ext_filter)?);
+        } else {
+            // A plain file is its own "entry".
+            entries.push(dir.clone());
+        }
+    }
+
+    if entries.is_empty() {
+        anyhow::bail!("no entries found to post");
+    }
+
+    // A season batch merges every entry's NZB into one at the end, so they
+    // all need the *same* archive password — resolved once, up front, and
+    // handed to every entry below. A plain --each batch has no such merge,
+    // so leaving this `None` lets each entry resolve (and randomise) its
+    // own password independently inside `run_single_upload` (issue #67).
+    let season_password: Option<String> = season_nzb
+        .is_some()
+        .then(|| {
+            resolve_entry_password(
+                None,
+                params.config.compress_password.as_deref(),
+                params.archive_password_raw.as_deref(),
+            )
+        })
+        .flatten();
+
+    let params = force_season_group(params, season_nzb.is_some());
+
+    // Whether each episode should keep its compressed archive on disk
+    // (instead of deleting it right after posting) so the season's global
+    // PAR2 step below can compute recovery data over the *actual posted
+    // bytes* rather than the original, never-compressed episode file — see
+    // `run_single_upload`'s `keep_compress_temp` doc comment. Mirrors the
+    // exact gate `post_season_par2_volumes` is called under further down, so
+    // nothing is retained when there's no season PAR2 step to read it.
+    let keep_compress_temp = season_nzb.is_some() && params.config.par2 > 0 && entries.len() > 1;
+
+    let effective_jobs = if jobs == 0 {
+        parmesan::performance_core_count()
+    } else {
+        jobs
+    };
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_jobs));
+
+    // One connection broker for the whole batch: every episode below checks
+    // out already-authenticated connections instead of paying a fresh
+    // TLS+AUTH handshake per episode (see ROADMAP.new.md Phase 2). Sized to
+    // the configured total connection budget and shared (via the broker's
+    // internal semaphore) across concurrently running episodes under
+    // `--jobs N`, so real concurrent sockets never exceed that budget.
+    let (broker, broker_keepalive) = ConnectionBroker::new(
+        Arc::new(params.config.all_servers().collect()),
+        params.config.total_connections(),
+        params.config.keepalive_interval,
+    );
+
+    let mut all_segments: Vec<PostedSegment> = Vec::new();
+    let mut all_groups: Vec<String> = Vec::new();
+    let mut any_cancelled = false;
+    let mut any_failures = false;
+    let mut posted_episode_paths: Vec<PathBuf> = Vec::new();
+    let mut compress_temp_cleanup = CompressTempCleanup(Vec::new());
+
+    let total_entries = entries.len();
+    let mut handles = Vec::new();
+    for (entry_idx, entry) in entries.iter().enumerate() {
+        // Acquire the permit before spawning so uploads start in the sorted
+        // order. With the permit inside the task, the scheduler decided which
+        // upload ran first, making --each non-deterministic.
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let entry = entry.clone();
+        let params = Arc::clone(&params);
+        let task_cancel = cancel.clone();
+        let task_password = season_password.clone();
+        let task_broker = broker.clone();
+        let label = release_label(&entry);
+
+        info!(
+            entry = entry_idx + 1,
+            total = total_entries,
+            name = %label,
+            "--each entry"
+        );
+
+        let handle = tokio::spawn(async move {
+            let _permit = permit;
+            if !params.json_mode {
+                println!("\n── {} ──", label);
+            }
+            run_single_upload(
+                &params,
+                &[entry],
+                &label,
+                Some(&task_cancel),
+                task_password.as_deref(),
+                keep_compress_temp,
+                Some(task_broker),
+            )
+            .await
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(result)) => {
+                all_segments.extend(result.segments);
+                for g in result.groups {
+                    if !all_groups.contains(&g) {
+                        all_groups.push(g);
+                    }
+                }
+                if result.cancelled {
+                    any_cancelled = true;
+                }
+                // Pack completeness is independent of --allow-incomplete-nzb
+                // (that flag is per-episode). had_failures already covers
+                // MissingConfirmed; inconclusive is OR'd so Inconclusive
+                // still blocks if the two ever diverge.
+                if result.had_failures || !result.inconclusive.is_empty() {
+                    any_failures = true;
+                }
+                posted_episode_paths.extend(result.posted_paths);
+                if let Some(dir) = result.compress_temp_dir {
+                    compress_temp_cleanup.0.push(dir);
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("upload error: {e:#}");
+                any_failures = true;
+            }
+            Err(e) => {
+                eprintln!("upload task panicked: {e}");
+                any_failures = true;
+            }
+        }
+    }
+
+    // Every episode has checked its connections back in by now — close them
+    // for real and stop the keepalive task.
+    broker.shutdown().await;
+    broker_keepalive.abort();
+
+    info!(entries = total_entries, "--each complete");
+
+    // Write consolidated season NZB (and matching .nfo + hooks) when requested.
+    // The pack is a distinct artefact: --allow-incomplete-nzb never unlocks it.
+    if let Some(season_path) = season_nzb {
+        if pesto::poster::should_write_season_nzb(
+            any_cancelled,
+            any_failures,
+            all_segments.is_empty(),
+        ) {
+            info!(entries = total_entries, path = %season_path.display(), "season merge starting");
+            let config = &params.config;
+            let season_name = config.nzb_title.clone().or_else(|| {
+                season_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+            });
+
+            // Generate and post global PAR2 for the entire season (Phase 47b).
+            // This produces a single, coherent recovery set covering all episodes
+            // instead of multiple independent rsids for each episode.
+            //
+            // Uses `posted_episode_paths` — the files each episode actually put
+            // on the wire (an archive, under `--compress`/`--password`) — not
+            // the original `entries`. The two can differ in content, name, and
+            // even count (one archive can split into several `--compress-
+            // volume-size` volumes); computing recovery data against the
+            // original, never-posted file would produce a PAR2 set that
+            // doesn't describe anything actually on Usenet (`keep_compress_temp`
+            // above is what keeps these archives alive long enough to read here).
+            let mut season_par2_segments = Vec::new();
+            if config.par2 > 0 && posted_episode_paths.len() > 1 {
+                match post_season_par2_volumes(
+                    &posted_episode_paths,
+                    &season_name.clone().unwrap_or_else(|| "season".to_string()),
+                    &params,
+                    &cancel,
+                )
+                .await
+                {
+                    Ok(par2_segments) => {
+                        if !par2_segments.is_empty() {
+                            info!(
+                                par2_segments = par2_segments.len(),
+                                "season PAR2 volumes posted successfully"
+                            );
+                            season_par2_segments = par2_segments;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("✗ season PAR2 posting failed: {e:#}");
+                        eprintln!("  (continuing with per-episode PAR2 sets)");
+                        // Non-fatal; continue with season consolidation without global PAR2.
+                    }
+                }
+            }
+
+            // Filter segments for the season NZB:
+            // - Keep: episode data files (no .par2 in name)
+            // - Remove: per-episode PAR2 sets (have .par2 in name)
+            // - Add: global season PAR2 (replaces individual sets with single coherent rsid)
+            let season_segments: Vec<PostedSegment> = if !season_par2_segments.is_empty() {
+                let data_segments: Vec<_> = all_segments
+                    .iter()
+                    .filter(|s| !s.file_name.ends_with(".par2"))
+                    .cloned()
+                    .collect();
+                info!(
+                    total_segments = all_segments.len(),
+                    data_segments_count = data_segments.len(),
+                    par2_segments_count = season_par2_segments.len(),
+                    "season NZB consolidation: filtering segments"
+                );
+                if data_segments.is_empty() {
+                    eprintln!("⚠ WARNING: No episode data segments found! Season NZB will contain only PAR2.");
+                }
+                let mut combined = data_segments;
+                combined.extend(season_par2_segments);
+                combined
+            } else {
+                // If season PAR2 generation failed, use all segments (with per-episode PAR2 sets)
+                info!(
+                    total_segments = all_segments.len(),
+                    "season NZB consolidation: using all segments (no global PAR2)"
+                );
+                all_segments.clone()
+            };
+
+            let mut nzb_tags = config.nzb_tags.clone();
+            add_obfuscation_tag(&mut nzb_tags, &config.obfuscate);
+            let nzb_meta = NzbMeta {
+                name: season_name,
+                password: config
+                    .nzb_password
+                    .clone()
+                    .or_else(|| season_password.clone()),
+                category: config.nzb_category.clone(),
+                tmdb_id: config.tmdb_id.clone(),
+                imdb_id: config.imdb_id.clone(),
+                tvdb_id: config.tvdb_id.as_deref().map(|id| {
+                    format!(
+                        "{}/{id}",
+                        config
+                            .tvdb_kind
+                            .unwrap_or(pesto::nzb::TvdbKind::Series)
+                            .as_str()
+                    )
+                }),
+                mal_id: config.mal_id.clone(),
+                tags: nzb_tags,
+            };
+            let xml =
+                pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta, config.obfuscate);
+            tokio::fs::write(&season_path, &xml)
+                .await
+                .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;
+            if !params.json_mode {
+                println!("\nwrote season nzb: {}", season_path.display());
+            } else {
+                let path_esc = season_path
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
+                println!(r#"{{"type":"nzb_written","path":"{path_esc}","season":true}}"#);
+            }
+
+            // Generate season .nfo (mediainfo of first episode) next to the NZB.
+            let nfo_path: Option<PathBuf> = if config.nfo {
+                let nfo_out = season_path.with_extension("nfo");
+                match pesto::nfo::generate_season(dirs) {
+                    Some(content) => match pesto::nfo::write(
+                        &nfo_out,
+                        &format!("{}{content}", nfo_metadata_header(config)),
+                    ) {
+                        Ok(()) => {
+                            println!("wrote nfo:  {}", nfo_out.display());
+                            Some(nfo_out)
+                        }
+                        Err(e) => {
+                            eprintln!("season nfo write failed: {e}");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            // Run post-upload hooks — same as a regular upload.
+            let season_label = season_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "season".to_string());
+            let total_bytes: u64 = all_segments.iter().map(|s| s.bytes).sum();
+            let effective_password = config
+                .nzb_password
+                .clone()
+                .or_else(|| season_password.clone());
+            let season_obfuscate = match config.obfuscate {
+                ObfuscateMode::None => "none",
+                ObfuscateMode::Full => "full",
+                ObfuscateMode::Light => "light",
+                ObfuscateMode::FullShared => "full-shared",
+                ObfuscateMode::Article => "article",
+            };
+            // The group(s) actually used across every episode in the season
+            // — every episode is now forced onto the same pre-picked target
+            // (see the `pick_post_group` override above `run_batch`'s entry
+            // loop), so `all_groups` is just that one shared target rather
+            // than a union of independently-random picks.
+            let season_groups_str = all_groups.join(":");
+            // Same reasoning for the server(s): the union of servers that
+            // actually accepted an article across every episode, derived
+            // from each segment's `server_idx`, not the static config.
+            let season_server_list: Vec<_> = config.all_servers().collect();
+            let mut season_server_idxs: Vec<usize> =
+                all_segments.iter().map(|s| s.server_idx).collect();
+            season_server_idxs.sort_unstable();
+            season_server_idxs.dedup();
+            let season_servers_str = season_server_idxs
+                .into_iter()
+                .filter_map(|idx| season_server_list.get(idx))
+                .map(|s| s.host.as_str())
+                .collect::<Vec<_>>()
+                .join(":");
+            let season_tags_str = config.nzb_tags.join(" ");
+            let hook_env = HookEnv {
+                nzb_path: Some(&season_path),
+                nfo_path: nfo_path.as_deref(),
+                name: &season_label,
+                total_bytes,
+                input_paths: "",
+                group: all_groups.first().map(String::as_str),
+                groups: &season_groups_str,
+                password: effective_password.as_deref(),
+                server: season_servers_str.split(':').next().unwrap_or(&config.host),
+                servers: &season_servers_str,
+                category: config.nzb_category.as_deref(),
+                nzb_title: config.nzb_title.as_deref(),
+                obfuscate: season_obfuscate,
+                par2: config.par2,
+                tags: &season_tags_str,
+                tmdb_id: config.tmdb_id.as_deref(),
+                imdb_id: config.imdb_id.as_deref(),
+                tvdb_id: config.tvdb_id.as_deref(),
+                mal_id: config.mal_id.as_deref(),
+                incomplete: false,
+            };
+            // Skip hooks for --dry-run / --par2-only: no real upload happened.
+            if !config.dry_run && !config.par2_only {
+                run_all_hooks(config, &hook_env);
+            }
+        } else if any_cancelled {
+            eprintln!("interrupted — skipping season nzb output");
+        } else if any_failures {
+            eprintln!("error: season pack was not created due to earlier upload failures");
+        } else {
+            eprintln!("error: season pack was not created (no valid segments were uploaded)");
+        }
+    }
+
+    Ok((all_segments, any_cancelled, any_failures))
 }
 
 #[cfg(test)]
@@ -167,147 +585,4 @@ mod release_label_tests {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_artifact_entry_matches_nfo_and_nzb_case_insensitively() {
-        assert!(is_artifact_entry(Path::new("Show.nfo")));
-        assert!(is_artifact_entry(Path::new("Show.NZB")));
-        assert!(is_artifact_entry(Path::new("/a/b/c.NfO")));
-        assert!(!is_artifact_entry(Path::new("Show.mkv")));
-        assert!(!is_artifact_entry(Path::new("Show")));
-        assert!(!is_artifact_entry(Path::new("nfo")));
-    }
-
-    #[test]
-    fn top_level_entries_skips_generated_artifacts() {
-        let dir = std::env::temp_dir().join(format!(
-            "pesto_each_artifact_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("ep01.mkv"), b"x").unwrap();
-        // Orphan artifacts left in the input directory by a previous run.
-        std::fs::write(dir.join("ep01.nfo"), b"x").unwrap();
-        std::fs::write(dir.join("ep01.nzb"), b"x").unwrap();
-
-        let names: Vec<String> = top_level_entries(&dir, &[])
-            .unwrap()
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, ["ep01.mkv"]);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn matches_ext_filter_is_case_insensitive_and_empty_means_everything() {
-        assert!(matches_ext_filter(Path::new("Show.MKV"), &["mkv".into()]));
-        assert!(matches_ext_filter(Path::new("Show.mkv"), &["MKV".into()]));
-        assert!(!matches_ext_filter(Path::new("Show.srt"), &["mkv".into()]));
-        assert!(matches_ext_filter(Path::new("Show.srt"), &[]));
-        assert!(!matches_ext_filter(Path::new("Show"), &["mkv".into()]));
-    }
-
-    #[test]
-    fn top_level_entries_filters_loose_files_by_ext_but_keeps_directories() {
-        let dir = std::env::temp_dir().join(format!(
-            "pesto_each_ext_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(dir.join("Extras")).unwrap();
-        std::fs::write(dir.join("ep01.mkv"), b"x").unwrap();
-        std::fs::write(dir.join("ep01.srt"), b"x").unwrap();
-
-        let names: Vec<String> = top_level_entries(&dir, &["mkv".to_string()])
-            .unwrap()
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        // The loose .srt sibling is dropped; the subdirectory is kept even
-        // though "Extras" has no matching extension of its own, since a
-        // matching file could live inside it.
-        assert_eq!(names, ["ep01.mkv", "Extras"]);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn apply_ext_filter_drops_non_matching_and_errors_when_nothing_left() {
-        let mut inputs = vec![
-            pesto::walk::InputFile {
-                path: PathBuf::from("ep01.mkv"),
-                name: "ep01.mkv".to_string(),
-            },
-            pesto::walk::InputFile {
-                path: PathBuf::from("ep01.srt"),
-                name: "ep01.srt".to_string(),
-            },
-        ];
-        apply_ext_filter(&mut inputs, &["mkv".to_string()], "entry").unwrap();
-        assert_eq!(inputs.len(), 1);
-        assert_eq!(inputs[0].name, "ep01.mkv");
-
-        let mut only_subs = vec![pesto::walk::InputFile {
-            path: PathBuf::from("ep01.srt"),
-            name: "ep01.srt".to_string(),
-        }];
-        assert!(apply_ext_filter(&mut only_subs, &["mkv".to_string()], "entry").is_err());
-
-        // Empty filter is a no-op.
-        let mut untouched = vec![pesto::walk::InputFile {
-            path: PathBuf::from("ep01.srt"),
-            name: "ep01.srt".to_string(),
-        }];
-        apply_ext_filter(&mut untouched, &[], "entry").unwrap();
-        assert_eq!(untouched.len(), 1);
-    }
-
-    #[test]
-    fn derive_season_nzb_path_prefers_explicit_out() {
-        let path = derive_season_nzb_path(
-            Some(Path::new("/custom/out.nzb")),
-            Path::new("/downloads/Show.S01"),
-            Some("/nzbs"),
-        );
-        assert_eq!(path, PathBuf::from("/custom/out.nzb"));
-    }
-
-    #[test]
-    fn derive_season_nzb_path_names_after_entry_under_nzb_dir() {
-        let path = derive_season_nzb_path(None, Path::new("/downloads/Show.S01"), Some("/nzbs"));
-        assert_eq!(path, PathBuf::from("/nzbs/Show.S01.nzb"));
-    }
-
-    #[test]
-    fn derive_season_nzb_path_names_dot_after_current_directory() {
-        let cwd = std::env::current_dir().unwrap();
-        let expected_name = cwd
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "season".to_string());
-
-        let path = derive_season_nzb_path(None, Path::new("."), Some("/nzbs"));
-
-        assert_eq!(
-            path,
-            PathBuf::from("/nzbs").join(format!("{expected_name}.nzb"))
-        );
-    }
-
-    #[test]
-    fn derive_season_nzb_path_falls_back_to_cwd_relative_name() {
-        let path = derive_season_nzb_path(None, Path::new("/downloads/Show.S01"), None);
-        assert_eq!(path, PathBuf::from("Show.S01.nzb"));
-    }
-}
+mod tests;
