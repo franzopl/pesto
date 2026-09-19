@@ -13,7 +13,6 @@ use clap::Parser;
 use pesto::config::{self, Config, FileConfig, ObfuscateMode};
 use pesto::logging;
 use pesto::nntp::pool::ConnectionBroker;
-use pesto::nzb::NzbMeta;
 use tracing::{error, info};
 
 mod batch;
@@ -29,7 +28,6 @@ use batch::{apply_ext_filter, derive_season_nzb_path, release_label, run_batch};
 use cleanup::CleanupMode;
 use cli::Cli;
 use hooks::{run_all_hooks, run_pre_hook, run_pre_hooks_dir, HookEnv};
-use output::{nzb_archive_path, resolve_nzb_dest};
 use upload::{
     plan_upload_paths, resolve_entry_password, resume_flags_string, PhaseTimings, UploadParams,
     UploadResult,
@@ -416,141 +414,18 @@ async fn run_single_upload(
         eprintln!();
     }
 
-    // Write NZB.
-    // The canonical copy goes to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb.
-    // If the user specified a destination (--out or nzb_dir), a hardlink (or
-    // copy when cross-device) is placed there so re-uploads never collide.
-    let out: Option<PathBuf> = if let Some(stem) = nzb_out_path {
-        Some(nzb_archive_path(&stem).await)
-    } else {
-        None
-    };
-
-    // nzb_reported_path: the path shown to the user and passed to hooks/history.
-    // It is the user-dest (hardlink) when set, otherwise the archive copy.
-    let mut nzb_reported_path: Option<PathBuf> = nzb_user_dest.clone().or_else(|| out.clone());
-
-    let _nzb_xml: Option<String> = if let Some(out) = &out {
-        if !config.par2_only {
-            if has_unrecoverable_failures {
-                eprintln!("skipping nzb output — upload incomplete");
-                nzb_reported_path = None;
-                None
-            } else if outcome.segments.is_empty() {
-                eprintln!("no segments posted — skipping nzb output");
-                nzb_reported_path = None;
-                None
-            } else {
-                let mut nzb_tags = config.nzb_tags.clone();
-                add_obfuscation_tag(&mut nzb_tags, &config.obfuscate);
-                let nzb_meta = NzbMeta {
-                    name: config.nzb_title.clone(),
-                    password: config
-                        .nzb_password
-                        .clone()
-                        .or_else(|| effective_password.clone()),
-                    category: config.nzb_category.clone(),
-                    tmdb_id: config.tmdb_id.clone(),
-                    imdb_id: config.imdb_id.clone(),
-                    tvdb_id: config.tvdb_id.as_deref().map(|id| {
-                        format!(
-                            "{}/{id}",
-                            config
-                                .tvdb_kind
-                                .unwrap_or(pesto::nzb::TvdbKind::Series)
-                                .as_str()
-                        )
-                    }),
-                    mal_id: config.mal_id.clone(),
-                    tags: nzb_tags,
-                };
-                let xml = pesto::nzb::generate(
-                    &outcome.groups,
-                    &outcome.segments,
-                    &nzb_meta,
-                    config.obfuscate,
-                );
-                tokio::fs::write(out, &xml)
-                    .await
-                    .with_context(|| format!("writing nzb file `{}`", out.display()))?;
-
-                // Place a hardlink (or copy) at the user-requested destination,
-                // respecting the nzb_conflict policy.
-                if let Some(dest) = &nzb_user_dest {
-                    if let Some(parent) = dest.parent() {
-                        let _ = tokio::fs::create_dir_all(parent).await;
-                    }
-                    let effective_dest = resolve_nzb_dest(dest, config.nzb_conflict).await?;
-                    if std::fs::hard_link(out, &effective_dest).is_err() {
-                        std::fs::copy(out, &effective_dest).with_context(|| {
-                            format!("copying nzb to `{}`", effective_dest.display())
-                        })?;
-                    }
-                    nzb_reported_path = Some(effective_dest);
-                }
-
-                let reported = nzb_reported_path.as_deref().unwrap_or(out);
-                if params.json_mode {
-                    let path_esc = reported
-                        .display()
-                        .to_string()
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"");
-                    println!(r#"{{"type":"nzb_written","path":"{path_esc}"}}"#);
-                } else {
-                    println!("wrote nzb: {}", reported.display());
-                }
-
-                // Append to shared history catalog.
-                if params.write_history && !config.par2_only && !config.dry_run {
-                    let obf_name = if config.obfuscate != pesto::config::ObfuscateMode::None {
-                        Some(entry_label)
-                    } else {
-                        None
-                    };
-                    let par2_str;
-                    let par2_pct = if config.par2 > 0 {
-                        par2_str = format!("{}%", config.par2);
-                        Some(par2_str.as_str())
-                    } else {
-                        None
-                    };
-                    // The server(s) that actually accepted an article this
-                    // run (`outcome.servers`), not just the statically
-                    // configured primary — a multi-server (failover) config
-                    // commonly uses every configured server at once.
-                    let history_servers_str = outcome.servers.join(", ");
-                    let wire_subjects_vec = pesto::nzb::wire_subjects(&outcome.segments);
-                    pesto::history::record_upload(
-                        &pesto::history::UploadRecord {
-                            name: entry_label,
-                            obfuscated_name: obf_name,
-                            password: effective_password.as_deref(),
-                            total_bytes,
-                            // The group actually posted to (`pick_post_group`
-                            // chose one at random from `config.groups`), not
-                            // the configured list's static first entry.
-                            group: outcome.groups.first().map(String::as_str),
-                            server: (!history_servers_str.is_empty())
-                                .then_some(history_servers_str.as_str()),
-                            par2_redundancy: par2_pct,
-                            duration_secs: upload_start.elapsed().as_secs_f64(),
-                            nzb_path: Some(&reported.display().to_string()),
-                            subject: config.nzb_title.as_deref().or(Some(entry_label)),
-                            wire_subjects: &wire_subjects_vec,
-                        },
-                        config.history_dir.as_deref(),
-                    );
-                }
-
-                Some(xml)
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let nzb_reported_path = upload::artifacts::write(upload::artifacts::ArtifactRequest {
+        params,
+        nzb_out_path,
+        nzb_user_dest,
+        has_unrecoverable_failures,
+        effective_password: effective_password.as_deref(),
+        outcome: &outcome,
+        entry_label,
+        total_bytes,
+        duration_secs: upload_start.elapsed().as_secs_f64(),
+    })
+    .await?;
 
     // Send completion notifications.
     let notify_enabled = config.notify.unwrap_or(true)
