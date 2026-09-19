@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+bash scripts/check-source-size.sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
