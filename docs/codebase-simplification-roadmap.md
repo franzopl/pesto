@@ -524,13 +524,16 @@ Next action: completed in the following progress entry.
   upload. `upload.rs` now acts as the facade and owns only shared upload types
   and planning policy; batch and watch callers retain their existing call
   signatures.
-- Reduced the entrypoint from 4,993 to 800 lines and removed it from the
+- Added `merge.rs` for the offline season-NZB merge command and moved its
+  season-key tests beside the implementation. Added `summary.rs` for the
+  final structured session-log record.
+- Reduced the entrypoint from 4,993 to 567 lines and removed it from the
   source-size debt baseline. The extracted
   `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
   `upload.rs`, `upload/compression.rs`, `upload/artifacts.rs`,
-  `upload/completion.rs`, `upload/lifecycle.rs`, `output.rs` and `cleanup.rs`
-  modules contain 776, 588, 224, 286, 280, 247, 584, 172, 157, 179, 511, 67
-  and 230 lines respectively.
+  `upload/completion.rs`, `upload/lifecycle.rs`, `merge.rs`, `summary.rs`,
+  `output.rs` and `cleanup.rs` modules contain 776, 588, 224, 286, 280, 247,
+  584, 172, 157, 179, 511, 209, 45, 67 and 230 lines respectively.
 
 Validation completed:
 
@@ -539,7 +542,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: extract the offline merge-season command into `merge.rs` and
-session-log formatting into `summary.rs`. Keep the entrypoint focused on
-startup and dispatch, preserve merge output byte-for-byte, and move the season
-name tests beside `merge.rs`.
+Next action: split the remaining `run` workflow into validation/configuration
+and mode dispatch in `command.rs`. Keep runtime construction and the final
+top-level call in `main.rs`, preserve initialization order, and target an
+entrypoint below 250 lines.
