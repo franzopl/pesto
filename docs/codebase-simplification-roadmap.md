@@ -510,10 +510,15 @@ Next action: completed in the following progress entry.
 - Moved compression-root selection, shared upload-root detection, resumable
   archive identity and resume-command fingerprint formatting into `upload.rs`,
   together with their fourteen focused tests.
-- Reduced the entrypoint baseline from 4,993 to 1,718 lines. The extracted
+- Added `upload/compression.rs` as a named lifecycle stage. It owns format
+  resolution, resume archive reuse, temporary paths, progress polling,
+  published archive names and compression timing while returning an explicit
+  outcome to the remaining upload orchestration.
+- Reduced the entrypoint baseline from 4,993 to 1,548 lines. The extracted
   `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
-  `upload.rs`, `output.rs` and `cleanup.rs` modules contain 776, 588, 224, 286,
-  280, 247, 577, 67 and 230 lines respectively.
+  `upload.rs`, `upload/compression.rs`, `output.rs` and `cleanup.rs` modules
+  contain 776, 588, 224, 286, 280, 247, 579, 172, 67 and 230 lines
+  respectively.
 
 Validation completed:
 
@@ -522,8 +527,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: extract compression planning/execution from `run_single_upload`
-into a named stage without growing `upload.rs` above 800 lines; use a focused
-submodule if needed. Keep posted filenames, resume fingerprints,
-temporary-directory lifetime and phase timing unchanged. Then extract
-NZB/history output as a separate stage.
+Next action: extract NZB generation, conflict handling, archive linking and
+history recording from `run_single_upload` into `upload/artifacts.rs`. Keep
+the exact incomplete-upload gates, reported path selection and history fields;
+then isolate NFO and post-hook completion behavior.

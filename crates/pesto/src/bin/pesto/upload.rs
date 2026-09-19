@@ -1,5 +1,7 @@
 //! Single-upload context, results and behavior-neutral planning stages.
 
+pub(super) mod compression;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

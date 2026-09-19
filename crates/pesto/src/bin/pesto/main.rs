@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pesto::compress::{compress, existing_archive, ArchiveFormat};
 use pesto::config::{self, Config, FileConfig, ObfuscateMode};
 use pesto::logging;
 use pesto::nntp::pool::ConnectionBroker;
@@ -32,8 +31,8 @@ use cli::Cli;
 use hooks::{run_all_hooks, run_pre_hook, run_pre_hooks_dir, HookEnv};
 use output::{nzb_archive_path, resolve_nzb_dest};
 use upload::{
-    collect_compress_roots, plan_upload_paths, resolve_entry_password, resume_flags_string,
-    reuse_or_generate_archive_stem, upload_root, PhaseTimings, UploadParams, UploadResult,
+    plan_upload_paths, resolve_entry_password, resume_flags_string, PhaseTimings, UploadParams,
+    UploadResult,
 };
 use watch::{run_watch, WatchBatchOpts};
 
@@ -190,172 +189,20 @@ async fn run_single_upload(
     let nzb_user_dest = upload_paths.nzb_user_dest;
     let resume_path = upload_paths.resume_path;
 
-    // ── Compression ──────────────────────────────────────────────────────────
-    let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
-        if effective_password.is_some() {
-            Some("7z".to_string())
-        } else {
-            None
-        }
-    });
-
-    let compress_temp_dir: Option<PathBuf>;
-    // `light` makes a compressed archive's opaque filename the one public
-    // share token: it is reused for the wire, NZB and PAR2 metadata below.
-    let mut light_compressed_prefix: Option<String> = None;
-    if let Some(fmt_str) = &compress_format_str {
-        let format = ArchiveFormat::parse(fmt_str).ok_or_else(|| {
-            anyhow::anyhow!("unknown compression format `{fmt_str}`; supported: 7z, zip, rar")
-        })?;
-
-        if format == ArchiveFormat::Rar && pesto::compress::find_binary("rar").is_none() {
-            eprintln!("note: rar password protection requires the `rar` binary in PATH");
-        }
-
-        let client_archive_stem = upload_root(&inputs)
-            .or_else(|| {
-                inputs.first().map(|f| {
-                    PathBuf::from(&f.name)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            })
-            .unwrap_or_else(|| "archive".to_string());
-        let client_archive_stem = pesto::compress::portable_archive_stem(&client_archive_stem);
-
-        // The obfuscated archive name is normally regenerated fresh on every
-        // run — but that means a --resume run can never match this file's
-        // segments back up, since the resume key is this very name. When a
-        // compatible prior state exists (same posting parameters — see
-        // `resume::RunFingerprint`) and already recorded one, reuse it
-        // instead of generating a new one; otherwise generate fresh and
-        // record it (tracked unconditionally, same as segment state — see
-        // issue #18's follow-up discussion) so a *future* --resume can reuse
-        // it. `poster::post_files_with_progress_and_cancel` still validates
-        // the fingerprint itself, so a genuinely incompatible resume run
-        // simply gets a fresh stem here and a wiped segment state there.
-        let archive_stem = if config.obfuscate != ObfuscateMode::None {
-            reuse_or_generate_archive_stem(resume_path.as_deref(), config)
-        } else {
-            client_archive_stem.clone()
-        };
-        if config.obfuscate == ObfuscateMode::Light {
-            light_compressed_prefix = Some(archive_stem.clone());
-        }
-
-        let tmp_base = config
-            .compress_temp_dir
-            .clone()
-            .unwrap_or_else(std::env::temp_dir);
-        // A pid-keyed directory is gone on the next process, so `--resume`
-        // can never see the archive it recorded. When resuming, key the
-        // scratch dir by the (stable) archive stem so an interrupted run
-        // finds the same files and can skip recompression.
-        let tmp_dir = if config.resume {
-            tmp_base.join(format!("pesto_compress_{archive_stem}"))
-        } else {
-            tmp_base.join(format!(
-                "pesto_compress_{}_{}",
-                std::process::id(),
-                entry_label
-            ))
-        };
-        compress_temp_dir = Some(tmp_dir.clone());
-
-        let fs_paths: Vec<PathBuf> = collect_compress_roots(&inputs);
-        let compress_input_bytes: u64 = fs_paths.iter().map(|p| dir_or_file_size(p)).sum();
-
-        let t_compress = std::time::Instant::now();
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressStarted {
-            total_bytes: compress_input_bytes,
-        });
-
-        // Sum every file currently in the (per-run, exclusive) tmp_dir
-        // rather than watching one fixed name: with --compress-volume-size
-        // the compressor writes several `stem.partNN.rar` / `stem.7z.NNN`
-        // files instead of a single `stem.<ext>`, and this stays correct in
-        // both cases.
-        let poll_tx = progress_tx.clone();
-        let poll_dir = tmp_dir.clone();
-        let poll_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                interval.tick().await;
-                let bytes_written = dir_or_file_size(&poll_dir);
-                let _ = poll_tx
-                    .send(pesto::progress::ProgressEvent::CompressProgress { bytes_written });
-            }
-        });
-
-        let compress_inputs = fs_paths.clone();
-        let compress_stem = archive_stem.clone();
-        let compress_dest = tmp_dir.clone();
-        let compress_pass = effective_password.clone();
-        let compress_volume_size = config.compress_volume_size.clone();
-        let result = if config.resume {
-            existing_archive(
-                &tmp_dir,
-                &archive_stem,
-                format,
-                compress_volume_size.as_deref(),
-            )
-        } else {
-            None
-        };
-        let result = if let Some(reused) = result {
-            eprintln!(
-                "resume: reusing existing archive `{}`",
-                reused.path.display()
-            );
-            reused
-        } else {
-            tokio::task::spawn_blocking(move || {
-                compress(
-                    &compress_inputs,
-                    &compress_stem,
-                    &compress_dest,
-                    format,
-                    compress_pass.as_deref(),
-                    compress_volume_size.as_deref(),
-                )
-            })
-            .await
-            .context("compressor task panicked")??
-        };
-
-        poll_handle.abort();
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::CompressDone);
-        let compress_ms = t_compress.elapsed().as_millis();
-        info!(elapsed_ms = compress_ms, phase = "compress", "phase done");
-        timings.compress_ms = Some(compress_ms);
-
-        inputs = std::iter::once(result.path)
-            .chain(result.extra_paths)
-            .map(|path| {
-                let published_stem = if config.obfuscate == ObfuscateMode::Light {
-                    &archive_stem
-                } else {
-                    &client_archive_stem
-                };
-                let name =
-                    pesto::compress::client_archive_name(&path, &archive_stem, published_stem);
-                pesto::walk::InputFile { path, name }
-            })
-            .collect();
-
-        if let Some(pw) = &effective_password {
-            let was_auto = params.archive_password_raw.as_deref() == Some("");
-            if was_auto {
-                println!("archive password: {pw}");
-            }
-        }
-    } else {
-        compress_temp_dir = None;
-    }
-    // ─────────────────────────────────────────────────────────────────────────
+    let compression = upload::compression::run(
+        config,
+        inputs,
+        entry_label,
+        resume_path.as_deref(),
+        effective_password.as_deref(),
+        params.archive_password_raw.as_deref() == Some(""),
+        &progress_tx,
+    )
+    .await?;
+    timings.compress_ms = compression.elapsed_ms;
+    let compress_temp_dir = compression.temp_dir;
+    let light_compressed_prefix = compression.light_prefix;
+    let inputs = compression.inputs;
 
     // Captured now, after `inputs` has taken its final (possibly compressed)
     // form and before posting: the exact set of files that are about to be
@@ -1571,23 +1418,6 @@ async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
-}
-
-/// Recursively sum bytes for a path that may be a file or a directory.
-fn dir_or_file_size(path: &Path) -> u64 {
-    match std::fs::metadata(path) {
-        Err(_) => 0,
-        Ok(m) if m.is_file() => m.len(),
-        Ok(_) => {
-            let mut total = 0u64;
-            if let Ok(rd) = std::fs::read_dir(path) {
-                for entry in rd.flatten() {
-                    total += dir_or_file_size(&entry.path());
-                }
-            }
-            total
-        }
-    }
 }
 
 /// Aggregate the upload as `(file count, subfolder count, total bytes)`.
