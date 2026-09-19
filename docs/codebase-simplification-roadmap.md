@@ -167,7 +167,7 @@ Steps:
   one owner in the target layout.
 - [ ] Extract CLI declarations and `Cli::overrides` without changing flags,
   help text or defaults.
-- [ ] Extract cleanup mode and its tests.
+- [x] Extract cleanup mode and its tests.
 - [x] Extract NZB destination, archive-path and path-expansion behavior.
 - [ ] Extract hook environment construction and execution. Reuse
   `pesto::hooks` only where semantics are already identical.
@@ -474,10 +474,13 @@ Next action: completed in the following progress entry.
   intended modules in the Phase 1 inventory table.
 - Added `crates/pesto/src/bin/pesto/output.rs` for NZB conflict resolution,
   archive destinations and tilde expansion.
+- Added `crates/pesto/src/bin/pesto/cleanup.rs` for cleanup policy, watch-mode
+  cleanup coordination and the ten focused regression tests.
 - Kept a temporary explicit module path while the binary entry point remains
   `src/bin/pesto.rs`; this disappears when the entry point moves into the
   `src/bin/pesto/` directory.
-- Reduced the CLI baseline from 4,993 to 4,934 lines.
+- Reduced the CLI baseline from 4,993 to 4,670 lines. The extracted `output.rs`
+  and `cleanup.rs` modules contain 67 and 230 lines respectively.
 
 Validation completed:
 
@@ -485,6 +488,7 @@ Validation completed:
 - `cargo check -p pesto-poster --all-targets`: passed.
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 
-Next action: extract `CleanupMode`, its filesystem behavior and its focused
-tests into `crates/pesto/src/bin/pesto/cleanup.rs`, then run the same narrow
-Pesto validation before moving to the CLI declaration.
+Next action: move the Clap declarations and `Cli::overrides` into
+`crates/pesto/src/bin/pesto/cli.rs` without changing any flag, default or help
+text. The parent module will import `Cli`; fields used by dispatch must receive
+the narrowest visibility that Rust's module boundary allows.
