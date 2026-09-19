@@ -1,6 +1,7 @@
 //! Single-upload context, results and behavior-neutral planning stages.
 
 pub(super) mod artifacts;
+pub(super) mod completion;
 pub(super) mod compression;
 
 use std::path::{Path, PathBuf};

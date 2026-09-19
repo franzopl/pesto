@@ -427,148 +427,22 @@ async fn run_single_upload(
     })
     .await?;
 
-    // Send completion notifications.
-    let notify_enabled = config.notify.unwrap_or(true)
-        && (config.notify_webhook.is_some() || config.notify_ntfy.is_some());
-    if notify_enabled && !config.par2_only && !config.dry_run && !cancelled {
-        // Reflects true completeness, independent of --allow-incomplete-nzb —
-        // the notification should say "not fully ok" even when the user
-        // chose to publish anyway.
-        let had_failures = !outcome.failures.is_empty()
-            || has_post_failures
-            || has_confirmed_missing
-            || has_inconclusive;
-        pesto::notify::send_all(&pesto::notify::NotifyConfig {
-            webhook_url: config.notify_webhook.as_deref(),
-            ntfy_topic: config.notify_ntfy.as_deref(),
-            name: entry_label,
-            total_bytes,
-            group: outcome.groups.first().map(String::as_str),
-            category: config.nzb_category.as_deref(),
-            ok: !had_failures,
-        })
-        .await;
-    }
-
-    // Generate .nfo as a local artifact only when the upload actually
-    // succeeded. Writing it on failure leaves an orphan `.nfo` in the input
-    // directory (no nzb_reported_path → fallback next to the source files),
-    // which `--resume --each` would later pick up as a standalone release.
-    let upload_ok = !cancelled && outcome.failures.is_empty() && !has_unrecoverable_failures;
-    let nfo_path: Option<PathBuf> = if config.nfo && upload_ok && !config.par2_only {
-        let base = nzb_reported_path
-            .as_ref()
-            .map(|p| p.with_extension("nfo"))
-            .or_else(|| {
-                entry_paths
-                    .first()
-                    .and_then(|p| p.parent())
-                    .map(|d| d.join(format!("{entry_label}.nfo")))
-            });
-        if let Some(ref nfo_out) = base {
-            // `nfo::generate` blocks on `bdinfo`/`mediainfo`, which can take
-            // a while on a large Blu-ray disc — long enough that, with no
-            // output in between, it looks like the process hung. Run it on
-            // a blocking-pool thread and print a heartbeat every 10s so
-            // there's always something on screen while it works.
-            if pesto::nfo::looks_like_bluray(entry_paths) {
-                println!(
-                    "generating nfo (running bdinfo — this can take a while on large Blu-ray discs)..."
-                );
-            } else {
-                println!("generating nfo...");
-            }
-            pesto::memory::set_phase(pesto::memory::Phase::Nfo);
-            let nfo_paths = entry_paths.to_vec();
-            let nfo_handle = tokio::task::spawn_blocking(move || pesto::nfo::generate(&nfo_paths));
-            tokio::pin!(nfo_handle);
-            let nfo_content = loop {
-                tokio::select! {
-                    res = &mut nfo_handle => break res.context("nfo generation task panicked")?,
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-                        println!("... still generating nfo, please wait");
-                    }
-                }
-            };
-            match nfo_content {
-                Some(content) => match pesto::nfo::write(
-                    nfo_out,
-                    &format!("{}{content}", nfo_metadata_header(config)),
-                ) {
-                    Ok(()) => {
-                        println!("wrote nfo:  {}", nfo_out.display());
-                        Some(nfo_out.clone())
-                    }
-                    Err(e) => {
-                        eprintln!("nfo write failed: {e}");
-                        None
-                    }
-                },
-                None => {
-                    eprintln!("nfo: no content generated for the given paths");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Run post-upload hooks only when the upload actually succeeded.
-    if upload_ok && !config.par2_only && !config.dry_run {
-        // Use `original_inputs`, not `inputs`: when --compress is active
-        // `inputs` was replaced with the single compressed archive, which
-        // would otherwise hide every original filename (and its extension)
-        // from post-upload hooks — see the `original_inputs` snapshot above.
-        let post_input_paths = original_inputs
-            .iter()
-            .map(|f| f.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(":");
-        let post_obfuscate = match config.obfuscate {
-            ObfuscateMode::None => "none",
-            ObfuscateMode::Full => "full",
-            ObfuscateMode::Light => "light",
-            ObfuscateMode::FullShared => "full-shared",
-            ObfuscateMode::Article => "article",
-        };
-        // PESTO_GROUP/PESTO_GROUPS report the group(s) actually posted to
-        // (`outcome.groups`, chosen at random by `pick_post_group` from the
-        // full configured list), not the static configured list itself —
-        // this is a post-upload hook, so the real destination is known.
-        let post_groups_str = outcome.groups.join(":");
-        // Same reasoning for PESTO_SERVER/PESTO_SERVERS: report the
-        // server(s) that actually accepted an article (`outcome.servers`),
-        // not just the statically configured primary.
-        let post_servers_str = outcome.servers.join(":");
-        let post_tags_str = config.nzb_tags.join(" ");
-        let hook_env = HookEnv {
-            nzb_path: nzb_reported_path.as_deref(),
-            nfo_path: nfo_path.as_deref(),
-            name: entry_label,
-            total_bytes,
-            input_paths: &post_input_paths,
-            group: outcome.groups.first().map(String::as_str),
-            groups: &post_groups_str,
-            password: effective_password.as_deref(),
-            server: post_servers_str.split(':').next().unwrap_or(&config.host),
-            servers: &post_servers_str,
-            category: config.nzb_category.as_deref(),
-            nzb_title: config.nzb_title.as_deref(),
-            obfuscate: post_obfuscate,
-            par2: config.par2,
-            tags: &post_tags_str,
-            tmdb_id: config.tmdb_id.as_deref(),
-            imdb_id: config.imdb_id.as_deref(),
-            tvdb_id: config.tvdb_id.as_deref(),
-            mal_id: config.mal_id.as_deref(),
-            incomplete: has_confirmed_missing,
-        };
-
-        run_all_hooks(config, &hook_env);
-    }
+    upload::completion::run(upload::completion::CompletionRequest {
+        params,
+        entry_paths,
+        entry_label,
+        original_inputs: &original_inputs,
+        effective_password: effective_password.as_deref(),
+        outcome: &outcome,
+        nzb_reported_path: nzb_reported_path.as_deref(),
+        cancelled,
+        has_post_failures,
+        has_confirmed_missing,
+        has_inconclusive,
+        has_unrecoverable_failures,
+        total_bytes,
+    })
+    .await?;
 
     // Cleanup temp dirs. When `keep_compress_temp` is set, the caller still
     // needs `posted_paths` on disk (a `--season` batch's global PAR2 step

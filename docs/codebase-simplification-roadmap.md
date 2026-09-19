@@ -517,11 +517,14 @@ Next action: completed in the following progress entry.
 - Added `upload/artifacts.rs` for canonical NZB persistence, conflict-aware
   user destinations, hardlink/copy fallback, reported-path selection and
   history recording. Its request type makes the stage inputs explicit.
-- Reduced the entrypoint baseline from 4,993 to 1,423 lines. The extracted
+- Added `upload/completion.rs` for completion notifications, asynchronous NFO
+  generation with heartbeat output, and post-upload hook environments built
+  from the original pre-compression inputs.
+- Reduced the entrypoint baseline from 4,993 to 1,297 lines. The extracted
   `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
-  `upload.rs`, `upload/compression.rs`, `upload/artifacts.rs`, `output.rs` and
-  `cleanup.rs` modules contain 776, 588, 224, 286, 280, 247, 580, 172, 157,
-  67 and 230 lines respectively.
+  `upload.rs`, `upload/compression.rs`, `upload/artifacts.rs`,
+  `upload/completion.rs`, `output.rs` and `cleanup.rs` modules contain 776,
+  588, 224, 286, 280, 247, 581, 172, 157, 179, 67 and 230 lines respectively.
 
 Validation completed:
 
@@ -530,7 +533,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: isolate NFO generation and post-hook completion behavior in a
-focused upload completion stage. Preserve the success gate, original input
-paths, heartbeat output and all hook environment fields. Then move the reduced
-`run_single_upload` orchestration into `upload.rs`.
+Next action: move the reduced `run_single_upload` orchestration into
+`upload/lifecycle.rs`, leaving `upload.rs` as its facade and policy/type owner.
+Move or narrow the remaining helper dependencies rather than importing the
+whole binary parent, and keep `batch.rs`/`watch.rs` call signatures unchanged.
