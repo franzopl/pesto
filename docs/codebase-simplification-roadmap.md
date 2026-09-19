@@ -174,7 +174,8 @@ Steps:
 - [ ] Extract batch/season behavior.
   - [x] Extract input filtering, season NZB destination and release labels with
     their focused tests.
-  - [ ] Extract season PAR2 generation/upload.
+  - [x] Extract season PAR2 generation/upload with its progress regression
+    test.
   - [ ] Extract batch orchestration and remaining batch tests.
 - [ ] Extract watch behavior.
 - [ ] Convert `run_single_upload` into named stages with a small context/result
@@ -492,9 +493,13 @@ Next action: completed in the following progress entry.
 - Added `crates/pesto/src/bin/pesto/batch.rs` for pure input filtering, season
   NZB destination policy and release labels, together with twelve focused
   tests.
-- Reduced the entrypoint baseline from 4,993 to 3,323 lines. The extracted
-  `cli.rs`, `batch.rs`, `hooks.rs`, `output.rs` and `cleanup.rs` modules contain
-  776, 313, 280, 67 and 230 lines respectively.
+- Added `crates/pesto/src/bin/pesto/season.rs` for season-wide PAR2 generation
+  and its internal upload lifecycle, together with the progress regression
+  test. The module remains separate from `batch.rs` so pure entry-selection
+  policy does not depend on upload machinery.
+- Reduced the entrypoint baseline from 4,993 to 3,099 lines. The extracted
+  `cli.rs`, `batch.rs`, `hooks.rs`, `season.rs`, `output.rs` and `cleanup.rs`
+  modules contain 776, 313, 280, 247, 67 and 230 lines respectively.
 
 Validation completed:
 
@@ -503,8 +508,8 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: extract season PAR2 generation/upload into a dedicated
-`season.rs` sibling rather than growing the pure-policy `batch.rs`. Keep
-`UploadParams` in the parent temporarily and expose only the internal fields
-required by the season module; move its progress regression test with the
-implementation.
+Next action: extract `force_season_group`, `CompressTempCleanup` and
+`run_batch` into `batch.rs`, then move their remaining focused tests. Preserve
+the current concurrency, cancellation, season-NZB and cleanup behavior; keep
+`UploadParams` and `UploadResult` in the parent until the single-upload
+lifecycle moves to `upload.rs`.

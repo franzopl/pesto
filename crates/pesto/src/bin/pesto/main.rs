@@ -24,12 +24,14 @@ mod cleanup;
 mod cli;
 mod hooks;
 mod output;
+mod season;
 
 use batch::{apply_ext_filter, derive_season_nzb_path, release_label, top_level_entries};
 use cleanup::{apply_watch_cleanup, CleanupMode};
 use cli::Cli;
 use hooks::{run_all_hooks, run_pre_hook, run_pre_hooks_dir, HookEnv};
 use output::{expand_tilde, nzb_archive_path, resolve_nzb_dest};
+use season::post_season_par2_volumes;
 
 /// Tracks this process's exact live-heap byte count (see
 /// [`pesto::memory::alloc`]), for comparison against `VmSize`/`RLIMIT_AS` in
@@ -1117,158 +1119,8 @@ fn nfo_metadata_header(config: &Config) -> String {
     header
 }
 
-/// Whether a top-level entry is a pesto-generated artifact that must never be
-/// treated as an independent `--each` release. A bare `.nfo`/`.nzb` sitting in
-/// the input directory is one of our own outputs (e.g. an orphan `.nfo` left by
-/// a failed run); uploading it as a standalone release is never intended.
-async fn post_season_par2_volumes(
-    episode_paths: &[PathBuf],
-    release_name: &str,
-    params: &Arc<UploadParams>,
-    cancel: &Arc<std::sync::atomic::AtomicBool>,
-) -> Result<Vec<PostedSegment>> {
-    if episode_paths.is_empty() || params.config.par2 == 0 {
-        return Ok(Vec::new());
-    }
-
-    let (progress_tx, renderer) = if params.json_mode {
-        pesto::progress::spawn_json_emitter()
-    } else {
-        pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
-    };
-    let result = post_season_par2_volumes_with_progress(
-        episode_paths,
-        release_name,
-        params,
-        cancel,
-        progress_tx,
-    )
-    .await;
-    let _ = renderer.await;
-    result
-}
-
-async fn post_season_par2_volumes_with_progress(
-    episode_paths: &[PathBuf],
-    release_name: &str,
-    params: &Arc<UploadParams>,
-    cancel: &Arc<std::sync::atomic::AtomicBool>,
-    progress_tx: pesto::progress::ProgressSender,
-) -> Result<Vec<PostedSegment>> {
-    if episode_paths.is_empty() || params.config.par2 == 0 {
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::Finished);
-        return Ok(Vec::new());
-    }
-
-    // Create a persistent directory for PAR2 volumes (not temp).
-    let par2_output_dir =
-        tempfile::tempdir().context("creating directory for season PAR2 volumes")?;
-    let par2_dir_path = par2_output_dir.path().to_path_buf();
-
-    // Generate the PAR2 volumes.
-    let generation = pesto::poster::generate_and_write_season_par2_with_progress(
-        episode_paths,
-        release_name,
-        &par2_dir_path,
-        &params.config,
-        Some(&progress_tx),
-    )
-    .await;
-    if let Err(error) = generation {
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::Failed {
-            description: format!("season PAR2 generation failed: {error:#}"),
-        });
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::Finished);
-        return Err(error);
-    }
-
-    // Read the generated `.par2` files.
-    let par2_files: Vec<PathBuf> = std::fs::read_dir(&par2_dir_path)?
-        .filter_map(|entry| {
-            entry.ok().and_then(|e| {
-                let path = e.path();
-                if path.extension().is_some_and(|ext| ext == "par2") {
-                    Some(path)
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-
-    if par2_files.is_empty() {
-        let _ = progress_tx.send(pesto::progress::ProgressEvent::Finished);
-        return Ok(Vec::new());
-    }
-
-    let _ = progress_tx.send(pesto::progress::ProgressEvent::Status {
-        text: format!("Uploading {} season recovery volume(s)", par2_files.len()),
-    });
-
-    // Post the PAR2 volumes using the standard upload pipeline.
-    // Create a config copy with PAR2 disabled to prevent recursive PAR2 generation.
-    let mut par2_config = (*params.config).clone();
-    par2_config.par2 = 0; // Disable PAR2 for PAR2 volumes themselves
-
-    // Disable compression too. `run_upload` (the library pipeline this call
-    // goes through) re-derives `compress_format_str` from `compress_password`
-    // independently of anything the caller already did — so leaving a
-    // `--compress`/`--password` season config in place here would wrap each
-    // *already-generated* `.par2` volume in its own password-protected
-    // archive before posting it. The result is a season "PAR2" set that's
-    // really an encrypted blob no downloader can read as PAR2 at all,
-    // defeating the entire point of posting recovery data.
-    par2_config.compress_format = None;
-    par2_config.compress_password = None;
-    par2_config.compress_volume_size = None;
-
-    // `no_hooks` only suppresses the `~/.config/pesto/hooks/` directory scan —
-    // per `hooks::run_hooks`, explicit `post_hooks` entries "still run
-    // regardless". A configured post-hook (e.g. one of the indexer-submission
-    // scripts under `examples/hooks/`) would otherwise fire against this
-    // internal, PAR2-only NZB and submit it to an indexer ahead of the real
-    // season NZB, so both hook paths must be disabled here.
-    par2_config.no_hooks = true;
-    par2_config.post_hooks = Vec::new();
-
-    // Write the PAR2 NZB inside `par2_output_dir` rather than a lone
-    // `NamedTempFile`. `run_upload` never writes to the exact path it's
-    // given — `versioned_nzb_path` normalizes the extension and picks a
-    // fresh, non-colliding `{stem}.nzb` sibling — so a standalone
-    // `NamedTempFile` (deleted on drop) tracks a *different* path than the
-    // one actually holding the NZB content, leaking a PAR2-only NZB that
-    // nothing ever cleans up (it was found and mistakenly submitted to an
-    // indexer ahead of the real season NZB). Placing it in `par2_output_dir`
-    // guarantees whatever path is actually chosen is removed when that
-    // `TempDir` drops at the end of this function.
-    let par2_nzb_path = par2_dir_path.join("season-par2.nzb");
-
-    let upload_result = pesto::upload::run_upload(
-        &par2_config,
-        &par2_files,
-        "season-par2",
-        Some(progress_tx),
-        Some(cancel.clone()),
-        Some(par2_nzb_path), // write NZB to temp (discarded after)
-        false,               // don't write history for PAR2 volumes
-        None,                // no pause support for PAR2 volume posting
-    )
-    .await;
-    let outcome = upload_result?;
-
-    info!(
-        par2_segments = outcome.segments.len(),
-        par2_volumes = par2_files.len(),
-        "season PAR2 upload complete"
-    );
-
-    Ok(outcome.segments)
-}
-
-/// Derive the path for a `--season` consolidated NZB for `entry`. Prefers
-/// `explicit_out` (from `--out`) if given; otherwise names the file after
-/// `entry` and places it under `nzb_dir` (from config), or the current
-/// directory if unset.
+/// Force every episode in a season batch onto one pre-picked newsgroup target.
+/// Plain `--each` runs keep their original group pool unchanged.
 fn force_season_group(params: Arc<UploadParams>, is_season: bool) -> Arc<UploadParams> {
     if !is_season {
         return params;
@@ -1306,13 +1158,7 @@ impl Drop for CompressTempCleanup {
     }
 }
 
-/// Human-readable entry label for hooks (`PESTO_NAME`), banners, and history.
-///
-/// Strips only known media/archive extensions so `Show.S01E01.mkv` becomes
-/// `Show.S01E01`. Dots inside a scene name (`Show.S01E01.720p.BluRay-Group`)
-/// are kept — `file_stem()` would chop them. `--season`/`--each` used to
-/// pass the raw filename, so indexer pre-hooks searched for `….mkv` and
-/// missed an existing release whose name has no extension.
+/// Run `--each` / `--season` batch orchestration over the collected entries.
 async fn run_batch(
     params: Arc<UploadParams>,
     dirs: &[PathBuf],
@@ -2883,76 +2729,6 @@ mod tests {
             ext_filter: Vec::new(),
             cleanup_mode: CleanupMode::Leave,
         }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn season_par2_reports_generation_and_volume_upload_progress() {
-        let dir = tempfile::tempdir().unwrap();
-        let episode_a = dir.path().join("S01E01.bin");
-        let episode_b = dir.path().join("S01E02.bin");
-        std::fs::write(&episode_a, vec![0x11; 1024 * 1024]).unwrap();
-        std::fs::write(&episode_b, vec![0x22; 1024 * 1024]).unwrap();
-
-        let mut config = test_config(64 * 1024, ObfuscateMode::None, None, 10);
-        config.dry_run = true;
-        config.check = false;
-        let params = Arc::new(test_upload_params(config));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let segments = post_season_par2_volumes_with_progress(
-            &[episode_a, episode_b],
-            "Season01",
-            &params,
-            &cancel,
-            tx,
-        )
-        .await
-        .unwrap();
-        assert!(
-            !segments.is_empty(),
-            "dry-run volume upload should produce segments"
-        );
-
-        let mut events = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            events.push(event);
-        }
-        assert!(events.iter().any(|event| matches!(
-            event,
-            pesto::progress::ProgressEvent::Par2EncodeStarted { .. }
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            pesto::progress::ProgressEvent::Par2PassStarted { .. }
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            pesto::progress::ProgressEvent::Par2InputProgress { .. }
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            pesto::progress::ProgressEvent::Par2ComputeStarted { .. }
-        )));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, pesto::progress::ProgressEvent::Par2SliceWritten)));
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                pesto::progress::ProgressEvent::Started {
-                    mode: pesto::progress::RunMode::DryRun,
-                    ..
-                }
-            )),
-            "the generated volume upload must start the normal rich progress path"
-        );
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, pesto::progress::ProgressEvent::SegmentDone { .. })));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, pesto::progress::ProgressEvent::Finished)));
     }
 
     // ── force_season_group ───────────────────────────────────────────────────
