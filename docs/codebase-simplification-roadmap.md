@@ -172,6 +172,10 @@ Steps:
 - [x] Extract hook environment construction and execution. Reuse
   `pesto::hooks` only where semantics are already identical.
 - [ ] Extract batch/season behavior.
+  - [x] Extract input filtering, season NZB destination and release labels with
+    their focused tests.
+  - [ ] Extract season PAR2 generation/upload.
+  - [ ] Extract batch orchestration and remaining batch tests.
 - [ ] Extract watch behavior.
 - [ ] Convert `run_single_upload` into named stages with a small context/result
   type instead of a monolithic function.
@@ -485,9 +489,12 @@ Next action: completed in the following progress entry.
   environment, failure policy and platform command selection. The shared
   `pesto::hooks` module remains distinct because its reusable captured-output
   API does not expose pre-hook abort semantics or all CLI metadata variables.
-- Reduced the entrypoint baseline from 4,993 to 3,622 lines. The extracted
-  `cli.rs`, `hooks.rs`, `output.rs` and `cleanup.rs` modules contain 776, 280,
-  67 and 230 lines respectively.
+- Added `crates/pesto/src/bin/pesto/batch.rs` for pure input filtering, season
+  NZB destination policy and release labels, together with twelve focused
+  tests.
+- Reduced the entrypoint baseline from 4,993 to 3,323 lines. The extracted
+  `cli.rs`, `batch.rs`, `hooks.rs`, `output.rs` and `cleanup.rs` modules contain
+  776, 313, 280, 67 and 230 lines respectively.
 
 Validation completed:
 
@@ -496,6 +503,8 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: split the batch/season region. Start with its pure input-filtering
-and release-label helpers plus their focused tests, then move season PAR2 and
-batch orchestration after the leaf dependencies are explicit.
+Next action: extract season PAR2 generation/upload into a dedicated
+`season.rs` sibling rather than growing the pure-policy `batch.rs`. Keep
+`UploadParams` in the parent temporarily and expose only the internal fields
+required by the season module; move its progress regression test with the
+implementation.
