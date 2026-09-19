@@ -163,12 +163,12 @@ crates/pesto/src/bin/pesto/
 
 Steps:
 
-- [ ] Inventory every top-level type and function in `bin/pesto.rs` and assign
+- [x] Inventory every top-level type and function in `bin/pesto.rs` and assign
   one owner in the target layout.
 - [ ] Extract CLI declarations and `Cli::overrides` without changing flags,
   help text or defaults.
 - [ ] Extract cleanup mode and its tests.
-- [ ] Extract NZB destination, archive-path and path-expansion behavior.
+- [x] Extract NZB destination, archive-path and path-expansion behavior.
 - [ ] Extract hook environment construction and execution. Reuse
   `pesto::hooks` only where semantics are already identical.
 - [ ] Extract batch/season behavior.
@@ -183,6 +183,32 @@ Do not redesign flags or hook behavior in this phase. Potential shared helpers
 identified during analysis include `expand_tilde`, recursive size calculation,
 session summaries and hook execution; they must only be consolidated after
 their edge cases are compared.
+
+### Phase 1 inventory
+
+The line ranges below describe the Phase 0 version of `bin/pesto.rs`; they are
+an ownership map, not stable source references.
+
+| Original region | Responsibility | Intended owner |
+|---|---|---|
+| 34–805 | help text, `Cli`, and override resolution | `cli.rs` |
+| 806–1,021 | cleanup policy and tests | `cleanup.rs` |
+| 1,022–2,101 | upload context, result, timings and single-upload lifecycle | `upload.rs` |
+| 2,102–2,453 | input filters, season PAR2 helpers and release labels | `batch.rs` |
+| 2,454–2,840 | batch orchestration | `batch.rs` |
+| 2,841–3,167 | watch state, retry and cleanup orchestration | `watch.rs` |
+| 3,168–3,365 | merge-season command and season-name parsing | `merge.rs` |
+| 3,366–3,419 | session report writing | `summary.rs` |
+| 3,420–3,789 | runtime startup, validation and mode dispatch | `main.rs` / `command.rs` |
+| 3,790–3,955 | compression roots, resume identity and upload summaries | `upload.rs` |
+| 3,956–3,986 | welcome/header output | `command.rs` |
+| 3,987–4,266 | hook environment and hook execution | `hooks.rs` |
+| 4,267–4,328 | NZB destinations and path expansion | `output.rs` |
+| 4,329–end | mixed unit tests | move beside each owning module |
+
+The first extraction is `output.rs`: it is a leaf policy module with only
+filesystem/config dependencies and validates the child-module visibility and
+layout before moving stateful upload code.
 
 ## Phase 2 — Separate terminal state from rendering
 
@@ -440,6 +466,25 @@ Decisions:
 - SIMD and tables are eligible for permanent exceptions only after the general
   refactors reach Phase 7.
 
-Next action: commit Phase 0, then inventory every top-level type, function and
-test in `crates/pesto/src/bin/pesto.rs`; record its intended owner before the
-first Phase 1 code move.
+Next action: completed in the following progress entry.
+
+### 2026-09-19 — Phase 1 started
+
+- Inventoried all top-level CLI types, functions and tests and assigned their
+  intended modules in the Phase 1 inventory table.
+- Added `crates/pesto/src/bin/pesto/output.rs` for NZB conflict resolution,
+  archive destinations and tilde expansion.
+- Kept a temporary explicit module path while the binary entry point remains
+  `src/bin/pesto.rs`; this disappears when the entry point moves into the
+  `src/bin/pesto/` directory.
+- Reduced the CLI baseline from 4,993 to 4,934 lines.
+
+Validation completed:
+
+- `bash scripts/check-source-size.sh`: passed.
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo test -p pesto-poster --bin pesto`: 52 passed.
+
+Next action: extract `CleanupMode`, its filesystem behavior and its focused
+tests into `crates/pesto/src/bin/pesto/cleanup.rs`, then run the same narrow
+Pesto validation before moving to the CLI declaration.

@@ -22,6 +22,14 @@ use pesto::nzb::NzbMeta;
 use pesto::poster::PostedSegment;
 use tracing::{error, info};
 
+// Temporary explicit path while the binary entry point is still
+// `src/bin/pesto.rs`. It becomes a plain `mod output;` when Phase 1 moves the
+// entry point to `src/bin/pesto/main.rs`.
+#[path = "pesto/output.rs"]
+mod output;
+
+use output::{expand_tilde, nzb_archive_path, resolve_nzb_dest};
+
 /// Tracks this process's exact live-heap byte count (see
 /// [`pesto::memory::alloc`]), for comparison against `VmSize`/`RLIMIT_AS` in
 /// `--memory-report`. Declared here — in the binary, not the `pesto` library
@@ -4256,73 +4264,6 @@ fn is_executable(path: &std::path::Path) -> bool {
             .as_deref(),
         Some("exe" | "cmd" | "bat" | "ps1" | "py")
     )
-}
-
-/// Return a unique path for the NZB using `O_CREAT|O_EXCL` (atomic create).
-///
-/// Tries `base.nzb`, then `base.v2.nzb`, `base.v3.nzb`, … until it can
-/// Resolve the final user-destination path for the NZB according to the
-/// conflict policy. Returns an error when the policy is `Fail` and the file
-/// already exists.
-async fn resolve_nzb_dest(
-    dest: &Path,
-    conflict: pesto::config::NzbConflict,
-) -> anyhow::Result<PathBuf> {
-    use pesto::config::NzbConflict;
-    if !dest.exists() {
-        return Ok(dest.to_path_buf());
-    }
-    match conflict {
-        NzbConflict::Overwrite => Ok(dest.to_path_buf()),
-        NzbConflict::Rename => {
-            let base = dest.with_extension("");
-            let stem = base.to_string_lossy();
-            let mut n = 1u32;
-            loop {
-                let candidate = PathBuf::from(format!("{stem}-{n}.nzb"));
-                if !candidate.exists() {
-                    return Ok(candidate);
-                }
-                n += 1;
-            }
-        }
-        NzbConflict::Fail => {
-            anyhow::bail!(
-                "nzb file already exists: {} (set nzb_conflict = \"overwrite\" or \"rename\" to allow)",
-                dest.display()
-            )
-        }
-    }
-}
-
-/// Return the canonical NZB archive path: `~/.config/pesto/nzb/TIMESTAMP_stem.nzb`.
-/// Creates the directory if needed. The timestamp prefix makes every upload
-/// unique so overwrites are never an issue.
-async fn nzb_archive_path(stem: &str) -> PathBuf {
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let filename = format!("{timestamp}_{stem}.nzb");
-
-    if let Some(dir) = pesto::config::config_dir().map(|d| d.join("nzb")) {
-        let _ = tokio::fs::create_dir_all(&dir).await;
-        dir.join(filename)
-    } else {
-        PathBuf::from(filename)
-    }
-}
-
-/// Expand a leading `~` to the user's home directory.
-/// Returns the path unchanged when `~` is not present or `$HOME` is unset.
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    } else if path == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]
