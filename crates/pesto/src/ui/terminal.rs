@@ -5,6 +5,7 @@ use crate::ui::format::{
     bar_width, body_width, fast_repost_label, format_size, inconclusive_label, render_dual_bar,
     strip_ansi_for_plain, wrapped_note, CHECK_BAND_COLOR, UPLOAD_BAND_COLOR,
 };
+use crate::ui::metrics;
 use crate::ui::render::{
     ansi, box_bottom, box_line, box_top, format_duration, render_bar, render_sparkline,
     terminal_width, truncate, visible_len, wrap,
@@ -786,7 +787,7 @@ impl RenderState {
     }
 
     fn elapsed_secs(&self) -> f64 {
-        self.start.elapsed().as_secs_f64().max(0.001)
+        metrics::elapsed_secs(self.start)
     }
 
     /// Fraction of the run completed, measured in segments.
@@ -798,15 +799,12 @@ impl RenderState {
     /// read `100%  864/864 seg`). Bytes stay the basis for speed, size and
     /// ETA, where that remainder is harmless.
     fn progress_frac(&self) -> f64 {
-        if self.total_segments == 0 {
-            return 0.0;
-        }
-        (self.done_segments as f64 / self.total_segments as f64).clamp(0.0, 1.0)
+        metrics::progress_fraction(self.done_segments, self.total_segments)
     }
 
     /// Bytes posted per second so far.
     fn rate(&self) -> f64 {
-        self.done_bytes as f64 / self.elapsed_secs()
+        metrics::bytes_per_second(self.done_bytes, self.elapsed_secs())
     }
 
     /// Record a per-tick speed sample in the ring buffer (phase 21c/21d).
@@ -820,51 +818,19 @@ impl RenderState {
 
     /// Return the active speed history slice in chronological order.
     fn speed_samples(&self) -> Vec<f64> {
-        let n = self.speed_history_len;
-        if n == 0 {
-            return Vec::new();
-        }
-        let start = if n < 10 {
-            0
-        } else {
-            self.speed_history_pos // oldest slot when buffer is full
-        };
-        (0..n)
-            .map(|i| self.speed_history[(start + i) % 10])
-            .collect()
+        metrics::ordered_samples(
+            &self.speed_history,
+            self.speed_history_pos,
+            self.speed_history_len,
+        )
     }
 
     /// Compute ETA as a range based on throughput confidence (phase 21d).
     ///
     /// Returns `(low_secs, high_secs, unstable)`.
     fn eta_range(&self) -> Option<(f64, f64, bool)> {
-        let remaining = self.total_bytes.saturating_sub(self.done_bytes) as f64;
-        if remaining <= 0.0 {
-            return None;
-        }
         let samples = self.speed_samples();
-        if samples.is_empty() {
-            return None;
-        }
-        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        if mean < 1.0 {
-            return None;
-        }
-        let variance =
-            samples.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
-        let sigma = variance.sqrt();
-        let cv = sigma / mean;
-
-        let mid = remaining / mean;
-        if cv < 0.1 {
-            return Some((mid, mid, false));
-        }
-        let low = remaining / (mean + sigma).max(1.0);
-        // Clamp high to 10× low so instability never produces absurd ranges.
-        // When sigma ≥ mean the lower-bound divisor approaches zero, which
-        // would otherwise yield millions of hours.
-        let high = (remaining / (mean - sigma).max(1.0)).min(low * 10.0);
-        Some((low, high, cv >= 0.3))
+        metrics::eta_range(self.total_bytes.saturating_sub(self.done_bytes), &samples)
     }
 
     /// Update the smoothed (EMA) PAR2 encode/write rates from this tick's
@@ -947,22 +913,17 @@ impl RenderState {
             self.par2_encode_units_done(),
             self.par2_encode_units_total(),
         );
-        if total == 0 || done >= total {
-            return None;
-        }
-        (self.par2_encode_rate_ema > 0.01)
-            .then(|| (total - done) as f64 / self.par2_encode_rate_ema)
+        metrics::remaining_secs(done as u64, total as u64, self.par2_encode_rate_ema)
     }
 
     /// Same idea as [`Self::par2_encode_remaining_secs`], for the (usually
     /// short) phase that writes already-computed recovery data to disk.
     fn par2_write_remaining_secs(&self) -> Option<f64> {
-        if self.par2_write_total == 0 || self.par2_write_done >= self.par2_write_total {
-            return None;
-        }
-        (self.par2_write_rate_ema > 0.01).then(|| {
-            (self.par2_write_total - self.par2_write_done) as f64 / self.par2_write_rate_ema
-        })
+        metrics::remaining_secs(
+            u64::from(self.par2_write_done),
+            u64::from(self.par2_write_total),
+            self.par2_write_rate_ema,
+        )
     }
 
     /// Overall ETA in seconds, folding in PAR2 encode/write remaining time
@@ -983,25 +944,17 @@ impl RenderState {
     /// upload-side estimate (`eta_range`), the only one with enough samples to
     /// judge confidence.
     fn overall_eta_secs(&self) -> Option<(f64, bool)> {
-        let (mut best, unstable) = match self.eta_range() {
-            Some((_lo, hi, u)) => (Some(hi), u),
-            None => {
-                let rate = self.rate();
-                let fallback = (rate > 1.0 && self.total_bytes > self.done_bytes)
-                    .then(|| (self.total_bytes - self.done_bytes) as f64 / rate);
-                (fallback, false)
-            }
-        };
-        for x in [
-            self.par2_encode_remaining_secs(),
-            self.par2_write_remaining_secs(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            best = Some(best.map_or(x, |b: f64| b.max(x)));
-        }
-        best.map(|secs| (secs, unstable))
+        let rate = self.rate();
+        let fallback = (rate > 1.0 && self.total_bytes > self.done_bytes)
+            .then(|| (self.total_bytes - self.done_bytes) as f64 / rate);
+        metrics::overall_eta(
+            self.eta_range(),
+            fallback,
+            [
+                self.par2_encode_remaining_secs(),
+                self.par2_write_remaining_secs(),
+            ],
+        )
     }
 
     /// Draw quiet single-line mode (phase 21f).

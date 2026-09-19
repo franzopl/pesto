@@ -242,7 +242,7 @@ Steps:
 - [ ] Extract terminal unit tests from the implementation file and group them
   by state, metrics and renderer behavior.
 - [x] Extract pure formatting functions.
-- [ ] Extract rate and ETA calculations.
+- [x] Extract rate and ETA calculations.
 - [ ] Move `RenderState` and construction into `state.rs`.
 - [ ] Move `ProgressEvent` application into `reducer.rs`.
 - [ ] Split quiet, panel and plain renderers.
@@ -565,6 +565,10 @@ Next action: completed in the following progress entry.
   plain-mode ANSI removal, status labels and IEC byte formatting. Moved the
   focused bar-width regression test with the policy and reduced
   `ui/terminal.rs` further to 2,144 lines.
+- Added `ui/metrics.rs` for progress fractions, rates, chronological speed
+  samples, confidence-aware ETA ranges, phase estimates and overall ETA
+  selection. `RenderState` retains sample collection while delegating pure
+  calculations, reducing `ui/terminal.rs` to 2,097 lines.
 
 Validation completed:
 
@@ -573,6 +577,7 @@ Validation completed:
 - `cargo test -p pesto-poster --lib ui::terminal::tests`: 32 passed.
 - `bash scripts/check-source-size.sh`: passed.
 
-Next action: extract rate, ETA and aggregate progress calculations from
-`RenderState` into `ui/metrics.rs`. Preserve event ordering and renderer output,
-and move only the tests that directly exercise those calculations.
+Next action: move `RenderState` and its construction into `ui/state.rs`,
+leaving event application temporarily beside it or in `terminal.rs` until the
+following reducer extraction. Preserve field visibility narrowly and keep the
+renderer call sites unchanged.
