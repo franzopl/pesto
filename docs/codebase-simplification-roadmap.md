@@ -177,7 +177,7 @@ Steps:
   - [x] Extract season PAR2 generation/upload with its progress regression
     test.
   - [x] Extract batch orchestration and remaining batch tests.
-- [ ] Extract watch behavior.
+- [x] Extract watch behavior.
 - [ ] Convert `run_single_upload` into named stages with a small context/result
   type instead of a monolithic function.
 - [ ] Reduce `run` to validation and mode dispatch.
@@ -501,10 +501,12 @@ Next action: completed in the following progress entry.
   NZB/NFO/hooks flow and compression-temp cleanup guard into `batch.rs`.
   Focused batch tests now live in `batch/tests.rs`, keeping the production
   module below the 800-line guardrail without weakening cohesion.
-- Reduced the entrypoint baseline from 4,993 to 2,584 lines. The extracted
-  `cli.rs`, `batch.rs`, `batch/tests.rs`, `hooks.rs`, `season.rs`, `output.rs`
-  and `cleanup.rs` modules contain 776, 588, 224, 280, 247, 67 and 230 lines
-  respectively.
+- Added `crates/pesto/src/bin/pesto/watch.rs` for stability polling, retry
+  state, concurrent dispatch and watch-specific cleanup coordination.
+- Reduced the entrypoint baseline from 4,993 to 2,309 lines. The extracted
+  `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
+  `output.rs` and `cleanup.rs` modules contain 776, 588, 224, 286, 280, 247,
+  67 and 230 lines respectively.
 
 Validation completed:
 
@@ -513,7 +515,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: extract watch-mode state, retry/stability policy and orchestration
-into `watch.rs`, moving its focused tests with it. Keep calls into `run_batch`
-and `run_single_upload` as parent-owned boundaries until `upload.rs` exists,
-and preserve watch cleanup and cancellation behavior exactly.
+Next action: introduce `upload.rs` and move `UploadParams`, `UploadResult`,
+`PhaseTimings` and the single-upload lifecycle into it. First identify and
+extract behavior-neutral stage functions from `run_single_upload`; keep the
+public CLI behavior and calls from `batch.rs` and `watch.rs` unchanged.
