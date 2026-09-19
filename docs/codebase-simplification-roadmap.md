@@ -169,7 +169,7 @@ Steps:
   help text or defaults.
 - [x] Extract cleanup mode and its tests.
 - [x] Extract NZB destination, archive-path and path-expansion behavior.
-- [ ] Extract hook environment construction and execution. Reuse
+- [x] Extract hook environment construction and execution. Reuse
   `pesto::hooks` only where semantics are already identical.
 - [ ] Extract batch/season behavior.
 - [ ] Extract watch behavior.
@@ -481,9 +481,13 @@ Next action: completed in the following progress entry.
 - Added `crates/pesto/src/bin/pesto/cli.rs` for all Clap declarations and
   conversion to configuration overrides. Only fields consumed by the parent
   dispatcher are visible outside the module.
-- Reduced the entrypoint baseline from 4,993 to 3,894 lines. The extracted
-  `cli.rs`, `output.rs` and `cleanup.rs` modules contain 776, 67 and 230 lines
-  respectively.
+- Added `crates/pesto/src/bin/pesto/hooks.rs` for the CLI's pre/post-hook
+  environment, failure policy and platform command selection. The shared
+  `pesto::hooks` module remains distinct because its reusable captured-output
+  API does not expose pre-hook abort semantics or all CLI metadata variables.
+- Reduced the entrypoint baseline from 4,993 to 3,622 lines. The extracted
+  `cli.rs`, `hooks.rs`, `output.rs` and `cleanup.rs` modules contain 776, 280,
+  67 and 230 lines respectively.
 
 Validation completed:
 
@@ -492,7 +496,6 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: inspect `pesto::hooks` against the CLI-specific hook runner, then
-extract `HookEnv` and command/script execution into
-`crates/pesto/src/bin/pesto/hooks.rs` without changing ordering, environment
-variables, failure policy or platform-specific command selection.
+Next action: split the batch/season region. Start with its pure input-filtering
+and release-label helpers plus their focused tests, then move season PAR2 and
+batch orchestration after the leaf dependencies are explicit.
