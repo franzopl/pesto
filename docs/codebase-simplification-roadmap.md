@@ -180,9 +180,9 @@ Steps:
 - [x] Extract watch behavior.
 - [x] Convert `run_single_upload` into named stages with a small context/result
   type instead of a monolithic function.
-- [ ] Reduce `run` to validation and mode dispatch.
-- [ ] Keep the binary entry file below 250 lines.
-- [ ] Run Pesto tests after every extraction and all gates at phase completion.
+- [x] Reduce `run` to validation and mode dispatch.
+- [x] Keep the binary entry file below 250 lines.
+- [x] Run Pesto tests after every extraction and all gates at phase completion.
 
 Do not redesign flags or hook behavior in this phase. Potential shared helpers
 identified during analysis include `expand_tilde`, recursive size calculation,
@@ -527,22 +527,31 @@ Next action: completed in the following progress entry.
 - Added `merge.rs` for the offline season-NZB merge command and moved its
   season-key tests beside the implementation. Added `summary.rs` for the
   final structured session-log record.
-- Reduced the entrypoint from 4,993 to 567 lines and removed it from the
+- Added `command.rs` for CLI validation, configuration resolution, logging
+  initialization and top-level mode dispatch. The command workflow now uses
+  named stdin materialization, config loading, cleanup-policy and upload-mode
+  dispatch stages instead of one monolithic function.
+- Completed Phase 1 with the entrypoint reduced from 4,993 to 172 lines and
+  removed it from the
   source-size debt baseline. The extracted
-  `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
-  `upload.rs`, `upload/compression.rs`, `upload/artifacts.rs`,
+  `cli.rs`, `command.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`,
+  `season.rs`, `upload.rs`, `upload/compression.rs`, `upload/artifacts.rs`,
   `upload/completion.rs`, `upload/lifecycle.rs`, `merge.rs`, `summary.rs`,
-  `output.rs` and `cleanup.rs` modules contain 776, 588, 224, 286, 280, 247,
-  584, 172, 157, 179, 511, 209, 45, 67 and 230 lines respectively.
+  `output.rs` and `cleanup.rs` modules contain 776, 399, 588, 224, 286, 280,
+  247, 584, 172, 157, 179, 511, 209, 45, 67 and 230 lines respectively.
 
 Validation completed:
 
 - `bash scripts/check-source-size.sh`: passed.
 - `cargo check -p pesto-poster --all-targets`: passed.
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
+- `cargo fmt --all -- --check`: passed at Phase 1 completion.
+- `cargo clippy --all-targets -- -D warnings`: passed at Phase 1 completion.
+- `cargo test --all`: passed at Phase 1 completion, with only the repository's
+  explicitly ignored tests skipped.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: split the remaining `run` workflow into validation/configuration
-and mode dispatch in `command.rs`. Keep runtime construction and the final
-top-level call in `main.rs`, preserve initialization order, and target an
-entrypoint below 250 lines.
+Next action: begin Phase 2 by inventorying the state, reducer, metrics,
+formatting and renderer responsibilities in `pesto/src/ui/terminal.rs`. Move
+its unit tests into an adjacent test module first, without changing renderer
+output or async behavior.
