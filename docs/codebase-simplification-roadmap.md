@@ -551,7 +551,24 @@ Validation completed:
   explicitly ignored tests skipped.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: begin Phase 2 by inventorying the state, reducer, metrics,
-formatting and renderer responsibilities in `pesto/src/ui/terminal.rs`. Move
-its unit tests into an adjacent test module first, without changing renderer
-output or async behavior.
+Next action: completed in the following progress entry.
+
+### 2026-09-19 — Phase 2 started
+
+- Moved all 32 terminal regression tests out of the 3,227-line production
+  module into `ui/terminal/tests.rs` and `ui/terminal/tests/outcomes.rs`.
+  The first group covers layout and progress rendering; the second covers
+  verification, recovery and final outcomes.
+- Reduced `ui/terminal.rs` to 2,308 lines and lowered its source-size debt
+  baseline accordingly. No state, rendering or async-loop behavior changed.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib ui::terminal::tests`: 32 passed.
+- `bash scripts/check-source-size.sh`: passed.
+
+Next action: inventory the remaining production sections in
+`ui/terminal.rs`, then extract the pure formatting helpers and their focused
+tests into `ui/format.rs` without changing terminal output.
