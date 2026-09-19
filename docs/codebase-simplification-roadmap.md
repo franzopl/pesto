@@ -241,7 +241,7 @@ Steps:
 
 - [ ] Extract terminal unit tests from the implementation file and group them
   by state, metrics and renderer behavior.
-- [ ] Extract pure formatting functions.
+- [x] Extract pure formatting functions.
 - [ ] Extract rate and ETA calculations.
 - [ ] Move `RenderState` and construction into `state.rs`.
 - [ ] Move `ProgressEvent` application into `reducer.rs`.
@@ -561,6 +561,10 @@ Next action: completed in the following progress entry.
   verification, recovery and final outcomes.
 - Reduced `ui/terminal.rs` to 2,308 lines and lowered its source-size debt
   baseline accordingly. No state, rendering or async-loop behavior changed.
+- Added `ui/format.rs` for pure panel sizing, dual-band bars, wrapped notes,
+  plain-mode ANSI removal, status labels and IEC byte formatting. Moved the
+  focused bar-width regression test with the policy and reduced
+  `ui/terminal.rs` further to 2,144 lines.
 
 Validation completed:
 
@@ -569,6 +573,6 @@ Validation completed:
 - `cargo test -p pesto-poster --lib ui::terminal::tests`: 32 passed.
 - `bash scripts/check-source-size.sh`: passed.
 
-Next action: inventory the remaining production sections in
-`ui/terminal.rs`, then extract the pure formatting helpers and their focused
-tests into `ui/format.rs` without changing terminal output.
+Next action: extract rate, ETA and aggregate progress calculations from
+`RenderState` into `ui/metrics.rs`. Preserve event ordering and renderer output,
+and move only the tests that directly exercise those calculations.

@@ -81,15 +81,6 @@ fn box_borders_line_up_with_each_other() {
 }
 
 #[test]
-fn bar_width_keeps_the_historical_ratio() {
-    // 26-in-56 is what the fixed-width panel drew; keep it as the anchor
-    // so the default 80-column terminal looks unchanged.
-    assert_eq!(bar_width(56), 25);
-    assert!(bar_width(24) >= 10);
-    assert!(bar_width(MAX_BODY_W) <= 40);
-}
-
-#[test]
 fn quiet_and_panel_report_the_same_percentage() {
     // `-q` used to divide bytes (freezing at 95% because `total_bytes`
     // carries the unconsumed PAR2 hint) while the panel divided segments.
