@@ -3,6 +3,9 @@
 pub(super) mod artifacts;
 pub(super) mod completion;
 pub(super) mod compression;
+mod lifecycle;
+
+pub(super) use lifecycle::run_single_upload;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -178,7 +178,7 @@ Steps:
     test.
   - [x] Extract batch orchestration and remaining batch tests.
 - [x] Extract watch behavior.
-- [ ] Convert `run_single_upload` into named stages with a small context/result
+- [x] Convert `run_single_upload` into named stages with a small context/result
   type instead of a monolithic function.
 - [ ] Reduce `run` to validation and mode dispatch.
 - [ ] Keep the binary entry file below 250 lines.
@@ -520,11 +520,17 @@ Next action: completed in the following progress entry.
 - Added `upload/completion.rs` for completion notifications, asynchronous NFO
   generation with heartbeat output, and post-upload hook environments built
   from the original pre-compression inputs.
-- Reduced the entrypoint baseline from 4,993 to 1,297 lines. The extracted
+- Added `upload/lifecycle.rs` as the orchestration boundary for one complete
+  upload. `upload.rs` now acts as the facade and owns only shared upload types
+  and planning policy; batch and watch callers retain their existing call
+  signatures.
+- Reduced the entrypoint from 4,993 to 800 lines and removed it from the
+  source-size debt baseline. The extracted
   `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
   `upload.rs`, `upload/compression.rs`, `upload/artifacts.rs`,
-  `upload/completion.rs`, `output.rs` and `cleanup.rs` modules contain 776,
-  588, 224, 286, 280, 247, 581, 172, 157, 179, 67 and 230 lines respectively.
+  `upload/completion.rs`, `upload/lifecycle.rs`, `output.rs` and `cleanup.rs`
+  modules contain 776, 588, 224, 286, 280, 247, 584, 172, 157, 179, 511, 67
+  and 230 lines respectively.
 
 Validation completed:
 
@@ -533,7 +539,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: move the reduced `run_single_upload` orchestration into
-`upload/lifecycle.rs`, leaving `upload.rs` as its facade and policy/type owner.
-Move or narrow the remaining helper dependencies rather than importing the
-whole binary parent, and keep `batch.rs`/`watch.rs` call signatures unchanged.
+Next action: extract the offline merge-season command into `merge.rs` and
+session-log formatting into `summary.rs`. Keep the entrypoint focused on
+startup and dispatch, preserve merge output byte-for-byte, and move the season
+name tests beside `merge.rs`.
