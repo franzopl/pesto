@@ -10,12 +10,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use pesto::compress::{compress, existing_archive, random_password, ArchiveFormat};
+use pesto::compress::{compress, existing_archive, ArchiveFormat};
 use pesto::config::{self, Config, FileConfig, ObfuscateMode};
 use pesto::logging;
 use pesto::nntp::pool::ConnectionBroker;
 use pesto::nzb::NzbMeta;
-use pesto::poster::PostedSegment;
 use tracing::{error, info};
 
 mod batch;
@@ -24,13 +23,15 @@ mod cli;
 mod hooks;
 mod output;
 mod season;
+mod upload;
 mod watch;
 
 use batch::{apply_ext_filter, derive_season_nzb_path, release_label, run_batch};
 use cleanup::CleanupMode;
 use cli::Cli;
 use hooks::{run_all_hooks, run_pre_hook, run_pre_hooks_dir, HookEnv};
-use output::{expand_tilde, nzb_archive_path, resolve_nzb_dest};
+use output::{nzb_archive_path, resolve_nzb_dest};
+use upload::{plan_upload_paths, resolve_entry_password, PhaseTimings, UploadParams, UploadResult};
 use watch::{run_watch, WatchBatchOpts};
 
 /// Tracks this process's exact live-heap byte count (see
@@ -40,85 +41,6 @@ use watch::{run_watch, WatchBatchOpts};
 /// `penne` and `sugo` link `pesto` as a library and are unaffected by it.
 #[global_allocator]
 static ALLOC: pesto::memory::alloc::CountingAlloc = pesto::memory::alloc::CountingAlloc::new();
-
-/// Parameters for a single upload job that don't change between entries.
-#[derive(Clone)]
-struct UploadParams {
-    config: Arc<Config>,
-    /// The raw `--password` flag value (used to detect "was it auto-generated?").
-    archive_password_raw: Option<String>,
-    nzb_default: Option<String>,
-    json_mode: bool,
-    out: Option<PathBuf>,
-    /// Write a history record to history.jsonl after each successful upload.
-    write_history: bool,
-    renderer_opts: pesto::progress::RendererOptions,
-    /// Extensions from `--ext`, lowercased with any leading dot stripped.
-    /// Empty means no filtering.
-    ext_filter: Vec<String>,
-    /// Behavior for cleaning up source files/directories after successful upload.
-    cleanup_mode: CleanupMode,
-}
-
-/// The result of a single upload (one entry in `--each` / `--season`).
-struct UploadResult {
-    segments: Vec<PostedSegment>,
-    groups: Vec<String>,
-    cancelled: bool,
-    had_failures: bool,
-    /// STAT path failed without a 430. Split from `had_failures` so the
-    /// season-pack gate can refuse independently of MissingConfirmed.
-    inconclusive: Vec<String>,
-    total_bytes: u64,
-    nzb_path: Option<PathBuf>,
-    /// The files actually posted for this entry — post-compression when
-    /// `--compress`/`--password` replaced the original input with an
-    /// archive. A `--season` batch needs these (not the original episode
-    /// paths) to compute a global PAR2 set that matches what's really on
-    /// the wire; see `keep_compress_temp` on [`run_single_upload`].
-    posted_paths: Vec<PathBuf>,
-    /// Set when `keep_compress_temp` was requested and this entry actually
-    /// compressed its input: the temp dir holding `posted_paths`, left on
-    /// disk (instead of being cleaned up inline) for the caller to remove
-    /// once it's done reading those files.
-    compress_temp_dir: Option<PathBuf>,
-}
-
-/// Per-phase wall-clock timing accumulated during a single upload (26g).
-#[derive(Default)]
-struct PhaseTimings {
-    compress_ms: Option<u128>,
-    /// Includes the streaming check/repost queue draining, which now runs
-    /// concurrently with posting rather than as a separate serial phase.
-    post_ms: Option<u128>,
-}
-
-/// Resolve the archive password for one upload.
-///
-/// Priority: `forced` (a season's shared password, passed down from
-/// `run_batch`) beats `explicit` (`Config::compress_password` — an
-/// explicit `--password VALUE`, meant to be reused verbatim by every entry
-/// in the run) beats a freshly-generated random password when `raw` shows a
-/// bare `--password` was given (`Some("")`) beats no password at all.
-///
-/// The bare-flag case is resolved here, per call, rather than once when the
-/// CLI is parsed — resolving it once used to bake a single random password
-/// into `Config` for the whole process, so every entry under
-/// `--each`/`--watch` silently shared it instead of getting its own
-/// (issue #67). `run_batch` passes `forced` for a `--season` batch (every
-/// episode needs the same password so the merged season NZB only needs
-/// one) and `None` otherwise, so a plain `--each` still gets a fresh
-/// password per entry through the `raw` fallback below.
-fn resolve_entry_password(
-    forced: Option<&str>,
-    explicit: Option<&str>,
-    raw: Option<&str>,
-) -> Option<String> {
-    forced
-        .or(explicit)
-        .map(str::to_string)
-        .or_else(|| (raw == Some("")).then(random_password))
-}
 
 /// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
 ///
@@ -260,106 +182,10 @@ async fn run_single_upload(
         pesto::ui::terminal::spawn_renderer_with(params.renderer_opts.clone())
     };
 
-    // Derive NZB stem from: --out > nzb_default > nzb_dir/<stem>.nzb > ./<stem>.nzb
-    // Computed from the original entry_paths, before compression, so it never
-    // depends on the (possibly obfuscated/randomised) archive name compression
-    // produces below.
-    //
-    // nzb_stem: bare filename without extension, used to name the NZB.
-    // nzb_user_dest: optional user-requested destination (--out or nzb_dir).
-    //   The canonical copy always goes to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb;
-    //   a hardlink (or copy) is placed at nzb_user_dest when set.
-    let nzb_stem: Option<String> = params
-        .out
-        .as_ref()
-        .map(|p| {
-            p.with_extension("")
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .or_else(|| {
-            params.nzb_default.as_deref().map(|s| {
-                PathBuf::from(s)
-                    .with_extension("")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-        })
-        .or_else(|| {
-            entry_paths
-                .first()
-                .and_then(|p| {
-                    p.file_name().map(|s| {
-                        // Release directories use the full folder name as the NZB
-                        // stem — calling file_stem() would strip codec tags like
-                        // "264" from "H.264" or "0" from "AAC2.0".
-                        if p.is_dir() {
-                            s.to_string_lossy().into_owned()
-                        } else {
-                            std::path::Path::new(s)
-                                .file_stem()
-                                .unwrap_or(s)
-                                .to_string_lossy()
-                                .into_owned()
-                        }
-                    })
-                })
-                .or_else(|| upload_root(&inputs))
-                .or_else(|| {
-                    inputs.first().map(|f| {
-                        let top = f.name.split('/').next().unwrap_or(&f.name);
-                        // When the name has a slash, top is a directory component —
-                        // use it as-is to avoid stripping codec tags.
-                        if f.name.contains('/') {
-                            top.to_owned()
-                        } else {
-                            PathBuf::from(top)
-                                .file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned()
-                        }
-                    })
-                })
-        });
-
-    // User-specified destination directory/path for the NZB hardlink.
-    // Priority: --out > nzb_dir > directory next to the uploaded file(s).
-    let nzb_user_dest: Option<PathBuf> = params.out.clone().or_else(|| {
-        nzb_stem.as_deref().and_then(|stem| {
-            if let Some(dir) = config.nzb_dir.as_deref() {
-                Some(expand_tilde(dir).join(format!("{stem}.nzb")))
-            } else {
-                // Default: place the NZB next to the uploaded file/directory.
-                entry_paths
-                    .first()
-                    .and_then(|p| {
-                        if p.is_dir() {
-                            Some(p.as_path())
-                        } else {
-                            p.parent()
-                        }
-                    })
-                    .map(|d| d.join(format!("{stem}.nzb")))
-            }
-        })
-    });
-
-    // Resume state is keyed to the user-visible stem so it is stable across re-posts.
-    let resume_path: Option<PathBuf> = nzb_user_dest
-        .as_ref()
-        .map(|p| p.with_extension("pesto-state"))
-        .or_else(|| {
-            nzb_stem
-                .as_deref()
-                .map(|s| PathBuf::from(s).with_extension("pesto-state"))
-        });
-
-    // nzb_out_path is resolved at write time (after post) — placeholder kept for
-    // symmetry with the rest of the function.
-    let nzb_out_path: Option<String> = nzb_stem.clone();
+    let upload_paths = plan_upload_paths(params, entry_paths, &inputs);
+    let nzb_out_path = upload_paths.nzb_out_path;
+    let nzb_user_dest = upload_paths.nzb_user_dest;
+    let resume_path = upload_paths.resume_path;
 
     // ── Compression ──────────────────────────────────────────────────────────
     let compress_format_str: Option<String> = config.compress_format.clone().or_else(|| {
@@ -2229,63 +2055,6 @@ mod tests {
         let roots = collect_compress_roots(&files);
         assert_eq!(roots, vec![PathBuf::from("/home/user/upload/Test1")]);
         assert!(!roots.contains(&PathBuf::from("/home/user/upload")));
-    }
-
-    #[test]
-    fn resolve_entry_password_no_flag_is_no_password() {
-        assert_eq!(resolve_entry_password(None, None, None), None);
-    }
-
-    #[test]
-    fn resolve_entry_password_explicit_password_is_reused_verbatim() {
-        // `--password mypass`: same literal string every time it's resolved,
-        // matching every entry under --each/--season/--watch sharing it.
-        for raw in [None, Some(""), Some("mypass")] {
-            assert_eq!(
-                resolve_entry_password(None, Some("mypass"), raw),
-                Some("mypass".to_string())
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_entry_password_bare_flag_generates_a_password() {
-        // Regression for issue #67: bare `--password` (raw == Some("")) with
-        // no forced/explicit password must still produce something to
-        // protect the archive with.
-        let pw = resolve_entry_password(None, None, Some(""));
-        assert!(pw.is_some());
-        assert_eq!(pw.as_deref().map(str::len), Some(24));
-    }
-
-    #[test]
-    fn resolve_entry_password_bare_flag_is_unique_per_call() {
-        // Regression for issue #67: under plain --each/--watch (no forced
-        // password), every call must mint its own password instead of the
-        // whole run sharing one — this is what let `Test1.nzb` and
-        // `Test2.nzb` end up with the identical password after the
-        // `Cli::overrides()`-time resolution used to bake one value in for
-        // the whole process.
-        let a = resolve_entry_password(None, None, Some(""));
-        let b = resolve_entry_password(None, None, Some(""));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn resolve_entry_password_forced_wins_over_explicit_and_bare() {
-        // Regression for issue #67: a --season batch resolves one shared
-        // password up front (`run_batch`'s `season_password`) and forces it
-        // on every entry — every episode must get that exact value even
-        // though each entry, left alone, would otherwise resolve its own
-        // (explicit or freshly-random) password.
-        assert_eq!(
-            resolve_entry_password(Some("season-pw"), Some("explicit-pw"), Some("")),
-            Some("season-pw".to_string())
-        );
-        assert_eq!(
-            resolve_entry_password(Some("season-pw"), None, Some("")),
-            Some("season-pw".to_string())
-        );
     }
 
     #[test]

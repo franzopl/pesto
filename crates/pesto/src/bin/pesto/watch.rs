@@ -9,7 +9,8 @@ use anyhow::Result;
 
 use super::batch::{derive_season_nzb_path, release_label, run_batch, top_level_entries};
 use super::cleanup::apply_watch_cleanup;
-use super::{run_single_upload, UploadParams};
+use super::run_single_upload;
+use super::upload::UploadParams;
 
 /// How many consecutive failed attempts before giving up on an entry.
 const WATCH_MAX_RETRIES: u32 = 3;

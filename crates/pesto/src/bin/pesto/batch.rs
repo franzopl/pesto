@@ -13,10 +13,8 @@ use tracing::info;
 
 use super::output::expand_tilde;
 use super::season::post_season_par2_volumes;
-use super::{
-    add_obfuscation_tag, nfo_metadata_header, resolve_entry_password, run_all_hooks,
-    run_single_upload, HookEnv, UploadParams,
-};
+use super::upload::{resolve_entry_password, UploadParams};
+use super::{add_obfuscation_tag, nfo_metadata_header, run_all_hooks, run_single_upload, HookEnv};
 
 fn is_artifact_entry(path: &Path) -> bool {
     path.extension()

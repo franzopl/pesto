@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use pesto::poster::PostedSegment;
 use tracing::info;
 
-use super::UploadParams;
+use super::upload::UploadParams;
 
 /// Generate and post the PAR2 volumes that protect an entire season batch.
 pub(super) async fn post_season_par2_volumes(

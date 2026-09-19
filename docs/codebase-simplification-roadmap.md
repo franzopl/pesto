@@ -503,10 +503,14 @@ Next action: completed in the following progress entry.
   module below the 800-line guardrail without weakening cohesion.
 - Added `crates/pesto/src/bin/pesto/watch.rs` for stability polling, retry
   state, concurrent dispatch and watch-specific cleanup coordination.
-- Reduced the entrypoint baseline from 4,993 to 2,309 lines. The extracted
+- Started `crates/pesto/src/bin/pesto/upload.rs` with the stable per-entry
+  context/result types, phase timings, password policy and the first named
+  lifecycle stage: behavior-neutral NZB/resume path planning. Password tests
+  moved with their implementation.
+- Reduced the entrypoint baseline from 4,993 to 2,078 lines. The extracted
   `cli.rs`, `batch.rs`, `batch/tests.rs`, `watch.rs`, `hooks.rs`, `season.rs`,
-  `output.rs` and `cleanup.rs` modules contain 776, 588, 224, 286, 280, 247,
-  67 and 230 lines respectively.
+  `upload.rs`, `output.rs` and `cleanup.rs` modules contain 776, 588, 224, 286,
+  280, 247, 211, 67 and 230 lines respectively.
 
 Validation completed:
 
@@ -515,7 +519,7 @@ Validation completed:
 - `cargo test -p pesto-poster --bin pesto`: 52 passed.
 - `pesto --help` before and after the CLI extraction: byte-identical.
 
-Next action: introduce `upload.rs` and move `UploadParams`, `UploadResult`,
-`PhaseTimings` and the single-upload lifecycle into it. First identify and
-extract behavior-neutral stage functions from `run_single_upload`; keep the
-public CLI behavior and calls from `batch.rs` and `watch.rs` unchanged.
+Next action: continue decomposing `run_single_upload` by moving compression
+planning/execution and its existing archive-stem helpers into `upload.rs`.
+Keep posted filenames, resume fingerprints, temporary-directory lifetime and
+phase timing unchanged; then extract NZB/history output as a separate stage.
