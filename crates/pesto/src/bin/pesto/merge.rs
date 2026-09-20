@@ -76,6 +76,16 @@ pub(super) fn run_merge_season(
         let mut combined_segments: Vec<pesto::poster::PostedSegment> = Vec::new();
         let mut poster = String::new();
         let mut all_groups: Vec<String> = Vec::new();
+        // Encryption provenance (Body Encryption Standard v1.2 §8): every
+        // source in a merged group must agree on encryption mode and, when
+        // encrypted, on the transport password — merged articles carry
+        // distinct per-upload salts but one shared password, so a mismatch
+        // would produce an un-downloadable hybrid NZB. Sources with no
+        // encryption keep the ordinary `password: None` output, and an
+        // unmarked source archive password is never a transport password
+        // — `yenc_encrypted` gates the copy, exactly like the download-side
+        // `download_decryptor` check.
+        let mut encrypted_meta: Option<(bool, Option<String>)> = None;
 
         for src in &sources {
             let content = std::fs::read_to_string(src)
@@ -99,6 +109,34 @@ pub(super) fn run_merge_season(
             if poster.is_empty() {
                 poster = parsed.poster;
             }
+            match &encrypted_meta {
+                Some((true, prev_password)) => {
+                    anyhow::ensure!(
+                        parsed.meta.yenc_encrypted,
+                        "cannot merge season: {src:?} is unencrypted but an earlier \
+                         source in the group is encrypted (mixed encrypted/unencrypted sources)"
+                    );
+                    anyhow::ensure!(
+                        *prev_password == parsed.meta.password,
+                        "cannot merge season: {src:?} uses a different encryption password \
+                         than an earlier source in the group"
+                    );
+                }
+                Some((false, _)) => {
+                    anyhow::ensure!(
+                        !parsed.meta.yenc_encrypted,
+                        "cannot merge season: {src:?} is encrypted but an earlier \
+                         source in the group is unencrypted (mixed encrypted/unencrypted sources)"
+                    );
+                }
+                None => {
+                    if parsed.meta.yenc_encrypted {
+                        encrypted_meta = Some((true, parsed.meta.password));
+                    } else {
+                        encrypted_meta = Some((false, None));
+                    }
+                }
+            }
             for g in parsed.groups {
                 if !all_groups.contains(&g) {
                     all_groups.push(g);
@@ -109,17 +147,19 @@ pub(super) fn run_merge_season(
 
         combined_segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
 
+        let (yenc_encrypted, password) = encrypted_meta.unwrap_or((false, None));
         let meta = pesto::nzb::NzbMeta {
             name: display_name
                 .map(str::to_string)
                 .or_else(|| Some(key.clone())),
-            password: None,
+            password,
             category: None,
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
             mal_id: None,
             tags: nzb_tags.clone(),
+            yenc_encrypted,
         };
         // Segments here come from `nzb::parse`, which always leaves
         // `wire_name` empty (see its doc comment) — there is no live wire

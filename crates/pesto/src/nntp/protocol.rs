@@ -54,7 +54,7 @@ pub(super) fn is_dot_terminator(line: &[u8]) -> bool {
 /// [`post_parts_inner`] / [`NntpConnection::enqueue_post`]); this is the
 /// predicate those `debug_assert!`s use.
 pub(crate) fn yenc_body_has_leading_dot(body: &[u8]) -> bool {
-    body.starts_with(b".") || body.windows(3).any(|w| w == b"\r\n.")
+    body.starts_with(b".") || body.windows(2).any(|w| w == b"\n.")
 }
 
 /// Apply NNTP dot-stuffing: any line that begins with `.` gets an extra `.`

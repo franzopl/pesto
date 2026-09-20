@@ -30,6 +30,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
   - [Multiple files](#multiple-files)
 - [Obfuscation](#obfuscation)
 - [Compression and passwords](#compression-and-passwords)
+- [Encryption (yEnc body & control lines)](#encryption-yenc-body--control-lines)
 - [PAR2 recovery data](#par2-recovery-data)
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
@@ -561,6 +562,69 @@ pesto --obfuscate --password movie.mkv
 # Same, but explicit password and a directory input
 pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 ```
+
+---
+
+## Encryption (yEnc body & control lines)
+
+Pesto supports opt-in yEnc body and control-line encryption according to the
+yEnc Body and Control Lines Encryption Standards v1.2. Article bodies are encrypted with
+XChaCha20-Poly1305 before yEnc encoding, and yEnc control lines (`=ybegin`, `=ypart`,
+`=yend`, `=yencryption`) are encrypted using Radix 253 NIST SP 800-38G FF1.
+
+Under the v1.2 standards, each posted Usenet article is self-describing
+and embeds its salt and segment index directly into the wire bytes (indices are
+allocated from 1 upward, skipping any value whose big-endian bytes contain `0x0A`/`0x0D`):
+- A 20-byte bootstrap prefix (`[16-byte raw salt][4-byte uint32_be(segmentIndex)]`)
+  is prepended to physical Line 1 (`=ybegin`) before FF1 ciphertext.
+- A canonical 5-token header line (`=yencryption cipher=XChaCha20-Poly1305 salt=<32_hex> index=<8_hex> tag=<32_hex>`)
+  provides dual-bootstrap agreement for downloaders.
+
+Generated NZBs strictly conform to the standard NZB 1.1 DTD without custom
+XML attributes on `<segment>` elements. The `<head>` carries
+`<meta type="yenc_encrypted">true</meta>` and `<meta type="password">` (the
+transport password); the writer also emits the optional
+`yenc_version`/`yenc_cipher` provenance metas, which conforming readers gate
+fail-closed on unsupported values.
+
+Conforming downloaders detect `yenc_encrypted` and decrypt using the password
+in `<meta type="password">` (or from their own configured sources).
+
+### CLI usage
+
+```bash
+# Encrypt with a random 24-character password (printed to stdout and stored in .nzb)
+pesto --encrypt movie.mkv
+
+# Encrypt with an explicit password
+pesto --encrypt=<password> movie.mkv
+```
+
+> **Removed:** `--encrypt-password` was previously accepted as an alias of
+> `--encrypt`; it was removed — use `--encrypt` / `--encrypt=PASSWORD` only.
+
+### Configuration
+
+Enable encryption or set a default password in `config.toml`:
+
+```toml
+[encryption]
+password = "<password>"
+```
+
+### Threat Model
+
+- **Confidentiality:** Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from parties without the NZB and password. However, because the encryption password is conventionally stored in the NZB (`<meta type="password">`), confidentiality depends strictly on private distribution of the generated `.nzb`.
+- **Transport Security:** TLS continues to protect communication between the poster/downloader and NNTP servers, while content encryption protects payload data at rest on Usenet backend storage.
+- **Integrity & Authenticity:** Poly1305 tags authenticate segment bodies; tampering or truncation causes fail-closed authentication errors releasing zero unauthenticated plaintext.
+
+### Unsupported Operations
+
+- **Archive Passwords vs Transport Encryption:** An archive password passed to `--password` encrypts the archive file itself. It is distinct from `--encrypt`, which activates yEnc body and control-line transport encryption. If both are set, the transport password wins for the NZB `<meta type="password">`. Conforming downloaders inspect `<meta type="yenc_encrypted">true</meta>` to distinguish transport encryption from archive extraction passwords.
+
+### Protocol Status
+
+The yEnc encryption protocol is explicitly **experimental** (spec v1.2). An independent formal cryptographic review is recommended prior to stabilizing the specification across the ecosystem.
 
 ---
 
@@ -1296,6 +1360,8 @@ picked up automatically — no config change needed.
 | `--compress [FORMAT]` | `compression.format` | off | Bundle into an archive (`7z`, `zip`, `rar`) |
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
+| **Encryption** | | | |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

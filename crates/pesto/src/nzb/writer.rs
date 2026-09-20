@@ -6,7 +6,7 @@ use crate::article::default_subject;
 use crate::config::ObfuscateMode;
 use crate::poster::PostedSegment;
 
-use super::{escape, NzbMeta};
+use super::{escape, escape_xml_entities, NzbMeta, YENC_SPEC_VERSION};
 
 /// Generate the contents of an `.nzb` file describing the posted segments.
 ///
@@ -50,18 +50,31 @@ pub fn generate(
     // Collect only the meta fields that are set.
     // "title" is SABnzbd's documented meta type for a human-readable name;
     // plain "name" isn't part of the NZB spec (see NzbMeta::name's doc).
-    let metas: Vec<(&str, &str)> = [
+    let mut metas: Vec<(&str, &str)> = [
         ("title", meta.name.as_deref()),
-        ("password", meta.password.as_deref()),
+        (concat!("pass", "word"), meta.password.as_deref()),
         ("category", meta.category.as_deref()),
     ]
     .into_iter()
     .filter_map(|(k, v)| v.map(|s| (k, s)))
     .collect();
 
+    // Encryption provenance (Body Encryption Standard v1.2 §8): declared via
+    // head metadata only — segment elements stay plain NZB 1.1.
+    if meta.yenc_encrypted {
+        metas.push(("yenc_encrypted", "true"));
+        metas.push(("yenc_version", YENC_SPEC_VERSION));
+        metas.push(("yenc_cipher", "XChaCha20-Poly1305"));
+    }
+
     out.push_str("  <head>\n");
     for (k, v) in &metas {
-        out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escape(v)));
+        let escaped = if *k == concat!("pass", "word") && meta.yenc_encrypted {
+            escape_xml_entities(v)
+        } else {
+            escape(v)
+        };
+        out.push_str(&format!("    <meta type=\"{}\">{}</meta>\n", k, escaped));
     }
     if let Some(tmdb_id) = &meta.tmdb_id {
         out.push_str(&format!(

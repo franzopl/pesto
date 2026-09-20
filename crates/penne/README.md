@@ -687,6 +687,19 @@ damaged — at `--mode download`, that only happens if the fetch itself was
 already fully clean; otherwise it's kept so a later `--mode repair` (or
 higher) run can still use it.
 
+### Encrypted releases (yEnc encryption)
+
+Penne (and Sugo, which uses the same pipeline) downloads releases encrypted
+with yEnc body and control-line encryption (experimental Standards v1.2):
+`<meta type="yenc_encrypted">true</meta>` in the NZB head enables transport
+decryption, using the password from `<meta type="password">`. An explicitly
+supplied CLI `--password` overrides that meta value for transport decryption
+and also serves as the archive-extraction password for post-download
+unpacking; without the marker it is used only for archive extraction.
+Identity comes only from the article's own 20-byte Line 1 bootstrap; failed
+authentication releases zero plaintext and retries alternate servers before
+failing the job.
+
 ## Roadmap
 
 See [`ROADMAP.md`](ROADMAP.md). A web UI (à la SABnzbd) is planned as a

@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Support for yEnc combined-mode encrypted downloads.**
+  Automatic decryption of XChaCha20-Poly1305 bodies and FF1 Radix 253 control lines per the yEnc Body Encryption Standard v1.2 and Control Lines Standard v1.2, using the NZB `<meta type="password">` (the CLI `--password` option remains the archive-extraction password and is unrelated).
+
 ## [0.7.0] — 2026-10-26
 
 ### Added

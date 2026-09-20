@@ -24,6 +24,8 @@ fn seg(name: &str, part: u32, total: u32, id: &str) -> PostedSegment {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
+        plaintext_digest: None,
     }
 }
 
@@ -212,6 +214,8 @@ fn file_element_never_carries_a_name_attribute() {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
+        plaintext_digest: None,
     };
     let xml = generate(
         &["alt.test".into()],
@@ -249,6 +253,7 @@ fn meta_fields_emitted_in_head() {
         tvdb_id: Some("series/321".into()),
         mal_id: Some("654".into()),
         tags: Vec::new(),
+        yenc_encrypted: false,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"title\">My Upload</meta>"));
@@ -323,9 +328,14 @@ fn single_part_subject_still_carries_1_of_1() {
 }
 
 #[test]
-fn escape_drops_xml_illegal_controls() {
-    assert_eq!(escape("ok\u{0001}name"), "okname");
+fn escape_preserves_tab_lf_cr_verbatim() {
+    // XML 1.0 permits tab/LF/CR in content; the parser (quick-xml with
+    // trim_text(false)) round-trips them unchanged, so the writer must
+    // emit them verbatim too — a password containing LF must survive the
+    // generate/parse round trip byte-for-byte .
     assert_eq!(escape("keep\ttab"), "keep\ttab");
+    assert_eq!(escape("line1\nline2"), "line1\nline2");
+    assert_eq!(escape("cr\rreturned"), "cr\rreturned");
 }
 
 #[test]
@@ -440,6 +450,7 @@ fn only_password_meta_emits_head_without_name_or_category() {
         tvdb_id: None,
         mal_id: None,
         tags: Vec::new(),
+        yenc_encrypted: false,
     };
     let xml = generate(&["alt.test".into()], &[], &meta, ObfuscateMode::None);
     assert!(xml.contains("<meta type=\"password\">hunter2</meta>"));
@@ -466,6 +477,7 @@ fn parse_round_trips_generate() {
         tvdb_id: None,
         mal_id: None,
         tags: vec!["hd".into(), "2024".into()],
+        yenc_encrypted: false,
     };
     let xml = generate(&groups, &segs, &meta, ObfuscateMode::None);
     let parsed = parse(&xml).expect("parse must succeed");
@@ -661,3 +673,29 @@ fn wire_subjects_returns_one_entry_per_file() {
 fn wire_subjects_empty_when_no_segments() {
     assert_eq!(wire_subjects(&[]), Vec::<(String, String)>::new());
 }
+
+/// Declared part numbers must be preserved exactly: an NZB whose file
+/// declares parts 1 and 3 keeps part 3 as `3` rather than being compacted
+/// to `2`, or downloaders would assemble segment bytes at the wrong offset.
+#[test]
+fn parse_preserves_declared_parts_without_compacting() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head></head>
+  <file poster="poster" date="1700000000" subject="[1/1] - &quot;gap.bin&quot; yEnc (1/3)">
+    <groups><group>alt.test</group></groups>
+    <segments>
+      <segment bytes="500" number="1">gap1@x</segment>
+      <segment bytes="500" number="3">gap3@x</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+    let parsed = parse(xml).unwrap();
+    assert_eq!(parsed.segments.len(), 2);
+    assert_eq!(parsed.segments[0].part, 1);
+    assert_eq!(parsed.segments[1].part, 3);
+}
+
+mod encryption_metadata;
+mod password;

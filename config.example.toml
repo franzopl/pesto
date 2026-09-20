@@ -282,6 +282,14 @@ groups = ["alt.binaries.test"]
 # stricter disk quota — than the destination disk.
 # temp_dir = "/path/on/destination/disk/tmp"
 
+[encryption]
+# password — default password for yEnc body and control-line encryption
+# (--encrypt). Bare `--encrypt` uses this value when set and only generates
+# a random password when no password is configured here or given explicitly
+# as `--encrypt=PASSWORD`. When encryption is enabled, this password (or the
+# generated one) is carried in the NZB as <meta type="password">.
+# password = "…"
+
 [output]
 # nzb_dir — directory where .nzb hardlinks/copies are placed after each upload.
 # Every upload is also archived to ~/.config/pesto/nzb/TIMESTAMP_stem.nzb so

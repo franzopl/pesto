@@ -52,7 +52,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use pesto::config::ServerEntry;
-use pesto::yenc::decode_part;
+use pesto::crypto::{DownloadDecryptionAdapter, LocalCryptoError};
+use pesto::yenc::{decode_part, DecodedPart};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
 
@@ -115,6 +116,7 @@ struct WorkItem {
     file_name: String,
     part: u32,
     message_id: String,
+    bytes: u64,
 }
 
 /// Per-file completion tracking shared across the cache-hit prepass and
@@ -152,6 +154,20 @@ struct PassContext {
     retries: u32,
     progress: Option<ProgressSender>,
     shared: Arc<SharedState>,
+    decryptor: Option<Arc<DownloadDecryptionAdapter>>,
+}
+
+/// Decode a fetched (or cached) article body, restoring encrypted control
+/// lines and authenticating the body when a decryptor is configured.
+/// Ordinary downloads go straight to `decode_part` exactly as before.
+fn decode_body(
+    decryptor: &Option<Arc<DownloadDecryptionAdapter>>,
+    body: &[u8],
+) -> anyhow::Result<DecodedPart> {
+    match decryptor {
+        Some(decryptor) => decryptor.decode_article(body),
+        None => decode_part(body),
+    }
 }
 
 /// Fetch and decode every segment in `queue` from `tiers`, tried in
@@ -174,6 +190,19 @@ pub async fn download_queue(
     dest_dir: &Path,
     retries: u32,
     progress: Option<ProgressSender>,
+) -> Result<DownloadOutcome> {
+    download_queue_with_decryptor(queue, tiers, dest_dir, retries, progress, None).await
+}
+
+/// Fetch and decode every segment in `queue` from `tiers`, optionally using
+/// `decryptor` to restore encrypted control lines and authenticate body ciphertext.
+pub async fn download_queue_with_decryptor(
+    queue: &DownloadQueue,
+    tiers: &[ServerTier],
+    dest_dir: &Path,
+    retries: u32,
+    progress: Option<ProgressSender>,
+    decryptor: Option<Arc<DownloadDecryptionAdapter>>,
 ) -> Result<DownloadOutcome> {
     anyhow::ensure!(!tiers.is_empty(), "no servers configured");
 
@@ -226,31 +255,66 @@ pub async fn download_queue(
     for file in &queue.files {
         for seg in &file.segments {
             if let Some(cached) = cache::load(dest_dir, &seg.message_id) {
-                if let Ok(decoded) = decode_part(&cached) {
-                    emit(&progress, || ProgressEvent::SegmentDownloaded {
-                        file_name: file.name.clone(),
-                        part: seg.part,
-                        bytes: decoded.data.len() as u64,
-                    });
-                    resolve_segment(
-                        &file.name,
-                        &seg.message_id,
-                        seg.part,
-                        Some(decoded),
-                        &shared,
-                        &progress,
-                    )
-                    .await?;
-                    continue;
+                let decoded = match decode_body(&decryptor, &cached) {
+                    Ok(decoded) => Some(decoded),
+                    Err(e) => {
+                        // Body Std v1.2 §5 two-tier classification: a local
+                        // crypto failure is not provider corruption and no
+                        // other provider can cure it, so abort at once
+                        // (mirrors the worker path below).
+                        if e.is::<LocalCryptoError>() {
+                            return Err(e);
+                        }
+                        None
+                    }
+                };
+                if let Some(decoded) = decoded {
+                    // Body Std v1.2 B §8 + B §5 (optional bytes
+                    // comparison, PROVIDER_FAILOVER): a cache hit must
+                    // pass the same optional declared-bytes predicate a
+                    // fresh fetch applies, so a changed nonzero NZB
+                    // `bytes` value is rejected on a warm cache exactly
+                    // like on a cold one (PE-NEXT-5). The predicate is
+                    // encrypted-only; a mismatch falls through to the
+                    // provider fetch below and leaves the cached bytes
+                    // themselves untouched.
+                    let declared_bytes_ok = decryptor.is_none()
+                        || seg.bytes == 0
+                        || decoded.data.len() as u64 == seg.bytes;
+                    // Encrypted path only: the article's own authenticated
+                    // part number must match the queue part it was cached /
+                    // requested for; a replayed duplicate part must not be
+                    // committed under a later part (Body §2.1/§7 coverage).
+                    let part_ok = decryptor.is_none() || decoded.part == seg.part;
+                    if declared_bytes_ok && part_ok {
+                        emit(&progress, || ProgressEvent::SegmentDownloaded {
+                            file_name: file.name.clone(),
+                            part: seg.part,
+                            bytes: decoded.data.len() as u64,
+                        });
+                        resolve_segment(
+                            &file.name,
+                            &seg.message_id,
+                            seg.part,
+                            Some(decoded),
+                            &shared,
+                            &progress,
+                        )
+                        .await?;
+                        continue;
+                    }
                 }
                 // A corrupted cache entry (shouldn't happen, but a killed
-                // write mid-flush is possible) falls through to a normal
-                // network fetch rather than failing the segment outright.
+                // write mid-flush is possible) — or an encrypted hit whose
+                // plaintext length contradicts the now-declared bytes —
+                // falls through to a normal network fetch rather than
+                // failing the segment outright.
             }
             pending.push(WorkItem {
                 file_name: file.name.clone(),
                 part: seg.part,
                 message_id: seg.message_id.clone(),
+                bytes: seg.bytes,
             });
         }
     }
@@ -265,6 +329,7 @@ pub async fn download_queue(
         retries,
         progress,
         shared,
+        decryptor,
     });
 
     let last_tier_idx = tiers.len() - 1;
@@ -559,10 +624,50 @@ async fn worker_loop(
             }
         };
 
-        match decode_part(&body) {
+        let decoded_result = decode_body(&ctx.decryptor, &body).and_then(|decoded| {
+            // Body Std v1.2 B §8 + B §5 (optional bytes comparison,
+            // PROVIDER_FAILOVER): the NZB `bytes` attribute is the
+            // plaintext segment length, and checking it is optional (a
+            // MAY). The check applies only to encrypted downloads (the
+            // plain path keeps upstream's no-check behavior). When this
+            // check fails, the copy is a corrupt provider copy. The error
+            // goes to the leftover queue as provider failover (not a
+            // METADATA_VALIDATION failure), so the next server is tried.
+            // Only the last server's copy is reported as SegmentCorrupt.
+            if ctx.decryptor.is_some()
+                && item.bytes > 0
+                && decoded.data.len() as u64 != item.bytes
+            {
+                anyhow::bail!(
+                    "SEGMENT_BYTES_MISMATCH: fetched article plaintext length ({}) does not match NZB declared bytes ({})",
+                    decoded.data.len(),
+                    item.bytes
+                );
+            }
+            // Encrypted path only: segment coverage is the receiver's job
+            // (Body §2.1/§7). Assembly writes at the article's own offset
+            // but records presence under the queue part, so an intact
+            // replay of an earlier part for this Message-ID would
+            // otherwise leave this part's range zero-filled yet marked
+            // present. Treat a part mismatch as ordinary provider
+            // corruption (failover), never a local/job abort.
+            if ctx.decryptor.is_some() && decoded.part != item.part {
+                anyhow::bail!(
+                    "PART_MISMATCH: fetched article part ({}) does not match NZB segment part ({})",
+                    decoded.part,
+                    item.part
+                );
+            }
+            Ok(decoded)
+        });
+
+        match decoded_result {
             Ok(decoded) => {
                 // Cache the raw body, not the decoded form — see the module
-                // docs on `crate::cache` for why.
+                // docs on `crate::cache` for why. Only an AEAD-authenticated
+                // body reaches this store (PESTO13-02, Q7(a)): cache hits are
+                // fully re-authenticated (restore → CRC → AEAD) in
+                // `decode_body` before any byte reaches assembly.
                 let _ = cache::store(&ctx.dest_dir, &item.message_id, &body);
                 emit(&ctx.progress, || ProgressEvent::SegmentDownloaded {
                     file_name: item.file_name.clone(),
@@ -581,6 +686,11 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
+                // Local crypto failure (Argon2id/cache) is not provider
+                // corruption: no other tier can fix it, so abort at once.
+                if e.is::<LocalCryptoError>() {
+                    return Err(e);
+                }
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),

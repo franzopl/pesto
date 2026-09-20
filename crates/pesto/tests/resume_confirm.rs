@@ -207,6 +207,7 @@ fn test_config(port: u16, check: bool) -> Config {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,

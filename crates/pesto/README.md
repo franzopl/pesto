@@ -30,6 +30,7 @@ with a deliberately minimal scope: just the essentials, executed extremely fast.
   - [Multiple files](#multiple-files)
 - [Obfuscation](#obfuscation)
 - [Compression and passwords](#compression-and-passwords)
+- [Encryption (yEnc body & control lines)](#encryption-yenc-body--control-lines)
 - [PAR2 recovery data](#par2-recovery-data)
 - [Batch and watch modes](#batch-and-watch-modes)
 - [Reliability](#reliability)
@@ -426,6 +427,19 @@ pesto --obfuscate --password movie.mkv
 # Same, but explicit password and a directory input
 pesto --obfuscate=full --password=MySecret42 ./MyShow.S01/
 ```
+
+---
+
+## Encryption (yEnc body & control lines)
+
+Pesto supports opt-in yEnc body and control-line encryption (XChaCha20-Poly1305
+bodies, Radix 253 FF1 control lines) according to the experimental yEnc Body
+and Control Lines Encryption Standards v1.2 — see the
+[Encryption section](../../README.md#encryption-yenc-body--control-lines) in
+the root README for wire format, CLI usage, configuration, and status.
+
+> **Removed:** `--encrypt-password` was previously accepted as an alias of
+> `--encrypt`; it was removed — use `--encrypt` / `--encrypt=PASSWORD` only.
 
 ---
 
@@ -1145,6 +1159,8 @@ picked up automatically — no config change needed.
 | `--compress-temp-dir <DIR>` | `compression.temp_dir` | OS temp dir | Where the `--compress` archive is staged before posting |
 | `--compress-volume-size <SIZE>` | `compression.volume_size` | off | Split the archive into volumes (e.g. `500m`, `4g`); `rar`/`7z` only, rejected with `--compress=zip` |
 | `--password [PASSWORD]` | — | — | Archive password; bare flag = random |
+| **Encryption** | | | |
+| `--encrypt [PASSWORD]` | `encryption.password` | off | Enable yEnc body & control-line encryption; bare flag generates random password |
 | **Output** | | | |
 | `-o`, `--out <PATH>` | `output.nzb` | derived | Explicit `.nzb` output path |
 | `--nzb-dir <DIR>` | `output.nzb_dir` | — | Directory where `.nzb` files are saved |

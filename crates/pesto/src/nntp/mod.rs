@@ -167,9 +167,8 @@ impl Connection {
     /// Post an article whose headers and yEnc body are held in separate buffers.
     ///
     /// This avoids copying the body (typically ~768 KB) into a combined buffer.
-    /// The headers are dot-stuffed for RFC 3977 compliance. The body is written
-    /// directly without dot-stuffing because the yEnc encoder already escapes
-    /// any `'.'` that would appear at a line start (yEnc spec §4).
+    /// The headers are dot-stuffed for RFC 3977 compliance; the body is
+    /// dot-stuffed only when a line starts with '.' — see `write_body`.
     ///
     /// A `441` duplicate rejection (`already_exists`) is treated as success —
     /// see `already_exists` for why that's the right call when we don't yet
@@ -219,20 +218,7 @@ impl Connection {
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
-
-        // Body is *not* dot-stuffed. yEnc already escapes a '.' that would
-        // start a line (draft v1.3 §4 / `=ybegin` line wrap), so stuffing
-        // here would be a second pass over every article on the hot path.
-        debug_assert!(
-            !yenc_body_has_leading_dot(body),
-            "yEnc body must not contain a line starting with '.'; \
-             NNTP would treat it as end-of-article"
-        );
-        self.write_all_timeout(body).await?;
-        if !body.ends_with(b"\r\n") {
-            self.write_all_timeout(b"\r\n").await?;
-        }
-        self.write_all_timeout(b".\r\n").await?;
+        self.write_body(body).await?;
         self.flush_timeout().await?;
 
         let resp = self.read_response().await?;
@@ -260,17 +246,34 @@ impl Connection {
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
-        debug_assert!(
-            !yenc_body_has_leading_dot(body),
-            "yEnc body must not contain a line starting with '.'; \
-             NNTP would treat it as end-of-article"
-        );
-        self.write_all_timeout(body).await?;
+        self.write_body(body).await?;
+        Ok(())
+    }
+
+    /// Write one article body onto the wire, ending the POST data with the
+    /// `.` terminator line.
+    ///
+    /// The body is ordinarily *not* dot-stuffed because standard yEnc escapes
+    /// a '.' that would start a line (yEnc draft v1.3 §4 / `=ybegin` line
+    /// wrap), so an ordinary body never contains a line starting with '.'.
+    /// However encrypted control lines (the random Line 1 bootstrap salt or
+    /// an FF1 ciphertext line) CAN start with '.', and a valid salt may even
+    /// begin with the bytes `=ybegin`, so stuffing is decided purely from
+    /// the actual leading-dot bytes (RFC 3977 §3.1.1; Body Std v1.2 §9
+    /// transport boundary) — never from a wire-prefix shortcut.
+    /// A body not ending in CRLF gets one appended before the terminator.
+    async fn write_body(&mut self, body: &[u8]) -> Result<()> {
+        if yenc_body_has_leading_dot(body) {
+            let mut stuffed_body = Vec::with_capacity(body.len() + 16);
+            dot_stuff(body, &mut stuffed_body);
+            self.write_all_timeout(&stuffed_body).await?;
+        } else {
+            self.write_all_timeout(body).await?;
+        }
         if !body.ends_with(b"\r\n") {
             self.write_all_timeout(b"\r\n").await?;
         }
-        self.write_all_timeout(b".\r\n").await?;
-        Ok(())
+        self.write_all_timeout(b".\r\n").await
     }
 
     /// Flush all enqueued articles to the server. Call once after all

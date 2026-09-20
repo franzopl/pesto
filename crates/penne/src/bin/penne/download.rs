@@ -99,15 +99,23 @@ pub(super) async fn run(
         None
     };
 
-    let outcome = penne::download::download_queue(
+    // Q1(a) (2026-10-16): an explicitly typed `--password` is also a transport
+    // (yEnc-decryption) password, ahead of `<meta type="password">`; the
+    // `yenc_encrypted` marker in the helper remains the only gate. The same
+    // value keeps its downstream archive-extraction role below.
+    let decryptor =
+        penne::nzb::download_decryptor_with_password_override(&parsed.meta, password.as_deref())?;
+
+    let outcome = penne::download::download_queue_with_decryptor(
         &queue,
         &config.server_tiers,
         &dest_dir,
         config.retries,
         Some(tx),
+        decryptor,
     )
     .await?;
-    // `download_queue` now assembles every file internally as it completes,
+    // `download_queue_with_decryptor` now assembles every file internally as it completes,
     // so its own progress sender is the only copy left by the time it
     // returns — the channel closes on its own, and awaiting the renderer
     // here just waits for its last redraw to flush before the summary below
