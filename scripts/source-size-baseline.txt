@@ -5,7 +5,6 @@
 # size. Lower the value when a file shrinks and remove the entry once it is at
 # or below 800 lines. Entries are debt baselines, not permanent exceptions.
 1139 crates/upapasta/src/app/mod.rs
-1432 crates/parmesan/src/create.rs
 1422 crates/parmesan/src/encoder/shuffle_kernels.rs
 1227 crates/parmesan/src/encoder/tests.rs
 1105 crates/pesto/src/poster/check.rs

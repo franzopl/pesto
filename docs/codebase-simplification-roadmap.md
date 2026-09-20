@@ -435,13 +435,13 @@ Penne:
 
 - [x] Split `bin/penne.rs` into CLI, dispatch and command modules.
 - [x] Split `check.rs` into planning, execution and reporting.
-- [ ] Review `download.rs` and `assemble.rs` for existing pipeline-stage
+- [x] Review `download.rs` and `assemble.rs` for existing pipeline-stage
   boundaries.
-- [ ] Preserve failover, concurrency and end-to-end mock tests.
+- [x] Preserve failover, concurrency and end-to-end mock tests.
 
 Parmesan:
 
-- [ ] Split `create.rs` into planning, ingestion and packet writing if the
+- [x] Split `create.rs` into planning, ingestion and packet writing if the
   resulting dependencies remain one-directional.
 - [ ] Organize encoder tests by behavior/backend.
 - [ ] Keep cohesive SIMD kernels and lookup tables on the explicit exception
@@ -1396,6 +1396,60 @@ Validation completed:
 Next action: review `penne`'s `download.rs` and `assemble.rs` for existing
 pipeline-stage boundaries; extract only boundaries that reduce context while
 keeping the current failover and early-assembly behavior intact.
+
+### 2026-09-20 — Phase 6 continued: Penne pipeline review
+
+- Reviewed `download.rs` (656 lines) and `assemble.rs` (621 lines) after the
+  CLI and availability-checker splits. Neither is a remaining source-size
+  exception.
+- Kept `download.rs` intact: its cache prepass, tier drain, worker loop,
+  retry and segment-resolution stages are already named functions, and they
+  intentionally share the private `WorkItem`, `SharedState` and `PassContext`
+  invariants. Moving those functions would increase cross-module visibility
+  without reducing the context required to change the pipeline.
+- Kept `assemble.rs` intact: roughly half the file is focused regression
+  coverage, while its production code is one cohesive `StreamingAssembly`
+  lifecycle (lazy temp-file creation, positioned writes, CRC folding and
+  atomic completion). There is no one-directional subdomain to extract.
+- The full Penne suite run after the checker split preserved all failover,
+  multi-connection concurrency, cache/resume, early assembly and CLI
+  end-to-end mock tests. No production code changed during this review.
+
+Validation completed:
+
+- `cargo test -p penne`: passed.
+- `cargo clippy -p penne --all-targets -- -D warnings`: passed.
+- `bash scripts/check-source-size.sh`: passed with 14 baselined files.
+
+Next action: begin the Parmesan half of Phase 6 by reviewing `create.rs` for
+one-directional planning, ingestion and packet-writing boundaries before
+moving code.
+
+### 2026-09-20 — Phase 6 continued: Parmesan creation pipeline
+
+- Reduced `create.rs` from 1,432 to 600 lines while preserving its public API
+  as the creation facade and orchestration layer.
+- Extracted `create/model.rs` for the request, report, event, cancellation and
+  error contracts; `create/plan.rs` for validation and filesystem discovery;
+  and `create/output.rs` for transactional output staging and publication.
+- Extracted `create/ingest.rs` for full-slice and memory-limited chunked
+  encoder passes, keeping worker setup, progress accounting and SIMD/layout
+  selection together.
+- Extracted `create/packet_output.rs` for base-packet assembly, index writing
+  and recovery-volume appends. Dependencies remain one-directional from the
+  facade into the stage modules.
+- Removed `create.rs` from the source-size baseline, reducing the exception
+  list from 14 to 13 files.
+
+Validation completed:
+
+- `cargo clippy -p parmesan-par2 --all-targets -- -D warnings`: passed.
+- `cargo test -p parmesan-par2`: passed (142 executed tests, 12 ignored),
+  including public API/CLI byte identity, memory-limited passes, cancellation
+  cleanup and recovery-offset coverage.
+
+Next action: organize Parmesan encoder tests by behavior/backend while keeping
+the production SIMD kernels and lookup tables as focused exceptions.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
