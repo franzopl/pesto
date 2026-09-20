@@ -14,7 +14,9 @@ fn each_processes_entries_in_natural_order() {
     }
 
     let bin = env!("CARGO_BIN_EXE_pesto");
+    let xdg_home = tempfile::tempdir().unwrap();
     let output = Command::new(bin)
+        .env("XDG_CONFIG_HOME", xdg_home.path())
         .arg("--dry-run")
         .arg("--groups")
         .arg("alt.binaries.test")
