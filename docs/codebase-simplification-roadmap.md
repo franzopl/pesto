@@ -243,7 +243,7 @@ Steps:
   by state, metrics and renderer behavior.
 - [x] Extract pure formatting functions.
 - [x] Extract rate and ETA calculations.
-- [ ] Move `RenderState` and construction into `state.rs`.
+- [x] Move `RenderState` and construction into `state.rs`.
 - [ ] Move `ProgressEvent` application into `reducer.rs`.
 - [ ] Split quiet, panel and plain renderers.
 - [ ] Leave the async render loop and renderer selection in `terminal/mod.rs`.
@@ -569,15 +569,26 @@ Next action: completed in the following progress entry.
   samples, confidence-aware ETA ranges, phase estimates and overall ETA
   selection. `RenderState` retains sample collection while delegating pure
   calculations, reducing `ui/terminal.rs` to 2,097 lines.
+- Added `ui/state.rs` for `RenderState`, connection state and construction
+  defaults. Fields remain visible only inside `ui`, event application remains
+  temporarily in `terminal.rs`, and the production terminal module is now
+  1,819 lines.
 
 Validation completed:
 
 - `cargo check -p pesto-poster --all-targets`: passed.
 - `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
 - `cargo test -p pesto-poster --lib ui::terminal::tests`: 32 passed.
+- `cargo test -p pesto-poster --lib ui::`: 46 passed after the state
+  extraction.
 - `bash scripts/check-source-size.sh`: passed.
+- `cargo fmt --all -- --check`: passed after the state extraction.
+- `cargo clippy --all-targets -- -D warnings`: passed after the state
+  extraction.
+- `cargo test --all`: passed after the state extraction, with only the
+  repository's explicitly ignored tests skipped.
 
-Next action: move `RenderState` and its construction into `ui/state.rs`,
-leaving event application temporarily beside it or in `terminal.rs` until the
-following reducer extraction. Preserve field visibility narrowly and keep the
-renderer call sites unchanged.
+Next action: move `ProgressEvent` application from `terminal.rs` into
+`ui/reducer.rs`. Keep the event-to-state transition API crate-private, move
+state-transition tests toward that boundary where practical, and leave all
+rendering methods in `terminal.rs` until the renderer split.
