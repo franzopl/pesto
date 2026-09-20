@@ -434,7 +434,7 @@ numeric code.
 Penne:
 
 - [x] Split `bin/penne.rs` into CLI, dispatch and command modules.
-- [ ] Split `check.rs` into planning, execution and reporting.
+- [x] Split `check.rs` into planning, execution and reporting.
 - [ ] Review `download.rs` and `assemble.rs` for existing pipeline-stage
   boundaries.
 - [ ] Preserve failover, concurrency and end-to-end mock tests.
@@ -1367,6 +1367,35 @@ Validation completed:
 
 Next action: split `crates/penne/src/check.rs` into planning, execution and
 reporting while preserving failover, pipeline-depth and fail-fast behavior.
+
+### 2026-09-20 — Phase 6 continued: Penne availability checker
+
+- Split the 1,208-line `penne::check` implementation into `model.rs` (public
+  configuration, progress and outcome types), `plan.rs` (queue-to-work-item
+  planning), `execution.rs` (tier draining, workers, retry and pipelined NNTP
+  operations), and `reporting.rs` (streaming per-NZB outcomes and final result
+  assembly).
+- Kept `check.rs` as a 158-line public facade and orchestrator. Existing
+  `penne::check::*` paths are preserved through deliberate re-exports.
+- Moved the focused model tests beside their types. Fail-fast stop state,
+  server-tier ordering, connection counts, pipeline depth, retry backoff,
+  byte accounting and progress emission points are unchanged.
+- Removed `check.rs` from the source-size baseline. All new files are below
+  550 lines and the workspace baseline now has 14 entries.
+
+Validation completed:
+
+- `cargo check -p penne --all-targets`: passed.
+- `cargo clippy -p penne --all-targets -- -D warnings`: passed.
+- `cargo test -p penne`: passed, including 19 availability tests, the
+  concurrency regression, all CLI end-to-end tests and failover coverage.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 14 baselined files.
+
+Next action: review `penne`'s `download.rs` and `assemble.rs` for existing
+pipeline-stage boundaries; extract only boundaries that reduce context while
+keeping the current failover and early-assembly behavior intact.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
