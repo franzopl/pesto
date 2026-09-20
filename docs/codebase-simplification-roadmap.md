@@ -340,6 +340,7 @@ Target layout:
 crates/upapasta/src/
 ├── main.rs
 ├── runtime.rs
+├── input.rs
 ├── app/
 │   ├── mod.rs
 │   ├── navigation.rs
@@ -393,7 +394,7 @@ Steps:
     `App` in `app/mod.rs` and re-exporting the same public paths.
   - [x] Move each feature's `impl App` methods next to its state module.
 - [x] Move filesystem, upload, hook and indexer operations into `tasks/`.
-- [ ] Keep the event loop responsible for dispatch rather than business logic.
+- [x] Keep the event loop responsible for dispatch rather than business logic.
 - [ ] Review `AppEvent` after boundaries exist; group events only when doing so
   improves navigation and exhaustiveness.
 - [ ] Run `cargo check -p upapasta`, Clippy and tests after each feature move.
@@ -1073,6 +1074,29 @@ Validation completed:
 
 Next action: reduce `run_app` to dispatch by moving its per-event handling into
 focused functions or a `runtime` module, then review `AppEvent`.
+
+### 2026-09-20 — Phase 4 continued: event loop split
+
+- Moved `run_app` and the non-key event handling into `runtime.rs`; the loop
+  now only draws, drains events, dispatches them, polls background jobs and
+  sleeps. Non-key arms live in `handle_app_event`, and the per-iteration
+  folder-sizing / directory-scan / watch-scan work lives in `poll_background`.
+- Moved the full key dispatch into `input.rs` as `handle_key`, returning
+  `true` to quit. `main.rs` is now 111 lines (`main` plus module declarations)
+  and was removed from the source-size debt baseline, which is down to 21
+  entries.
+- Bodies are unchanged: the split only relocates code and threads `&tx` /
+  `upload_log_path` through the two helpers. No feature behavior changed.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: review `AppEvent` exhaustiveness and grouping now that the
+dispatch boundary exists, then run the full Phase 4 gate set.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
