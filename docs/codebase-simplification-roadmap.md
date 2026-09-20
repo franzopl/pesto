@@ -349,6 +349,7 @@ crates/upapasta/src/
 │   ├── vault.rs
 │   ├── watch.rs
 │   ├── config.rs
+│   ├── confirm.rs
 │   └── prowlarr.rs
 ├── tasks/
 │   ├── upload.rs
@@ -384,11 +385,11 @@ Steps:
   - [x] Extract the Prowlarr overlays.
   - [x] Extract the hook picker overlay.
 - [x] Keep `ui/mod.rs` as screen dispatch only.
-- [ ] Split feature-specific state and methods out of `app.rs` while retaining
+- [x] Split feature-specific state and methods out of `app.rs` while retaining
   `App` as the root state.
   - [x] Move the feature state types into an `app/` module directory, leaving
     `App` in `app/mod.rs` and re-exporting the same public paths.
-  - [ ] Move each feature's `impl App` methods next to its state module.
+  - [x] Move each feature's `impl App` methods next to its state module.
 - [ ] Move filesystem, upload, hook and indexer operations into `tasks/`.
 - [ ] Keep the event loop responsible for dispatch rather than business logic.
 - [ ] Review `AppEvent` after boundaries exist; group events only when doing so
@@ -1011,6 +1012,37 @@ Validation completed:
 Next action: move the Config-screen and confirm-panel methods into
 `app/config.rs`, promoting the shared effective-value helpers to
 `pub(super)` where upload also needs them.
+
+### 2026-09-20 — Phase 4 continued: Config, confirm and upload methods
+
+- Moved the Config-screen methods into `app/config.rs` (field navigation,
+  editing, reset, effective config/folder mode, and the prefs persistence).
+- Split the upload confirmation panel into `app/confirm.rs`: field order,
+  effective values, cycling, increment/decrement, edit commit/cancel and the
+  field views.
+- Moved the live upload methods into `app/upload.rs`: `trigger_upload`,
+  per-item status tracking, NZB-disk/hook index refresh, catalog recording,
+  upload start/finish, progress handling, pause/cancel and
+  `effective_upload_settings`.
+- Queue persistence (`save_queue`/`load_queue`) went to `app/queue.rs`.
+- `app/mod.rs` shrank from 2,441 to 1,139 lines and its source-size debt
+  baseline was lowered again. Every `app/` file is now under the 800-line
+  limit. What remains in `mod.rs` is `App`'s fields, `App::new`, the
+  `UploadProgress` type, the shared free functions and the tests.
+- The target `app/` layout gained a `confirm.rs` entry for the upload
+  confirmation panel, which is a distinct screen concern from the Config
+  screen.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: extract filesystem, upload, hook and indexer operations from
+`app/mod.rs` and `main.rs` into `tasks/`, beginning with the watch scan and
+queue sizing jobs.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 

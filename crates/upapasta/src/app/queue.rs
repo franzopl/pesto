@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::App;
+use super::{queue_path, App};
 
 /// Describes how a queued path will become an NZB. A directory bundles every
 /// file under it into a single NZB named after the folder (the standard Usenet
@@ -225,5 +225,69 @@ impl App {
         self.sync_queue_badges();
         self.save_queue();
         count
+    }
+}
+
+impl App {
+    /// Persist the current upload queue (the list of paths) so a carefully
+    /// built selection survives navigating away or restarting the app.
+    pub fn save_queue(&self) {
+        if let Some(path) = queue_path() {
+            if let Ok(json) = serde_json::to_string_pretty(&self.upload_queue.items) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
+    /// Restore a previously saved queue, dropping any path that no longer
+    /// exists on disk, and rebuild the grouping cache and Browser badges.
+    pub fn load_queue(&mut self) {
+        let Some(path) = queue_path() else { return };
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<String>>(&data) else {
+            return;
+        };
+        let mut dropped = 0usize;
+        self.upload_queue.items = items
+            .into_iter()
+            .filter(|p| {
+                let exists = std::path::Path::new(p).exists();
+                if !exists {
+                    dropped += 1;
+                }
+                exists
+            })
+            .collect();
+        self.upload_queue.selected = 0;
+        // Quick (walk-free) restore: folders come back unsized and their
+        // file count / size is computed off the UI thread, so restoring a queue
+        // of large folders cannot stall startup.
+        self.queue_meta = self
+            .upload_queue
+            .items
+            .iter()
+            .map(|p| (p.clone(), queue_entry_info_quick(p)))
+            .collect();
+        self.pending_meta = self
+            .queue_meta
+            .iter()
+            .filter(|(_, info)| !info.sized)
+            .map(|(p, _)| p.clone())
+            .collect();
+        self.sync_queue_badges();
+        let n = self.upload_queue.items.len();
+        if n > 0 {
+            let mut msg = format!("Restored {n} queued item(s)");
+            if dropped > 0 {
+                msg.push_str(&format!(" ({dropped} missing path(s) dropped)"));
+            }
+            self.status_bar.set(msg);
+        }
+        // Persist the pruned list so missing paths do not linger.
+        if dropped > 0 {
+            self.save_queue();
+        }
     }
 }
