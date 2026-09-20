@@ -374,7 +374,8 @@ Steps:
   - [x] Extract the history screen renderer.
   - [x] Extract the configuration screen renderer.
   - [x] Extract the watch screen renderer.
-  - [ ] Extract the NZB Vault screen renderer.
+  - [x] Extract the NZB Vault screen renderer.
+  - [ ] Extract the queue screen renderer.
 - [ ] Extract overlays after their owning screens.
 - [ ] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
@@ -790,8 +791,27 @@ Validation completed:
 - `bash scripts/check-source-size.sh`: passed with 23 baselined files.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 
-Next action: extract the NZB Vault screen renderer into `ui/vault.rs`, leaving
-its viewer overlay in `ui/mod.rs` until the later overlay pass.
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 4 continued: NZB Vault renderer
+
+- Added `crates/upapasta/src/ui/vault.rs` for the Vault file list, origin and
+  catalog markers, sorting label, selection state and parsed NZB detail panel.
+- `ui/mod.rs` now delegates `AppState::NzbVault` to `vault::draw` and shrank
+  from 2,145 to 1,945 lines. Lowered its source-size debt baseline again; the
+  new renderer is 206 lines.
+- Kept Vault loading, parsing, deletion and input handling outside the
+  renderer. The Vault viewer remains in `ui/mod.rs` for the later overlay pass.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Next action: extract the Queue screen and upload configuration panel into
+`ui/queue.rs`, without moving queue mutations or input handling.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
