@@ -409,7 +409,7 @@ Goal: complete the context reduction in protocol and formatting modules after
 the highest-value hotspots are under control.
 
 - [x] Split `nfo.rs` into metadata model, detection/parsing and rendering.
-- [ ] Split `nntp/mod.rs` into protocol/response parsing, authentication and
+- [x] Split `nntp/mod.rs` into protocol/response parsing, authentication and
   client behavior while preserving `pool.rs`.
 - [ ] Split `nzb.rs` into shared model, reader and writer.
 - [ ] Group `config/types.rs` by configuration section.
@@ -1145,6 +1145,29 @@ Validation completed:
 
 Next action: split `pesto`'s `nntp/mod.rs` into protocol/response parsing,
 authentication and client behavior while preserving `pool.rs`.
+
+### 2026-09-20 — Phase 5 continued: nntp split
+
+- Split `nntp/mod.rs` into focused submodules:
+  - `response.rs`: `Response`, `ErrorHint`, `classify_error` and `with_hint`.
+  - `protocol.rs`: dot-stuffing, dot-terminator and already-posted detection.
+  - `tls.rs`: the shared rustls client configuration.
+  - `auth.rs`: `authenticate`, `validate_proxy` and `proxy_exit_ip`.
+  - `tests.rs`: the existing tests and the test-only `from_stream` helper.
+- The public paths are unchanged (`pesto::nntp::{Response, ErrorHint,
+  classify_error}` and the `validate_proxy`/`proxy_exit_ip` re-exports), and
+  `pool.rs` is untouched. `nntp/mod.rs` is 596 lines and leaves the source-size
+  baseline; the workspace baseline fell from 20 to 19 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets` and `cargo clippy -p
+  pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib`: 589 passed, 5 ignored.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: split `pesto`'s `nzb.rs` into shared model, reader and writer.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
