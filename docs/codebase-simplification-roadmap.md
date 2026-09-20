@@ -444,9 +444,9 @@ Parmesan:
 - [x] Split `create.rs` into planning, ingestion and packet writing if the
   resulting dependencies remain one-directional.
 - [x] Organize encoder tests by behavior/backend.
-- [ ] Keep cohesive SIMD kernels and lookup tables on the explicit exception
+- [x] Keep cohesive SIMD kernels and lookup tables on the explicit exception
   list.
-- [ ] Split the CLI entry point from command behavior.
+- [x] Split the CLI entry point from command behavior.
 
 Run crate-specific checks during each step and all gates at phase completion.
 
@@ -1469,6 +1469,30 @@ Validation completed:
 
 Next action: document the remaining cohesive SIMD kernel and lookup-table
 exceptions, then split Parmesan's CLI entry point from command behavior.
+
+### 2026-09-20 — Phase 6 completed: Parmesan kernel review and CLI split
+
+- Reviewed the remaining Parmesan source-size exceptions:
+  `shuffle_kernels.rs` (1,422 lines), `affine2x_kernels.rs` (1,105 lines) and
+  `gfni_kernels.rs` (1,077 lines). Each is a focused, architecture-specific
+  SIMD implementation whose setup, target-feature contracts, unrolled hot
+  loops and tail handling must remain reviewable together.
+- Documented those three files directly in the source-size baseline as focused
+  SIMD exceptions. Lookup-table definitions are already isolated in the
+  180-line `encoder/tables.rs` module and need no exception.
+- Reduced `main.rs` from 503 to 16 lines: `cli.rs` (154 lines) owns Clap types
+  and the backwards-compatible implicit `create` alias, while `command.rs`
+  (339 lines) owns dispatch and create/verify/repair behavior.
+- Kept allocator tuning before runtime construction and preserved the bounded
+  runtime used by every command.
+
+Validation completed:
+
+- `cargo clippy -p parmesan-par2 --all-targets -- -D warnings`: passed.
+- `cargo test -p parmesan-par2`: passed (142 executed tests, 12 ignored).
+
+Phase 6 is complete. Next action: begin Phase 7 by classifying every remaining
+source-size exception and adding concise module maps to complex facades.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
