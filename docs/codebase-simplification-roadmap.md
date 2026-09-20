@@ -383,9 +383,12 @@ Steps:
   - [x] Extract the Vault viewer overlay.
   - [x] Extract the Prowlarr overlays.
   - [x] Extract the hook picker overlay.
-- [ ] Keep `ui/mod.rs` as screen dispatch only.
+- [x] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
   `App` as the root state.
+  - [x] Move the feature state types into an `app/` module directory, leaving
+    `App` in `app/mod.rs` and re-exporting the same public paths.
+  - [ ] Move each feature's `impl App` methods next to its state module.
 - [ ] Move filesystem, upload, hook and indexer operations into `tasks/`.
 - [ ] Keep the event loop responsible for dispatch rather than business logic.
 - [ ] Review `AppEvent` after boundaries exist; group events only when doing so
@@ -907,6 +910,36 @@ Validation completed:
 Next action: keep `ui/mod.rs` as screen dispatch only by relocating the shared
 rendering helpers into a dedicated `ui/` helper module, then begin moving
 feature state out of `app.rs`.
+
+### 2026-09-20 — Phase 4 continued: rendering helpers and `app/` state modules
+
+- Added `crates/upapasta/src/ui/helpers.rs` for the shared `truncate_str`,
+  `format_bytes`, `centered_rect` and `category_color` helpers and their three
+  truncation tests. Every screen and overlay now imports them from
+  `ui::helpers`; `ui/mod.rs` is 240 lines and holds only screen/overlay
+  dispatch, the top bar, the status bar and the small-terminal fallback.
+- Converted `crates/upapasta/src/app.rs` into `app/mod.rs` with feature state
+  modules: `queue.rs`, `vault.rs`, `prowlarr.rs`, `history.rs`, `config.rs`,
+  `watch.rs` and `hook_picker.rs`. `App` stays the root state in `mod.rs` and
+  re-exports the same public paths (`app::VaultState`, `app::queue_entry_info`,
+  `app::dir_stats`, …) so no caller changed.
+- Moved the types verbatim; only `WatchSettings` became `pub(super)` and
+  `dir_stats` is re-exported `pub(crate)`. `app/mod.rs` shrank from 3,588 to
+  3,057 lines and its source-size debt baseline was lowered accordingly.
+- The feature `impl App` methods still live in `app/mod.rs` and are the next
+  extraction target.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: move the feature-specific `impl App` methods (queue, vault,
+prowlarr, history, config, watch, hooks) alongside their state modules in
+`app/`, then start extracting filesystem/upload/hook/indexer work into
+`tasks/`.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
