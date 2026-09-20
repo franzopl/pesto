@@ -372,7 +372,8 @@ Steps:
 - [ ] Extract one screen renderer per change, starting with low-coupling
   history and configuration screens.
   - [x] Extract the history screen renderer.
-  - [ ] Extract the configuration screen renderer.
+  - [x] Extract the configuration screen renderer.
+  - [ ] Extract the watch screen renderer.
 - [ ] Extract overlays after their owning screens.
 - [ ] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
@@ -745,9 +746,31 @@ Validation completed:
 - `bash scripts/check-source-size.sh`: passed with 23 baselined files.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 
-Next action: extract the configuration renderer and its field-model builder
-from `crates/upapasta/src/ui/mod.rs` into `ui/config.rs`, preserving the
-current edit and override presentation exactly.
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 4 continued: configuration renderer
+
+- Added `crates/upapasta/src/ui/config.rs` for the configuration field model,
+  effective server and Prowlarr status panel, override indicators, editing
+  presentation and selection state.
+- `ui/mod.rs` now delegates `AppState::Config` to `config::draw` and shrank
+  from 2,644 to 2,329 lines. Lowered its source-size debt baseline again; the
+  extracted configuration module is 327 lines.
+- Preserved the existing `App`/`ConfigState` ownership and every field order,
+  default, mask, hint, color and override count. No configuration persistence
+  or input handling moved in this renderer-only step.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Next action: extract the Watch screen renderer and its field projection into
+`ui/watch.rs`, leaving filesystem scanning and event handling outside the UI
+module.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
