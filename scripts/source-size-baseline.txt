@@ -7,7 +7,6 @@
 1139 crates/upapasta/src/app/mod.rs
 1432 crates/parmesan/src/create.rs
 1422 crates/parmesan/src/encoder/shuffle_kernels.rs
-1313 crates/pesto/src/nzb.rs
 1227 crates/parmesan/src/encoder/tests.rs
 1208 crates/penne/src/check.rs
 1116 crates/penne/src/bin/penne.rs

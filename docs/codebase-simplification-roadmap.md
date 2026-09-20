@@ -411,7 +411,7 @@ the highest-value hotspots are under control.
 - [x] Split `nfo.rs` into metadata model, detection/parsing and rendering.
 - [x] Split `nntp/mod.rs` into protocol/response parsing, authentication and
   client behavior while preserving `pool.rs`.
-- [ ] Split `nzb.rs` into shared model, reader and writer.
+- [x] Split `nzb.rs` into shared model, reader and writer.
 - [ ] Group `config/types.rs` by configuration section.
 - [ ] Separate public progress events from terminal-specific presentation.
 - [ ] Review `compress.rs`, `resume.rs` and `upload.rs`; extract only natural
@@ -1168,6 +1168,30 @@ Validation completed:
   `bash scripts/check-source-size.sh`: passed.
 
 Next action: split `pesto`'s `nzb.rs` into shared model, reader and writer.
+
+### 2026-09-20 — Phase 5 continued: nzb split
+
+- Split `nzb.rs` into `nzb/mod.rs` plus:
+  - `model.rs`: `NzbMeta`, `ParsedNzb`, the TMDb/TVDB/IMDb/MAL reference
+    parsers and the XML `escape` helper.
+  - `reader.rs`: `parse` and the XML attribute/text, subject and unescape
+    helpers.
+  - `writer.rs`: `generate`, `write_file`, `wire_subject` and `wire_subjects`.
+  - `tests.rs`: the existing tests.
+- `nzb/mod.rs` is 19 lines of module wiring and public re-exports; every
+  submodule is well under the guardrail. The public paths
+  (`pesto::nzb::{generate, parse, NzbMeta, ...}`) are unchanged, and the
+  workspace baseline fell from 19 to 18 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets` and `cargo clippy -p
+  pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib nzb::`: 49 passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: group `pesto`'s `config/types.rs` by configuration section.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
