@@ -353,6 +353,8 @@ crates/upapasta/src/
 │   └── prowlarr.rs
 ├── tasks/
 │   ├── upload.rs
+│   ├── progress.rs
+│   ├── season.rs
 │   ├── watch.rs
 │   ├── hooks.rs
 │   └── prowlarr.rs
@@ -390,7 +392,7 @@ Steps:
   - [x] Move the feature state types into an `app/` module directory, leaving
     `App` in `app/mod.rs` and re-exporting the same public paths.
   - [x] Move each feature's `impl App` methods next to its state module.
-- [ ] Move filesystem, upload, hook and indexer operations into `tasks/`.
+- [x] Move filesystem, upload, hook and indexer operations into `tasks/`.
 - [ ] Keep the event loop responsible for dispatch rather than business logic.
 - [ ] Review `AppEvent` after boundaries exist; group events only when doing so
   improves navigation and exhaustiveness.
@@ -1043,6 +1045,34 @@ Validation completed:
 Next action: extract filesystem, upload, hook and indexer operations from
 `app/mod.rs` and `main.rs` into `tasks/`, beginning with the watch scan and
 queue sizing jobs.
+
+### 2026-09-20 — Phase 4 continued: background tasks extracted
+
+- Added `crates/upapasta/src/tasks/` and moved the background operations out of
+  `main.rs`:
+  - `tasks/watch.rs`: directory scanning, entry sizing and watch upload
+    dispatch (with the watch scan tests).
+  - `tasks/hooks.rs`: hook picker resolution and single-hook execution.
+  - `tasks/prowlarr.rs`: connection check, search, queue search and download.
+  - `tasks/upload.rs`: upload trigger, dry-run config, season hooks and the
+    real upload pipeline (with the season gate tests kept in `season.rs`).
+  - `tasks/progress.rs`: progress event formatting and the session summary.
+  - `tasks/season.rs`: the shared season-pack write/skip gate.
+- `main.rs` now contains only `main` and the `run_app` event loop; it shrank
+  from 2,817 to 912 lines and its source-size debt baseline was lowered. Every
+  `tasks/` file is under the 800-line guardrail.
+- Functions are `pub(crate)` only where the event loop calls them; the moved
+  bodies are unchanged.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: reduce `run_app` to dispatch by moving its per-event handling into
+focused functions or a `runtime` module, then review `AppEvent`.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
