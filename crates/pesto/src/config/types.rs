@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+// ── Defaults ─────────────────────────────────────────────────────────────────
+
 /// Default NNTP-over-TLS port.
 pub const DEFAULT_PORT: u16 = 563;
 /// Default number of parallel connections.
@@ -39,6 +41,8 @@ pub const DEFAULT_PIPELINE_DEPTH: usize = 1;
 pub const MAX_AUTO_PIPELINE_DEPTH: usize = 8;
 /// Default percentage of PAR2 recovery data to generate.
 pub const DEFAULT_PAR2: u8 = 10;
+
+// ── Server and proxy ─────────────────────────────────────────────────────────
 
 /// A fully resolved per-server entry used for failover.
 #[derive(Debug, Clone)]
@@ -127,6 +131,8 @@ impl Socks5Proxy {
         &self.address
     }
 }
+// ── NZB output and obfuscation ───────────────────────────────────────────────
+
 /// What to do when the NZB user-destination already exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -270,6 +276,8 @@ impl ObfuscateMode {
         }
     }
 }
+
+// ── TOML sections ────────────────────────────────────────────────────────────
 
 /// A per-server entry as parsed from `[[servers]]` in the TOML file.
 #[derive(Debug, Default, Deserialize)]
@@ -500,6 +508,8 @@ pub struct NotifySection {
     pub webhook_url: Option<String>,
     pub ntfy_topic: Option<String>,
 }
+
+// ── Resolved configuration ───────────────────────────────────────────────────
 
 /// Configuration as parsed from the TOML file.
 #[derive(Debug, Default, Deserialize)]
@@ -755,57 +765,4 @@ impl Config {
             self.check_connections
         }
     }
-}
-
-/// Parse `--memory-limit`'s global-budget spec: an absolute size (delegates
-/// to [`parse_upload_rate`] — harmless reuse, there's no `/s` suffix on a
-/// memory size), a percentage of host RAM (`"70%"`), or `"auto"`/empty
-/// (`None` — let `pesto::memory::Ceiling` derive it from RLIMIT_AS/cgroup/
-/// host RAM with no explicit override).
-pub fn parse_memory_limit_spec(s: &str) -> Result<Option<u64>> {
-    let s = s.trim();
-    if s.is_empty() || s.eq_ignore_ascii_case("auto") {
-        return Ok(None);
-    }
-    if let Some(pct) = s.strip_suffix('%') {
-        let pct: f64 = pct
-            .trim()
-            .parse()
-            .with_context(|| format!("invalid memory-limit percentage `{s}`"))?;
-        if !(0.0..=100.0).contains(&pct) {
-            bail!("memory-limit percentage `{s}` must be between 0% and 100%");
-        }
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let host_total = sys.total_memory();
-        return Ok(Some((host_total as f64 * pct / 100.0) as u64));
-    }
-    Ok(Some(parse_upload_rate(s)?))
-}
-
-/// Parse a human-readable upload rate string into bytes per second.
-pub fn parse_upload_rate(s: &str) -> Result<u64> {
-    let s = s.trim();
-    let s = s
-        .strip_suffix("/s")
-        .or_else(|| s.strip_suffix("ps"))
-        .unwrap_or(s)
-        .trim();
-
-    let split = s
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(s.len());
-    let (num_str, unit) = s.split_at(split);
-    let value: f64 = num_str
-        .trim()
-        .parse()
-        .with_context(|| format!("invalid upload rate `{}`", s))?;
-    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "k" | "kb" | "kib" => 1024.0,
-        "m" | "mb" | "mib" => 1024.0 * 1024.0,
-        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
-        other => bail!("unknown rate unit `{other}` in `{s}`"),
-    };
-    Ok((value * multiplier) as u64)
 }

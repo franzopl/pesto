@@ -412,7 +412,7 @@ the highest-value hotspots are under control.
 - [x] Split `nntp/mod.rs` into protocol/response parsing, authentication and
   client behavior while preserving `pool.rs`.
 - [x] Split `nzb.rs` into shared model, reader and writer.
-- [ ] Group `config/types.rs` by configuration section.
+- [x] Group `config/types.rs` by configuration section.
 - [ ] Separate public progress events from terminal-specific presentation.
 - [ ] Review `compress.rs`, `resume.rs` and `upload.rs`; extract only natural
   boundaries rather than chasing the line limit.
@@ -1192,6 +1192,26 @@ Validation completed:
   `bash scripts/check-source-size.sh`: passed.
 
 Next action: group `pesto`'s `config/types.rs` by configuration section.
+
+### 2026-09-20 — Phase 5 continued: config types grouped
+
+- Moved `parse_memory_limit_spec` and `parse_upload_rate` out of
+  `config/types.rs` into `config/parse.rs`, where the rest of the config
+  parsing lives, and re-exported them from `config/mod.rs`.
+- Grouped `config/types.rs` with section banners: defaults, server/proxy, NZB
+  output/obfuscation, TOML sections and resolved configuration. The file is 768
+  lines and leaves the source-size baseline (17 entries remain).
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets` and `cargo clippy -p
+  pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib config::`: 84 passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: separate public progress events from terminal-specific
+presentation.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 

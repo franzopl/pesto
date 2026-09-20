@@ -21,4 +21,3 @@
 851 crates/pesto/tests/integration.rs
 837 crates/pesto/src/compress.rs
 818 crates/pesto/tests/full_shared_obfuscation.rs
-811 crates/pesto/src/config/types.rs
