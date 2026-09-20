@@ -443,7 +443,7 @@ Parmesan:
 
 - [x] Split `create.rs` into planning, ingestion and packet writing if the
   resulting dependencies remain one-directional.
-- [ ] Organize encoder tests by behavior/backend.
+- [x] Organize encoder tests by behavior/backend.
 - [ ] Keep cohesive SIMD kernels and lookup tables on the explicit exception
   list.
 - [ ] Split the CLI entry point from command behavior.
@@ -1450,6 +1450,25 @@ Validation completed:
 
 Next action: organize Parmesan encoder tests by behavior/backend while keeping
 the production SIMD kernels and lookup tables as focused exceptions.
+
+### 2026-09-20 — Phase 6 continued: Parmesan encoder test organization
+
+- Replaced the 1,227-line `encoder/tests.rs` collection with a four-line
+  module index and focused suites for backend equivalence (286 lines), hashing
+  and checksums (91 lines), layout contracts (512 lines), and explicitly
+  ignored performance benchmarks (342 lines).
+- Preserved every test body and its existing architecture/feature gates; only
+  the test module paths changed to make intent and ownership visible.
+- Removed `encoder/tests.rs` from the source-size baseline, reducing the
+  exception list from 13 to 12 files.
+
+Validation completed:
+
+- `cargo clippy -p parmesan-par2 --all-targets -- -D warnings`: passed.
+- `cargo test -p parmesan-par2`: passed (142 executed tests, 12 ignored).
+
+Next action: document the remaining cohesive SIMD kernel and lookup-table
+exceptions, then split Parmesan's CLI entry point from command behavior.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
