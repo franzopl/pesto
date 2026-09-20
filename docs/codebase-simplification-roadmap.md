@@ -297,7 +297,7 @@ Safe extraction order:
 - [x] Extract identity and naming helpers.
 - [x] Extract PAR2 geometry and memory planning.
 - [x] Extract season PAR2 as an independent submodule.
-- [ ] Extract task and shared-state types.
+- [x] Extract task and shared-state types.
 - [ ] Extract producer behavior.
 - [ ] Extract worker and ready-article behavior.
 - [ ] Express the main run as named stages in `orchestrator.rs`.
@@ -679,9 +679,40 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract the task, shared-state and ready-article types into
-`poster/task.rs` and `poster/shared.rs` without changing dispatcher or
-buffer-pool behavior.
+Next action: extract producer behavior into `poster/producer.rs`, then the
+worker and ready-article path into `poster/worker.rs`, keeping the message
+pump and retry decisions byte-for-byte equivalent.
+
+### 2026-09-19 — Phase 3 continued: task and shared state
+
+- Added `poster/task.rs` for `TaskDispatcher`, `PostTask` and `ReadyArticle`.
+  Round-robin fan-out, backpressure and the `SendError` contract are unchanged.
+- Added `poster/shared.rs` for `Shared`, its buffer pools and `emit`. Merged the
+  two former `impl Shared` blocks into one; field visibility is `pub(super)` so
+  the poster orchestrator and its tests keep constructing and reading the same
+  fields as before.
+- Moved the shared-state field doc comments with the struct. The `internals`
+  regression tests (buffer reuse, oversized-drop, failure recording) stay in
+  `poster/tests/internals.rs` because they share the `minimal_shared` fixture;
+  they still protect the same behavior.
+- No allocation, buffering, dispatcher or progress-emission behavior changed.
+- Reduced `poster/mod.rs` from 3,658 to 3,451 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test each_reuses_connections_across_episodes`:
+  3 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test pause_resume`: 2 passed.
+- `cargo test -p pesto-poster --test streaming_check_overlaps_upload`: 1 passed.
+
+Next action: extract producer behavior into `poster/producer.rs`, then the
+worker and ready-article path into `poster/worker.rs`, keeping the message
+pump and retry decisions byte-for-byte equivalent.
 
 ### 2026-09-19 — Phase 3 continued: season PAR2 submodule
 
