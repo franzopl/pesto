@@ -301,7 +301,9 @@ Safe extraction order:
 - [x] Extract producer behavior.
 - [x] Extract worker and ready-article behavior.
 - [x] Move the run entry point into `poster/orchestrator.rs`.
-- [ ] Express the main run body as named stages inside `orchestrator.rs`.
+- [x] Extract run preparation, resume persistence and outcome as named stages.
+- [ ] Extract pipeline startup, worker join and check/recovery as named
+  stages inside `orchestrator.rs`.
 - [x] Replace the long internal argument list with an internal `RunOptions`;
   keep existing public functions as compatibility facades.
 - [x] Verify resume, check/repost, pause/cancel and connection-reuse tests.
@@ -680,10 +682,43 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: split the `run` body in `poster/orchestrator.rs` into named
-stages (prepare run, prepare inputs, start pipeline, await workers, recover or
-repost, persist resume state, build outcome) without changing the order, then
-run the posting benchmarks.
+Next action: extract the pipeline startup, worker join and
+check/recovery blocks from `run` into named stages, then run the posting
+benchmarks and memory measurements against the Phase 0 baseline.
+
+### 2026-09-19 — Phase 3 continued: named run preparation and finish stages
+
+- Added `poster/prepare.rs` (495 lines) for the preparation stages:
+  `prepare_resume` (resume/spool validation and the shared release identity),
+  `prepare_inputs` (per-file metadata, resume fingerprints, published names,
+  File-ID ordering and `--file-counter` numbering) and `prepare_resources`
+  (proxy validation, connection split, worker sizing, buffer pre-fill and PAR2
+  geometry) as `RunResources`.
+- Named the finishing stages in `poster/result.rs`: `persist_resume_state`
+  (the single incomplete-run persistence decision) and `build_outcome` (final
+  event, natural segment ordering and `PostOutcome`).
+- `run` now reads as: validate -> `prepare_resume` -> `prepare_inputs` ->
+  `prepare_resources` -> build `Shared` -> announce plan -> start pipeline ->
+  await workers -> recover or repost -> `persist_resume_state` ->
+  `build_outcome`. The preparation and finish stages are named functions; the
+  pipeline start/join/recovery blocks are still inline and remain the next
+  extraction. Order, logging, event emissions and every value are unchanged.
+- `poster/orchestrator.rs` is now 762 lines and was removed from the debt
+  baseline. No `poster/` production file remains above 800 lines; the
+  workspace baseline dropped from 24 to 23 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all 34 test binaries passed (589 library
+  tests, 52 binary tests, every integration suite).
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+
+Next action: extract the pipeline startup, worker join and check/recovery
+blocks from `run` into named stages, then run the posting benchmarks and memory
+measurements against the Phase 0 baseline.
 
 ### 2026-09-19 — Phase 3 continued: orchestrator and RunOptions
 

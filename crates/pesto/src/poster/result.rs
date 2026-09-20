@@ -7,16 +7,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::article::{default_subject, Article};
 use crate::config::Config;
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::{ProgressEvent, ProgressSender};
 use crate::resume::SegmentRecord;
+use crate::walk::natural_cmp;
 use crate::yenc;
 
-use super::outcome::{FailedTask, PostedSegment};
+use super::outcome::{FailedTask, PostOutcome, PostedSegment};
+use super::par2_temp_dir;
 use super::persisted_identity;
 use super::shared::Shared;
 use super::task::PostTask;
@@ -378,4 +380,95 @@ pub async fn repost_failed_tasks(
     }
 
     Ok(recovered)
+}
+
+/// Single, final resume-state persistence decision, replacing the old
+/// per-segment write in `commit_result`. Persist whenever anything is still
+/// unconfirmed: POST failures, MissingConfirmed (even with
+/// `--allow-incomplete-nzb` — the opt-in publishes the NZB but a later
+/// `--resume` can still fill the gap), Inconclusive, or a cancel that already
+/// has Posted records. Complete runs delete the state file.
+pub(super) fn persist_resume_state(
+    shared: &Shared,
+    cancelled: bool,
+    still_missing: &[String],
+    inconclusive: &[String],
+    failed_tasks: &[FailedTask],
+) {
+    if let (Some(resume), Some(rp)) = (&shared.resume, &shared.resume_path) {
+        let has_post_failures = !failed_tasks.is_empty();
+        let has_confirmed_missing = !cancelled && !still_missing.is_empty();
+        let has_inconclusive = !inconclusive.is_empty();
+        let has_progress = !resume.lock().unwrap().is_empty();
+        let incomplete = has_post_failures
+            || has_confirmed_missing
+            || has_inconclusive
+            || (cancelled && has_progress);
+        if incomplete {
+            let _ = resume.lock().unwrap().save(rp);
+        } else {
+            let _ = std::fs::remove_file(rp);
+            if let Some(dir) = &shared.spool_dir {
+                crate::spool::remove_all(dir);
+            }
+        }
+    }
+}
+
+/// Emit the final event, order the posted segments and assemble the run's
+/// [`PostOutcome`] (including the server list actually used).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_outcome(
+    config: &Config,
+    shared: &Shared,
+    failures: Vec<String>,
+    failed_tasks: Vec<FailedTask>,
+    cancelled: bool,
+    still_missing: Vec<String>,
+    inconclusive: Vec<String>,
+    failure_reason: Option<String>,
+    t_post_start: std::time::Instant,
+) -> PostOutcome {
+    shared.emit(ProgressEvent::Finished);
+
+    let mut segments = std::mem::take(&mut *shared.results.lock().unwrap());
+    // Natural (not lexicographic) by name, so the NZB lists `part2.rar` before
+    // `part10.rar` — the same volume order `--file-counter` numbers by.
+    segments.sort_by(|a, b| natural_cmp(&a.file_name, &b.file_name).then(a.part.cmp(&b.part)));
+
+    // 26d/26g — network performance summary + post phase timing
+    let total_retries = shared.total_retries.load(Ordering::Relaxed);
+    info!(
+        posted = segments.len(),
+        failed = failures.len(),
+        retries = total_retries,
+        still_missing = still_missing.len(),
+        inconclusive = inconclusive.len(),
+        elapsed_ms = t_post_start.elapsed().as_millis(),
+        phase = "post",
+        "network summary"
+    );
+
+    let all_servers: Vec<_> = config.all_servers().collect();
+    let mut used_server_idxs: Vec<usize> = segments.iter().map(|s| s.server_idx).collect();
+    used_server_idxs.sort_unstable();
+    used_server_idxs.dedup();
+    let servers_used: Vec<String> = used_server_idxs
+        .into_iter()
+        .filter_map(|idx| all_servers.get(idx))
+        .map(|s| s.host.clone())
+        .collect();
+
+    PostOutcome {
+        segments,
+        failures,
+        failed_tasks,
+        cancelled,
+        groups: shared.post_group.clone(),
+        still_missing,
+        inconclusive,
+        servers: servers_used,
+        failure_reason,
+        par2_temp_dir: par2_temp_dir(config.par2_temp_dir.as_deref(), shared.run_id),
+    }
 }

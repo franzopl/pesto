@@ -39,6 +39,7 @@ pub use outcome::{
 };
 mod options;
 mod orchestrator;
+mod prepare;
 pub use orchestrator::post_files_inner_with_release_prefix;
 mod producer;
 mod result;
