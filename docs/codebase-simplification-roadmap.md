@@ -294,7 +294,7 @@ Safe extraction order:
 - [x] Move tests out of `poster/mod.rs` without changing coverage.
 - [x] Extract public outcome types and pure decisions.
 - [x] Extract connection accounting and slot lifecycle.
-- [ ] Extract identity and naming helpers.
+- [x] Extract identity and naming helpers.
 - [ ] Extract PAR2 geometry and memory planning.
 - [ ] Extract season PAR2 as an independent submodule.
 - [ ] Extract task and shared-state types.
@@ -634,6 +634,12 @@ Next action: completed in the following progress entry.
   integration tests remain unchanged.
 - Reduced `poster/mod.rs` further to 4,570 lines and lowered its source-size
   debt baseline again.
+- Added `poster/identity.rs` for persisted wire identity, posting-group
+  selection, client-path normalization, PAR2/yEnc naming and article-date
+  resolution. The public `pick_post_group` path remains stable through the
+  facade, and 24 focused tests now live beside these rules.
+- Reduced `poster/mod.rs` further to 4,408 lines and lowered its source-size
+  debt baseline again.
 
 Validation completed:
 
@@ -662,6 +668,16 @@ Validation completed:
 - `bash scripts/check-source-size.sh`, `cargo fmt --all -- --check`,
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the connection extraction.
+- `cargo test -p pesto-poster --lib poster::identity::tests`: 24 passed.
+- `cargo test -p pesto-poster --test full_shared_obfuscation`: 7 passed.
+- `cargo test -p pesto-poster --test independent_obfuscation_tokens`: 3
+  passed.
+- `cargo test -p pesto-poster --test resume_confirm`: 7 passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed after
+  the identity extraction.
+- `bash scripts/check-source-size.sh`, `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
+  after the identity extraction.
 
-Next action: extract identity and naming helpers into `poster/identity.rs`,
-moving their focused path and policy tests beside the new owner where useful.
+Next action: extract PAR2 geometry and memory planning into the planned
+`poster/par2/` module while preserving the existing memory-budget decisions.

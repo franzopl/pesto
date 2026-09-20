@@ -16,15 +16,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
 use crate::article::{
-    default_subject, format_rfc2822, generate_message_id, obfuscated_name,
-    obfuscated_name_with_prefix, rand_u64, random_from, Article,
+    default_subject, generate_message_id, obfuscated_name, obfuscated_name_with_prefix,
+    random_from, Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
 use crate::nntp::pool::{ConnectionBroker, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
-use crate::resume::{
-    resume_action, PersistedWireIdentity, ResumeAction, ResumeState, SegmentRecord,
-};
+use crate::resume::{resume_action, ResumeAction, ResumeState, SegmentRecord};
 use crate::walk::{natural_cmp, InputFile};
 use crate::yenc;
 use parmesan::encoder::{FileHasher, FileHashes, RecoveryEncoder};
@@ -41,6 +39,12 @@ mod check;
 use check::spawn_check_coordinator;
 mod connections;
 use connections::{release_slots, split_connections, take_slots};
+mod identity;
+pub use identity::pick_post_group;
+use identity::{
+    normalize_client_path, obfuscated_yenc_name, par2_release_base, persisted_identity,
+    resolve_date,
+};
 mod outcome;
 pub use outcome::{
     nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
@@ -206,21 +210,6 @@ struct PostTask {
     /// same read the article body comes from), so no separate whole-file
     /// pre-pass is needed before posting can start.
     file_crc32: Option<u32>,
-}
-
-fn persisted_identity(
-    subject_name: &str,
-    yenc_name: &str,
-    from: &str,
-    date: &(Option<String>, Option<u64>),
-) -> PersistedWireIdentity {
-    PersistedWireIdentity {
-        subject_name: subject_name.to_owned(),
-        yenc_name: yenc_name.to_owned(),
-        from: from.to_owned(),
-        date: date.0.clone(),
-        unix_date: date.1,
-    }
 }
 
 /// Encoded article ready for NNTP (nyuu `Post` after `generate`).
@@ -1754,74 +1743,6 @@ async fn par2_only_ingest(
     .await?;
     *par2_slices_fed = slices_fed.load(Ordering::Relaxed);
     Ok(())
-}
-
-fn par2_base(name: &str) -> &str {
-    name.split('/').next().unwrap_or(name)
-}
-
-/// Base name for the PAR2 index/volumes: [`par2_base`], but first strips a
-/// `--compress-volume-size` volume suffix (`.partNN.rar`, `.NNN` after
-/// `.7z`/`.zip`) if present.
-///
-/// Without this, a volume-split archive's PAR2 set borrowed whichever file
-/// happened to be `metas[0]` verbatim — e.g. `archive.part04.rar.par2` — even
-/// though the recovery set actually covers every volume together. That's
-/// misleading (it reads as if only `part04` were protected) and, for
-/// `--obfuscate none`/`full` where the real name *is* the wire name, it also
-/// put a single volume's name on every PAR2 article's Subject instead of a
-/// name shared by the whole release.
-fn par2_release_base(name: &str) -> &str {
-    let trimmed = match crate::compress::volume_suffix(name) {
-        Some(suffix) => &name[..name.len() - suffix.len()],
-        None => name,
-    };
-    par2_base(trimmed)
-}
-
-/// Return an opaque yEnc filename, retaining only `.par2` for recovery
-/// volumes. Download clients use that extension to classify and clean up PAR2
-/// data after repair; the random stem intentionally carries no real name.
-fn obfuscated_yenc_name(real_name: &str) -> String {
-    let name = obfuscated_name();
-    if Path::new(real_name)
-        .extension()
-        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("par2"))
-    {
-        format!("{name}.par2")
-    } else {
-        name
-    }
-}
-
-/// Canonical path presented to download clients and stored in PAR2 FileDesc.
-/// The outer upload directory is the NZB job directory, so it is removed;
-/// everything below it is preserved with POSIX separators for SABnzbd,
-/// NZBGet and the PAR2 format.
-fn normalize_client_path<'a>(name: &'a str, release_root: Option<&str>) -> Result<&'a str> {
-    if name.is_empty() || name.starts_with('/') || name.contains('\\') || name.contains('\0') {
-        bail!("invalid published path `{name}`");
-    }
-    let path = match release_root {
-        Some(root) => name
-            .strip_prefix(root)
-            .and_then(|rest| rest.strip_prefix('/'))
-            .unwrap_or(name),
-        None => name,
-    };
-    if path.is_empty()
-        || path
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        bail!("published path `{name}` does not produce a safe relative client path");
-    }
-    if !path.is_ascii() {
-        bail!(
-            "published path `{name}` is not ASCII; use --compress=7z to preserve Unicode names inside an archive"
-        );
-    }
-    Ok(path)
 }
 
 /// MD5 of a file's first 16 KiB — the PAR2 "16k hash" half of a File ID.
@@ -3627,89 +3548,6 @@ fn make_task(
         from,
         date,
         file_crc32,
-    }
-}
-
-/// Choose the newsgroup(s) for a whole run.
-///
-/// When several groups are configured, one is picked at random (once per run)
-/// rather than cross-posting every article to all of them. The whole upload
-/// then stays together in a single group, while the footprint still spreads
-/// across the configured groups over many runs. Each entry in `groups` is a
-/// "target" that may itself be several newsgroup names joined with `+` (or
-/// the deprecated `,` alias) for a simultaneous cross-post (see
-/// [`crate::config::validation::validate_groups`] for the syntax this
-/// assumes has already been validated); the chosen target is split into the
-/// flat list every caller expects. With zero or one configured entry
-/// there's nothing to pick between, but the split still applies.
-///
-/// `pub` so a `--season` batch (`bin/pesto.rs`'s `run_batch`) can call this
-/// once up front and force every episode's `Config::groups` to the same
-/// pre-picked single-entry target. Otherwise each episode's own internal
-/// call (inside [`post_files`]) re-rolls independently, scattering a
-/// season's episodes across different newsgroups — the merged season NZB
-/// then needs a `<groups>` list wide enough to cover all of them, and any
-/// one episode's actual group may not even be among the ones another
-/// episode's segments were checked against.
-pub fn pick_post_group(groups: &[String]) -> Vec<String> {
-    let target = match groups {
-        [] => return Vec::new(),
-        [one] => one.as_str(),
-        many => {
-            let idx = (rand_u64() % many.len() as u64) as usize;
-            many[idx].as_str()
-        }
-    };
-    target
-        .split(['+', ','])
-        .map(|s| s.trim().to_string())
-        .collect()
-}
-
-/// Compute the `Date:` header value and its Unix timestamp from the config
-/// `date` option.
-///
-/// - `None` → `(None, None)` — header omitted, server fills it in.
-/// - `"now"` → current UTC time formatted as RFC 2822.
-/// - `"random"` → random time within the last 2 hours.
-/// - any other string → used verbatim (caller-supplied RFC 2822 timestamp).
-///
-/// Returns `(rfc_2822_string, unix_timestamp_secs)`.
-fn resolve_date(mode: Option<&str>) -> (Option<String>, Option<u64>) {
-    match mode {
-        None => (None, None),
-        Some("now") => {
-            let now = SystemTime::now();
-            let ts = now
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_secs();
-            (Some(format_rfc2822(now)), Some(ts))
-        }
-        Some("random") => {
-            // Pick a random offset in [0, 2h) before now.
-            // This breaks the obvious same-timestamp pattern that reveals
-            // articles belong to the same upload batch, while staying well
-            // inside the acceptance window of servers that reject articles
-            // whose Date is too far in the past (e.g. blocknews returns
-            // `441 437 ... TooOld`). A wider window (24h) tripped that limit
-            // for a small random subset of articles on every obfuscated run.
-            let r = rand_u64();
-            let offset_secs = r % (2 * 3600);
-            let t = SystemTime::now()
-                .checked_sub(Duration::from_secs(offset_secs))
-                .unwrap_or(UNIX_EPOCH);
-            let ts = t
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::ZERO)
-                .as_secs();
-            (Some(format_rfc2822(t)), Some(ts))
-        }
-        Some(fixed) => {
-            // For fixed dates we don't parse back to unix; the NZB will fall
-            // back to SystemTime::now() if the caller needs a timestamp.
-            (Some(fixed.to_string()), None)
-        }
     }
 }
 

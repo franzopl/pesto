@@ -1,53 +1,5 @@
 use super::*;
 
-// ── resolve_date ──────────────────────────────────────────────────────────
-
-#[test]
-fn resolve_date_none_omits_header() {
-    assert_eq!(resolve_date(None), (None, None));
-}
-
-#[test]
-fn resolve_date_now_returns_rfc2822() {
-    let (d, ts) = resolve_date(Some("now"));
-    let d = d.unwrap();
-    // Should look like "Mon, 01 Jan 2024 00:00:00 +0000".
-    assert!(d.ends_with("+0000"));
-    assert!(d.contains(':'));
-    assert!(ts.unwrap() > 0);
-}
-
-#[test]
-fn resolve_date_random_returns_rfc2822() {
-    let (d, ts) = resolve_date(Some("random"));
-    let d = d.unwrap();
-    assert!(d.ends_with("+0000"));
-    assert!(ts.unwrap() > 0);
-}
-
-#[test]
-fn resolve_date_random_within_2h() {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let (_, ts) = resolve_date(Some("random"));
-    let ts = ts.unwrap();
-    assert!(ts <= now, "random date must not be in the future");
-    assert!(
-        now - ts < 2 * 3600 + 1,
-        "random date must be within the last 2 hours"
-    );
-}
-
-#[test]
-fn resolve_date_fixed_is_returned_verbatim() {
-    let fixed = "Tue, 14 Jan 2025 10:00:00 +0000";
-    let (d, ts) = resolve_date(Some(fixed));
-    assert_eq!(d.as_deref(), Some(fixed));
-    assert!(ts.is_none());
-}
-
 // ── RateLimiter ───────────────────────────────────────────────────────────
 
 #[tokio::test]
