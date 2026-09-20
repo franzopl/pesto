@@ -296,7 +296,7 @@ Safe extraction order:
 - [x] Extract connection accounting and slot lifecycle.
 - [x] Extract identity and naming helpers.
 - [x] Extract PAR2 geometry and memory planning.
-- [ ] Extract season PAR2 as an independent submodule.
+- [x] Extract season PAR2 as an independent submodule.
 - [ ] Extract task and shared-state types.
 - [ ] Extract producer behavior.
 - [ ] Extract worker and ready-article behavior.
@@ -679,9 +679,42 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract season PAR2 (packet assembly, per-episode ingestion and
-volume writing) into `poster/par2/season.rs` without changing the recovery
-set's byte layout.
+Next action: extract the task, shared-state and ready-article types into
+`poster/task.rs` and `poster/shared.rs` without changing dispatcher or
+buffer-pool behavior.
+
+### 2026-09-19 — Phase 3 continued: season PAR2 submodule
+
+- Added `poster/par2/season.rs` for the season-wide recovery set: episode
+  ordering by File ID, per-episode File Description/IFSC packet assembly, the
+  append-as-we-go volume writer, the per-pass ingestion loop and
+  `generate_season_par2`.
+- Keep `generate_and_write_season_par2` and its progress variant public through
+  the `par2` facade so `pesto::poster::*` and the CLI season path are
+  unchanged.
+- Left `file_md5_16k` in the poster facade because the per-file path uses it
+  too; the season module imports it from its ancestor rather than duplicating
+  the hash logic.
+- The recovery set's byte layout, pass split, memory plan and progress events
+  are unchanged. `poster/par2/season.rs` is 518 lines.
+- Reduced `poster/mod.rs` from 4,158 to 3,658 lines and lowered its
+  source-size debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test season_par2_file_desc`: 3 passed.
+- `cargo test -p pesto-poster --test season_par2_matches_compressed_archive`:
+  1 passed.
+- `cargo test -p pesto-poster --test par2_directory`: 2 passed.
+- `bash scripts/check-source-size.sh`: passed.
+- `cargo fmt --all -- --check`: passed.
+
+Next action: extract the task, shared-state and ready-article types into
+`poster/task.rs` and `poster/shared.rs` without changing dispatcher or
+buffer-pool behavior.
 
 ### 2026-09-19 — Phase 3 continued: PAR2 geometry and memory planning
 
