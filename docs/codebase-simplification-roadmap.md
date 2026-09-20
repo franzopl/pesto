@@ -295,17 +295,22 @@ Safe extraction order:
 - [x] Extract public outcome types and pure decisions.
 - [x] Extract connection accounting and slot lifecycle.
 - [x] Extract identity and naming helpers.
-- [ ] Extract PAR2 geometry and memory planning.
-- [ ] Extract season PAR2 as an independent submodule.
-- [ ] Extract task and shared-state types.
-- [ ] Extract producer behavior.
-- [ ] Extract worker and ready-article behavior.
-- [ ] Express the main run as named stages in `orchestrator.rs`.
-- [ ] Replace the long internal argument list with an internal `RunOptions`;
+- [x] Extract PAR2 geometry and memory planning.
+- [x] Extract season PAR2 as an independent submodule.
+- [x] Extract task and shared-state types.
+- [x] Extract producer behavior.
+- [x] Extract worker and ready-article behavior.
+- [x] Move the run entry point into `poster/orchestrator.rs`.
+- [x] Extract run preparation, resume persistence and outcome as named stages.
+- [x] Extract the cancel watcher, pipeline startup and worker join as named
+  stages.
+- [ ] Extract the check/recovery block as a named stage inside
+  `orchestrator.rs`.
+- [x] Replace the long internal argument list with an internal `RunOptions`;
   keep existing public functions as compatibility facades.
-- [ ] Verify resume, check/repost, pause/cancel and connection-reuse tests.
+- [x] Verify resume, check/repost, pause/cancel and connection-reuse tests.
 - [ ] Compare posting benchmarks and memory metrics with the baseline.
-- [ ] Run all gates.
+- [x] Run all gates.
 
 The orchestration should read approximately as:
 
@@ -679,5 +684,306 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract PAR2 geometry and memory planning into the planned
-`poster/par2/` module while preserving the existing memory-budget decisions.
+Next action: extract the check/recovery block from `run` into a named stage,
+then run the posting benchmarks and memory measurements against the Phase 0
+baseline.
+
+### 2026-09-19 — Phase 3 continued: named pipeline join
+
+- Added `poster/pipeline.rs` (247 lines) for the posting pipeline machinery:
+  `spawn_cancel_watcher`, the `Pipeline` struct and `start_pipeline`, plus
+  `run_pipeline` which runs the producer or pre-generated-release poster, joins
+  the encode and POST workers and returns the force-abort/failure state and
+  recovered POST slots.
+- `orchestrator.rs` shrank from 797 to 597 lines; `pipeline.rs` is well under
+  the 800-line limit and the source-size baseline stays at 23 entries. All
+  `run` body state, cancellation semantics and join ordering are unchanged.
+- The check/recovery block (blind retry, streaming STAT drain and automatic
+  tail recovery) is the last inline stage and remains the documented next step.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all 34 test binaries passed.
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+
+Next action: extract the check/recovery block from `run` into a named stage,
+then run the posting benchmarks and memory measurements against the Phase 0
+baseline.
+
+### 2026-09-19 — Phase 3 continued: named pipeline startup
+
+- Added `spawn_cancel_watcher` for the external cancel/pause flag forwarding
+  and `start_pipeline` plus its `Pipeline` struct for spawning the POST worker
+  and yEnc encode pools. Both were lifted verbatim from `run`; channel depths,
+  round-robin dispatch, buffer-pool wiring and task handles are unchanged.
+- `run` now names: cancel watcher, `--par2-before-upload` generation, slot
+  checkout, check coordinator, pipeline startup, producer/join, retry and
+  recovery, persist, outcome. The worker-join and check/recovery blocks remain
+  inline and are the last staging step.
+- `poster/orchestrator.rs` is 797 lines, still below the general-purpose
+  800-line limit, and the source-size baseline remains at 23 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all 34 test binaries passed.
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+
+Next action: extract the worker join and check/recovery blocks from `run` into
+named stages, then run the posting benchmarks and memory measurements against
+the Phase 0 baseline.
+
+### 2026-09-19 — Phase 3 continued: named run preparation and finish stages
+
+- Added `poster/prepare.rs` (495 lines) for the preparation stages:
+  `prepare_resume` (resume/spool validation and the shared release identity),
+  `prepare_inputs` (per-file metadata, resume fingerprints, published names,
+  File-ID ordering and `--file-counter` numbering) and `prepare_resources`
+  (proxy validation, connection split, worker sizing, buffer pre-fill and PAR2
+  geometry) as `RunResources`.
+- Named the finishing stages in `poster/result.rs`: `persist_resume_state`
+  (the single incomplete-run persistence decision) and `build_outcome` (final
+  event, natural segment ordering and `PostOutcome`).
+- `run` now reads as: validate -> `prepare_resume` -> `prepare_inputs` ->
+  `prepare_resources` -> build `Shared` -> announce plan -> start pipeline ->
+  await workers -> recover or repost -> `persist_resume_state` ->
+  `build_outcome`. The preparation and finish stages are named functions; the
+  pipeline start/join/recovery blocks are still inline and remain the next
+  extraction. Order, logging, event emissions and every value are unchanged.
+- `poster/orchestrator.rs` is now 762 lines and was removed from the debt
+  baseline. No `poster/` production file remains above 800 lines; the
+  workspace baseline dropped from 24 to 23 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all 34 test binaries passed (589 library
+  tests, 52 binary tests, every integration suite).
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+
+Next action: extract the pipeline startup, worker join and check/recovery
+blocks from `run` into named stages, then run the posting benchmarks and memory
+measurements against the Phase 0 baseline.
+
+### 2026-09-19 — Phase 3 continued: orchestrator and RunOptions
+
+- Moved `post_files_inner_with_release_prefix` — the 1,127-line run entry
+  point — into `poster/orchestrator.rs`. Its body is byte-for-byte unchanged;
+  it is now the internal `run(options)` function.
+- Added `poster/options.rs` with the internal borrowed `RunOptions`. The
+  public function keeps its historical nine-argument signature and only
+  assembles the struct, so every `pesto::poster::*` path is unchanged and
+  external callers are unaffected.
+- Pruned the imports the move left unused in `mod.rs` and `orchestrator.rs`.
+- `poster/mod.rs` is now 611 lines and is no longer on the debt baseline.
+  `poster/orchestrator.rs` (1,177 lines) is the remaining Phase 3 hotspot and
+  replaced `mod.rs` on the baseline until its stages are named.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all targets passed (589 library tests, 52
+  binary tests, and every integration test including resume, check/repost,
+  pause/cancel, connection reuse and season PAR2).
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed after swapping the baseline
+  entry from `mod.rs` to `orchestrator.rs`.
+
+Next action: split the `run` body in `poster/orchestrator.rs` into named
+stages (prepare run, prepare inputs, start pipeline, await workers, recover or
+repost, persist resume state, build outcome) without changing the order, then
+run the posting benchmarks.
+
+### 2026-09-19 — Phase 3 continued: result policy extraction and main sync
+
+- Rebased `refactor/phase3-par2-engine` onto `origin/main` after PR #191
+  merged `refactor/codebase-simplification`. The pre-rebase tree was identical
+  to the merge result, so the rebase replayed cleanly.
+- Added `poster/result.rs` (381 lines) for `commit_result`, `jittered`,
+  `is_cheap_to_recover`, `target_label`, `record_failure` and the public
+  `repost_failed_tasks`. Resume recording, failure description formatting,
+  retry backoff and the end-of-run repost loop are unchanged.
+- Callers now reach the moved policy through `poster::result` (`worker.rs`,
+  `check.rs`) or the explicit test imports in `tests/{policy,paths,internals}.rs`.
+- Reduced `poster/mod.rs` from 2,088 to 1,733 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test check_post_retries`: 4 passed.
+- `cargo test -p pesto-poster --test check_recover_pass`: 3 passed.
+- `cargo test -p pesto-poster --test resume_confirm`: 7 passed.
+- `cargo test -p pesto-poster --test pause_resume`: 2 passed.
+
+Next action: reduce the run entry point to named stages in
+`poster/orchestrator.rs` and introduce an internal `RunOptions` equivalent,
+keeping the existing public functions as compatibility facades.
+
+### 2026-09-19 — Phase 3 continued: worker extraction
+
+- Added `poster/worker.rs` (671 lines) for `RateLimiter`, `encode_worker`,
+  `prepare_ready` and `worker`. The yEnc/resume/spool path, per-connection
+  message pump, idle keepalive and STAT/repost arms are unchanged.
+- Moved the two `RateLimiter` regression tests beside the implementation, per
+  the phase rule that tests travel with the behavior they protect.
+- `encode_worker` and `worker` are the only exports back to the poster scope;
+  `prepare_ready` and `RateLimiter` stay private to the module.
+- Reduced `poster/mod.rs` from 2,716 to 2,088 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test pause_resume`: 2 passed.
+- `cargo test -p pesto-poster --test check_recover_pass`: 3 passed.
+- `cargo test -p pesto-poster --test check_repost_preserves_obfuscation`:
+  3 passed.
+- `cargo test -p pesto-poster --test each_reuses_connections_across_episodes`:
+  3 passed.
+- `cargo test -p pesto-poster --test streaming_check_overlaps_upload`: 1 passed.
+- `cargo test -p pesto-poster --test paranoid_per_article_subject`: 2 passed.
+
+Next action: extract commit, failure and final-ordering policy into
+`poster/result.rs`, then reduce the run entry point to named stages in
+`poster/orchestrator.rs`.
+
+### 2026-09-19 — Phase 3 continued: producer extraction
+
+- Added `poster/producer.rs` (761 lines) for `producer`, `feed_par2_slice` and
+  `par2_only_ingest`. The producer still reads sequentially, feeds PAR2 slices
+  through the zero-copy fast path, and dispatches the same `PostTask`s through
+  the same `TaskDispatcher`; no allocation, buffering or pass logic changed.
+- `producer` remains the only entry point re-exported to the poster scope;
+  `feed_par2_slice` and `par2_only_ingest` stay private to the module.
+- `file_md5_16k` and `par2_output_dir` remain in the facade because the
+  orchestrator and season paths also use them.
+- Reduced `poster/mod.rs` from 3,451 to 2,716 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test par2_before_upload`: 6 passed.
+- `cargo test -p pesto-poster --test par2_directory`: 2 passed.
+- `cargo test -p pesto-poster --test file_counter`: 3 passed.
+- `cargo test -p pesto-poster --test full_shared_obfuscation`: 7 passed.
+
+Next action: extract the worker and ready-article path into
+`poster/worker.rs`, keeping the message pump, retry decisions and buffer
+recycling byte-for-byte equivalent.
+
+### 2026-09-19 — Phase 3 continued: task and shared state
+
+- Added `poster/task.rs` for `TaskDispatcher`, `PostTask` and `ReadyArticle`.
+  Round-robin fan-out, backpressure and the `SendError` contract are unchanged.
+- Added `poster/shared.rs` for `Shared`, its buffer pools and `emit`. Merged the
+  two former `impl Shared` blocks into one; field visibility is `pub(super)` so
+  the poster orchestrator and its tests keep constructing and reading the same
+  fields as before.
+- Moved the shared-state field doc comments with the struct. The `internals`
+  regression tests (buffer reuse, oversized-drop, failure recording) stay in
+  `poster/tests/internals.rs` because they share the `minimal_shared` fixture;
+  they still protect the same behavior.
+- No allocation, buffering, dispatcher or progress-emission behavior changed.
+- Reduced `poster/mod.rs` from 3,658 to 3,451 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test each_reuses_connections_across_episodes`:
+  3 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test pause_resume`: 2 passed.
+- `cargo test -p pesto-poster --test streaming_check_overlaps_upload`: 1 passed.
+
+Next action: extract producer behavior into `poster/producer.rs`, then the
+worker and ready-article path into `poster/worker.rs`, keeping the message
+pump and retry decisions byte-for-byte equivalent.
+
+### 2026-09-19 — Phase 3 continued: season PAR2 submodule
+
+- Added `poster/par2/season.rs` for the season-wide recovery set: episode
+  ordering by File ID, per-episode File Description/IFSC packet assembly, the
+  append-as-we-go volume writer, the per-pass ingestion loop and
+  `generate_season_par2`.
+- Keep `generate_and_write_season_par2` and its progress variant public through
+  the `par2` facade so `pesto::poster::*` and the CLI season path are
+  unchanged.
+- Left `file_md5_16k` in the poster facade because the per-file path uses it
+  too; the season module imports it from its ancestor rather than duplicating
+  the hash logic.
+- The recovery set's byte layout, pass split, memory plan and progress events
+  are unchanged. `poster/par2/season.rs` is 518 lines.
+- Reduced `poster/mod.rs` from 4,158 to 3,658 lines and lowered its
+  source-size debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test season_par2_file_desc`: 3 passed.
+- `cargo test -p pesto-poster --test season_par2_matches_compressed_archive`:
+  1 passed.
+- `cargo test -p pesto-poster --test par2_directory`: 2 passed.
+- `bash scripts/check-source-size.sh`: passed.
+- `cargo fmt --all -- --check`: passed.
+
+Next action: extract the task, shared-state and ready-article types into
+`poster/task.rs` and `poster/shared.rs` without changing dispatcher or
+buffer-pool behavior.
+
+### 2026-09-19 — Phase 3 continued: PAR2 geometry and memory planning
+
+- Added `poster/par2/mod.rs` as the PAR2 planning facade, re-exporting the
+  geometry and memory helpers at the poster scope so existing call sites stay
+  unchanged.
+- Added `poster/par2/geometry.rs` for `par2_geometry` and
+  `par2_geometry_from_sizes`, together with the eight slice-geometry
+  regression tests. No formula changed.
+- Added `poster/par2/memory.rs` for the address-space ceiling wrapper, the
+  connection/thread overhead reserve, the ceiling/retention constants and the
+  shared `par2_memory_plan`. The seven memory-model tests moved beside the
+  constants they pin, including the local `budget_for` reproduction.
+- Moved the message-ID randomness test into `tests/internals.rs` and retired
+  the now-empty `tests/memory.rs`; `tests/par2.rs` now covers only
+  `par2_output_dir`.
+- Reduced `poster/mod.rs` from 4,408 to 4,158 lines and lowered its
+  source-size debt baseline accordingly. No behavior, allocation or
+  concurrency policy changed.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `bash scripts/check-source-size.sh`: passed with 24 baselined files.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed, with only the repository's explicitly ignored
+  tests skipped.
+
+Next action: extract season PAR2 (packet assembly, per-episode ingestion and
+volume writing) into `poster/par2/season.rs` without changing the recovery
+set's byte layout.

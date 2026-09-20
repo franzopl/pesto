@@ -33,7 +33,6 @@ fn meta_with_name(path: &std::path::Path, name: &str) -> FileMeta {
 
 mod dry_run;
 mod internals;
-mod memory;
 mod par2;
 mod paths;
 mod policy;

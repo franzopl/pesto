@@ -1,4 +1,4 @@
-use super::*;
+use super::result::target_label;
 
 // ── target_label ──────────────────────────────────────────────────────────
 
