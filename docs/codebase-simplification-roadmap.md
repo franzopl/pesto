@@ -299,7 +299,7 @@ Safe extraction order:
 - [x] Extract season PAR2 as an independent submodule.
 - [x] Extract task and shared-state types.
 - [x] Extract producer behavior.
-- [ ] Extract worker and ready-article behavior.
+- [x] Extract worker and ready-article behavior.
 - [ ] Express the main run as named stages in `orchestrator.rs`.
 - [ ] Replace the long internal argument list with an internal `RunOptions`;
   keep existing public functions as compatibility facades.
@@ -679,9 +679,40 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract the worker and ready-article path into
-`poster/worker.rs`, keeping the message pump, retry decisions and buffer
-recycling byte-for-byte equivalent.
+Next action: extract commit, failure and final-ordering policy into
+`poster/result.rs`, then reduce the run entry point to named stages in
+`poster/orchestrator.rs`.
+
+### 2026-09-19 — Phase 3 continued: worker extraction
+
+- Added `poster/worker.rs` (671 lines) for `RateLimiter`, `encode_worker`,
+  `prepare_ready` and `worker`. The yEnc/resume/spool path, per-connection
+  message pump, idle keepalive and STAT/repost arms are unchanged.
+- Moved the two `RateLimiter` regression tests beside the implementation, per
+  the phase rule that tests travel with the behavior they protect.
+- `encode_worker` and `worker` are the only exports back to the poster scope;
+  `prepare_ready` and `RateLimiter` stay private to the module.
+- Reduced `poster/mod.rs` from 2,716 to 2,088 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test pause_resume`: 2 passed.
+- `cargo test -p pesto-poster --test check_recover_pass`: 3 passed.
+- `cargo test -p pesto-poster --test check_repost_preserves_obfuscation`:
+  3 passed.
+- `cargo test -p pesto-poster --test each_reuses_connections_across_episodes`:
+  3 passed.
+- `cargo test -p pesto-poster --test streaming_check_overlaps_upload`: 1 passed.
+- `cargo test -p pesto-poster --test paranoid_per_article_subject`: 2 passed.
+
+Next action: extract commit, failure and final-ordering policy into
+`poster/result.rs`, then reduce the run entry point to named stages in
+`poster/orchestrator.rs`.
 
 ### 2026-09-19 — Phase 3 continued: producer extraction
 
