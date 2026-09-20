@@ -414,7 +414,7 @@ the highest-value hotspots are under control.
 - [x] Split `nzb.rs` into shared model, reader and writer.
 - [x] Group `config/types.rs` by configuration section.
 - [x] Separate public progress events from terminal-specific presentation.
-- [ ] Review `compress.rs`, `resume.rs` and `upload.rs`; extract only natural
+- [x] Review `compress.rs`, `resume.rs` and `upload.rs`; extract only natural
   boundaries rather than chasing the line limit.
 - [ ] Run all gates.
 
@@ -1235,6 +1235,32 @@ Validation completed:
 
 Next action: review `compress.rs`, `resume.rs` and `upload.rs` for natural
 boundaries rather than chasing the line limit.
+
+### 2026-09-20 — Phase 5 continued: compress split
+
+- Split `compress.rs` into `compress/mod.rs` plus:
+  - `volumes.rs`: volume-size validation, archive-name/volume discovery and
+    naming helpers.
+  - `backend.rs`: the `7z`/`rar` process invocation, tool discovery and command
+    running.
+  - `tests.rs`: the existing tests.
+- Public paths are preserved by re-exports (`pesto::compress::{find_binary,
+  volume_suffix, client_archive_name, portable_archive_stem, ...}`); all files
+  are under the guardrail, so the `compress.rs` baseline entry was removed
+  (16 entries remain).
+- `resume.rs` (758) and `upload.rs` (727) were reviewed and left intact: they
+  are already under the limit and their existing module boundaries are
+  cohesive, so no artificial split was made.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`, `cargo clippy -p pesto-poster
+  --all-targets -- -D warnings` and `cargo check -p upapasta`: passed.
+- `cargo test -p pesto-poster --lib`: 589 passed, 5 ignored (compress: 19).
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: run the full Phase 5 gate set.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
