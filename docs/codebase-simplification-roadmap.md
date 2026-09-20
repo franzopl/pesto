@@ -302,8 +302,9 @@ Safe extraction order:
 - [x] Extract worker and ready-article behavior.
 - [x] Move the run entry point into `poster/orchestrator.rs`.
 - [x] Extract run preparation, resume persistence and outcome as named stages.
-- [ ] Extract pipeline startup, worker join and check/recovery as named
-  stages inside `orchestrator.rs`.
+- [x] Extract the cancel watcher and pipeline startup as named stages.
+- [ ] Extract the worker join and check/recovery blocks as named stages inside
+  `orchestrator.rs`.
 - [x] Replace the long internal argument list with an internal `RunOptions`;
   keep existing public functions as compatibility facades.
 - [x] Verify resume, check/repost, pause/cancel and connection-reuse tests.
@@ -682,9 +683,34 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract the pipeline startup, worker join and
-check/recovery blocks from `run` into named stages, then run the posting
-benchmarks and memory measurements against the Phase 0 baseline.
+Next action: extract the worker join and check/recovery blocks from `run` into
+named stages, then run the posting benchmarks and memory measurements against
+the Phase 0 baseline.
+
+### 2026-09-19 — Phase 3 continued: named pipeline startup
+
+- Added `spawn_cancel_watcher` for the external cancel/pause flag forwarding
+  and `start_pipeline` plus its `Pipeline` struct for spawning the POST worker
+  and yEnc encode pools. Both were lifted verbatim from `run`; channel depths,
+  round-robin dispatch, buffer-pool wiring and task handles are unchanged.
+- `run` now names: cancel watcher, `--par2-before-upload` generation, slot
+  checkout, check coordinator, pipeline startup, producer/join, retry and
+  recovery, persist, outcome. The worker-join and check/recovery blocks remain
+  inline and are the last staging step.
+- `poster/orchestrator.rs` is 797 lines, still below the general-purpose
+  800-line limit, and the source-size baseline remains at 23 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all 34 test binaries passed.
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+
+Next action: extract the worker join and check/recovery blocks from `run` into
+named stages, then run the posting benchmarks and memory measurements against
+the Phase 0 baseline.
 
 ### 2026-09-19 — Phase 3 continued: named run preparation and finish stages
 
