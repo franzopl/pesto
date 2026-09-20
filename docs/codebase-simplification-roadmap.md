@@ -373,7 +373,8 @@ Steps:
   history and configuration screens.
   - [x] Extract the history screen renderer.
   - [x] Extract the configuration screen renderer.
-  - [ ] Extract the watch screen renderer.
+  - [x] Extract the watch screen renderer.
+  - [ ] Extract the NZB Vault screen renderer.
 - [ ] Extract overlays after their owning screens.
 - [ ] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
@@ -768,9 +769,29 @@ Validation completed:
 - `bash scripts/check-source-size.sh`: passed with 23 baselined files.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 
-Next action: extract the Watch screen renderer and its field projection into
-`ui/watch.rs`, leaving filesystem scanning and event handling outside the UI
-module.
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 4 continued: Watch renderer
+
+- Added `crates/upapasta/src/ui/watch.rs` for Watch field projection, editing
+  presentation and the live uploading/stabilizing/queued status panels.
+- `ui/mod.rs` now delegates `AppState::Watch` to `watch::draw` and shrank from
+  2,329 to 2,145 lines. Lowered its source-size debt baseline again; the new
+  renderer is 196 lines.
+- Filesystem scanning, stability tracking, queueing and event handling remain
+  outside the renderer. Field order, hints, selection, colors and five-entry
+  status limits are unchanged.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Next action: extract the NZB Vault screen renderer into `ui/vault.rs`, leaving
+its viewer overlay in `ui/mod.rs` until the later overlay pass.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
