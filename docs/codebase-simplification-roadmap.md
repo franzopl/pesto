@@ -293,7 +293,7 @@ Safe extraction order:
 
 - [x] Move tests out of `poster/mod.rs` without changing coverage.
 - [x] Extract public outcome types and pure decisions.
-- [ ] Extract connection accounting and slot lifecycle.
+- [x] Extract connection accounting and slot lifecycle.
 - [ ] Extract identity and naming helpers.
 - [ ] Extract PAR2 geometry and memory planning.
 - [ ] Extract season PAR2 as an independent submodule.
@@ -628,6 +628,12 @@ Next action: completed in the following progress entry.
   live beside their owner.
 - Reduced `poster/mod.rs` further to 4,631 lines and lowered its source-size
   debt baseline again.
+- Added `poster/connections.rs` for the upload/check budget split, broker
+  checkout and whole-set release lifecycle. Its seven boundary tests now live
+  beside the policy, and the existing broker-reuse and posting-server
+  integration tests remain unchanged.
+- Reduced `poster/mod.rs` further to 4,570 lines and lowered its source-size
+  debt baseline again.
 
 Validation completed:
 
@@ -647,7 +653,15 @@ Validation completed:
 - `bash scripts/check-source-size.sh`, `cargo fmt --all -- --check`,
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the outcome extraction.
+- `cargo test -p pesto-poster --lib poster::connections::tests`: 7 passed.
+- `cargo test -p pesto-poster --test each_reuses_connections_across_episodes`:
+  3 passed.
+- `cargo test -p pesto-poster --test check_targets_posting_server`: 1 passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed after
+  the connection extraction.
+- `bash scripts/check-source-size.sh`, `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
+  after the connection extraction.
 
-Next action: extract connection accounting and slot lifecycle into
-`poster/connections.rs`, preserving the current broker checkout/checkin order
-and total-connection cap.
+Next action: extract identity and naming helpers into `poster/identity.rs`,
+moving their focused path and policy tests beside the new owner where useful.

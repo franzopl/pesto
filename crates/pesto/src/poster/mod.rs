@@ -20,7 +20,7 @@ use crate::article::{
     obfuscated_name_with_prefix, rand_u64, random_from, Article,
 };
 use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, Config, ObfuscateMode};
-use crate::nntp::pool::{ConnectionBroker, ConnectionPool, ConnectionSlot};
+use crate::nntp::pool::{ConnectionBroker, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::{
     resume_action, PersistedWireIdentity, ResumeAction, ResumeState, SegmentRecord,
@@ -39,6 +39,8 @@ use parmesan::worker::Par2Worker;
 
 mod check;
 use check::spawn_check_coordinator;
+mod connections;
+use connections::{release_slots, split_connections, take_slots};
 mod outcome;
 pub use outcome::{
     nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
@@ -94,69 +96,6 @@ fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize, usize, us
                 .par2_recovery_count
                 .unwrap_or(n.saturating_mul(config.par2 as usize) / 100);
             (s, n, rec)
-        }
-    }
-}
-
-/// Split the configured total connection count between upload workers and
-/// the check queue. Both auto (`check_connections == 0`) and explicit N
-/// are carved out of the total so `-n 50` always means 50 connections to
-/// the server, not 50 + a check pool on top — that total is frequently a
-/// hard provider-enforced cap. Explicit N is clamped:
-/// `check = N.min(total.saturating_sub(1))`, so `-n 10 --check-connections 10`
-/// is 9+1, never 10+1.
-///
-/// `check_connections == 0` means auto, not off. Off is `config.check == false`.
-/// After the formula, `check == 0` with checking enabled is a start-up error
-/// (`-n 1 --check` and `-n 1 --check-connections 1`) rather than a silent skip.
-/// Returns `(check_conns, upload_conns)`.
-fn split_connections(config: &Config, check_enabled: bool) -> Result<(usize, usize)> {
-    let total_conns = config.total_connections();
-    if !check_enabled {
-        return Ok((0, total_conns));
-    }
-    let check = if config.check_connections == 0 {
-        config
-            .effective_check_connections()
-            .min(total_conns.saturating_sub(1))
-    } else {
-        config.check_connections.min(total_conns.saturating_sub(1))
-    };
-    if check == 0 {
-        bail!(
-            "checking is enabled but no connection remains for the STAT pool \
-             (need at least one upload connection and one check connection). \
-             Raise `-n`/`connections`, lower `--check-connections`, or pass `--no-check`"
-        );
-    }
-    Ok((check, total_conns.saturating_sub(check)))
-}
-
-/// Check out `n` slots from the broker, or build a fresh pool of `n` when
-/// this run has no broker. `n == 0` is a no-op.
-async fn take_slots(
-    broker: Option<&Arc<ConnectionBroker>>,
-    servers: Arc<Vec<crate::config::ServerEntry>>,
-    n: usize,
-) -> Vec<ConnectionSlot> {
-    if n == 0 {
-        return Vec::new();
-    }
-    match broker {
-        Some(broker) => broker.checkout(n).await,
-        None => ConnectionPool::build(servers, n).into_slots(),
-    }
-}
-
-/// One checkin of the whole set at episode end (broker), or QUIT when this
-/// run owns the sockets. Never called between post-join and `scale_up`.
-async fn release_slots(broker: Option<&ConnectionBroker>, slots: Vec<ConnectionSlot>) {
-    match broker {
-        Some(broker) => broker.checkin_all(slots).await,
-        None => {
-            for mut slot in slots {
-                slot.quit().await;
-            }
         }
     }
 }
