@@ -420,7 +420,7 @@ the highest-value hotspots are under control.
 
 After movement is complete, perform a separate public API audit:
 
-- [ ] inventory current external users in UpaPasta, Penne and Sugo;
+- [x] inventory current external users in UpaPasta, Penne and Sugo;
 - [ ] replace broad `pub mod` exposure with deliberate re-exports where this
   can be done compatibly;
 - [ ] use `pub(crate)` for implementation details;
@@ -1278,6 +1278,30 @@ Remaining Phase 5 work is the public API audit: inventory external users across
 UpaPasta, Penne and Sugo, replace broad `pub mod` exposure with deliberate
 re-exports where compatible, mark implementation details `pub(crate)`, and
 document the supported embedding surface.
+
+### 2026-09-20 — Phase 5 continued: public API inventory
+
+Inventoried the `pesto` modules each sibling crate actually depends on:
+
+- UpaPasta: `config`, `history`, `hooks`, `logging`, `nfo`, `nzb`, `post`
+  (functions), `poster`, `progress`, `upload`, `walk`.
+- Penne: `compress`, `config`, `logging`, `nntp` (including `pool`), `nzb`,
+  `par2`, `poster`, `progress`, `ui` (`render`, `terminal`), `yenc`.
+- Sugo: `config`, `nzb`, `poster`, `progress`, `ui`, `yenc` (plus Penne
+  itself).
+
+`pesto` modules with no sibling-crate users — candidates for `pub(crate)` or
+deliberate re-exports — are `article`, `cancel`, `memory`, `notify`, `resume`
+and `spool`. However, an attempted tightening showed that the in-package
+`pesto` binary and the `crates/pesto/tests/*.rs` integration tests are
+themselves external consumers (`bin/` and `tests/` are separate crate roots
+that must reach the library through `pesto::...`), so `resume` and `spool` at
+least are part of the effective public surface and cannot be made
+crate-private without a deliberate re-export design. The tightening step is
+therefore left open for a follow-up decision rather than applied blindly.
+
+Next action: tighten the unused-by-embeddings module declarations (accounting
+for the in-package binary/tests) and document the supported embedding surface.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
