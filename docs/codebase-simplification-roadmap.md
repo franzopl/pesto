@@ -376,7 +376,8 @@ Steps:
   - [x] Extract the watch screen renderer.
   - [x] Extract the NZB Vault screen renderer.
   - [x] Extract the queue screen renderer.
-  - [ ] Extract the Browser screen renderer.
+  - [x] Extract the Browser screen renderer.
+  - [ ] Extract the Dashboard screen renderer.
 - [ ] Extract overlays after their owning screens.
 - [ ] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
@@ -832,9 +833,28 @@ Validation completed:
 - `cargo test -p upapasta`: 38 passed.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 
-Next action: extract the Browser screen, NZB detail panel and compact queue
-summary into `ui/browser.rs`, continuing to reuse the Queue configuration
-panel rather than duplicating it.
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 4 continued: Browser renderer
+
+- Added `crates/upapasta/src/ui/browser.rs` for the file-tree layout, NZB
+  status/detail panel and compact queue summary.
+- `ui/mod.rs` now delegates `AppState::Browser` to `browser::draw` and shrank
+  from 1,685 to 1,307 lines. Lowered its source-size debt baseline again; the
+  new Browser renderer is 392 lines.
+- Continued to reuse `queue::draw_upload_config_panel` when confirmation is
+  open. Navigation, background sizing, catalog lookups, queue mutations and
+  input handling remain outside the renderer.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Next action: extract the Dashboard idle and upload-progress renderers into
+`ui/dashboard.rs`, including their stage bars and per-file progress views.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
