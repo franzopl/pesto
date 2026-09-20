@@ -298,7 +298,7 @@ Safe extraction order:
 - [x] Extract PAR2 geometry and memory planning.
 - [x] Extract season PAR2 as an independent submodule.
 - [x] Extract task and shared-state types.
-- [ ] Extract producer behavior.
+- [x] Extract producer behavior.
 - [ ] Extract worker and ready-article behavior.
 - [ ] Express the main run as named stages in `orchestrator.rs`.
 - [ ] Replace the long internal argument list with an internal `RunOptions`;
@@ -679,9 +679,37 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract producer behavior into `poster/producer.rs`, then the
-worker and ready-article path into `poster/worker.rs`, keeping the message
-pump and retry decisions byte-for-byte equivalent.
+Next action: extract the worker and ready-article path into
+`poster/worker.rs`, keeping the message pump, retry decisions and buffer
+recycling byte-for-byte equivalent.
+
+### 2026-09-19 — Phase 3 continued: producer extraction
+
+- Added `poster/producer.rs` (761 lines) for `producer`, `feed_par2_slice` and
+  `par2_only_ingest`. The producer still reads sequentially, feeds PAR2 slices
+  through the zero-copy fast path, and dispatches the same `PostTask`s through
+  the same `TaskDispatcher`; no allocation, buffering or pass logic changed.
+- `producer` remains the only entry point re-exported to the poster scope;
+  `feed_par2_slice` and `par2_only_ingest` stay private to the module.
+- `file_md5_16k` and `par2_output_dir` remain in the facade because the
+  orchestrator and season paths also use them.
+- Reduced `poster/mod.rs` from 3,451 to 2,716 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test par2_before_upload`: 6 passed.
+- `cargo test -p pesto-poster --test par2_directory`: 2 passed.
+- `cargo test -p pesto-poster --test file_counter`: 3 passed.
+- `cargo test -p pesto-poster --test full_shared_obfuscation`: 7 passed.
+
+Next action: extract the worker and ready-article path into
+`poster/worker.rs`, keeping the message pump, retry decisions and buffer
+recycling byte-for-byte equivalent.
 
 ### 2026-09-19 — Phase 3 continued: task and shared state
 
