@@ -10,7 +10,10 @@ use ratatui::{
     Frame,
 };
 
-use super::{category_color, format_bytes, theme, truncate_str};
+use super::{
+    helpers::{category_color, format_bytes, truncate_str},
+    theme,
+};
 
 pub(super) fn draw(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()

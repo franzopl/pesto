@@ -1,7 +1,7 @@
 //! Hook picker overlay.
 
 use crate::app::App;
-use crate::ui::{centered_rect, theme};
+use crate::ui::{helpers::centered_rect, theme};
 
 use ratatui::{
     layout::Rect,

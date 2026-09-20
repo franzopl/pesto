@@ -1,7 +1,7 @@
 //! History NZB viewer overlay.
 
 use crate::app::App;
-use crate::ui::{category_color, centered_rect, format_bytes};
+use crate::ui::helpers::{category_color, centered_rect, format_bytes};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},

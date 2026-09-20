@@ -10,7 +10,10 @@ use ratatui::{
     Frame,
 };
 
-use super::{format_bytes, theme, truncate_str};
+use super::{
+    helpers::{format_bytes, truncate_str},
+    theme,
+};
 
 /// Dedicated full-height Queue screen (F2): the single home for reviewing,
 /// reordering, removing and launching the upload queue built in the Browser.

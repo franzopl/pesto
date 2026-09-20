@@ -1,7 +1,7 @@
 //! NZB Vault viewer overlay.
 
 use crate::app::App;
-use crate::ui::{category_color, centered_rect, format_bytes, truncate_str};
+use crate::ui::helpers::{category_color, centered_rect, format_bytes, truncate_str};
 
 use ratatui::{
     layout::Rect,

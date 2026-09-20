@@ -1,7 +1,10 @@
 //! Prowlarr search and queue batch-search overlays.
 
 use crate::app::App;
-use crate::ui::{centered_rect, format_bytes, theme, truncate_str};
+use crate::ui::{
+    helpers::{centered_rect, format_bytes, truncate_str},
+    theme,
+};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},

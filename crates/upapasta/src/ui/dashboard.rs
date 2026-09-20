@@ -13,7 +13,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{theme, truncate_str};
+use super::{helpers::truncate_str, theme};
 
 pub(super) fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     if app.upload_in_progress {

@@ -10,7 +10,10 @@ use ratatui::{
     Frame,
 };
 
-use super::{category_color, format_bytes, queue, theme};
+use super::{
+    helpers::{category_color, format_bytes},
+    queue, theme,
+};
 
 pub(super) fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let has_queue = !app.upload_queue.items.is_empty();
