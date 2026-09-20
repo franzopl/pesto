@@ -941,6 +941,31 @@ prowlarr, history, config, watch, hooks) alongside their state modules in
 `app/`, then start extracting filesystem/upload/hook/indexer work into
 `tasks/`.
 
+### 2026-09-20 — Phase 4 continued: Watch methods moved
+
+- Moved the Watch-mode `impl App` methods into `app/watch.rs`, beside
+  `WatchState`: field navigation/editing, enable toggling, scan folding,
+  watch-triggered upload start/finish, the done-dir move, and settings
+  load/save. `move_watch_item_to_done` stays private to the module; the public
+  entry points keep their signatures, so the event loop is unchanged.
+- `app/mod.rs` shrank from 3,057 to 2,768 lines and its source-size debt
+  baseline was lowered again. `WATCH_FIELD_COUNT` is no longer re-exported
+  because only `watch.rs` uses it.
+- The Watch group was chosen first because its private helper is used only
+  inside the group; the remaining feature methods still share helpers with the
+  root `App` and need the same check before each move.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: move the Vault methods (`load_vault`, `vault_parse_selected`,
+`vault_open_viewer`) into `app/vault.rs`, then continue with history, config,
+queue and hooks.
+
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
 - Added `poster/pipeline.rs` (247 lines) for the posting pipeline machinery:

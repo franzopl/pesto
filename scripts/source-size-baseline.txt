@@ -4,7 +4,7 @@
 # The checker permits these files only while they do not exceed the recorded
 # size. Lower the value when a file shrinks and remove the entry once it is at
 # or below 800 lines. Entries are debt baselines, not permanent exceptions.
-3057 crates/upapasta/src/app/mod.rs
+2768 crates/upapasta/src/app/mod.rs
 2817 crates/upapasta/src/main.rs
 2174 crates/pesto/src/nfo.rs
 1532 crates/pesto/src/nntp/mod.rs
