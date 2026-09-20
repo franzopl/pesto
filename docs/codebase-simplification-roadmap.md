@@ -433,7 +433,7 @@ numeric code.
 
 Penne:
 
-- [ ] Split `bin/penne.rs` into CLI, dispatch and command modules.
+- [x] Split `bin/penne.rs` into CLI, dispatch and command modules.
 - [ ] Split `check.rs` into planning, execution and reporting.
 - [ ] Review `download.rs` and `assemble.rs` for existing pipeline-stage
   boundaries.
@@ -1338,6 +1338,35 @@ Validation completed:
 Next action: start Phase 6 by inventorying and splitting `bin/penne.rs` into
 CLI declarations, top-level dispatch and focused command modules, preserving
 the existing command-line surface and end-to-end mock tests.
+
+### 2026-09-20 — Phase 6 started: Penne CLI decomposition
+
+- Inventoried the 1,116-line `bin/penne.rs`: Clap declarations, top-level
+  dispatch, NZB information, the download/post-processing pipeline and the
+  first-class availability checker were its five independent owners.
+- Added `bin/penne/cli.rs` for the complete Clap model without changing flag
+  names, defaults, help text or command structure.
+- Added `bin/penne/command.rs` for logging initialization, wizard selection,
+  batch download dispatch, exit-code aggregation and check dispatch.
+- Added focused `info.rs`, `download.rs` and `check.rs` command modules. The
+  moved command bodies, output, operation order and error/exit policies are
+  unchanged.
+- Reduced `bin/penne.rs` to a 34-line entry point and removed its 1,116-line
+  source-size baseline entry. Every new module is below 425 lines; the
+  workspace baseline now has 15 entries.
+
+Validation completed:
+
+- `cargo check -p penne --all-targets`: passed.
+- `cargo clippy -p penne --all-targets -- -D warnings`: passed.
+- `cargo test -p penne`: passed, including all loopback NNTP mock and CLI
+  end-to-end tests.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 15 baselined files.
+
+Next action: split `crates/penne/src/check.rs` into planning, execution and
+reporting while preserving failover, pipeline-depth and fail-fast behavior.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
