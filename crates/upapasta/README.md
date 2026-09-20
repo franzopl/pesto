@@ -22,3 +22,22 @@ Next milestones:
 5. Watch mode with smart rules
 
 This version aims to replace the Python implementation entirely while keeping the familiar `upapasta` UX.
+
+## Configuration
+
+UpaPasta shares configuration with `pesto` (`$XDG_CONFIG_HOME/pesto/config.toml`).
+
+### Encryption
+
+UpaPasta uses pesto's opt-in yEnc body and control-line encryption (experimental
+Standards v1.2). Configure the `[encryption]` section in `config.toml`:
+
+```toml
+[encryption]
+password = "<password>"
+```
+
+When configured, uploads are encrypted and the generated NZB carries
+`<meta type="yenc_encrypted">true</meta>` with the `<meta type="password">`
+transport password. See the root pesto README's Encryption section for the
+wire format and status.

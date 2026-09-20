@@ -91,6 +91,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 - Linux ARM64 release artifact `pesto-linux-aarch64`, built natively against
   Debian 12 / glibc 2.36 and validated with the full package test suite (#199).
+- **Opt-in yEnc body and control-line encryption (`--encrypt`).**
+  Per-segment AEAD encryption using XChaCha20-Poly1305 before yEnc encoding, and NIST SP 800-38G FF1 Radix 253 format-preserving encryption of yEnc control lines (`=ybegin`, `=ypart`, `=yend`, `=yencryption`) per the experimental yEnc Encryption Standards v1.2. The `--encrypt-password` alias was removed: `--encrypt[=PASSWORD]` is the only encryption flag form.
+- **NZB encryption metadata.**
+  Encrypted uploads emit `<meta type="yenc_encrypted">true</meta>` (alongside the optional `yenc_version`/`yenc_cipher` provenance metas emitted by the writer) in the NZB `<head>`; segment elements stay plain NZB 1.1. `NzbMeta`'s earlier provisional provenance fields were replaced by the single `yenc_encrypted` flag (the writer still emits the optional provenance metas and readers gate fail-closed on unsupported values), and `Config`/`FileConfig` gain the `[encryption]` section.
+
+### Changed
+
+- **`repost_failed_tasks` signature update**: adds an `adapter: Option<Arc<UploadEncryptionAdapter>>` argument for encrypted article retry; ordinary callers pass `None`.
 - Repeatable `--exclude <GLOB>` and `--no-exclude`, with root-level TOML
   `exclude` and `no_exclude` keys. Exclusions prune discovered directories,
   warn for skipped entries, and reject an empty upload. Explicit file arguments

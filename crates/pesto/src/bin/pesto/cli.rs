@@ -319,6 +319,19 @@ pub(super) struct Cli {
     #[arg(long, value_name = "PASS")]
     nzb_password: Option<String>,
 
+    /// Encrypt articles using yEnc body and control-line encryption. Optional
+    /// PASSWORD: bare `--encrypt` generates a random 24-character password
+    /// and prints it; `--encrypt=<password>` uses an explicit one
+    /// [config: encryption.password].
+    #[arg(
+        long,
+        value_name = "PASSWORD",
+        num_args = 0..=1,
+        default_missing_value = "",
+        require_equals = true
+    )]
+    pub(super) encrypt: Option<String>,
+
     /// Category written to `<meta type="category">` in the `.nzb`
     /// [config: output.nzb_category].
     #[arg(long, value_name = "CAT")]

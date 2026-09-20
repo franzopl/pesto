@@ -6,6 +6,7 @@ use tracing::warn;
 
 use crate::article::{default_subject, generate_message_id, obfuscated_name, random_from, Article};
 use crate::config::{Config, ObfuscateMode};
+use crate::crypto::UploadEncryptionAdapter;
 use crate::nntp::pool::ConnectionSlot;
 use crate::yenc;
 
@@ -14,8 +15,17 @@ use super::PostedSegment;
 /// Re-read `seg`'s slice from disk, re-encode it, and post it under a fresh
 /// Message-ID. Deliberately never reuses `seg.message_id` — see the module
 /// doc comment for why reposting under a cursed ID is unsafe.
+///
+/// `adapter` is the upload's [`UploadEncryptionAdapter`]: when present, the
+/// reposted article is re-encrypted with the *same* salt and
+/// `seg.segment_index` the original copy used, so the reposted wire output
+/// keeps the authenticated identity of the first attempt. Posting plaintext
+/// for an encrypted upload would leak the file contents on the wire and
+/// produce an article the NZB's declared `yenc_encrypted` provenance cannot
+/// decrypt (Body Encryption Standard v1.2 §8).
 pub(super) async fn repost_one(
     config: &Config,
+    adapter: Option<&UploadEncryptionAdapter>,
     slot: &mut ConnectionSlot,
     seg: &PostedSegment,
     groups: &[String],
@@ -30,6 +40,26 @@ pub(super) async fn repost_one(
         .map_err(|e| anyhow::anyhow!("allocating repost buffer: {e}"))?;
     buf.resize(read_len, 0);
     file.read_exact(&mut buf).await?;
+
+    // PESTO-FINAL-1 (Body Encryption Standard v1.2 §8): the original copy
+    // was encrypted under this segment's salt + `seg.segment_index`, which
+    // already authenticated its plaintext. If the source changed since that
+    // post, re-encrypting the re-read bytes under the same identity would
+    // publish a second, different plaintext under one authenticated
+    // identity — refuse (Err), so the caller's existing repost-failure
+    // handling exhausts attempts and leaves the segment missing. Describe
+    // the condition only: no digests, keys or plaintext bytes are logged.
+    if let Some(expected) = seg.plaintext_digest {
+        use sha2::{Digest, Sha256};
+        if Sha256::digest(&buf).as_slice() != expected.as_slice() {
+            return Err(anyhow::anyhow!(
+                "repost: source file changed since the original encrypted post; \
+                 refusing to re-post segment {}/{} under the same segment identity",
+                seg.part,
+                seg.total
+            ));
+        }
+    }
 
     let spec = yenc::PartSpec {
         number: seg.part,
@@ -46,7 +76,20 @@ pub(super) async fn repost_one(
         ),
         ObfuscateMode::Article => (
             obfuscated_name(),
-            obfuscated_name(),
+            if adapter.is_some() {
+                // Encrypted upload (Body Encryption Standard v1.2 §8): the
+                // yEnc `name=` is an AAD input (§2.1), so the repost must
+                // reuse the original copy's name — with the same salt and
+                // `seg.segment_index` below, the re-encrypted wire form stays
+                // byte-identical to the first attempt. A fresh name here
+                // would change the ciphertext of an article the NZB's
+                // bootstrap already authenticates under the old name.
+                seg.wire_yenc_name.to_string()
+            } else {
+                // Ordinary upload: the name is not authenticated, keep the
+                // upstream per-repost rotation.
+                obfuscated_name()
+            },
             random_from(),
             super::super::resolve_date(config.date.as_deref()),
         ),
@@ -61,14 +104,30 @@ pub(super) async fn repost_one(
     // doc comment) — using it here would repost an obfuscated release under
     // its real name, undoing `--obfuscate` the moment one article needs a
     // repost. `wire_name` carries the identity actually posted with.
-    let encoded = yenc::encode_part(
-        &wire_yenc,
-        seg.file_size,
-        spec,
-        &buf,
-        config.line_length,
-        file_crc32,
-    );
+    let encoded = match adapter {
+        Some(adapter) => {
+            let mut encode_buf = Vec::new();
+            adapter
+                .encode_article(
+                    &wire_yenc,
+                    seg.file_size,
+                    spec,
+                    &buf,
+                    config.line_length,
+                    seg.segment_index,
+                    &mut encode_buf,
+                )
+                .map_err(|e| anyhow::anyhow!("repost: failed to re-encrypt article segment: {e}"))?
+        }
+        None => yenc::encode_part(
+            &wire_yenc,
+            seg.file_size,
+            spec,
+            &buf,
+            config.line_length,
+            file_crc32,
+        ),
+    };
     let (rfc_date, _ts) = &date;
     let mut message_id = generate_message_id(config.message_id_domain.as_deref());
     let article = Article {
@@ -86,6 +145,14 @@ pub(super) async fn repost_one(
     };
     let headers = article.build_headers();
     let wire_bytes = (headers.len() + encoded.body.len()) as u64;
+    // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
+    // §2.1): encrypted releases declare the plaintext
+    // segment length, ordinary uploads the wire-article length.
+    let nzb_bytes = if adapter.is_some() {
+        buf.len() as u64
+    } else {
+        wire_bytes
+    };
 
     let max_retries = config.retries.max(1);
     let mut last_err = anyhow::anyhow!("repost: no attempt made");
@@ -113,13 +180,15 @@ pub(super) async fn repost_one(
                         part: seg.part,
                         total: seg.total,
                         message_id,
-                        bytes: wire_bytes,
+                        bytes: nzb_bytes,
                         from: Arc::from(from.as_str()),
                         date: date.clone(),
                         full_crc32: seg.full_crc32,
                         server_idx: slot.server_idx(),
                         file_index: seg.file_index,
                         total_files: seg.total_files,
+                        segment_index: seg.segment_index,
+                        plaintext_digest: seg.plaintext_digest,
                     });
                 }
                 Err(e) => {

@@ -13,5 +13,8 @@
 #
 # Focused compatibility/end-to-end test suites that exercise whole pipelines
 # across many modules and are clearer as one scenario per file.
-872 crates/penne/tests/cli_download_end_to_end.rs
+937 crates/penne/tests/cli_download_end_to_end.rs
 868 crates/penne/tests/check.rs
+1539 crates/penne/tests/download_encryption.rs
+818 crates/pesto/src/nntp/tests.rs
+1133 crates/pesto/tests/encrypted_repost_identity.rs
