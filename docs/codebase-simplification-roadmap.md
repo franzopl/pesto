@@ -369,7 +369,7 @@ crates/upapasta/src/
 
 Steps:
 
-- [ ] Extract one screen renderer per change, starting with low-coupling
+- [x] Extract one screen renderer per change, starting with low-coupling
   history and configuration screens.
   - [x] Extract the history screen renderer.
   - [x] Extract the configuration screen renderer.
@@ -377,8 +377,12 @@ Steps:
   - [x] Extract the NZB Vault screen renderer.
   - [x] Extract the queue screen renderer.
   - [x] Extract the Browser screen renderer.
-  - [ ] Extract the Dashboard screen renderer.
-- [ ] Extract overlays after their owning screens.
+  - [x] Extract the Dashboard screen renderer.
+- [x] Extract overlays after their owning screens.
+  - [x] Extract the History NZB viewer overlay.
+  - [x] Extract the Vault viewer overlay.
+  - [x] Extract the Prowlarr overlays.
+  - [x] Extract the hook picker overlay.
 - [ ] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
   `App` as the root state.
@@ -853,8 +857,56 @@ Validation completed:
 - `cargo test -p upapasta`: 38 passed.
 - `cargo fmt --all -- --check` and `git diff --check`: passed.
 
-Next action: extract the Dashboard idle and upload-progress renderers into
-`ui/dashboard.rs`, including their stage bars and per-file progress views.
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 4 continued: Dashboard renderer
+
+- Added `crates/upapasta/src/ui/dashboard.rs` for the idle Dashboard, effective
+  upload settings, stage gauges, speed history and per-file progress view.
+- `ui/mod.rs` now delegates `AppState::Dashboard` to `dashboard::draw` and
+  shrank from 1,307 to 812 lines. Lowered its source-size debt baseline again;
+  the new Dashboard renderer is 509 lines.
+- All screen renderers in the target Phase 4 layout now have dedicated
+  modules. Upload orchestration, progress updates, pause/cancel behavior and
+  input handling remain outside the renderer.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Next action: start the overlay pass by extracting the History NZB viewer into
+`ui/overlays/nzb_viewer.rs`; this will bring `ui/mod.rs` below the 800-line
+source-size limit and remove its debt baseline.
+
+### 2026-09-20 — Phase 4 continued: overlay renderers
+
+- Added `crates/upapasta/src/ui/overlays/` as the floating-overlay module:
+  `nzb_viewer.rs` (History NZB archive viewer), `vault_viewer.rs` (NZB Vault
+  file viewer), `prowlarr.rs` (queue batch-search and search/detail overlays)
+  and `hook_picker.rs` (per-release hook picker).
+- `ui/mod.rs` now dispatches every overlay to `overlays::*` from `draw` and
+  `draw_main`, and shrank from 812 to 323 lines. It dropped below the 800-line
+  general-purpose limit, so its source-size debt baseline entry was removed;
+  the workspace baseline fell from 23 to 22 entries.
+- Only `centered_rect`, `format_bytes`, `category_color` and `truncate_str`
+  remain in `ui/mod.rs` as shared rendering helpers. Overlay content, layout
+  strings, colors, scroll math and list highlighting are byte-for-byte
+  unchanged; no state or input handling moved.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: keep `ui/mod.rs` as screen dispatch only by relocating the shared
+rendering helpers into a dedicated `ui/` helper module, then begin moving
+feature state out of `app.rs`.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
