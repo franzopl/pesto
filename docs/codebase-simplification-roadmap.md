@@ -300,12 +300,13 @@ Safe extraction order:
 - [x] Extract task and shared-state types.
 - [x] Extract producer behavior.
 - [x] Extract worker and ready-article behavior.
-- [ ] Express the main run as named stages in `orchestrator.rs`.
-- [ ] Replace the long internal argument list with an internal `RunOptions`;
+- [x] Move the run entry point into `poster/orchestrator.rs`.
+- [ ] Express the main run body as named stages inside `orchestrator.rs`.
+- [x] Replace the long internal argument list with an internal `RunOptions`;
   keep existing public functions as compatibility facades.
-- [ ] Verify resume, check/repost, pause/cancel and connection-reuse tests.
+- [x] Verify resume, check/repost, pause/cancel and connection-reuse tests.
 - [ ] Compare posting benchmarks and memory metrics with the baseline.
-- [ ] Run all gates.
+- [x] Run all gates.
 
 The orchestration should read approximately as:
 
@@ -679,9 +680,40 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: reduce the run entry point to named stages in
-`poster/orchestrator.rs` and introduce an internal `RunOptions` equivalent,
-keeping the existing public functions as compatibility facades.
+Next action: split the `run` body in `poster/orchestrator.rs` into named
+stages (prepare run, prepare inputs, start pipeline, await workers, recover or
+repost, persist resume state, build outcome) without changing the order, then
+run the posting benchmarks.
+
+### 2026-09-19 — Phase 3 continued: orchestrator and RunOptions
+
+- Moved `post_files_inner_with_release_prefix` — the 1,127-line run entry
+  point — into `poster/orchestrator.rs`. Its body is byte-for-byte unchanged;
+  it is now the internal `run(options)` function.
+- Added `poster/options.rs` with the internal borrowed `RunOptions`. The
+  public function keeps its historical nine-argument signature and only
+  assembles the struct, so every `pesto::poster::*` path is unchanged and
+  external callers are unaffected.
+- Pruned the imports the move left unused in `mod.rs` and `orchestrator.rs`.
+- `poster/mod.rs` is now 611 lines and is no longer on the debt baseline.
+  `poster/orchestrator.rs` (1,177 lines) is the remaining Phase 3 hotspot and
+  replaced `mod.rs` on the baseline until its stages are named.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: all targets passed (589 library tests, 52
+  binary tests, and every integration test including resume, check/repost,
+  pause/cancel, connection reuse and season PAR2).
+- `cargo fmt --all -- --check`: passed.
+- `bash scripts/check-source-size.sh`: passed after swapping the baseline
+  entry from `mod.rs` to `orchestrator.rs`.
+
+Next action: split the `run` body in `poster/orchestrator.rs` into named
+stages (prepare run, prepare inputs, start pipeline, await workers, recover or
+repost, persist resume state, build outcome) without changing the order, then
+run the posting benchmarks.
 
 ### 2026-09-19 — Phase 3 continued: result policy extraction and main sync
 
