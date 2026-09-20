@@ -10,6 +10,10 @@
 //! round of bikeshedding the split.
 
 /// A budget consumer sharing the process's effective ceiling.
+// The non-PAR2 stages intentionally reserve names for the next backpressure
+// pass; keeping them together prevents each pipeline stage inventing its own
+// incompatible split in the meantime.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     /// The largest single consumer — PAR2 recovery-encoding buffers.

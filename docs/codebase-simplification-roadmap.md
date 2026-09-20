@@ -421,10 +421,10 @@ the highest-value hotspots are under control.
 After movement is complete, perform a separate public API audit:
 
 - [x] inventory current external users in UpaPasta, Penne and Sugo;
-- [ ] replace broad `pub mod` exposure with deliberate re-exports where this
+- [x] replace broad `pub mod` exposure with deliberate re-exports where this
   can be done compatibly;
-- [ ] use `pub(crate)` for implementation details;
-- [ ] document and freeze the supported embedding surface.
+- [x] use `pub(crate)` for implementation details;
+- [x] document and freeze the supported embedding surface.
 
 ## Phase 6 — Apply the policy to Penne and Parmesan
 
@@ -1302,6 +1302,42 @@ therefore left open for a follow-up decision rather than applied blindly.
 
 Next action: tighten the unused-by-embeddings module declarations (accounting
 for the in-package binary/tests) and document the supported embedding surface.
+
+### 2026-09-20 — Phase 5 completed: public API boundaries
+
+- Added `docs/pesto-embedding-api.md` as the supported, path-based contract
+  for Pesto embedding. It distinguishes the high-level posting API, the
+  domain APIs shared with UpaPasta/Penne/Sugo, and the operational surface
+  that remains public for Pesto's own binary and integration tests.
+- Made the implementation modules behind `config` private; their supported
+  types, parsers and validation function remain available through the
+  existing `pesto::config::*` facade re-exports.
+- Made the decoder and architecture-specific yEnc implementation modules
+  private; their supported functions and `DecodedPart` remain available
+  through the existing `pesto::yenc::*` facade re-exports. Updated the one
+  in-package integration test that still bypassed that facade.
+- Hid memory ceiling, cgroup and pressure implementation modules behind the
+  existing `pesto::memory` facade and made the stage budget crate-visible.
+  `memory::alloc` remains deliberately public because a consuming binary must
+  name `CountingAlloc` in a `#[global_allocator]` declaration.
+- Kept `article`, `cancel`, `notify`, `resume`, `spool` and `update` public:
+  Pesto's binary and integration tests are separate crate roots and still use
+  those paths. They are documented as operational compatibility surface, not
+  as new embedding dependencies.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- `bash scripts/check-source-size.sh`: passed with 16 baselined files.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed; all workspace suites completed without a
+  failure and only explicitly ignored tests were skipped.
+
+Next action: start Phase 6 by inventorying and splitting `bin/penne.rs` into
+CLI declarations, top-level dispatch and focused command modules, preserving
+the existing command-line surface and end-to-end mock tests.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 

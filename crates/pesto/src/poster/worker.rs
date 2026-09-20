@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::article::{default_subject, generate_message_id, Article};
-use crate::config::{types::MAX_AUTO_PIPELINE_DEPTH, ObfuscateMode};
+use crate::config::{ObfuscateMode, MAX_AUTO_PIPELINE_DEPTH};
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::ProgressEvent;
 use crate::resume::{resume_action, ResumeAction};
