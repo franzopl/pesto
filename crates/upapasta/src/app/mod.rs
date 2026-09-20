@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 mod config;
 mod history;
 mod hook_picker;
+mod navigation;
 mod prowlarr;
 mod queue;
 mod vault;
@@ -19,27 +20,12 @@ mod watch;
 pub use config::{ConfigState, ConfirmField, ConfirmFieldView, FolderMode, SessionOverrides};
 pub use history::HistoryState;
 pub use hook_picker::HookPickerState;
+pub use navigation::AppState;
 pub use prowlarr::{ProwlarrBatchState, ProwlarrSearchState, ProwlarrState};
 pub(crate) use queue::dir_stats;
 pub use queue::{queue_entry_info, queue_entry_info_quick, QueueEntryInfo};
 pub use vault::{DiskNzbInfo, NzbOrigin, VaultEntry, VaultSort, VaultState};
 pub use watch::WatchState;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum AppState {
-    #[default]
-    Dashboard,
-    /// Dedicated upload-queue screen: review, reorder, remove and launch the
-    /// queue built in the Browser. The single home for queue management.
-    Queue,
-    Browser,
-    History,
-    NzbVault,
-    Config,
-    /// Watch-mode setup and live status (monitored directory, stabilizing /
-    /// queued items, on/off toggle).
-    Watch,
-}
 
 #[derive(Debug, Default)]
 pub struct UploadProgress {
@@ -480,37 +466,6 @@ impl App {
         }
 
         app
-    }
-
-    pub fn next_tab(&mut self) {
-        self.state = match self.state {
-            AppState::Dashboard => AppState::Queue,
-            AppState::Queue => AppState::Browser,
-            AppState::Browser => AppState::History,
-            AppState::History => AppState::NzbVault,
-            AppState::NzbVault => AppState::Config,
-            AppState::Config => AppState::Watch,
-            AppState::Watch => AppState::Dashboard,
-        };
-        if self.state == AppState::NzbVault {
-            self.load_vault();
-        }
-        self.log_panel.push(format!("Switched to {:?}", self.state));
-    }
-
-    pub fn prev_tab(&mut self) {
-        self.state = match self.state {
-            AppState::Dashboard => AppState::Watch,
-            AppState::Queue => AppState::Dashboard,
-            AppState::Browser => AppState::Queue,
-            AppState::History => AppState::Browser,
-            AppState::NzbVault => AppState::History,
-            AppState::Config => AppState::NzbVault,
-            AppState::Watch => AppState::Config,
-        };
-        if self.state == AppState::NzbVault {
-            self.load_vault();
-        }
     }
 
     pub fn trigger_upload(&mut self) {

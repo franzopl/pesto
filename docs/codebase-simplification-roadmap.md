@@ -990,6 +990,28 @@ Validation completed:
 Next action: move the Config-screen and confirm-panel methods into
 `app/config.rs`, then extract upload/hook/indexer work into `tasks/`.
 
+### 2026-09-20 — Phase 4 continued: navigation module
+
+- Moved `AppState` and the `next_tab`/`prev_tab` methods into
+  `app/navigation.rs`, matching the target `app/` layout. `AppState` is
+  re-exported at the same path, so no caller changed.
+- `app/mod.rs` shrank from 2,486 to 2,441 lines and its source-size debt
+  baseline was lowered again.
+- Remaining `impl App` groups are the Config/confirm panel (largest, shares
+  effective-value helpers with upload) and the upload/hook/indexer methods,
+  which are the next targets.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: move the Config-screen and confirm-panel methods into
+`app/config.rs`, promoting the shared effective-value helpers to
+`pub(super)` where upload also needs them.
+
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
 - Added `poster/pipeline.rs` (247 lines) for the posting pipeline machinery:
