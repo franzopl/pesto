@@ -233,22 +233,24 @@ crates/pesto/src/ui/
 │   ├── mod.rs       # channel loop and renderer selection
 │   ├── panel.rs
 │   ├── plain.rs
-│   └── quiet.rs
-└── tests/
+│   ├── quiet.rs
+│   ├── summary.rs
+│   ├── tests.rs
+│   └── tests/        # renderer, state and outcome regressions
 ```
 
 Steps:
 
-- [ ] Extract terminal unit tests from the implementation file and group them
+- [x] Extract terminal unit tests from the implementation file and group them
   by state, metrics and renderer behavior.
 - [x] Extract pure formatting functions.
 - [x] Extract rate and ETA calculations.
 - [x] Move `RenderState` and construction into `state.rs`.
 - [x] Move `ProgressEvent` application into `reducer.rs`.
-- [ ] Split quiet, panel and plain renderers.
-- [ ] Leave the async render loop and renderer selection in `terminal/mod.rs`.
-- [ ] Confirm snapshots/assertions cover equivalent output.
-- [ ] Run Pesto tests and all gates.
+- [x] Split quiet, panel and plain renderers.
+- [x] Leave the async render loop and renderer selection in `terminal/mod.rs`.
+- [x] Confirm snapshots/assertions cover equivalent output.
+- [x] Run Pesto tests and all gates.
 
 The intended flow is:
 
@@ -553,7 +555,7 @@ Validation completed:
 
 Next action: completed in the following progress entry.
 
-### 2026-09-19 — Phase 2 started
+### 2026-09-19 — Phase 2 completed
 
 - Moved all 32 terminal regression tests out of the 3,227-line production
   module into `ui/terminal/tests.rs` and `ui/terminal/tests/outcomes.rs`.
@@ -570,12 +572,21 @@ Next action: completed in the following progress entry.
   selection. `RenderState` retains sample collection while delegating pure
   calculations, reducing `ui/terminal.rs` to 2,097 lines.
 - Added `ui/state.rs` for `RenderState`, connection state and construction
-  defaults. Fields remain visible only inside `ui`, event application remains
-  temporarily in `terminal.rs`, and the production terminal module is now
-  1,819 lines.
+  defaults. Fields remain visible only inside `ui`; the production terminal
+  module was reduced to 1,819 lines at this step.
 - Added `ui/reducer.rs` for all `ProgressEvent` to `RenderState` transitions.
   The existing crate-private `RenderState::apply` call sites remain unchanged,
   while `ui/terminal.rs` is reduced further to 1,451 lines.
+- Split terminal output into `terminal/panel.rs`, `plain.rs`, `quiet.rs` and
+  `summary.rs`. The 125-line `terminal/mod.rs` now owns only terminal setup,
+  channel processing, renderer selection and adaptive refresh timing.
+- Moved derived state projections beside `RenderState`. Production files now
+  contain 657 lines in `panel.rs`, 471 in `state.rs`, 373 in `reducer.rs`, 216
+  in `plain.rs`, 172 in `summary.rs` and 127 in `quiet.rs`; no terminal UI
+  production file remains on the source-size debt baseline.
+- Grouped terminal regressions into renderer, state and outcome modules, with
+  pure metric tests remaining beside `metrics.rs`. The focused UI suite now
+  contains 48 passing tests, including direct state-transition assertions.
 
 Validation completed:
 
@@ -594,8 +605,12 @@ Validation completed:
   repository's explicitly ignored tests skipped.
 - `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`
   and `cargo test --all`: passed after the reducer extraction.
+- `cargo test -p pesto-poster --lib ui::`: 48 passed after the renderer and
+  test-suite split.
+- `bash scripts/check-source-size.sh`, `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed at
+  Phase 2 completion.
 
-Next action: extract the quiet renderer into `ui/terminal/quiet.rs`. Expose
-only the read-only state projections it needs within `ui`, retain the existing
-draw-loop call signature, and keep terminal I/O behavior byte-for-byte
-equivalent before proceeding to the panel and plain renderers.
+Next action: begin Phase 3 by inventorying the tests embedded in
+`poster/mod.rs`, then move them into focused test modules without touching
+posting concurrency, allocation or retry behavior.

@@ -1,4 +1,5 @@
 use crate::progress::RunMode;
+use crate::ui::metrics;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -10,6 +11,193 @@ pub(super) enum ConnState {
     Busy,
     Auth,
     Retrying,
+}
+
+impl RenderState {
+    /// Files that have every segment done, and files partially in flight.
+    pub(super) fn file_tally(&self) -> (usize, usize) {
+        let mut done = 0;
+        let mut in_flight = 0;
+        for &(d, total) in self.files.values() {
+            if total > 0 && d >= total {
+                done += 1;
+            } else if d > 0 {
+                in_flight += 1;
+            }
+        }
+        (done, in_flight)
+    }
+
+    pub(super) fn elapsed_secs(&self) -> f64 {
+        metrics::elapsed_secs(self.start)
+    }
+
+    /// Fraction of the run completed, measured in segments.
+    ///
+    /// Segments — not bytes — are the single source of truth for every
+    /// percentage on screen. `total_bytes` carries the pre-seeded
+    /// `par2_bytes_hint`, whose unconsumed remainder means a byte ratio tops
+    /// out slightly short of 1.0 (`-q` visibly froze at 95% while the panel
+    /// read `100%  864/864 seg`). Bytes stay the basis for speed, size and
+    /// ETA, where that remainder is harmless.
+    pub(super) fn progress_frac(&self) -> f64 {
+        metrics::progress_fraction(self.done_segments, self.total_segments)
+    }
+
+    /// Bytes posted per second so far.
+    pub(super) fn rate(&self) -> f64 {
+        metrics::bytes_per_second(self.done_bytes, self.elapsed_secs())
+    }
+
+    /// Record a per-tick speed sample in the ring buffer (phase 21c/21d).
+    pub(super) fn push_speed_sample(&mut self, bps: f64) {
+        self.speed_history[self.speed_history_pos] = bps;
+        self.speed_history_pos = (self.speed_history_pos + 1) % 10;
+        if self.speed_history_len < 10 {
+            self.speed_history_len += 1;
+        }
+    }
+
+    /// Return the active speed history slice in chronological order.
+    pub(super) fn speed_samples(&self) -> Vec<f64> {
+        metrics::ordered_samples(
+            &self.speed_history,
+            self.speed_history_pos,
+            self.speed_history_len,
+        )
+    }
+
+    /// Compute ETA as a range based on throughput confidence (phase 21d).
+    ///
+    /// Returns `(low_secs, high_secs, unstable)`.
+    pub(super) fn eta_range(&self) -> Option<(f64, f64, bool)> {
+        let samples = self.speed_samples();
+        metrics::eta_range(self.total_bytes.saturating_sub(self.done_bytes), &samples)
+    }
+
+    /// Update the smoothed (EMA) PAR2 encode/write rates from this tick's
+    /// delta. Called once per draw tick (~200ms), mirroring the byte-rate
+    /// sampling right above its call site.
+    ///
+    /// The remaining-time estimates below deliberately use this smoothed
+    /// recent rate rather than the cumulative since-start average: PAR2
+    /// encoding is fed by the same data-starved read loop as the upload
+    /// (see the module's architecture notes), so its progress is bursty —
+    /// a slow start (or a network stall mid-run) skews a cumulative average
+    /// for a long time afterward, swinging the displayed ETA wildly as the
+    /// average slowly catches up. An EMA of the recent per-tick rate reacts
+    /// in seconds instead of minutes.
+    pub(super) fn update_par2_rate_emas(&mut self) {
+        const EMA_ALPHA: f64 = 0.15;
+        if self.par2_encode_total > 0 {
+            // Cumulative across passes, so a pass rollover (where the raw
+            // `done` restarts at 0) doesn't register as a stalled tick.
+            let units = self.par2_encode_units_done();
+            let delta = units.saturating_sub(self.prev_par2_encode_done) as f64;
+            let instant_rate = delta * (1000.0 / 200.0);
+            self.prev_par2_encode_done = units;
+            self.par2_encode_rate_ema = if self.par2_encode_rate_ema <= 0.0 {
+                instant_rate
+            } else {
+                EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.par2_encode_rate_ema
+            };
+        }
+        if self.par2_write_total > 0 {
+            let delta = self
+                .par2_write_done
+                .saturating_sub(self.prev_par2_write_done) as f64;
+            let instant_rate = delta * (1000.0 / 200.0);
+            self.prev_par2_write_done = self.par2_write_done;
+            self.par2_write_rate_ema = if self.par2_write_rate_ema <= 0.0 {
+                instant_rate
+            } else {
+                EMA_ALPHA * instant_rate + (1.0 - EMA_ALPHA) * self.par2_write_rate_ema
+            };
+        }
+    }
+
+    /// Input slices fed so far across *every* pass. See [`Self::par2_passes`]:
+    /// a multi-pass encode re-reads the whole input per pass and restarts its
+    /// per-pass counter, so this is the only figure that rises monotonically.
+    pub(super) fn par2_encode_units_done(&self) -> usize {
+        self.par2_pass_index * self.par2_encode_total + self.par2_encode_done
+    }
+
+    /// Total input-slice feeds the encode will perform across every pass.
+    pub(super) fn par2_encode_units_total(&self) -> usize {
+        self.par2_passes.max(1) * self.par2_encode_total
+    }
+
+    pub(super) fn recovered_retries(&self) -> u64 {
+        self.recovered_post_retries + self.recovered_check_retries
+    }
+
+    pub(super) fn confirmed_articles(&self) -> u64 {
+        self.check_checked
+            .saturating_sub(self.check_failed)
+            .saturating_sub(self.check_inconclusive)
+    }
+
+    pub(super) fn accepted_articles(&self) -> u64 {
+        self.done_segments.saturating_sub(self.failures)
+    }
+
+    /// Projected remaining seconds for the PAR2 encode phase, if it's active
+    /// and has a usable rate estimate. PAR2 encoding runs concurrently with
+    /// posting and can outlast it (e.g. a slow encode on a fast link, or
+    /// extra passes forced by a tight memory budget) — folding this into the
+    /// overall ETA (see its call site) means a slow encode shows up there
+    /// instead of only in its own easy-to-miss indicator line. Counted over
+    /// all passes, so a 3-pass encode isn't reported as nearly done at the end
+    /// of pass 1.
+    pub(super) fn par2_encode_remaining_secs(&self) -> Option<f64> {
+        let (done, total) = (
+            self.par2_encode_units_done(),
+            self.par2_encode_units_total(),
+        );
+        metrics::remaining_secs(done as u64, total as u64, self.par2_encode_rate_ema)
+    }
+
+    /// Same idea as [`Self::par2_encode_remaining_secs`], for the (usually
+    /// short) phase that writes already-computed recovery data to disk.
+    pub(super) fn par2_write_remaining_secs(&self) -> Option<f64> {
+        metrics::remaining_secs(
+            u64::from(self.par2_write_done),
+            u64::from(self.par2_write_total),
+            self.par2_write_rate_ema,
+        )
+    }
+
+    /// Overall ETA in seconds, folding in PAR2 encode/write remaining time
+    /// alongside the upload-side estimate — one pessimistic number instead of
+    /// several separate, easily-conflicting ETAs on screen at once. Both
+    /// folded phases run concurrently with the upload, so `max` (not a sum) is
+    /// the right combinator: the run ends when the slowest of them does.
+    ///
+    /// The streaming check is deliberately *not* folded in. Its throughput is
+    /// bimodal — throttled to the upload's pace while data is still going out,
+    /// then bursting once the connections free up — so any rate extrapolation
+    /// swings wildly right when the upload finishes (the very moment the ETA
+    /// is read most). Its progress is already visible as the blue band inside
+    /// the upload bar and the live tally in the check box, so no numeric
+    /// estimate is needed for it.
+    ///
+    /// Returns `(seconds, unstable)`; `unstable` only ever reflects the
+    /// upload-side estimate (`eta_range`), the only one with enough samples to
+    /// judge confidence.
+    pub(super) fn overall_eta_secs(&self) -> Option<(f64, bool)> {
+        let rate = self.rate();
+        let fallback = (rate > 1.0 && self.total_bytes > self.done_bytes)
+            .then(|| (self.total_bytes - self.done_bytes) as f64 / rate);
+        metrics::overall_eta(
+            self.eta_range(),
+            fallback,
+            [
+                self.par2_encode_remaining_secs(),
+                self.par2_write_remaining_secs(),
+            ],
+        )
+    }
 }
 
 /// Mutable view built from the terminal progress event stream.
