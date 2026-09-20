@@ -244,7 +244,7 @@ Steps:
 - [x] Extract pure formatting functions.
 - [x] Extract rate and ETA calculations.
 - [x] Move `RenderState` and construction into `state.rs`.
-- [ ] Move `ProgressEvent` application into `reducer.rs`.
+- [x] Move `ProgressEvent` application into `reducer.rs`.
 - [ ] Split quiet, panel and plain renderers.
 - [ ] Leave the async render loop and renderer selection in `terminal/mod.rs`.
 - [ ] Confirm snapshots/assertions cover equivalent output.
@@ -573,6 +573,9 @@ Next action: completed in the following progress entry.
   defaults. Fields remain visible only inside `ui`, event application remains
   temporarily in `terminal.rs`, and the production terminal module is now
   1,819 lines.
+- Added `ui/reducer.rs` for all `ProgressEvent` to `RenderState` transitions.
+  The existing crate-private `RenderState::apply` call sites remain unchanged,
+  while `ui/terminal.rs` is reduced further to 1,451 lines.
 
 Validation completed:
 
@@ -581,14 +584,18 @@ Validation completed:
 - `cargo test -p pesto-poster --lib ui::terminal::tests`: 32 passed.
 - `cargo test -p pesto-poster --lib ui::`: 46 passed after the state
   extraction.
+- `cargo test -p pesto-poster --lib ui::`: 46 passed after the reducer
+  extraction.
 - `bash scripts/check-source-size.sh`: passed.
 - `cargo fmt --all -- --check`: passed after the state extraction.
 - `cargo clippy --all-targets -- -D warnings`: passed after the state
   extraction.
 - `cargo test --all`: passed after the state extraction, with only the
   repository's explicitly ignored tests skipped.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`
+  and `cargo test --all`: passed after the reducer extraction.
 
-Next action: move `ProgressEvent` application from `terminal.rs` into
-`ui/reducer.rs`. Keep the event-to-state transition API crate-private, move
-state-transition tests toward that boundary where practical, and leave all
-rendering methods in `terminal.rs` until the renderer split.
+Next action: extract the quiet renderer into `ui/terminal/quiet.rs`. Expose
+only the read-only state projections it needs within `ui`, retain the existing
+draw-loop call signature, and keep terminal I/O behavior byte-for-byte
+equivalent before proceeding to the panel and plain renderers.
