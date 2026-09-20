@@ -416,7 +416,7 @@ the highest-value hotspots are under control.
 - [x] Separate public progress events from terminal-specific presentation.
 - [x] Review `compress.rs`, `resume.rs` and `upload.rs`; extract only natural
   boundaries rather than chasing the line limit.
-- [ ] Run all gates.
+- [x] Run all gates.
 
 After movement is complete, perform a separate public API audit:
 
@@ -1261,6 +1261,23 @@ Validation completed:
   `bash scripts/check-source-size.sh`: passed.
 
 Next action: run the full Phase 5 gate set.
+
+### 2026-09-20 — Phase 5 gates
+
+- Ran the full workspace gate set after the movement work:
+  - `cargo fmt --all -- --check`: passed.
+  - `cargo clippy --all-targets -- -D warnings`: passed.
+  - `cargo test --all`: every suite passed (64 `test result: ok` lines, no
+    failures); `pesto-poster` lib 589 passed / 5 ignored.
+  - `bash scripts/check-source-size.sh`: passed with 16 baselined files.
+- The source-size baseline fell from 23 entries at Phase 0 to 16: UpaPasta's
+  `app.rs`, `main.rs` and `ui/mod.rs`, pesto's `nfo.rs`, `nntp/mod.rs`,
+  `nzb.rs`, `config/types.rs` and `compress.rs` all left the list.
+
+Remaining Phase 5 work is the public API audit: inventory external users across
+UpaPasta, Penne and Sugo, replace broad `pub mod` exposure with deliberate
+re-exports where compatible, mark implementation details `pub(crate)`, and
+document the supported embedding surface.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
