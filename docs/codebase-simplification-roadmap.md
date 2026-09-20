@@ -408,7 +408,7 @@ background results continue to arrive through events/channels.
 Goal: complete the context reduction in protocol and formatting modules after
 the highest-value hotspots are under control.
 
-- [ ] Split `nfo.rs` into metadata model, detection/parsing and rendering.
+- [x] Split `nfo.rs` into metadata model, detection/parsing and rendering.
 - [ ] Split `nntp/mod.rs` into protocol/response parsing, authentication and
   client behavior while preserving `pool.rs`.
 - [ ] Split `nzb.rs` into shared model, reader and writer.
@@ -1119,6 +1119,32 @@ Validation completed:
 
 Phase 4 is complete. Next action: begin Phase 5 by splitting `pesto`'s `nfo.rs`
 into metadata model, detection/parsing and rendering.
+
+### 2026-09-20 — Phase 5 started: nfo split
+
+- Converted `crates/pesto/src/nfo.rs` into `nfo/mod.rs` and split it into:
+  - `detect.rs`: video/series-folder/Blu-ray-DVD disc-root detection.
+  - `mpls.rs`: Blu-ray MPLS playlist parsing and language-tag injection.
+  - `dvd.rs`: DVD IFO language tables and title selection.
+  - `mediainfo.rs`: `mediainfo`/`bdinfo` invocation and output extraction.
+  - `render.rs`: banners, trees and folder/listing rendering.
+  - `tests.rs`: the existing 36-test suite, unchanged.
+- `nfo/mod.rs` is 254 lines and keeps only `generate`, `generate_season`,
+  `write`, `looks_like_bluray` and the module wiring. The public paths are
+  unchanged (`pesto::nfo::*`), and the split is a pure code move.
+- Removed the `nfo.rs` source-size baseline entry; the workspace baseline fell
+  from 21 to 20 entries.
+
+Validation completed:
+
+- `cargo check -p pesto-poster` and `cargo clippy -p pesto-poster
+  --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib nfo::`: 36 passed, 5 ignored.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: split `pesto`'s `nntp/mod.rs` into protocol/response parsing,
+authentication and client behavior while preserving `pool.rs`.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
