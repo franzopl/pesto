@@ -291,7 +291,7 @@ crates/pesto/src/poster/
 
 Safe extraction order:
 
-- [ ] Move tests out of `poster/mod.rs` without changing coverage.
+- [x] Move tests out of `poster/mod.rs` without changing coverage.
 - [ ] Extract public outcome types and pure decisions.
 - [ ] Extract connection accounting and slot lifecycle.
 - [ ] Extract identity and naming helpers.
@@ -611,6 +611,29 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed at
   Phase 2 completion.
 
-Next action: begin Phase 3 by inventorying the tests embedded in
-`poster/mod.rs`, then move them into focused test modules without touching
-posting concurrency, allocation or retry behavior.
+Next action: completed in the following progress entry.
+
+### 2026-09-19 — Phase 3 started
+
+- Inventoried all 76 unit tests embedded in `poster/mod.rs` and moved them to
+  `poster/tests/`, grouped as `memory.rs` (7), `paths.rs` (14), `par2.rs` (11),
+  `policy.rs` (25), `dry_run.rs` (6) and `internals.rs` (13). Shared fixtures
+  live in the 39-line `tests/mod.rs` facade.
+- Reduced the production `poster/mod.rs` from 5,947 to 4,856 lines without
+  changing implementation code or test coverage, and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::tests::`: 76 passed.
+- `bash scripts/check-source-size.sh`: passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed, with only the repository's explicitly ignored
+  tests skipped.
+
+Next action: extract public outcome types and their pure completion decisions
+from `poster/mod.rs`. Preserve all existing public paths through re-exports and
+move the corresponding `policy.rs` tests beside the new owner where practical.
