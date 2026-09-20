@@ -1,5 +1,16 @@
 use super::*;
 
+// ── Message-ID domain ─────────────────────────────────────────────────────
+
+#[test]
+fn message_id_domain_is_random() {
+    let a = crate::article::generate_message_id(None);
+    let b = crate::article::generate_message_id(None);
+    assert_ne!(a, b);
+    assert!(a.contains('@'));
+    assert!(!a.contains("blocknews") && !a.contains("pesto"));
+}
+
 // ── physical_core_count ───────────────────────────────────────────────────
 
 #[test]

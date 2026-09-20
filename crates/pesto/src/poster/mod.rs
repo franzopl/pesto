@@ -29,16 +29,18 @@ use parmesan::encoder::{FileHasher, FileHashes, RecoveryEncoder};
 use parmesan::layout;
 use parmesan::packet::{self, SliceChecksum};
 
-use parmesan::ops::{
-    calculate_geometry, ingest_files_with_progress, CreateOptions as Par2CreateOptions,
-    InputFile as Par2InputFile,
-};
+use parmesan::ops::{ingest_files_with_progress, InputFile as Par2InputFile};
 use parmesan::worker::Par2Worker;
 
 mod check;
 use check::spawn_check_coordinator;
 mod connections;
 use connections::{release_slots, split_connections, take_slots};
+mod par2;
+use par2::{
+    address_space_limit, connection_overhead_reserve, par2_geometry, par2_geometry_from_sizes,
+    par2_memory_plan,
+};
 mod identity;
 pub use identity::pick_post_group;
 use identity::{
@@ -50,59 +52,6 @@ pub use outcome::{
     nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
     PostedSegment,
 };
-
-/// Compute the PAR2 recovery-set geometry `(slice_size_bytes,
-/// total_input_slices, recovery_block_count)` that `producer` will use for
-/// this batch of files, given the current config. Pure and cheap — only
-/// reads file sizes already collected in `metas`, no I/O — so it can be
-/// called before encoding actually starts to seed an exact (not estimated)
-/// progress total. Mirrors the geometry logic in `producer` exactly; keep
-/// the two in sync.
-fn par2_geometry(metas: &[Arc<FileMeta>], config: &Config) -> (usize, usize, usize) {
-    let sizes: Vec<u64> = metas.iter().map(|m| m.size).collect();
-    par2_geometry_from_sizes(&sizes, config)
-}
-
-/// Shared PAR2 geometry for the per-file path and the season path so
-/// `--par2-slice-size` / `--par2-slice-count` / `--par2-recovery-count`
-/// cannot drift between them.
-fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize, usize, usize) {
-    let files: Vec<Par2InputFile> = sizes
-        .iter()
-        .enumerate()
-        .map(|(i, &size)| Par2InputFile {
-            path: PathBuf::new(),
-            display_name: i.to_string(),
-            size,
-        })
-        .collect();
-    let options = Par2CreateOptions {
-        slice_size: config.par2_slice_size,
-        slice_count: config.par2_slice_count,
-        recovery_count: config.par2_recovery_count,
-        recovery_pct: config.par2,
-        ..Par2CreateOptions::default()
-    };
-    match calculate_geometry(&files, &options) {
-        Ok(geometry) => geometry,
-        Err(_) => {
-            // Overflow of the PAR2 slice/recovery ceilings: return the counts
-            // so the caller can emit the same error it always has.
-            let s = config
-                .par2_slice_size
-                .map(|s| (s / 64 * 64).max(64))
-                .unwrap_or(64);
-            let n: usize = sizes
-                .iter()
-                .map(|sz| (*sz as usize).div_ceil(s.max(1)))
-                .sum();
-            let rec = config
-                .par2_recovery_count
-                .unwrap_or(n.saturating_mul(config.par2 as usize) / 100);
-            (s, n, rec)
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct FileMeta {
@@ -1776,205 +1725,6 @@ fn par2_output_dir(meta: &FileMeta) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// This process's own virtual address-space ceiling — see
-/// [`crate::memory::address_space_limit`], which owns the implementation now
-/// that startup tuning needs it too.
-fn address_space_limit() -> Option<u64> {
-    crate::memory::address_space_limit()
-}
-
-/// Rough reservation for the process overhead that `par2_memory_limit`
-/// doesn't account for — per-connection TLS/article buffers, the tokio
-/// runtime, the check-connection pool — so the PAR2 pass doesn't get sized
-/// right up to the address-space ceiling and starve everything else that
-/// also has to fit inside it.
-fn connection_overhead_reserve(connections: usize, threads: usize) -> u64 {
-    const PER_CONNECTION: u64 = 8 * 1024 * 1024; // generous: TLS + article buffers
-                                                 // Was 32 MiB, chosen before anything measured per-thread cost. A live musl
-                                                 // run on a 128-core seedbox reserved 2.0 GiB under that figure (64 threads)
-                                                 // for stacks whose real size, after `crate::memory` bounded them, is 1 MiB
-                                                 // — a ~32x over-estimate, and 69% of the entire reserve. 4 MiB keeps 3 MiB
-                                                 // of headroom per thread for SIMD/GF16 scratch on top of the measured
-                                                 // stack. Over-reserving is not free: the budget below is derived from what
-                                                 // this leaves, so every wasted GiB here costs PAR2 budget and can force an
-                                                 // extra pass — and each pass is another full read of the input.
-    const PER_THREAD: u64 = 4 * 1024 * 1024; // stack (measured 1 MiB) + scratch
-                                             // Was 512 MiB. Raised after a completed 83.4 GiB / 116 619-segment musl run
-                                             // showed the process's true peak is *not* in the PAR2 passes: those topped
-                                             // out at 7.38 GiB, then the tail of the run (final posting, the accumulated
-                                             // `results` vector, the check queue's heap, NZB assembly) added another
-                                             // 0.75 GiB to reach 8.13 GiB. None of that is PAR2 budget, so it belongs
-                                             // here — sizing the budget as if the passes were the high-water mark
-                                             // understates the real ceiling pressure by exactly that much.
-                                             //
-                                             // This term scales with segment count in reality; a flat 1 GiB covers the
-                                             // ~116 k-segment case measured. Phase 1's sampler should replace it with a
-                                             // real per-segment figure (see docs/memory-management.md).
-    const BASELINE: u64 = 1024 * 1024 * 1024; // runtime, results/NZB/check tail
-    BASELINE + (connections as u64) * PER_CONNECTION + (threads as u64) * PER_THREAD
-}
-
-/// Share of the address-space ceiling the whole process is allowed to reach.
-///
-/// `RLIMIT_AS` is a hard, zero-tolerance wall — one allocation across it aborts
-/// via `handle_alloc_error`, and with `panic = "abort"` nothing unwinds far
-/// enough to log why. The margin is deliberately wide.
-const CEILING_TARGET: f64 = 0.85;
-
-/// A pass's real working set as a multiple of its memory budget.
-///
-/// The budget sizes the recovery buffers; on top of those the encoder gets a
-/// flush queue of `memory_limit / 4` (see the `queue_limit` computation in
-/// `producer`), so a pass actually occupies ~1.25x what it is budgeted.
-const PASS_WORKING_SET_FACTOR: f64 = 1.25;
-
-/// Share of a finished pass's working set still held by the allocator when the
-/// next pass allocates.
-///
-/// The pass loop drops each `Par2Worker` before creating the next, so this is
-/// not a leak — it is musl's allocator not returning freed spans to the OS, and
-/// the next pass's differently-shaped allocations not fitting the holes left
-/// behind. `RLIMIT_AS` counts the retained mapping regardless.
-///
-/// Measured on a live 75.8 GiB / 3-pass musl run: VmPeak went 4.98 GiB during
-/// pass 1 to 7.15 GiB during pass 2, a 2.17 GiB step against a 4.15 GiB pass
-/// working set — 52% retained. Rounded up to 0.55.
-///
-/// This is the term the old formula omitted entirely, and omitting it is why
-/// the over-sized `PER_THREAD` above was load-bearing: two errors cancelled.
-/// Correcting only one of them would have raised the budget to ~4.2 GiB/pass
-/// and pushed predicted peak use to ~92% of the ceiling.
-const CROSS_PASS_RETENTION: f64 = 0.55;
-
-/// Safe per-pass PAR2 budget, derived from this process's own `RLIMIT_AS`
-/// rather than host/cgroup RAM (see [`address_space_limit`]).
-///
-/// The model is:
-///
-/// ```text
-/// peak ≈ reserve + budget × PASS_WORKING_SET_FACTOR × (1 + retention)
-/// ```
-///
-/// where `retention` is [`CROSS_PASS_RETENTION`] for a multi-pass run and zero
-/// for a single-pass one — a run that never starts a second pass cannot be
-/// holding a first pass's memory. Solving for `budget` under
-/// `peak ≤ ceiling × CEILING_TARGET` gives the two branches below.
-///
-/// Splitting the single-pass case out matters: it is both the common case and
-/// the one the old flat 50% penalised hardest. On a 9.5 GiB ceiling the budget
-/// for a single-pass run goes from 3.3 GiB to ~5.6 GiB, which is itself the
-/// cheapest way to *avoid* multi-pass runs — and every pass avoided is one
-/// less full read of the input.
-///
-/// `recovery_count == 0` (no PAR2 requested) takes the single-pass branch; the
-/// budget is unused in that case but must still be a sane number.
-fn address_space_budget(reserve: u64, slice_size: usize, recovery_count: usize) -> Option<u64> {
-    let as_limit = address_space_limit()?;
-    let headroom = (as_limit as f64 * CEILING_TARGET) - reserve as f64;
-    if headroom <= 0.0 {
-        // The reserve alone already exceeds the target. Return 0 and let the
-        // caller surface it — silently handing back a tiny budget here would
-        // produce thousands of passes instead of an actionable error.
-        return Some(0);
-    }
-
-    let single_pass = headroom / PASS_WORKING_SET_FACTOR;
-    let fits_in_one_pass = slice_size == 0
-        || recovery_count == 0
-        || (single_pass as u64) / (slice_size as u64) >= recovery_count as u64;
-    if fits_in_one_pass {
-        return Some(single_pass as u64);
-    }
-
-    Some((headroom / (PASS_WORKING_SET_FACTOR * (1.0 + CROSS_PASS_RETENTION))) as u64)
-}
-
-/// Shared PAR2 memory budget + pass list used by the per-file producer and
-/// the season path so `--memory-limit` cannot drift between them.
-fn par2_memory_plan(
-    config: &Config,
-    par2_slice_size: usize,
-    recovery_count: usize,
-    active_connections: usize,
-) -> Result<(usize, Vec<(u32, usize)>)> {
-    let reserve_threads = if config.threads > 0 {
-        config.threads
-    } else {
-        parmesan::performance_core_count()
-    };
-    let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
-    let as_budget = address_space_budget(overhead_reserve, par2_slice_size, recovery_count);
-    if as_budget == Some(0) && recovery_count > 0 {
-        anyhow::bail!(
-            "not enough address space to generate PAR2: this session's limit \
-             (RLIMIT_AS = {}) is already exceeded by the ~{} reserved for {} \
-             connections and {} PAR2 threads. Lower --connections/--threads, \
-             disable PAR2 with --par2 0, or raise `ulimit -v` for this session.",
-            crate::progress::format_size(address_space_limit().unwrap_or_default()),
-            crate::progress::format_size(overhead_reserve),
-            active_connections,
-            reserve_threads,
-        );
-    }
-    let ceiling = crate::memory::Ceiling::discover(config.memory_limit);
-    let non_as_par2_share = crate::memory::budget::share_of(
-        ceiling.effective_excluding_address_space(),
-        crate::memory::budget::Stage::Par2,
-    );
-    let binding_budget = as_budget.map_or(non_as_par2_share, |b| b.min(non_as_par2_share));
-
-    let memory_limit = match config.par2_memory_limit {
-        Some(limit) => {
-            if limit as u64 > binding_budget {
-                let bound_by_as = as_budget.is_some_and(|b| b <= non_as_par2_share);
-                anyhow::bail!(
-                    "--par2-memory-limit {} won't fit safely: {} leaves a safe budget of \
-                     only {} once ~{} is reserved for {} connections and {} PAR2 threads. \
-                     Lower --par2-memory-limit (or --memory-limit / --connections/--threads), \
-                     or {}.",
-                    crate::progress::format_size(limit as u64),
-                    if bound_by_as {
-                        format!(
-                            "this session's address-space limit (RLIMIT_AS = {})",
-                            crate::progress::format_size(address_space_limit().unwrap_or_default())
-                        )
-                    } else {
-                        format!(
-                            "the global --memory-limit budget (effective ceiling {})",
-                            crate::progress::format_size(ceiling.effective)
-                        )
-                    },
-                    crate::progress::format_size(binding_budget),
-                    crate::progress::format_size(overhead_reserve),
-                    active_connections,
-                    reserve_threads,
-                    if bound_by_as {
-                        "raise `ulimit -v` for this session"
-                    } else {
-                        "raise --memory-limit"
-                    },
-                );
-            }
-            limit
-        }
-        None => (binding_budget as usize).max(256 * 1024 * 1024),
-    };
-
-    let slices_per_pass = (memory_limit / par2_slice_size.max(1)).max(1);
-    let mut passes = Vec::new();
-    if recovery_count > 0 {
-        let mut start = 0;
-        while start < recovery_count {
-            let count = (recovery_count - start).min(slices_per_pass);
-            passes.push((start as u32, count));
-            start += count;
-        }
-    } else {
-        passes.push((0, 0));
-    }
-    Ok((memory_limit, passes))
 }
 
 async fn producer(

@@ -295,7 +295,7 @@ Safe extraction order:
 - [x] Extract public outcome types and pure decisions.
 - [x] Extract connection accounting and slot lifecycle.
 - [x] Extract identity and naming helpers.
-- [ ] Extract PAR2 geometry and memory planning.
+- [x] Extract PAR2 geometry and memory planning.
 - [ ] Extract season PAR2 as an independent submodule.
 - [ ] Extract task and shared-state types.
 - [ ] Extract producer behavior.
@@ -679,5 +679,40 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract PAR2 geometry and memory planning into the planned
-`poster/par2/` module while preserving the existing memory-budget decisions.
+Next action: extract season PAR2 (packet assembly, per-episode ingestion and
+volume writing) into `poster/par2/season.rs` without changing the recovery
+set's byte layout.
+
+### 2026-09-19 — Phase 3 continued: PAR2 geometry and memory planning
+
+- Added `poster/par2/mod.rs` as the PAR2 planning facade, re-exporting the
+  geometry and memory helpers at the poster scope so existing call sites stay
+  unchanged.
+- Added `poster/par2/geometry.rs` for `par2_geometry` and
+  `par2_geometry_from_sizes`, together with the eight slice-geometry
+  regression tests. No formula changed.
+- Added `poster/par2/memory.rs` for the address-space ceiling wrapper, the
+  connection/thread overhead reserve, the ceiling/retention constants and the
+  shared `par2_memory_plan`. The seven memory-model tests moved beside the
+  constants they pin, including the local `budget_for` reproduction.
+- Moved the message-ID randomness test into `tests/internals.rs` and retired
+  the now-empty `tests/memory.rs`; `tests/par2.rs` now covers only
+  `par2_output_dir`.
+- Reduced `poster/mod.rs` from 4,408 to 4,158 lines and lowered its
+  source-size debt baseline accordingly. No behavior, allocation or
+  concurrency policy changed.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `bash scripts/check-source-size.sh`: passed with 24 baselined files.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed, with only the repository's explicitly ignored
+  tests skipped.
+
+Next action: extract season PAR2 (packet assembly, per-episode ingestion and
+volume writing) into `poster/par2/season.rs` without changing the recovery
+set's byte layout.
