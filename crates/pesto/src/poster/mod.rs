@@ -39,6 +39,11 @@ use parmesan::worker::Par2Worker;
 
 mod check;
 use check::spawn_check_coordinator;
+mod outcome;
+pub use outcome::{
+    nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
+    PostedSegment,
+};
 
 /// Compute the PAR2 recovery-set geometry `(slice_size_bytes,
 /// total_input_slices, recovery_block_count)` that `producer` will use for
@@ -154,212 +159,6 @@ async fn release_slots(broker: Option<&ConnectionBroker>, slots: Vec<ConnectionS
             }
         }
     }
-}
-
-/// A posted segment, retained for later `.nzb` generation.
-///
-/// `file_path`, `subject_name` and `from` are `Arc`-shared rather than owned
-/// `PathBuf`/`String`: every segment is held twice at once — once in
-/// `Shared::results`, once again as a `check::QueueItem` in the streaming
-/// check queue's per-server heap while it awaits its `STAT` — and these three
-/// fields are identical across every segment of the same file (or, for
-/// `from` outside article mode, the whole run). Measured on an
-/// 83.4 GiB / 116 619-segment run, the two copies together cost ~150 MiB;
-/// sharing these three turns the second copy's allocation for them into a
-/// refcount bump. `file_name`/`message_id` stay owned `String` — they're
-/// unique per segment, so there's nothing to share.
-#[derive(Debug, Clone)]
-pub struct PostedSegment {
-    pub file_name: String,
-    /// Absolute filesystem path of the source file, preserved so a post-check
-    /// repost can re-read the segment regardless of the current working
-    /// directory. `file_name` alone (the published/relative name) is
-    /// insufficient — see `FailedTask::file_path` (issue #23), which this
-    /// mirrors for the `--check` repost path.
-    pub file_path: Arc<Path>,
-    pub subject_name: Arc<str>,
-    /// The wire identity (Subject/yEnc `name=`) actually used to post this
-    /// segment — independent of `subject_name`, which is always the real
-    /// filename for NZB purposes regardless of `--obfuscate` (see
-    /// `generate`'s doc comment in `nzb.rs`). A `--check` repost of a
-    /// missing article must reuse *this*, not `subject_name`, or an
-    /// obfuscated release leaks its real name back onto the wire the moment
-    /// one article needs reposting. Empty for segments reconstructed from a
-    /// parsed `.nzb` (`nzb::parse`), which never re-encode.
-    pub wire_name: Arc<str>,
-    /// The exact yEnc `=ybegin name=` used for this segment. This is separate
-    /// from `wire_name` because every mode except `none`/`light` deliberately
-    /// avoids making Subject and yEnc name identical.
-    pub wire_yenc_name: Arc<str>,
-    pub file_size: u64,
-    pub part: u32,
-    pub total: u32,
-    pub message_id: String,
-    pub bytes: u64,
-    pub from: Arc<str>,
-    /// Date header as `(rfc_string, unix_timestamp)`. Both parts are preserved
-    /// so fixed dates survive round-trips and retries.
-    pub date: (Option<String>, Option<u64>),
-    /// CRC-32 of the whole file this segment belongs to. Only meaningful (and
-    /// only ever emitted on the `=yend` line) when `part == total` — see
-    /// `PostTask::file_crc32`.
-    pub full_crc32: u32,
-    /// Index into this run's server list (`Config::all_servers()` order) of
-    /// the server that actually accepted this article's `240`. The
-    /// streaming check queue (`poster::check`) uses this to `STAT` the same
-    /// server the article was posted to, instead of guessing — with a
-    /// multi-server failover config, different articles from the same run
-    /// can legitimately land on different servers, and a provider that
-    /// never received an article obviously can't confirm it. Copied from
-    /// `.pesto-state` on a resume re-STAT so the check targets the same host.
-    /// Left as `0` for dry-run segments (nothing was actually posted) and
-    /// pre-schema resume records.
-    pub server_idx: usize,
-    /// This file's 1-based position among every file in the release, and the
-    /// release's total file count — the `--file-counter` subject prefix.
-    /// `(0, 0)` when the flag is off; see `Shared::total_files`. Denormalized
-    /// here (rather than looked up via `Shared`) because both the NZB writer
-    /// and a `--check` repost rebuild the subject from a `PostedSegment`
-    /// alone, long after `Shared` is gone.
-    pub file_index: u32,
-    pub total_files: u32,
-}
-
-/// A segment that failed to post during the upload run. Carries enough
-/// information to re-post the *same* article on the end-of-run retry pass.
-#[derive(Debug, Clone)]
-pub struct FailedTask {
-    /// Published name (relative path / base name) used for NZB metadata and
-    /// logging. Not a filesystem path — see [`FailedTask::file_path`].
-    pub file_name: String,
-    /// Canonical relative path restored by NZB/PAR2 clients.
-    pub client_path: String,
-    /// Absolute filesystem path of the source file, preserved so the end-of-run
-    /// retry can re-read the segment regardless of the current working
-    /// directory. `file_name` alone is insufficient (issue #23).
-    pub file_path: PathBuf,
-    /// The Message-ID the in-run attempts used. The end-of-run retry re-posts
-    /// with this *same* ID so that, if the article actually reached the server
-    /// during the run (e.g. the `240` ack was lost when the connection died),
-    /// the server can deduplicate it: it answers `441 … 435 Already exists`,
-    /// which is now treated as success instead of producing a duplicate article
-    /// under a fresh ID. Mirrors nyuu's same-Message-ID repost strategy.
-    pub message_id: String,
-    pub subject_name: String,
-    /// The yEnc `=ybegin ... name=` value the in-run attempt used —
-    /// independent of `subject_name` under `Full`/`Article`/`FullShared`
-    /// obfuscation (see `poster/mod.rs`'s `ObfuscateMode` match arms).
-    /// Carried through so a repost doesn't fall back to reusing
-    /// `subject_name` for both, which would reintroduce the exact-match
-    /// signature those modes deliberately avoid.
-    pub yenc_name: String,
-    pub file_size: u64,
-    pub part: u32,
-    pub total: u32,
-    pub from: String,
-    /// Date header as `(rfc_string, unix_timestamp)`. Both are preserved so
-    /// fixed dates (which have `Some` RFC but `None` timestamp) are not lost.
-    pub date: (Option<String>, Option<u64>),
-    /// CRC-32 of the whole file this segment belongs to — see
-    /// `PostedSegment::full_crc32`. Only meaningful when `part == total`.
-    pub full_crc32: u32,
-    /// See `PostedSegment::file_index`/`total_files` — carried through so the
-    /// end-of-run retry (which only has `&[FailedTask]`, not `Shared`) can
-    /// rebuild the identical subject.
-    pub file_index: u32,
-    pub total_files: u32,
-}
-
-/// The result of a posting run.
-#[derive(Debug)]
-pub struct PostOutcome {
-    pub segments: Vec<PostedSegment>,
-    pub failures: Vec<String>,
-    /// Segments that never got a `240` even after the in-run blind retry
-    /// pass, preserved so the caller can report them.
-    pub failed_tasks: Vec<FailedTask>,
-    pub cancelled: bool,
-    /// The newsgroup(s) actually used for this upload (one entry when multiple
-    /// groups are configured, since `pick_post_group` selects one at random).
-    pub groups: Vec<String>,
-    /// The server(s) that actually accepted at least one article this run —
-    /// derived from `PostedSegment::server_idx` on the final, post-check
-    /// segment list, not just the configured list. In a multi-server
-    /// (failover) config this can legitimately be a subset (a server that
-    /// was unreachable all run) or, more commonly, every configured server
-    /// that had a connection quota. Empty for `--par2-only`/`--dry-run`.
-    pub servers: Vec<String>,
-    /// Message-IDs that were posted (`240`) but STAT 430-exhausted every
-    /// retry/repost. Empty when `config.check` is disabled. Distinct from
-    /// [`Self::inconclusive`]: this is a confirmed gap.
-    pub still_missing: Vec<String>,
-    /// Message-IDs whose STAT path failed without a 430 (transport, timeout,
-    /// 480/502, cancel drain). Never unblocked by `--allow-incomplete-nzb`.
-    pub inconclusive: Vec<String>,
-    /// Set when the run stopped because `producer` returned an error (bad
-    /// PAR2 geometry, a memory-budget check, file I/O, …) rather than because
-    /// the user cancelled it. `cancelled` is `true` in both cases — callers
-    /// that want to tell "the user pressed Ctrl-C" apart from "the run failed
-    /// and here's why" should check this field first. See issue #57: without
-    /// it, callers had no way to surface the actual failure and could only
-    /// print a generic "interrupted" message.
-    pub failure_reason: Option<String>,
-    /// This run's PAR2 temp directory (see [`par2_temp_dir`]). Always set,
-    /// even when PAR2 was never generated — removing a directory that was
-    /// never created is a harmless no-op. Callers use this instead of
-    /// calling `par2_temp_dir` themselves, so each concurrent `--each`/
-    /// `--season` entry (`--jobs > 1`) cleans up only its own directory
-    /// instead of a path shared by every run in the process (issue #67).
-    pub par2_temp_dir: PathBuf,
-}
-
-impl PostOutcome {
-    /// Remove this run's PAR2 scratch directory after every consumer has
-    /// finished reading it. A missing directory is an expected no-op when
-    /// PAR2 generation was disabled or did not reach materialisation.
-    /// Cleanup failures are logged but do not invalidate the upload outcome.
-    pub async fn cleanup_par2_temp_dir(&self) {
-        cleanup_par2_temp_dir(&self.par2_temp_dir).await;
-    }
-}
-
-/// Whether the NZB (and NFO / post-hooks) should be written for this run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NzbWriteDecision {
-    Write,
-    Refuse,
-}
-
-/// Single NZB completeness gate used by the CLI and [`crate::upload::run_upload`].
-/// `--allow-incomplete-nzb` unblocks only MissingConfirmed, never POST
-/// failures or Inconclusive.
-pub fn nzb_write_decision(
-    post_failures: bool,
-    missing_confirmed: bool,
-    inconclusive: bool,
-    allow_incomplete_nzb: bool,
-) -> NzbWriteDecision {
-    if post_failures || inconclusive || (missing_confirmed && !allow_incomplete_nzb) {
-        NzbWriteDecision::Refuse
-    } else {
-        NzbWriteDecision::Write
-    }
-}
-
-/// Whether a combined `--season` NZB should be written.
-///
-/// The pack is a distinct artefact from per-episode NZBs: write only when
-/// every episode is complete (Confirmed, or Posted under `--no-check`),
-/// the run was not cancelled, and there is at least one segment. One
-/// MissingConfirmed or Inconclusive episode blocks the pack even if
-/// `--allow-incomplete-nzb` wrote that episode's own NZB — the flag never
-/// unlocks the merge.
-pub fn should_write_season_nzb(
-    any_cancelled: bool,
-    any_episode_incomplete: bool,
-    all_segments_empty: bool,
-) -> bool {
-    !any_cancelled && !any_episode_incomplete && !all_segments_empty
 }
 
 #[derive(Debug, Clone)]
@@ -1863,30 +1662,6 @@ pub fn par2_temp_dir(base: Option<&Path>, run_id: u64) -> PathBuf {
         .map(Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
     base.join(format!("parmesan_{}_{run_id}", std::process::id()))
-}
-
-/// Remove a per-run PAR2 scratch directory once every consumer has finished
-/// reading it. A missing directory is an expected no-op when PAR2 generation
-/// was disabled or did not reach the materialisation phase. Other cleanup
-/// failures do not invalidate an otherwise successful upload, but are logged
-/// so operators can find and remove leaked scratch data.
-async fn cleanup_par2_temp_dir(path: &Path) {
-    let started = Instant::now();
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => info!(
-            path = %path.display(),
-            elapsed_ms = started.elapsed().as_millis(),
-            "PAR2 scratch directory removed"
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            debug!(path = %path.display(), "PAR2 scratch directory was not created")
-        }
-        Err(error) => warn!(
-            path = %path.display(),
-            error = %error,
-            "failed to remove PAR2 scratch directory"
-        ),
-    }
 }
 
 /// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure

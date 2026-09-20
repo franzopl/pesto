@@ -292,7 +292,7 @@ crates/pesto/src/poster/
 Safe extraction order:
 
 - [x] Move tests out of `poster/mod.rs` without changing coverage.
-- [ ] Extract public outcome types and pure decisions.
+- [x] Extract public outcome types and pure decisions.
 - [ ] Extract connection accounting and slot lifecycle.
 - [ ] Extract identity and naming helpers.
 - [ ] Extract PAR2 geometry and memory planning.
@@ -622,6 +622,12 @@ Next action: completed in the following progress entry.
 - Reduced the production `poster/mod.rs` from 5,947 to 4,856 lines without
   changing implementation code or test coverage, and lowered its source-size
   debt baseline accordingly.
+- Added `poster/outcome.rs` for `PostOutcome`, `PostedSegment`, `FailedTask`
+  and the pure NZB publication decisions. The facade preserves every existing
+  `pesto::poster::*` path through re-exports, while the six policy tests now
+  live beside their owner.
+- Reduced `poster/mod.rs` further to 4,631 lines and lowered its source-size
+  debt baseline again.
 
 Validation completed:
 
@@ -633,7 +639,15 @@ Validation completed:
 - `cargo clippy --all-targets -- -D warnings`: passed.
 - `cargo test --all`: passed, with only the repository's explicitly ignored
   tests skipped.
+- `cargo check -p pesto-poster --all-targets`: passed after the outcome
+  extraction.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed after
+  the outcome extraction.
+- `cargo test -p pesto-poster --lib poster::outcome::tests`: 6 passed.
+- `bash scripts/check-source-size.sh`, `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
+  after the outcome extraction.
 
-Next action: extract public outcome types and their pure completion decisions
-from `poster/mod.rs`. Preserve all existing public paths through re-exports and
-move the corresponding `policy.rs` tests beside the new owner where practical.
+Next action: extract connection accounting and slot lifecycle into
+`poster/connections.rs`, preserving the current broker checkout/checkin order
+and total-connection cap.
