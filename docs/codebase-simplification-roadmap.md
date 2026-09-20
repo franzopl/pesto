@@ -304,12 +304,12 @@ Safe extraction order:
 - [x] Extract run preparation, resume persistence and outcome as named stages.
 - [x] Extract the cancel watcher, pipeline startup and worker join as named
   stages.
-- [ ] Extract the check/recovery block as a named stage inside
+- [x] Extract the check/recovery block as a named stage inside
   `orchestrator.rs`.
 - [x] Replace the long internal argument list with an internal `RunOptions`;
   keep existing public functions as compatibility facades.
 - [x] Verify resume, check/repost, pause/cancel and connection-reuse tests.
-- [ ] Compare posting benchmarks and memory metrics with the baseline.
+- [x] Compare posting benchmarks and memory metrics with the baseline.
 - [x] Run all gates.
 
 The orchestration should read approximately as:
@@ -371,6 +371,8 @@ Steps:
 
 - [ ] Extract one screen renderer per change, starting with low-coupling
   history and configuration screens.
+  - [x] Extract the history screen renderer.
+  - [ ] Extract the configuration screen renderer.
 - [ ] Extract overlays after their owning screens.
 - [ ] Keep `ui/mod.rs` as screen dispatch only.
 - [ ] Split feature-specific state and methods out of `app.rs` while retaining
@@ -684,9 +686,68 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract the check/recovery block from `run` into a named stage,
-then run the posting benchmarks and memory measurements against the Phase 0
-baseline.
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 3 completed: named recovery and benchmark comparison
+
+- Added `recover_or_repost` and its compact `RecoveryOutcome` to
+  `poster/orchestrator.rs`. The run entry point now delegates the blind retry,
+  streaming STAT drain, bounded tail recovery, slot release and stale resume
+  record cleanup as one named stage before resume persistence and outcome
+  construction.
+- The extraction preserves the existing retry decisions, event order,
+  connection-slot ownership and resume mutations. `run` is now 347 lines and
+  reads as the lifecycle documented above; `orchestrator.rs` remains below the
+  source-size limit at 640 lines.
+- Compared the changed release binary with an independently built `HEAD`
+  control using `bench/run.sh stages --workload mixed-folder --scale 1.0
+  --reps 3 --yes` on the same medialab host. The 2.0 GiB posting-only median
+  was 2,269.3 versus 2,266.8 MiB/s (+0.1%), with 70.6 versus 80.3 MiB peak
+  RSS. The `post+check` median was 283.5 versus 280.5 MiB/s (+1.1%), with
+  717.0 versus 725.8 MiB peak RSS. Both throughput deltas are within measured
+  noise and memory did not regress. The CPU governor was `powersave`, so these
+  results are treated as a same-session regression check rather than a new
+  publishable performance baseline.
+
+Validation completed:
+
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- Focused check/recovery, pause/cancel and connection-reuse integration tests:
+  12 passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `XDG_CONFIG_HOME=/tmp/pesto-test-empty-config cargo test --all`: passed,
+  with only explicitly ignored tests skipped. The isolated config is required
+  because `batch_order` otherwise discovers the developer's real Pesto config
+  and attempts proxy validation instead of remaining self-contained.
+
+Next action: completed in the following progress entry.
+
+### 2026-09-20 — Phase 4 started: history renderer
+
+- Added `crates/upapasta/src/ui/history.rs` as the owner of the History screen
+  layout, search bar, upload list, selected-record detail and catalog stats.
+- Kept the existing root `App` state and shared rendering policies; the new
+  module imports the existing byte formatting, category color and Unicode-safe
+  truncation helpers rather than duplicating them.
+- `ui/mod.rs` now dispatches the History state to `history::draw` and shrank
+  from 2,885 to 2,644 lines. Lowered its source-size debt baseline to match;
+  the focused `history.rs` is 245 lines.
+- The NZB viewer overlay remains in `ui/mod.rs` for now and will move with the
+  overlay pass, after its owning History screen boundary is established.
+
+Validation completed:
+
+- `cargo check -p upapasta`: passed.
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: 38 passed.
+- `bash scripts/check-source-size.sh`: passed with 23 baselined files.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+Next action: extract the configuration renderer and its field-model builder
+from `crates/upapasta/src/ui/mod.rs` into `ui/config.rs`, preserving the
+current edit and override presentation exactly.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 

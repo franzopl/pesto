@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::nntp::pool::ConnectionBroker;
+use crate::nntp::pool::{ConnectionBroker, ConnectionSlot};
 use crate::progress::{FileEntry, ProgressEvent, ProgressSender, RunMode};
 use crate::resume::SegmentRecord;
 use crate::walk::InputFile;
@@ -16,10 +16,10 @@ use crate::yenc;
 use parmesan::layout;
 use parmesan::packet;
 
-use super::check::{self, spawn_check_coordinator};
+use super::check::{self, spawn_check_coordinator, CheckCoordinatorHandle};
 use super::connections::{release_slots, take_slots};
 use super::options::RunOptions;
-use super::outcome::{PostOutcome, PostedSegment};
+use super::outcome::{FailedTask, PostOutcome, PostedSegment};
 use super::pipeline::{run_pipeline, spawn_cancel_watcher, start_pipeline, Pipeline};
 use super::prepare::{prepare_inputs, prepare_resources, prepare_resume, RunResources};
 use super::producer::producer;
@@ -274,7 +274,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
     // Streaming check: every segment that gets a clean `240` is queued here
     // and STAT-checked a few seconds later, concurrently with the rest of
     // the upload, instead of waiting for the whole run to finish.
-    let mut check_coordinator = if !check_slots.is_empty() {
+    let check_coordinator = if !check_slots.is_empty() {
         Some(spawn_check_coordinator(
             config.clone(),
             shared.post_group.clone(),
@@ -299,7 +299,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         tx_opt,
     } = start_pipeline(&shared, worker_count, &mut post_slots);
 
-    let (force_abort, failure_reason, mut post_slots) = run_pipeline(
+    let (force_abort, failure_reason, post_slots) = run_pipeline(
         &shared,
         metas,
         tx_opt,
@@ -313,6 +313,65 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         post_slots,
     )
     .await;
+    let RecoveryOutcome {
+        failures,
+        failed_tasks,
+        cancelled,
+        still_missing,
+        inconclusive,
+    } = recover_or_repost(
+        config,
+        &shared,
+        broker.as_deref(),
+        check_coordinator,
+        force_abort,
+        post_slots,
+    )
+    .await;
+
+    persist_resume_state(
+        &shared,
+        cancelled,
+        &still_missing,
+        &inconclusive,
+        &failed_tasks,
+    );
+
+    let outcome = build_outcome(
+        config,
+        &shared,
+        failures,
+        failed_tasks,
+        cancelled,
+        still_missing,
+        inconclusive,
+        failure_reason,
+        t_post_start,
+    );
+
+    cancel_handle.abort();
+
+    Ok(outcome)
+}
+
+struct RecoveryOutcome {
+    failures: Vec<String>,
+    failed_tasks: Vec<FailedTask>,
+    cancelled: bool,
+    still_missing: Vec<String>,
+    inconclusive: Vec<String>,
+}
+
+/// Retry unacknowledged posts, drain the streaming STAT queue and attempt the
+/// bounded final recovery pass before returning every held connection slot.
+async fn recover_or_repost(
+    config: &Config,
+    shared: &Arc<Shared>,
+    broker: Option<&ConnectionBroker>,
+    mut check_coordinator: Option<CheckCoordinatorHandle>,
+    force_abort: bool,
+    mut post_slots: Vec<ConnectionSlot>,
+) -> RecoveryOutcome {
     let mut failures = std::mem::take(&mut *shared.failures.lock().unwrap());
     let mut failed_tasks = std::mem::take(&mut *shared.failed_tasks.lock().unwrap());
     let cancelled_during_post = shared.cancelled.load(Ordering::Relaxed);
@@ -541,7 +600,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
 
     // One checkin of the whole set so `--jobs` keeps the next episode
     // blocked on the semaphore until this episode is fully done.
-    release_slots(broker.as_deref(), post_slots).await;
+    release_slots(broker, post_slots).await;
 
     // Whatever is left in `still_missing` at this point is confirmed bad:
     // the original POST got a `240`, but every STAT check and every repost
@@ -571,27 +630,11 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         }
     }
 
-    persist_resume_state(
-        &shared,
-        cancelled,
-        &still_missing,
-        &inconclusive,
-        &failed_tasks,
-    );
-
-    let outcome = build_outcome(
-        config,
-        &shared,
+    RecoveryOutcome {
         failures,
         failed_tasks,
         cancelled,
         still_missing,
         inconclusive,
-        failure_reason,
-        t_post_start,
-    );
-
-    cancel_handle.abort();
-
-    Ok(outcome)
+    }
 }
