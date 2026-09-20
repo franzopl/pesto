@@ -33,6 +33,8 @@ jobs:
           echo "nproc: $(nproc)"
           echo "CPU flags of interest:"
           grep -o -E '\b(avx2|avx512f|avx512bw|gfni|ssse3)\b' /proc/cpuinfo | sort -u || true
+      - name: Source-size guard
+        run: bash scripts/check-source-size.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

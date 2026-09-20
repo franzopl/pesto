@@ -19,7 +19,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "pesto"
-path = "src/bin/pesto.rs"
+path = "src/bin/pesto/main.rs"
 
 [dependencies]
 parmesan = { package = "parmesan-par2", version = "0.5.5", path = "../parmesan", default-features = false }
