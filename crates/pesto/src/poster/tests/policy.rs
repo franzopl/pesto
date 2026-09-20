@@ -1,3 +1,4 @@
+use super::result::is_cheap_to_recover;
 use super::*;
 
 // ── automatic recovery threshold (is_cheap_to_recover) ────────────────────

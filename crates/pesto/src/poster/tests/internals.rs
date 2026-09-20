@@ -1,3 +1,4 @@
+use super::result::record_failure;
 use super::*;
 
 // ── Message-ID domain ─────────────────────────────────────────────────────

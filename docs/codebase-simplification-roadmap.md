@@ -679,9 +679,38 @@ Validation completed:
   `cargo clippy --all-targets -- -D warnings` and `cargo test --all`: passed
   after the identity extraction.
 
-Next action: extract commit, failure and final-ordering policy into
-`poster/result.rs`, then reduce the run entry point to named stages in
-`poster/orchestrator.rs`.
+Next action: reduce the run entry point to named stages in
+`poster/orchestrator.rs` and introduce an internal `RunOptions` equivalent,
+keeping the existing public functions as compatibility facades.
+
+### 2026-09-19 — Phase 3 continued: result policy extraction and main sync
+
+- Rebased `refactor/phase3-par2-engine` onto `origin/main` after PR #191
+  merged `refactor/codebase-simplification`. The pre-rebase tree was identical
+  to the merge result, so the rebase replayed cleanly.
+- Added `poster/result.rs` (381 lines) for `commit_result`, `jittered`,
+  `is_cheap_to_recover`, `target_label`, `record_failure` and the public
+  `repost_failed_tasks`. Resume recording, failure description formatting,
+  retry backoff and the end-of-run repost loop are unchanged.
+- Callers now reach the moved policy through `poster::result` (`worker.rs`,
+  `check.rs`) or the explicit test imports in `tests/{policy,paths,internals}.rs`.
+- Reduced `poster/mod.rs` from 2,088 to 1,733 lines and lowered its source-size
+  debt baseline accordingly.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`: passed.
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster --lib poster::`: 82 passed.
+- `cargo test -p pesto-poster --test integration`: 8 passed.
+- `cargo test -p pesto-poster --test check_post_retries`: 4 passed.
+- `cargo test -p pesto-poster --test check_recover_pass`: 3 passed.
+- `cargo test -p pesto-poster --test resume_confirm`: 7 passed.
+- `cargo test -p pesto-poster --test pause_resume`: 2 passed.
+
+Next action: reduce the run entry point to named stages in
+`poster/orchestrator.rs` and introduce an internal `RunOptions` equivalent,
+keeping the existing public functions as compatibility facades.
 
 ### 2026-09-19 — Phase 3 continued: worker extraction
 

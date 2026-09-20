@@ -13,9 +13,9 @@ use crate::progress::ProgressEvent;
 use crate::resume::{resume_action, ResumeAction};
 use crate::yenc;
 
-use super::commit_result;
 use super::outcome::PostedSegment;
 use super::persisted_identity;
+use super::result::commit_result;
 use super::shared::Shared;
 use super::task::{PostTask, ReadyArticle, TaskDispatcher};
 /// Per-worker token-bucket rate limiter.

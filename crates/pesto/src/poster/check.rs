@@ -570,7 +570,7 @@ async fn process_item(
             slot.invalidate("stat_err");
             item.stat_attempts += 1;
             if item.stat_attempts < max_stat_attempts {
-                let base = super::jittered(slot.retry_delay(), worker_idx);
+                let base = super::result::jittered(slot.retry_delay(), worker_idx);
                 // Unlike the "not found" path above, this used to be silent
                 // in the UI — only a `tracing::warn!`, which is a no-op
                 // unless the user runs with `-v`/`--session-log`. A run of
