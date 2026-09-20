@@ -395,10 +395,10 @@ Steps:
   - [x] Move each feature's `impl App` methods next to its state module.
 - [x] Move filesystem, upload, hook and indexer operations into `tasks/`.
 - [x] Keep the event loop responsible for dispatch rather than business logic.
-- [ ] Review `AppEvent` after boundaries exist; group events only when doing so
+- [x] Review `AppEvent` after boundaries exist; group events only when doing so
   improves navigation and exhaustiveness.
-- [ ] Run `cargo check -p upapasta`, Clippy and tests after each feature move.
-- [ ] Run all gates.
+- [x] Run `cargo check -p upapasta`, Clippy and tests after each feature move.
+- [x] Run all gates.
 
 The TUI must remain responsive: render modules never perform blocking work and
 background results continue to arrive through events/channels.
@@ -1097,6 +1097,28 @@ Validation completed:
 
 Next action: review `AppEvent` exhaustiveness and grouping now that the
 dispatch boundary exists, then run the full Phase 4 gate set.
+
+### 2026-09-20 — Phase 4 complete: AppEvent review
+
+- Removed the dead `AppEvent` variants (`FileSelected`, `UploadStarted`,
+  `UploadCompleted`, `Quit`) and the unused `EventHandler` /
+  `create_progress_channel` helpers; dropped the blanket
+  `#![allow(dead_code)]` from `events.rs` and the never-constructed
+  `UploadPhase::Done`.
+- Grouped the enum into Input/logging, Browser/queue, upload lifecycle,
+  Prowlarr, hooks and watch sections so the dispatch match in `runtime.rs`
+  reads top-down.
+- No produced or consumed event changed; only unused surface was removed.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh` (21 baselined files): passed.
+
+Phase 4 is complete. Next action: begin Phase 5 by splitting `pesto`'s `nfo.rs`
+into metadata model, detection/parsing and rendering.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
