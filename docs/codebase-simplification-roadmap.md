@@ -413,7 +413,7 @@ the highest-value hotspots are under control.
   client behavior while preserving `pool.rs`.
 - [x] Split `nzb.rs` into shared model, reader and writer.
 - [x] Group `config/types.rs` by configuration section.
-- [ ] Separate public progress events from terminal-specific presentation.
+- [x] Separate public progress events from terminal-specific presentation.
 - [ ] Review `compress.rs`, `resume.rs` and `upload.rs`; extract only natural
   boundaries rather than chasing the line limit.
 - [ ] Run all gates.
@@ -1212,6 +1212,29 @@ Validation completed:
 
 Next action: separate public progress events from terminal-specific
 presentation.
+
+### 2026-09-20 — Phase 5 continued: progress presentation split
+
+- Converted `progress.rs` into `progress/mod.rs` and moved the concrete
+  presentation code into submodules:
+  - `progress/json.rs`: `spawn_json_emitter` and its emit loop.
+  - `progress/plain.rs`: `format_size`, `UploadFlags`, `print_upload_flags`
+    and `print_tree`.
+- `progress/mod.rs` is 277 lines holding the event model, the channel type
+  aliases and the `RendererOptions` contract; it re-exports the presentation
+  entry points, so `pesto::progress::{format_size, spawn_json_emitter, ...}`
+  and every existing caller are unchanged.
+
+Validation completed:
+
+- `cargo check -p pesto-poster --all-targets`, `cargo clippy -p pesto-poster
+  --all-targets -- -D warnings` and `cargo check -p upapasta`: passed.
+- `cargo test -p pesto-poster --lib`: 589 passed, 5 ignored.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: review `compress.rs`, `resume.rs` and `upload.rs` for natural
+boundaries rather than chasing the line limit.
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
