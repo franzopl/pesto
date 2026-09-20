@@ -1,5 +1,9 @@
 //! Queue entry metadata: how a queued path becomes an NZB.
 
+use std::path::PathBuf;
+
+use super::App;
+
 /// Describes how a queued path will become an NZB. A directory bundles every
 /// file under it into a single NZB named after the folder (the standard Usenet
 /// "release" unit); a plain file becomes one NZB named after the file. This is
@@ -122,4 +126,104 @@ pub(crate) fn dir_stats(dir: &std::path::Path) -> (usize, u64) {
         }
     }
     (count, bytes)
+}
+
+impl App {
+    /// Toggle the item under the Browser cursor in the upload queue, then
+    /// advance the cursor. This is the single selection action (`Space`): the
+    /// queue is the one source of truth, so the Browser `[x]` badge and the
+    /// queue panel always agree. Files and directories are both allowed; a
+    /// directory is queued as one release → one NZB.
+    pub fn toggle_queue_at_cursor(&mut self) {
+        let path = match self.file_tree.get_selected().cloned() {
+            Some(p) => p,
+            None => return,
+        };
+        let key = path.to_string_lossy().to_string();
+        let now_queued = self.upload_queue.toggle(key.clone());
+        if now_queued {
+            // Quick (no walk): a folder's file count / size is computed off the
+            // UI thread so marking a huge directory never freezes the loop.
+            let info = queue_entry_info_quick(&key);
+            if info.is_dir {
+                self.pending_meta.push(key.clone());
+                self.status_bar.set(format!(
+                    "Queued folder “{}” → 1 NZB (sizing…) — {} in queue",
+                    info.nzb_name,
+                    self.upload_queue.items.len()
+                ));
+            } else {
+                self.status_bar.set(format!(
+                    "Queued “{}” — {} in queue",
+                    info.nzb_name,
+                    self.upload_queue.items.len()
+                ));
+            }
+            self.queue_meta.insert(key, info);
+        } else {
+            self.queue_meta.remove(&key);
+            self.status_bar.set(format!(
+                "Unqueued — {} item(s) in queue",
+                self.upload_queue.items.len()
+            ));
+        }
+        self.sync_queue_badges();
+        self.save_queue();
+        self.file_tree.select_next();
+    }
+
+    /// Rebuild the Browser badge mirror from the queue. Must be called after any
+    /// mutation of `upload_queue.items`.
+    pub fn sync_queue_badges(&mut self) {
+        let set: std::collections::HashSet<PathBuf> =
+            self.upload_queue.items.iter().map(PathBuf::from).collect();
+        self.file_tree.set_queued(set);
+    }
+
+    /// Grouping info for a queued path, from the cache when available. The
+    /// fallback uses the quick (walk-free) form so a render that races ahead of
+    /// the cache cannot trigger a filesystem walk on the UI thread.
+    pub fn queue_info(&self, path: &str) -> QueueEntryInfo {
+        self.queue_meta
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| queue_entry_info_quick(path))
+    }
+
+    /// Drain the folders awaiting a `dir_stats` walk. The run loop runs these on
+    /// a blocking worker and returns each result via [`apply_queue_meta`].
+    pub fn take_pending_meta(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_meta)
+    }
+
+    /// Fold a completed `dir_stats` result back into the queue cache. Ignored if
+    /// the path has since left the queue (unqueued before the walk finished).
+    pub fn apply_queue_meta(&mut self, key: &str, file_count: usize, size_bytes: u64) {
+        if let Some(info) = self.queue_meta.get_mut(key) {
+            info.file_count = file_count;
+            info.size_bytes = size_bytes;
+            info.sized = true;
+        }
+    }
+
+    /// Remove the selected queue item, keeping caches and badges in sync.
+    pub fn remove_queue_selected(&mut self) -> Option<String> {
+        let removed = self.upload_queue.remove_selected();
+        if let Some(ref p) = removed {
+            self.queue_meta.remove(p);
+            self.sync_queue_badges();
+            self.save_queue();
+        }
+        removed
+    }
+
+    /// Clear the whole queue, returning how many items were removed.
+    pub fn clear_queue(&mut self) -> usize {
+        let count = self.upload_queue.items.len();
+        self.upload_queue.clear();
+        self.queue_meta.clear();
+        self.sync_queue_badges();
+        self.save_queue();
+        count
+    }
 }

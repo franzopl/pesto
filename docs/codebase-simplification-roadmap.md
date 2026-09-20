@@ -966,6 +966,30 @@ Next action: move the Vault methods (`load_vault`, `vault_parse_selected`,
 `vault_open_viewer`) into `app/vault.rs`, then continue with history, config,
 queue and hooks.
 
+### 2026-09-20 — Phase 4 continued: Vault, History and Queue methods moved
+
+- Moved the Vault methods (`load_vault`, `vault_parse_selected`,
+  `vault_open_viewer`) into `app/vault.rs`.
+- Moved the History methods (`refresh_history`, `refresh_stats`,
+  `history_select_next/prev`, `open_nzb_viewer`, `close_nzb_viewer`,
+  `nzb_viewer_scroll_*`) into `app/history.rs`.
+- Moved the Queue methods (`toggle_queue_at_cursor`, `sync_queue_badges`,
+  `queue_info`, `take_pending_meta`, `apply_queue_meta`, `remove_queue_selected`,
+  `clear_queue`) into `app/queue.rs`, beside the queue metadata helpers.
+- Each group keeps its public method signatures; only private helpers that are
+  used solely within a group moved with it. `app/mod.rs` shrank from 2,768 to
+  2,486 lines and its source-size debt baseline was lowered again.
+
+Validation completed:
+
+- `cargo check -p upapasta`, `cargo clippy -p upapasta --all-targets -- -D
+  warnings` and `cargo test -p upapasta` (38 passed): passed.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh`: passed.
+
+Next action: move the Config-screen and confirm-panel methods into
+`app/config.rs`, then extract upload/hook/indexer work into `tasks/`.
+
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
 - Added `poster/pipeline.rs` (247 lines) for the posting pipeline machinery:
