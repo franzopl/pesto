@@ -1494,6 +1494,30 @@ Validation completed:
 Phase 6 is complete. Next action: begin Phase 7 by classifying every remaining
 source-size exception and adding concise module maps to complex facades.
 
+### 2026-09-20 — Phase 7 started: exception inventory and App facade
+
+- Classified the 12 Phase 7 baseline entries into four focused SIMD backends,
+  four compatibility/end-to-end test suites and four general-purpose files
+  that still require reduction (`upapasta::app`, `file_tree`, poster checking
+  and configuration tests). No general-purpose file was granted a permanent
+  exception.
+- Added a module map to `upapasta::app` and moved upload-progress models,
+  progress aggregation and shared display vocabulary into `app/progress.rs`
+  (267 lines).
+- Moved the facade's regression coverage into `app/tests.rs` (270 lines),
+  preserving the existing `app::tests::*` paths.
+- Reduced `app/mod.rs` from 1,139 to 614 lines and removed it from the
+  source-size baseline, leaving 11 entries.
+
+Validation completed:
+
+- `cargo clippy -p upapasta --all-targets -- -D warnings`: passed.
+- `cargo test -p upapasta`: passed (38 tests).
+
+Next action: reduce the general-purpose `pesto::poster::check` coordinator by
+extracting its queue/state model from orchestration while preserving streaming
+check and recovery ordering.
+
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 
 - Added `poster/pipeline.rs` (247 lines) for the posting pipeline machinery:
