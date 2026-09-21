@@ -30,6 +30,10 @@
 //! (`bytes_written`/`bytes_read`) and summed up here, so the terminal
 //! report can show, say, "12.3 KiB to check a 4 GiB release" for `Stat`, or
 //! the release's real size for `Body`.
+//!
+//! Module map: `model` holds configuration, progress and outcome types,
+//! `plan` turns a queue into work items, `execution` drains server tiers with
+//! workers and retries, and `reporting` streams per-NZB outcomes.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;

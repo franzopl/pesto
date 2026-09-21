@@ -4,6 +4,10 @@
 //! - Single media file → `mediainfo` output for that file.
 //! - Series directory (name contains SXX pattern) → `mediainfo` of first episode.
 //! - Generic directory (courses, documents, etc.) → banner + stats + directory tree.
+//!
+//! Module map: `detect` classifies the input, `mediainfo` runs the external
+//! probes, `mpls` and `dvd` read disc metadata, and `render` formats the
+//! banners, trees and listings.
 
 use std::path::{Path, PathBuf};
 

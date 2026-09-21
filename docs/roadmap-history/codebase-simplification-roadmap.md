@@ -1,5 +1,11 @@
 # Codebase simplification roadmap
 
+> **Archived (2026-09-20).** Every phase in this plan is complete. The durable
+> outcome is `scripts/check-source-size.sh` plus a baseline that now contains
+> only documented SIMD backends and whole-pipeline compatibility test suites.
+> This document is preserved for historical context; see
+> `docs/architecture.md` and the crate roadmaps for the current design.
+
 This is the persistent execution plan for reducing the maintenance and context
 cost of the Pesto workspace. It is intentionally more detailed than the active
 product roadmaps: a later session should be able to resume the refactor from
@@ -455,17 +461,17 @@ Run crate-specific checks during each step and all gates at phase completion.
 Goal: convert the temporary no-growth baseline into a durable architecture
 guardrail.
 
-- [ ] Remove baseline entries as files fall below 800 lines.
-- [ ] Classify remaining exceptions as SIMD, tables, generated or focused
+- [x] Remove baseline entries as files fall below 800 lines.
+- [x] Classify remaining exceptions as SIMD, tables, generated or focused
   compatibility tests and document why each should stay large.
-- [ ] Consider a lower warning threshold after the first six phases; do not
+- [x] Consider a lower warning threshold after the first six phases; do not
   fail historical 400–800-line modules without an identified boundary.
-- [ ] Add concise module maps to complex subsystem facades.
-- [ ] Verify entry points are navigational and dependency direction remains
+- [x] Add concise module maps to complex subsystem facades.
+- [x] Verify entry points are navigational and dependency direction remains
   consistent with `docs/architecture.md`.
-- [ ] Re-measure workspace files, hotspot concentration and common-task context
+- [x] Re-measure workspace files, hotspot concentration and common-task context
   size.
-- [ ] Remove completed work from this active roadmap or archive it according to
+- [x] Remove completed work from this active roadmap or archive it according to
   the repository roadmap policy.
 
 ## Progress log
@@ -1517,6 +1523,138 @@ Validation completed:
 Next action: reduce the general-purpose `pesto::poster::check` coordinator by
 extracting its queue/state model from orchestration while preserving streaming
 check and recovery ordering.
+
+### 2026-09-20 — Phase 7 continued: poster check boundaries
+
+- Added a module map to `poster::check` and kept the streaming queue,
+  per-server work stealing and coordinator lifecycle together in the facade.
+- Extracted article reconstruction, reposting and NNTP refusal classification
+  into `check/repost.rs` (177 lines).
+- Extracted the bounded, parallel final recovery pass into
+  `check/recovery.rs` (186 lines) and moved focused classification tests into
+  `check/tests.rs` (64 lines).
+- Reduced `poster/check.rs` from 1,105 to 707 lines and removed it from the
+  source-size baseline, leaving 10 entries. Streaming STAT/repost ordering,
+  slot ownership and resume Message-ID replacement are unchanged.
+
+Validation completed:
+
+- `cargo clippy -p pesto-poster --all-targets -- -D warnings`: passed.
+- `cargo test -p pesto-poster`: passed, including streaming-check, retry,
+  recovery, resume and server-targeting integration coverage.
+
+Next action: organize the 1,077-line configuration test collection by config
+domain without changing the production configuration module.
+
+### 2026-09-20 — Phase 7 continued: configuration test domains
+
+- Converted `crates/pesto/src/config/tests.rs` into `config/tests/` modules
+  grouped by the production config domains: `defaults.rs` (resolution
+  precedence and default/required-field policy), `servers.rs` (multi-server
+  resolution), `parsing.rs` (upload-rate and memory-limit spec parsing),
+  `obfuscation.rs` (mode policy and file-counter rules), `toml_sections.rs`
+  (section parsing), `loading.rs` (`FileConfig::load` and misplaced-key hints),
+  `cli_overrides.rs` (override matrix) and `behavior.rs` (hooks and check
+  defaults).
+- Shared `base_overrides`/`minimal_file` fixtures live in `tests/mod.rs`; every
+  test body moved verbatim and no production configuration code changed.
+- Removed the 1,077-line `config/tests.rs` source-size baseline entry; the
+  largest new file is `toml_sections.rs` at 257 lines. The workspace baseline
+  fell from 10 to 9 entries.
+
+Validation completed:
+
+- `cargo test -p pesto-poster --lib config::`: 84 passed (75 moved tests plus
+  the 9 existing validation tests).
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed (64 `test result: ok` lines, no failures), with
+  only explicitly ignored tests skipped.
+- `bash scripts/check-source-size.sh`: passed with 9 baselined files.
+
+Next action: reduce the remaining general-purpose
+`upapasta::ui::components::file_tree` renderer, then classify `pesto::yenc::x86`
+as a focused SIMD exception.
+
+### 2026-09-20 — Phase 7 continued: file_tree split and exception classification
+
+- Converted `crates/upapasta/src/ui/components/file_tree.rs` (912 lines) into
+  `file_tree/`: `mod.rs` keeps the `FileTree`/`DirScanJob` state, navigation,
+  scan scheduling and filtering; `scan.rs` owns the blocking filesystem helpers
+  (`path_is_backed`, `dir_has_unbacked`, `release_key`, `item_size`);
+  `render.rs` owns the ratatui list rendering and badge/size formatting;
+  `tests.rs` owns the moved regressions. `release_key` is re-exported at the
+  same `ui::components::file_tree::release_key` path.
+- Reduced the largest file to `mod.rs` at 426 lines and removed the 912-line
+  baseline entry; the workspace baseline fell from 9 to 8 entries.
+- Reclassified `crates/pesto/src/yenc/x86.rs` (897 lines) as a focused
+  architecture-specific SIMD backend in `scripts/source-size-baseline.txt`,
+  alongside the Parmesan kernels, and grouped the four remaining entries as
+  whole-pipeline compatibility test suites. No general-purpose file remains on
+  the exception list.
+
+Validation completed:
+
+- `cargo test -p upapasta`: 38 passed, including the six moved `file_tree`
+  tests.
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh` (8 baselined files): passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed (64 `test result: ok` lines, no failures), with
+  only explicitly ignored tests skipped.
+
+Next action: add concise module maps to the remaining complex subsystem facades
+and verify entry points stay navigational relative to `docs/architecture.md`,
+then re-measure the workspace hotspot metrics.
+
+### 2026-09-20 — Phase 7 continued: facade maps, entry-point check and re-measurement
+
+- Added concise module maps to the remaining complex facades: `pesto::poster`,
+  `pesto::nntp`, `pesto::nzb`, `pesto::nfo`, `pesto::ui`, `upapasta::ui`,
+  `penne::check` and `parmesan::create`.
+- Verified the entry points named in `docs/architecture.md` against the tree
+  and updated the stale paths: UpaPasta state is now `src/app/` (not
+  `src/app.rs`) and the NZB module is `pesto/src/nzb/` (not `nzb.rs`). The
+  ownership table, route-a-change table and dependency direction still match
+  the actual crate graph.
+- Re-measured the workspace: about 94,300 lines across 335 Rust files —
+  `pesto` 48,540, `parmesan` 17,540, `upapasta` 12,634, `penne` 12,395 and
+  `sugo` 3,130. The largest files are now the four classified SIMD kernels
+  (1,422 / 1,105 / 1,077 / 897) and the four whole-pipeline compatibility
+  suites (872 / 868 / 851 / 818); every other file is under 780 lines and no
+  production general-purpose file needs an exception.
+- Decision on the lower warning threshold: keep 800 lines as the enforced
+  limit and do not add a non-failing warning. The workspace still contains 28
+  cohesive files between 600 and 800 lines, so a blanket warning would be
+  noise; a split should follow an identified behavioral boundary, not the line
+  count. Historical 400–800-line modules remain accepted as-is.
+
+Validation completed:
+
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh` (8 baselined files): passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed (64 `test result: ok` lines, no failures).
+
+Next action: archive or trim the completed Phase 0–7 work per the repository
+roadmap policy, leaving only the outstanding guardrail maintenance.
+
+### 2026-09-20 — Phase 7 complete: plan archived
+
+- Every Phase 0–7 step is complete. The only durable artifact that remains
+  active is `scripts/check-source-size.sh` and its 8-entry baseline of
+  documented SIMD backends and whole-pipeline compatibility suites.
+- Archived this document to `docs/roadmap-history/` following the repository
+  policy that the active `ROADMAP.md` contains only unfinished work. Added the
+  archive to `docs/roadmap-history/README.md` and updated the root roadmap's
+  reference to point at the archived location as completed context.
+
+Validation completed:
+
+- `cargo fmt --all -- --check`, `git diff --check` and
+  `bash scripts/check-source-size.sh` (8 baselined files): passed.
+- `cargo clippy --all-targets -- -D warnings`: passed.
+- `cargo test --all`: passed (64 `test result: ok` lines, no failures).
 
 ### 2026-09-19 — Phase 3 continued: named pipeline join
 

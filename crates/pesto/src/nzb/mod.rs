@@ -1,4 +1,8 @@
 //! `.nzb` generation, parsing and the shared metadata model.
+//!
+//! Module map: `model` holds the metadata types and TMDb/TVDB/IMDb/MAL
+//! reference parsers, `reader` parses `.nzb` XML, and `writer` generates and
+//! serializes it.
 
 mod model;
 mod reader;

@@ -7,6 +7,11 @@
 //!
 //! [`create`] is the primary entry point. Its request and result types give
 //! the CLI and library one explicit creation contract.
+//!
+//! Module map: `model` holds the request/report/event contracts, `plan`
+//! validates and discovers inputs, `ingest` runs the encoder passes,
+//! `packet_output` assembles and writes packets, and `output` stages
+//! transactional publication.
 
 use crate::ops::{calculate_geometry, plan_memory_layout, sort_files_by_file_id, CreateOptions};
 use crate::{packet, EncoderLayout, SimdPath};

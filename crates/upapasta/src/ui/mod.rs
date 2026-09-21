@@ -1,3 +1,10 @@
+//! TUI rendering: screen dispatch and the shared chrome.
+//!
+//! Module map: one renderer per screen (`dashboard`, `browser`, `queue`,
+//! `history`, `vault`, `watch`, `config`) plus `overlays/` for floating panels,
+//! `components/` for reusable widgets, `helpers` for shared formatting and
+//! `theme` for the palette.
+
 use crate::app::{App, AppState};
 mod browser;
 pub mod components;

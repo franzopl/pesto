@@ -7,12 +7,12 @@
 # Focused architecture-specific SIMD kernels; keep each backend contiguous so
 # target-feature invariants and its hot loop can be reviewed together.
 1422 crates/parmesan/src/encoder/shuffle_kernels.rs
-1105 crates/pesto/src/poster/check.rs
 1105 crates/parmesan/src/encoder/affine2x_kernels.rs
-1077 crates/pesto/src/config/tests.rs
 1077 crates/parmesan/src/encoder/gfni_kernels.rs
-912 crates/upapasta/src/ui/components/file_tree.rs
 897 crates/pesto/src/yenc/x86.rs
+#
+# Focused compatibility/end-to-end test suites that exercise whole pipelines
+# across many modules and are clearer as one scenario per file.
 872 crates/penne/tests/cli_download_end_to_end.rs
 868 crates/penne/tests/check.rs
 851 crates/pesto/tests/integration.rs

@@ -3,6 +3,11 @@
 //! A [`Connection`] wraps a single NNTP session. It speaks just enough of the
 //! protocol (RFC 3977 / RFC 4643) to authenticate and post articles — that is
 //! the whole MVP surface.
+//!
+//! Module map: `protocol` owns dot-stuffing and response framing, `response`
+//! classifies server replies and error hints, `auth` handles AUTHINFO and
+//! proxy checks, `tls` builds the shared rustls client, and `pool` manages
+//! connection reuse and checkout.
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};

@@ -9,8 +9,9 @@ the crate changelogs and the previous phase-by-phase roadmap is preserved in
 
 The posting pipeline is mature. The current product focus is UpaPasta v2,
 followed by downloader completion, API stabilization and release engineering.
-The cross-workspace effort to reduce maintenance and context cost is tracked in
-the [codebase simplification roadmap](docs/codebase-simplification-roadmap.md).
+The cross-workspace effort to reduce maintenance and context cost is complete
+and archived in the
+[codebase simplification roadmap](docs/roadmap-history/codebase-simplification-roadmap.md).
 
 Architecture principles:
 

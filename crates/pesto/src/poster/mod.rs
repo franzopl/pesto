@@ -4,6 +4,11 @@
 //! Files are read sequentially by a producer. yEnc runs on a small encode
 //! pool (nyuu: one encoder filling a ready-article queue). NNTP workers only
 //! POST. If PAR2 recovery exceeds a memory limit, the producer re-reads.
+//!
+//! Module map: `orchestrator` runs the lifecycle; `prepare` and `pipeline`
+//! perform its preparation and startup/join stages; `producer`, `worker` and
+//! `task` move files through encoding and POST; `connections`, `identity`,
+//! `result` and `check` own their named policies; `par2/` plans recovery sets.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
