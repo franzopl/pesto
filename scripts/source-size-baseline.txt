@@ -4,26 +4,16 @@
 # The checker permits these files only while they do not exceed the recorded
 # size. Lower the value when a file shrinks and remove the entry once it is at
 # or below 800 lines. Entries are debt baselines, not permanent exceptions.
-3588 crates/upapasta/src/app.rs
-2885 crates/upapasta/src/ui/mod.rs
-2817 crates/upapasta/src/main.rs
-2174 crates/pesto/src/nfo.rs
-1532 crates/pesto/src/nntp/mod.rs
-1432 crates/parmesan/src/create.rs
+# Focused architecture-specific SIMD kernels; keep each backend contiguous so
+# target-feature invariants and its hot loop can be reviewed together.
 1422 crates/parmesan/src/encoder/shuffle_kernels.rs
-1313 crates/pesto/src/nzb.rs
-1227 crates/parmesan/src/encoder/tests.rs
-1208 crates/penne/src/check.rs
-1116 crates/penne/src/bin/penne.rs
-1105 crates/pesto/src/poster/check.rs
 1105 crates/parmesan/src/encoder/affine2x_kernels.rs
-1077 crates/pesto/src/config/tests.rs
 1077 crates/parmesan/src/encoder/gfni_kernels.rs
-912 crates/upapasta/src/ui/components/file_tree.rs
 897 crates/pesto/src/yenc/x86.rs
+#
+# Focused compatibility/end-to-end test suites that exercise whole pipelines
+# across many modules and are clearer as one scenario per file.
 872 crates/penne/tests/cli_download_end_to_end.rs
 868 crates/penne/tests/check.rs
 851 crates/pesto/tests/integration.rs
-837 crates/pesto/src/compress.rs
 818 crates/pesto/tests/full_shared_obfuscation.rs
-811 crates/pesto/src/config/types.rs

@@ -1,4 +1,5 @@
-//! Public API of `pesto`, intended for integration with `upapasta`.
+//! Public API of `pesto`, intended for integration with `upapasta`, `penne`
+//! and `sugo`.
 //!
 //! `pesto` is a fast, lean Usenet poster: it yEnc-encodes files, posts the
 //! resulting articles over NNTP and emits an `.nzb` file. See ROADMAP.md for
@@ -23,6 +24,11 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! The supported embedding surface and its compatibility tiers are documented
+//! in `docs/pesto-embedding-api.md` in the workspace repository. Child modules
+//! that only organize an implementation are private; use the items re-exported
+//! by their domain facade (for example, [`config`] and [`yenc`]).
 
 /// Shown by `--version` and the startup banner.
 pub const DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");

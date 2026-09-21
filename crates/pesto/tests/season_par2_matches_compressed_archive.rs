@@ -25,7 +25,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use pesto::yenc::decode::decode_part;
+use pesto::yenc::decode_part;
 
 /// A mock NNTP server that accepts every `POST` with `240` and records the
 /// full raw article body (headers + yEnc data), as exact bytes — a lossy

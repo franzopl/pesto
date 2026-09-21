@@ -32,7 +32,7 @@ of sibling CLIs.
 |---|---|---|
 | `parmesan` | PAR2 format, Reed-Solomon, encoding, verification and repair | `src/lib.rs`, then `ops.rs`, `verify.rs` or `repair.rs` |
 | `pesto` | Posting, configuration, yEnc, NNTP, NZB generation and upload progress | `src/lib.rs`, then `poster/`, `nntp/`, `yenc/` or `upload.rs` |
-| `upapasta` | Upload TUI, catalog, watch mode and passive indexer integration | `src/app.rs` for state; `src/events.rs` for actions; `src/ui/` for rendering |
+| `upapasta` | Upload TUI, catalog, watch mode and passive indexer integration | `src/app/` for state; `src/events.rs` for actions; `src/ui/` for rendering |
 | `penne` | NZB retrieval, assembly, checks, repair and extraction | `src/download.rs` for the pipeline; neighboring stage modules for behavior |
 | `sugo` | HTTP/SSE/API presentation and one-job-at-a-time orchestration | `src/job/` for behavior; `src/api/` or `src/web/` for transport/presentation |
 
@@ -61,11 +61,11 @@ inter-crate integration mechanism.
 | POST throughput, retries, article scheduling or posting PAR2 | `pesto/src/poster/` | UIs and `penne` |
 | NNTP/TLS/authentication or POST/STAT/BODY semantics | `pesto/src/nntp/` | application-specific policy |
 | yEnc wire encoding or decoding | `pesto/src/yenc/` | UI and NNTP connection management |
-| NZB XML, subjects or Message-IDs | `pesto/src/nzb.rs` | downloader assembly |
+| NZB XML, subjects or Message-IDs | `pesto/src/nzb/` | downloader assembly |
 | PAR2 geometry, packets, verification or repair | `parmesan/src/` | `pesto` CLI and UI code |
 | Download scheduling, failover or file assembly | `penne/src/download.rs` or `assemble.rs` | `sugo` handlers |
 | Download post-processing | the matching `penne` stage (`repair`, `deobfuscate`, `extract`, `cleanup`) | route handlers |
-| UpaPasta key behavior | `upapasta/src/events.rs` and `app.rs` | ratatui widgets |
+| UpaPasta key behavior | `upapasta/src/events.rs` and `app/` | ratatui widgets |
 | UpaPasta layout | `upapasta/src/ui/` after the required state exists | persistence and network tasks |
 | SABnzbd API or browser behavior | `sugo/src/api/` or `web/` | `penne` pipeline internals |
 | Sugo job lifecycle/progress | `sugo/src/job/` | templates and API serialization |

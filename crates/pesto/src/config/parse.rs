@@ -1,6 +1,6 @@
 use crate::article::random_from;
 use crate::config::types::*;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Maps every known config field to the section it actually lives in, so an
@@ -513,4 +513,57 @@ impl Config {
             keepalive_interval: file.server.keepalive.unwrap_or(DEFAULT_KEEPALIVE_SECS),
         })
     }
+}
+
+/// Parse `--memory-limit`'s global-budget spec: an absolute size (delegates
+/// to [`parse_upload_rate`] — harmless reuse, there's no `/s` suffix on a
+/// memory size), a percentage of host RAM (`"70%"`), or `"auto"`/empty
+/// (`None` — let `pesto::memory::Ceiling` derive it from RLIMIT_AS/cgroup/
+/// host RAM with no explicit override).
+pub fn parse_memory_limit_spec(s: &str) -> Result<Option<u64>> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if let Some(pct) = s.strip_suffix('%') {
+        let pct: f64 = pct
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid memory-limit percentage `{s}`"))?;
+        if !(0.0..=100.0).contains(&pct) {
+            bail!("memory-limit percentage `{s}` must be between 0% and 100%");
+        }
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let host_total = sys.total_memory();
+        return Ok(Some((host_total as f64 * pct / 100.0) as u64));
+    }
+    Ok(Some(parse_upload_rate(s)?))
+}
+
+/// Parse a human-readable upload rate string into bytes per second.
+pub fn parse_upload_rate(s: &str) -> Result<u64> {
+    let s = s.trim();
+    let s = s
+        .strip_suffix("/s")
+        .or_else(|| s.strip_suffix("ps"))
+        .unwrap_or(s)
+        .trim();
+
+    let split = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let (num_str, unit) = s.split_at(split);
+    let value: f64 = num_str
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid upload rate `{}`", s))?;
+    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        other => bail!("unknown rate unit `{other}` in `{s}`"),
+    };
+    Ok((value * multiplier) as u64)
 }

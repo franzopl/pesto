@@ -1,7 +1,4 @@
-#![allow(dead_code)]
-
 use crossterm::event::KeyEvent;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 /// High-level phase of the pipeline.
 ///
@@ -24,7 +21,6 @@ pub enum UploadPhase {
         written: u32,
         total: u32,
     },
-    Done,
 }
 
 /// Structured progress information extracted from pesto::progress::ProgressEvent
@@ -80,20 +76,17 @@ pub struct FileProgressUpdate {
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
+    // ── Input and logging ────────────────────────────────────────────────
+    // Keyboard (routed from the async EventStream)
+    Key(KeyEvent),
     // Human readable log line
     Progress(String),
     // Structured progress for accurate bars / stats
     ProgressUpdate(ProgressUpdate),
-    // Keyboard (routed from the async EventStream)
-    Key(KeyEvent),
-    // File selection events
-    FileSelected(String),
-    // Upload lifecycle
-    UploadStarted,
-    UploadCompleted,
-    UploadError(String),
     // Periodic UI tick
     Tick,
+
+    // ── Browser and queue ────────────────────────────────────────────────
     // A background directory scan finished: per-item (path, backed, size). The
     // generation lets the FileTree drop results for a directory it already left.
     DirScanReady {
@@ -106,6 +99,8 @@ pub enum AppEvent {
         file_count: usize,
         size_bytes: u64,
     },
+
+    // ── Upload lifecycle ─────────────────────────────────────────────────
     // A single queue item started uploading (sequential, one NZB at a time).
     ItemUploadStarted {
         path: String,
@@ -134,6 +129,13 @@ pub enum AppEvent {
         duration_s: f64,
         record_catalog: bool,
     },
+    // Internal: upload task finished
+    UploadFinished {
+        success: bool,
+        cancelled: bool,
+    },
+    // Upload error surfaced to the user (log line + status).
+    UploadError(String),
     // Record one produced NZB in the catalog (used by per-file / season folder
     // modes where a single queue entry yields multiple NZBs).
     CatalogRecord {
@@ -142,13 +144,8 @@ pub enum AppEvent {
         nzb_path: Option<std::path::PathBuf>,
         duration_s: f64,
     },
-    // Internal: upload task finished
-    UploadFinished {
-        success: bool,
-        cancelled: bool,
-    },
-    // Upload control
-    Quit,
+
+    // ── Prowlarr ─────────────────────────────────────────────────────────
     // Prowlarr connection check result
     ProwlarrStatus(crate::prowlarr::ConnectionStatus),
     // Prowlarr search results (Ok) or error (Err)
@@ -172,6 +169,8 @@ pub enum AppEvent {
         no_match: usize,
         failed: usize,
     },
+
+    // ── Hooks ────────────────────────────────────────────────────────────
     // Manual "run a hook on the selected release" finished. `ok` is true only
     // when the hook exited 0; the app then records the run for the release so
     // the Browser and picker can flag it. `release_key`/`hook_name` are empty
@@ -183,6 +182,8 @@ pub enum AppEvent {
         hook_name: String,
         log: Vec<String>,
     },
+
+    // ── Watch mode ───────────────────────────────────────────────────────
     // A background rescan of the watch directory finished: top-level entries
     // as (path, size) snapshots for stability tracking.
     WatchScanReady {
@@ -200,24 +201,4 @@ pub enum AppEvent {
         nzb_path: Option<std::path::PathBuf>,
         duration_s: f64,
     },
-}
-
-pub struct EventHandler {
-    pub tx: UnboundedSender<AppEvent>,
-    pub rx: UnboundedReceiver<AppEvent>,
-}
-
-impl EventHandler {
-    pub fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        Self { tx, rx }
-    }
-
-    pub fn send(&self, event: AppEvent) {
-        let _ = self.tx.send(event);
-    }
-}
-
-pub fn create_progress_channel() -> (UnboundedSender<String>, UnboundedReceiver<String>) {
-    mpsc::unbounded_channel()
 }
