@@ -36,10 +36,11 @@ Workspace applications also rely on the following domain APIs:
 | `upload` | the application-oriented upload lifecycle |
 | `yenc` | yEnc encode/decode primitives |
 
-Consumers should import items from these facade paths. Implementation modules
-such as `config::types`, `config::parse`, `yenc::decode`, and architecture-
-specific yEnc backends are private. Their supported items remain available as
-direct children of `config` and `yenc`.
+Consumers should import items from these facade paths. Legacy implementation
+paths such as `config::types`, `config::parse`, `yenc::decode`, and the
+architecture-specific yEnc backends remain publicly reachable for source
+compatibility, but new code should use the items re-exported directly from
+`config` and `yenc`.
 
 ## Operational compatibility surface
 
@@ -51,11 +52,11 @@ the executable or tests use them, but new sibling-crate code must not depend on
 them without first promoting the required behavior into the supported surface
 above.
 
-`memory::alloc` is the one deliberately public child module in this group: a
-binary must be able to name `CountingAlloc` in its `#[global_allocator]`
-declaration. Memory budgeting, ceiling discovery internals and pressure
-tracking implementations are crate-private or exposed only through the
-`memory` facade.
+`memory::alloc` is a required public child module: a binary must be able to
+name `CountingAlloc` in its `#[global_allocator]` declaration. The other
+memory child modules remain public compatibility paths for existing consumers;
+new code should prefer the types re-exported through the `memory` facade where
+available.
 
 ## Compatibility rules
 

@@ -54,10 +54,10 @@
 //! saving; see `DEFAULT_MAX_BLOCKING_THREADS`.
 
 pub mod alloc;
-pub(crate) mod budget;
-mod ceiling;
-mod cgroup;
-mod pressure;
+pub mod budget;
+pub mod ceiling;
+pub mod cgroup;
+pub mod pressure;
 
 pub use ceiling::Ceiling;
 pub use pressure::{Pressure, PressureTracker};

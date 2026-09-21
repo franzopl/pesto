@@ -120,7 +120,8 @@ pub fn generate(
 /// release — same scope as the `entry_label` already surfaced to hooks and
 /// history. `None` when there are no segments, or the first one's
 /// `wire_name` is empty (segments reconstructed from a parsed `.nzb` via
-/// [`parse`], which never re-encode and so never had a wire identity).
+/// [`crate::nzb::parse`], which never re-encode and so never had a wire
+/// identity).
 pub fn wire_subject(segments: &[PostedSegment]) -> Option<String> {
     let first = segments.first()?;
     if first.wire_name.is_empty() {

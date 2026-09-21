@@ -92,8 +92,8 @@ pub(super) fn collect_videos(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Returns `true` when `paths` point at a Blu-ray disc structure, i.e. the case
-/// where [`generate`] will invoke `bdinfo`. Used to decide whether a caller's
-/// progress message should mention `bdinfo` specifically.
+/// where [`crate::nfo::generate`] will invoke `bdinfo`. Used to decide whether
+/// a caller's progress message should mention `bdinfo` specifically.
 pub fn looks_like_bluray(paths: &[PathBuf]) -> bool {
     paths.len() == 1 && paths[0].is_dir() && !find_bluray_disc_roots(&paths[0]).is_empty()
 }

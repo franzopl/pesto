@@ -44,7 +44,7 @@ pub struct FileTree {
     /// `(total items, unbacked items, total bytes still to upload)`.
     summary: (usize, usize, u64),
     /// Absolute paths currently in the upload queue. This is a render mirror of
-    /// `App::upload_queue`, refreshed via [`set_queued`]; it is never mutated
+    /// `App::upload_queue`, refreshed via [`Self::set_queued`]; it is never mutated
     /// directly so the queue stays the single source of truth.
     pub queued: HashSet<PathBuf>,
     /// NZB status from the catalog, keyed by original_name (filename or full path).
@@ -66,14 +66,14 @@ pub struct FileTree {
     visible_height: usize,
     /// Per-item scan result `(backed, upload_size_bytes)`, keyed by item path.
     /// Computed off the UI thread (see [`DirScanJob`]) and delivered via
-    /// [`apply_scan`]. A missing key means "not scanned yet".
+    /// [`Self::apply_scan`]. A missing key means "not scanned yet".
     scan_cache: HashMap<PathBuf, (bool, u64)>,
     /// Monotonic scan id. A delivered scan is applied only if it still matches
     /// the current generation, so results for a directory we already left (or a
     /// stale `nzb_status`) are discarded.
     scan_generation: u64,
     /// Set whenever a fresh background scan is needed (after navigation or a
-    /// catalog change); consumed by [`take_scan_job`].
+    /// catalog change); consumed by [`Self::take_scan_job`].
     scan_pending: bool,
     /// False until the scan for the current generation has been applied. The
     /// summary line shows a "scanning…" hint until then.
@@ -310,7 +310,7 @@ impl FileTree {
 
     /// Hand off the pending directory scan, if any. The caller runs
     /// [`DirScanJob::run`] on a blocking thread and returns the result through
-    /// [`apply_scan`]. Returns `None` when no scan is pending.
+    /// [`Self::apply_scan`]. Returns `None` when no scan is pending.
     pub fn take_scan_job(&mut self) -> Option<DirScanJob> {
         if !self.scan_pending {
             return None;

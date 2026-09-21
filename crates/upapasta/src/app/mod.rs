@@ -49,7 +49,7 @@ pub struct App {
     pub queue_meta: std::collections::HashMap<String, QueueEntryInfo>,
     /// Queued folder paths whose file count / size still need the recursive
     /// `dir_stats` walk. The run loop drains this, runs the walk off the UI
-    /// thread, and folds the result back via [`apply_queue_meta`], so marking a
+    /// thread, and folds the result back via [`App::apply_queue_meta`], so marking a
     /// huge folder never blocks the loop.
     pub pending_meta: Vec<String>,
     /// Live per-item upload state, keyed by the queue path. Drives the ✓/✗/▶

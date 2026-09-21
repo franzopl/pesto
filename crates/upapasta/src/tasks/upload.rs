@@ -469,8 +469,9 @@ pub(crate) fn build_dry_run_config() -> Config {
 ///
 /// Mirrors the NFO + hook stage of [`pesto::upload::run_upload`] (which only
 /// fires for the per-episode runs): generate a season `.nfo` next to the pack
-/// `.nzb` when NFOs are enabled, build the same [`HookContext`], then run every
-/// configured hook so the pack is forwarded to the indexer like the episodes.
+/// `.nzb` when NFOs are enabled, build the same [`pesto::hooks::HookContext`],
+/// then run every configured hook so the pack is forwarded to the indexer like
+/// the episodes.
 async fn run_season_hooks(
     config: &Config,
     season_dir: &Path,

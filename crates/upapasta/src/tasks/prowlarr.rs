@@ -99,7 +99,8 @@ pub(crate) fn trigger_prowlarr_search(app: &mut App, tx: mpsc::UnboundedSender<A
 ///
 /// Searches Prowlarr for every queued release in one background pass and
 /// auto-downloads any result whose name matches the release exactly (same
-/// [`release_key`]). Items without an exact match are only counted/logged —
+/// [`crate::ui::components::file_tree::release_key`]). Items without an exact
+/// match are only counted/logged —
 /// never auto-downloaded. Progress is streamed back via `ProwlarrBatchProgress`
 /// and a final `ProwlarrBatchDone`.
 pub(crate) fn trigger_prowlarr_queue_search(app: &mut App, tx: mpsc::UnboundedSender<AppEvent>) {

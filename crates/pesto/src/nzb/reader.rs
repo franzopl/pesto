@@ -9,10 +9,10 @@ use super::{NzbMeta, ParsedNzb};
 
 /// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
 ///
-/// The parser targets the format produced by [`generate`] but tolerates minor
-/// whitespace variation.  Attributes must use double quotes. Segments are
-/// sorted by `(file_name, part)` before returning so they can be passed
-/// directly to [`generate`].
+/// The parser targets the format produced by [`crate::nzb::generate`] but
+/// tolerates minor whitespace variation. Attributes must use double quotes.
+/// Segments are sorted by `(file_name, part)` before returning so they can be
+/// passed directly to [`crate::nzb::generate`].
 pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
     let mut poster = String::new();
     let mut groups: Vec<String> = Vec::new();

@@ -191,7 +191,7 @@ impl App {
     }
 
     /// Drain the folders awaiting a `dir_stats` walk. The run loop runs these on
-    /// a blocking worker and returns each result via [`apply_queue_meta`].
+    /// a blocking worker and returns each result via [`Self::apply_queue_meta`].
     pub fn take_pending_meta(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_meta)
     }

@@ -10,11 +10,11 @@
 mod tables;
 
 #[cfg(target_arch = "aarch64")]
-mod aarch64;
-mod decode;
-mod scalar;
+pub mod aarch64;
+pub mod decode;
+pub mod scalar;
 #[cfg(target_arch = "x86_64")]
-mod x86;
+pub mod x86;
 
 #[cfg(test)]
 mod tests;

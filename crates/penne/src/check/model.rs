@@ -9,7 +9,7 @@ use clap::ValueEnum;
 ///
 /// `Stat` and `Head` never transfer an article body; `Body` does (and
 /// discards it, never decoding or writing anything — see
-/// [`check_queue`]'s doc comment). Lives here rather than in the CLI
+/// [`crate::check::check_queue`]'s doc comment). Lives here rather than in the CLI
 /// binary, mirroring [`crate::config::ProcessingMode`]'s existing
 /// precedent of a `clap::ValueEnum` in the library so both the flag and a
 /// future library caller share one definition.
