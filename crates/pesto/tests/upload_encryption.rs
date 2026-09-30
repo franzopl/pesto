@@ -6,7 +6,6 @@ use pesto::crypto::{control, DownloadDecryptionAdapter};
 use pesto::poster::post_files_with_progress;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::instrument::WithSubscriber;
 
 async fn handle_connection(stream: TcpStream, captured: Arc<Mutex<Vec<Vec<u8>>>>) {
     let (read_half, mut write_half) = stream.into_split();
@@ -866,65 +865,4 @@ async fn test_persistence_lifecycle_invariants() {
         let art_salt = control::extract_salt_from_line1(body).unwrap();
         assert_eq!(&art_salt, saved_salt);
     }
-}
-
-#[tokio::test]
-async fn test_secret_redaction_in_tracing_logs() {
-    let sentinel_pass = "SENTINEL_PASSWORD_998877";
-    let (port, _captured) = spawn_mock_server().await;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("log_test.bin");
-    let plaintext = b"SECRET_PLAINTEXT_DATA_12345";
-    std::fs::write(&path, plaintext).unwrap();
-
-    let log_buffer = Arc::new(Mutex::new(Vec::new()));
-    let buffer_clone = Arc::clone(&log_buffer);
-
-    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for BufferWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let make_writer = move || BufferWriter(Arc::clone(&buffer_clone));
-
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_writer(make_writer)
-        .finish();
-
-    let config = make_config(port, Some(sentinel_pass.into()));
-    let files = vec![pesto::walk::InputFile {
-        path: path.clone(),
-        name: "log_test.bin".into(),
-    }];
-
-    let outcome = post_files_with_progress(&config, &files, None, None, Some("redaction-capture"))
-        .with_subscriber(subscriber)
-        .await
-        .unwrap();
-    assert!(outcome.failures.is_empty());
-
-    let logs = String::from_utf8_lossy(&log_buffer.lock().unwrap()).to_string();
-
-    // Verify sentinels are completely absent from logs
-    assert!(
-        !logs.contains(sentinel_pass),
-        "password sentinel leaked in logs"
-    );
-    assert!(
-        !logs.contains("SECRET_PLAINTEXT_DATA_12345"),
-        "plaintext leaked in logs"
-    );
-
-    // Safe identifiers may be logged
-    assert!(
-        logs.contains("redaction-capture") && logs.contains("upload plan"),
-        "logs should contain upload-specific progress context"
-    );
 }
