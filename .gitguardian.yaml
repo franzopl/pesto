@@ -1,0 +1,67 @@
+version: 2
+secret:
+  ignored_matches:
+    - name: super-secret-canary-pass-12345
+      match: super-secret-canary-pass-12345
+    - name: missing-metadata-canary-pass-99999
+      match: missing-metadata-canary-pass-99999
+    - name: multipart-roundtrip-canary-pass
+      match: multipart-roundtrip-canary-pass
+    - name: sugo-tamper-canary-pass-999
+      match: sugo-tamper-canary-pass-999
+    - name: obfpass456
+      match: obfpass456
+    - name: test123
+      match: test123
+    - name: test-vector-master-key
+      match: de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3
+    - name: penne-test-password-123
+      match: penne-test-password-123
+    - name: zero-output-test-password
+      match: zero-output-test-password
+    - name: cache-eviction-password
+      match: cache-eviction-password
+    - name: tier-failover-password
+      match: tier-failover-password
+    - name: multipart-partial-auth-fail-password
+      match: multipart-partial-auth-fail-password
+    - name: encrypted-par2-verify-pass
+      match: encrypted-par2-verify-pass
+    - name: encrypted-par2-repair-pass
+      match: encrypted-par2-repair-pass
+    - name: test-pass-obfuscated-123
+      match: test-pass-obfuscated-123
+    - name: test-pass-misleading-456
+      match: test-pass-misleading-456
+    - name: test-pass-reordered-789
+      match: test-pass-reordered-789
+    - name: test-pass-sparse-subsets
+      match: test-pass-sparse-subsets
+    - name: test-pass-failover-tier
+      match: test-pass-failover-tier
+    - name: test-pass-tampering-zero-out
+      match: test-pass-tampering-zero-out
+    - name: test-pass-cache-stability
+      match: test-pass-cache-stability
+    - name: test-pass-preflight
+      match: test-pass-preflight
+    - name: unencrypted-rejection-password
+      match: unencrypted-rejection-password
+    - name: sugo-secret-password-12345
+      match: sugo-secret-password-12345
+    - name: sugo-restart-test-secret-42
+      match: sugo-restart-test-secret-42
+    - name: archive-extract-password-only
+      match: archive-extract-password-only
+    - name: strict-header-test-password
+      match: strict-header-test-password
+    - name: crc-validation-test-password
+      match: crc-validation-test-password
+    - name: zero-output-rejection-password
+      match: zero-output-rejection-password
+  ignored_paths:
+    - "**/tests/**"
+    - "**/test-vectors/**"
+    - "**/*test*/**"
+    - "crates/*/tests/**"
+    - "crates/*/test-vectors/**"

@@ -381,10 +381,13 @@ mod tests {
                 .iter()
                 .map(|n| QueuedFile {
                     name: n.to_string(),
+                    file_ordinal: None,
+                    total_files: None,
                     segments: vec![QueuedSegment {
                         message_id: format!("<{n}@x>"),
                         part: 1,
                         bytes: 10,
+                        segment_index: None,
                     }],
                 })
                 .collect(),

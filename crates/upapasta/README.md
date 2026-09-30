@@ -22,3 +22,24 @@ Next milestones:
 5. Watch mode with smart rules
 
 This version aims to replace the Python implementation entirely while keeping the familiar `upapasta` UX.
+
+## Configuration
+
+UpaPasta shares configuration with `pesto` (`$XDG_CONFIG_HOME/pesto/config.toml`).
+
+### Encryption
+
+To enable yEnc body and control-line encryption for posting tasks dispatched by UpaPasta, configure the `[encryption]` section in `config.toml`:
+
+```toml
+[encryption]
+password = "MySecretPassword"
+```
+
+When configured, uploads automatically encrypt bodies with XChaCha20-Poly1305, encrypt control lines with Radix 253 FF1, and embed `<meta type="yenc_encrypted">true</meta>` with `<meta type="password">` in generated NZBs, compatible with Penne and Sugo (support in SABnzbd and NZBGet is in development).
+
+> **Threat Model & Confidentiality:**
+> Content encryption at the article layer (XChaCha20-Poly1305) protects Usenet articles from parties lacking the NZB and password. However, because the encryption password is conventionally embedded in `<meta type="password">` within the generated NZB, confidentiality depends strictly on private distribution of the `.nzb` file.
+
+> **Note on Season Consolidation:**
+> Combined season packs are currently unsupported for encrypted uploads. Because each episode upload generates an independent random session salt and separate segment index space, consolidating multiple episodes into a single NZB with duplicate segment indices violates the specification. Preflight validation rejects encrypted season uploads before any episode transfer begins. When encryption is enabled in season mode, individual per-episode NZBs are created.

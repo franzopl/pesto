@@ -220,15 +220,17 @@ impl Connection {
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
 
-        // Body is *not* dot-stuffed. yEnc already escapes a '.' that would
-        // start a line (draft v1.3 §4 / `=ybegin` line wrap), so stuffing
-        // here would be a second pass over every article on the hot path.
-        debug_assert!(
-            !yenc_body_has_leading_dot(body),
-            "yEnc body must not contain a line starting with '.'; \
-             NNTP would treat it as end-of-article"
-        );
-        self.write_all_timeout(body).await?;
+        // Body is ordinarily *not* dot-stuffed because standard yEnc escapes
+        // a '.' that would start a line (draft v1.3 §4 / `=ybegin` line wrap).
+        // However, encrypted control lines or other lines may start with '.',
+        // in which case RFC 3977 §3.1.1 requires dot-stuffing.
+        if yenc_body_has_leading_dot(body) {
+            let mut stuffed_body = Vec::with_capacity(body.len() + 16);
+            dot_stuff(body, &mut stuffed_body);
+            self.write_all_timeout(&stuffed_body).await?;
+        } else {
+            self.write_all_timeout(body).await?;
+        }
         if !body.ends_with(b"\r\n") {
             self.write_all_timeout(b"\r\n").await?;
         }
@@ -260,12 +262,13 @@ impl Connection {
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
-        debug_assert!(
-            !yenc_body_has_leading_dot(body),
-            "yEnc body must not contain a line starting with '.'; \
-             NNTP would treat it as end-of-article"
-        );
-        self.write_all_timeout(body).await?;
+        if yenc_body_has_leading_dot(body) {
+            let mut stuffed_body = Vec::with_capacity(body.len() + 16);
+            dot_stuff(body, &mut stuffed_body);
+            self.write_all_timeout(&stuffed_body).await?;
+        } else {
+            self.write_all_timeout(body).await?;
+        }
         if !body.ends_with(b"\r\n") {
             self.write_all_timeout(b"\r\n").await?;
         }

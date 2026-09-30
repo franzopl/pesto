@@ -202,6 +202,8 @@ fn queue_with(files: &[(&str, &[&str])]) -> DownloadQueue {
             .iter()
             .map(|(name, ids)| QueuedFile {
                 name: name.to_string(),
+                file_ordinal: None,
+                total_files: None,
                 segments: ids
                     .iter()
                     .enumerate()
@@ -209,6 +211,7 @@ fn queue_with(files: &[(&str, &[&str])]) -> DownloadQueue {
                         message_id: id.to_string(),
                         part: (i + 1) as u32,
                         bytes: 4,
+                        segment_index: None,
                     })
                     .collect(),
             })
@@ -457,6 +460,8 @@ async fn progress_events_arrive_while_the_check_is_still_running() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
+            file_ordinal: None,
+            total_files: None,
             segments: ids
                 .iter()
                 .enumerate()
@@ -464,6 +469,7 @@ async fn progress_events_arrive_while_the_check_is_still_running() {
                     message_id: id.clone(),
                     part: i as u32 + 1,
                     bytes: 4,
+                    segment_index: None,
                 })
                 .collect(),
         }],
@@ -528,6 +534,8 @@ async fn missing_progress_events_arrive_while_the_check_is_still_running() {
     let queue = DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
+            file_ordinal: None,
+            total_files: None,
             segments: ids
                 .iter()
                 .enumerate()
@@ -535,6 +543,7 @@ async fn missing_progress_events_arrive_while_the_check_is_still_running() {
                     message_id: id.clone(),
                     part: i as u32 + 1,
                     bytes: 4,
+                    segment_index: None,
                 })
                 .collect(),
         }],

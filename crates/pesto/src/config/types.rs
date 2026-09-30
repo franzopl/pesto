@@ -509,6 +509,13 @@ pub struct NotifySection {
     pub ntfy_topic: Option<String>,
 }
 
+/// Encryption configuration from the `[encryption]` TOML section.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncryptionSection {
+    pub password: Option<String>,
+}
+
 // ── Resolved configuration ───────────────────────────────────────────────────
 
 /// Configuration as parsed from the TOML file.
@@ -531,6 +538,8 @@ pub struct FileConfig {
     pub compression: CompressionSection,
     #[serde(default)]
     pub notify: NotifySection,
+    #[serde(default)]
+    pub encryption: EncryptionSection,
 }
 
 /// CLI-supplied overrides.
@@ -572,6 +581,7 @@ pub struct Overrides {
     pub compress_volume_size: Option<String>,
     pub nzb_title: Option<String>,
     pub nzb_password: Option<String>,
+    pub encrypt_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_tags: Vec<String>,
     /// Raw `--tmdb` value, e.g. `movie/12345` or `tv:12345`; parsed and
@@ -664,6 +674,7 @@ pub struct Config {
     pub compress_volume_size: Option<String>,
     pub nzb_title: Option<String>,
     pub nzb_password: Option<String>,
+    pub encrypt_password: Option<String>,
     pub nzb_category: Option<String>,
     pub nzb_tags: Vec<String>,
     /// TMDb reference emitted as `<meta type="tmdbid">`, formatted as

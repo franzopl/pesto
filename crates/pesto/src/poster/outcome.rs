@@ -1,10 +1,205 @@
 //! Posting results and the pure policies that decide whether to publish them.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
+
+/// Immutable per-segment identity for encryption nonce derivation.
+///
+/// Carries the file ordinal (`file_ordinal`), total files in the release
+/// (`total_files`), the segment's declared part number (`part_number`), and
+/// the canonical globally unique `segment_index` computed by the prefix-sum
+/// formula defined in the yEnc Body Encryption Standard v1.0 §2:
+///
+/// ```text
+/// segment_index = sum(parts(J) for J < file_ordinal) + part_number
+/// ```
+///
+/// All fields are one-based `u32` values; zero is never valid. Construction
+/// is only through [`SegmentIdentity::checked`], which enforces the full
+/// contract and returns `None` on any violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SegmentIdentity {
+    /// 1-based file position in the release (`N` in `[N/M]`).
+    pub file_ordinal: u32,
+    /// Total file count in the release (`M` in `[N/M]`).
+    pub total_files: u32,
+    /// 1-based part (segment) number within this file.
+    pub part_number: u32,
+    /// Globally unique segment index across the entire release.
+    pub segment_index: u32,
+}
+
+impl SegmentIdentity {
+    /// Construct a checked identity from the prefix-sum parts.
+    ///
+    /// `prefix_parts` is the sum of part counts for every file whose ordinal
+    /// is strictly less than `file_ordinal`. Returns `None` if any input is
+    /// zero, `file_ordinal > total_files`, or the resulting `segment_index`
+    /// overflows `u32` or equals zero.
+    pub fn checked(
+        prefix_parts: u64,
+        file_ordinal: u32,
+        total_files: u32,
+        part_number: u32,
+    ) -> Option<Self> {
+        if file_ordinal == 0 || total_files == 0 || part_number == 0 {
+            return None;
+        }
+        if file_ordinal > total_files {
+            return None;
+        }
+        let index_u64 = prefix_parts.checked_add(u64::from(part_number))?;
+        let segment_index = u32::try_from(index_u64).ok()?;
+        if segment_index == 0 {
+            return None;
+        }
+        Some(SegmentIdentity {
+            file_ordinal,
+            total_files,
+            part_number,
+            segment_index,
+        })
+    }
+
+    /// Construct a checked identity from an explicit segment index.
+    ///
+    /// Requires `part_number > 0 && segment_index > 0`.
+    /// Enforces two legal geometry forms:
+    /// - Counted geometry: `total_files > 0 && file_ordinal >= 1 && file_ordinal <= total_files`.
+    /// - Uncounted geometry: exactly `file_ordinal == 0 && total_files == 0` (used for imported
+    ///   NZBs and obfuscated releases where release counters are omitted per RFC Section 8).
+    ///
+    /// Rejects mixed forms (e.g. `file_ordinal > 0 && total_files == 0` or
+    /// `file_ordinal == 0 && total_files > 0`) by returning `None`.
+    pub fn explicit(
+        file_ordinal: u32,
+        total_files: u32,
+        part_number: u32,
+        segment_index: u32,
+    ) -> Option<Self> {
+        if part_number == 0 || segment_index == 0 {
+            return None;
+        }
+        if total_files > 0 {
+            if file_ordinal < 1 || file_ordinal > total_files {
+                return None;
+            }
+        } else if file_ordinal != 0 {
+            return None;
+        }
+        Some(SegmentIdentity {
+            file_ordinal,
+            total_files,
+            part_number,
+            segment_index,
+        })
+    }
+}
+
+/// File-level parts and numbering input for identity reconstruction.
+#[derive(Debug, Clone)]
+pub struct FileIdentityInput {
+    pub file_ordinal: u32,
+    pub total_files: u32,
+    pub parts: Vec<(u32, String)>,
+}
+
+/// Reconstruct the complete set of [`SegmentIdentity`] values for a release
+/// given per-file ordinals and part counts.
+///
+/// Returns `Some(map)` keyed by Message-ID when every file has a valid unique
+/// ordinal in `1..=total_files` and every part has a contiguous range starting
+/// at 1. Returns `None` if any validation fails — the release is then treated
+/// as ordinary (no encryption identity).
+pub fn reconstruct_identities(
+    files: &[FileIdentityInput],
+) -> Option<HashMap<String, SegmentIdentity>> {
+    if files.is_empty() {
+        return None;
+    }
+
+    // All files must agree on total_files.
+    let total_files = files[0].total_files;
+    if total_files == 0 {
+        return None;
+    }
+    if files.iter().any(|f| f.total_files != total_files) {
+        return None;
+    }
+
+    // Ordinal set must be complete: file count must match total_files exactly.
+    // This also bounds memory allocation so total_files cannot cause DoS.
+    if files.len() as u64 != u64::from(total_files) {
+        return None;
+    }
+
+    // Collect unique ordinals and validated part info.
+    let mut ordinal_parts: Vec<(u32, u32)> = Vec::with_capacity(files.len());
+    for f in files {
+        if f.file_ordinal == 0 || f.file_ordinal > total_files {
+            return None;
+        }
+        let max_part = f.parts.len() as u32;
+        if max_part == 0 {
+            return None;
+        }
+        // Parts must be contiguous 1..=max_part with no duplicates.
+        let mut seen_parts: Vec<u32> = f.parts.iter().map(|(p, _)| *p).collect();
+        seen_parts.sort_unstable();
+        seen_parts.dedup();
+        if seen_parts.len() != max_part as usize {
+            return None;
+        }
+        for (i, &p) in seen_parts.iter().enumerate() {
+            if p != (i as u32) + 1 {
+                return None;
+            }
+        }
+        ordinal_parts.push((f.file_ordinal, max_part));
+    }
+
+    // Check unique ordinals and complete 1..=total_files set.
+    let mut ordinals: Vec<u32> = ordinal_parts.iter().map(|(o, _)| *o).collect();
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    if ordinals.len() != files.len() {
+        return None;
+    }
+    if ordinals.len() != total_files as usize {
+        return None;
+    }
+    for (i, &o) in ordinals.iter().enumerate() {
+        if o != (i as u32) + 1 {
+            return None;
+        }
+    }
+
+    // Build prefix sums sorted by ordinal.
+    ordinal_parts.sort_by_key(|(o, _)| *o);
+    let mut prefix_sums: Vec<u64> = Vec::with_capacity(total_files as usize);
+    let mut running: u64 = 0;
+    for (_, part_count) in &ordinal_parts {
+        prefix_sums.push(running);
+        running = running.checked_add(u64::from(*part_count))?;
+    }
+
+    // Build result map keyed by Message-ID.
+    let mut result = HashMap::new();
+    for f in files {
+        let prefix = prefix_sums[(f.file_ordinal - 1) as usize];
+        for (part, mid) in &f.parts {
+            let identity = SegmentIdentity::checked(prefix, f.file_ordinal, total_files, *part)?;
+            result.insert(mid.clone(), identity);
+        }
+    }
+
+    Some(result)
+}
 
 /// A posted segment, retained for later `.nzb` generation.
 ///
@@ -73,6 +268,10 @@ pub struct PostedSegment {
     /// alone, long after `Shared` is gone.
     pub file_index: u32,
     pub total_files: u32,
+    /// Immutable segment identity across the entire release.
+    /// `Some` for live and planned upload runs; `None` for ordinary parsed NZB
+    /// segments that do not carry encryption identity metadata.
+    pub segment_identity: Option<SegmentIdentity>,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -116,6 +315,9 @@ pub struct FailedTask {
     /// end-of-run retry can rebuild the identical subject.
     pub file_index: u32,
     pub total_files: u32,
+    /// Immutable segment identity across the entire release, preserved from
+    /// the original planned PostTask so retries use the identical identity.
+    pub segment_identity: SegmentIdentity,
 }
 
 /// The result of a posting run.

@@ -58,6 +58,8 @@ pub struct RunFingerprint {
     #[serde(default)]
     pub compress_password: Option<String>,
     #[serde(default)]
+    pub encrypt_password: Option<String>,
+    #[serde(default)]
     pub line_length: usize,
 }
 
@@ -74,6 +76,7 @@ impl RunFingerprint {
             par2_recovery_count: config.par2_recovery_count,
             compress_volume_size: config.compress_volume_size.clone(),
             compress_password: config.compress_password.as_deref().map(hash_secret),
+            encrypt_password: config.encrypt_password.as_deref().map(hash_secret),
             line_length: config.line_length,
         }
     }
@@ -171,6 +174,10 @@ pub struct SegmentRecord {
     /// must not silently invent names when a private-mode repost is required.
     #[serde(default)]
     pub wire_identity: Option<PersistedWireIdentity>,
+    /// Exact segment identity within the release layout. Deserializes as `None`
+    /// for pre-schema JSON.
+    #[serde(default)]
+    pub segment_identity: Option<crate::poster::SegmentIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +187,31 @@ pub struct PersistedWireIdentity {
     pub from: String,
     pub date: Option<String>,
     pub unix_date: Option<u64>,
+}
+
+/// Upload session identity containing an optional opaque 16-byte salt and the
+/// complete ordered release layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSessionIdentity {
+    /// Opaque 16-byte salt for this session, if set.
+    #[serde(default)]
+    pub salt: Option<[u8; 16]>,
+    /// The complete ordered release layout.
+    pub layout: crate::poster::ReleaseLayout,
+}
+
+impl UploadSessionIdentity {
+    pub fn new(salt: Option<[u8; 16]>, layout: crate::poster::ReleaseLayout) -> Self {
+        Self { salt, layout }
+    }
+
+    pub fn salt(&self) -> Option<&[u8; 16]> {
+        self.salt.as_ref()
+    }
+
+    pub fn layout(&self) -> &crate::poster::ReleaseLayout {
+        &self.layout
+    }
 }
 
 /// Persistent state for a single upload session.
@@ -210,6 +242,12 @@ pub struct ResumeState {
     files: HashMap<String, FileFingerprint>,
     /// Key: `"{file_name}\0{part}"`.
     segments: HashMap<String, SegmentRecord>,
+    /// Upload session identity containing salt and complete release layout.
+    #[serde(default)]
+    session_identity: Option<UploadSessionIdentity>,
+    /// Tracks if session was invalidated during this run so that spool directory can be cleared.
+    #[serde(skip)]
+    session_invalidated: bool,
 }
 
 impl ResumeState {
@@ -267,16 +305,93 @@ impl ResumeState {
     pub fn validate_run(&mut self, current: &RunFingerprint) -> bool {
         if let Some(stored) = &self.fingerprint {
             if stored != current {
-                self.segments.clear();
-                self.files.clear();
-                self.archive_stem = None;
-                self.release_prefix = None;
-                self.release_from = None;
+                self.invalidate_session();
                 self.fingerprint = Some(current.clone());
                 return false;
             }
         }
         self.fingerprint = Some(current.clone());
+        true
+    }
+
+    /// The session identity recorded for this state, if any.
+    pub fn session_identity(&self) -> Option<&UploadSessionIdentity> {
+        self.session_identity.as_ref()
+    }
+
+    /// Record (or update) the upload session identity.
+    pub fn set_session_identity(&mut self, identity: UploadSessionIdentity) {
+        self.session_identity = Some(identity);
+    }
+
+    /// The opaque 16-byte session salt recorded for this state, if any.
+    pub fn session_salt(&self) -> Option<&[u8; 16]> {
+        self.session_identity.as_ref().and_then(|s| s.salt())
+    }
+
+    /// The release layout recorded for this session, if any.
+    pub fn session_layout(&self) -> Option<&crate::poster::ReleaseLayout> {
+        self.session_identity.as_ref().map(|s| s.layout())
+    }
+
+    /// Invalidate the entire upload session, clearing session identity (salt and
+    /// layout), all segment records, all file fingerprints, archive stem, and shared
+    /// release identity.
+    pub fn invalidate_session(&mut self) {
+        self.session_invalidated = true;
+        self.session_identity = None;
+        self.segments.clear();
+        self.files.clear();
+        self.archive_stem = None;
+        self.release_prefix = None;
+        self.release_from = None;
+    }
+
+    /// Check if the session was invalidated during this run.
+    pub fn is_session_invalidated(&self) -> bool {
+        self.session_invalidated
+    }
+
+    /// Take and clear the session_invalidated dirty bit.
+    pub fn take_session_invalidated(&mut self) -> bool {
+        std::mem::take(&mut self.session_invalidated)
+    }
+
+    /// Validate the current release layout against this session's recorded
+    /// identity. If the stored layout differs from `current_layout`, or if any
+    /// recorded segment has an identity inconsistent with `current_layout`, the
+    /// entire session is invalidated and `false` is returned.
+    pub fn validate_session(&mut self, current_layout: &crate::poster::ReleaseLayout) -> bool {
+        if let Some(stored) = &self.session_identity {
+            // Compare logical layout structure: total_files, total_segments, and part counts
+            let stored_layout = stored.layout();
+            let matches = stored_layout.total_files() == current_layout.total_files()
+                && stored_layout.total_segments() == current_layout.total_segments()
+                && stored_layout
+                    .entries()
+                    .iter()
+                    .zip(current_layout.entries())
+                    .all(|(a, b)| {
+                        a.release_ordinal == b.release_ordinal
+                            && a.part_count == b.part_count
+                            && a.prefix_parts == b.prefix_parts
+                    });
+            if !matches {
+                self.invalidate_session();
+                return false;
+            }
+        }
+
+        // Verify stored records that carry segment identity
+        for record in self.segments.values() {
+            if let Some(id) = record.segment_identity {
+                if current_layout.segment_identity(id.file_ordinal, id.part_number) != Some(id) {
+                    self.invalidate_session();
+                    return false;
+                }
+            }
+        }
+
         true
     }
 
@@ -363,6 +478,7 @@ impl ResumeState {
                 check_disabled: false,
                 server_idx: 0,
                 wire_identity: None,
+                segment_identity: None,
             },
         );
     }
@@ -424,6 +540,7 @@ mod tests {
             par2_recovery_count: None,
             compress_volume_size: None,
             compress_password: None,
+            encrypt_password: None,
             line_length: 128,
         }
     }
@@ -531,6 +648,19 @@ mod tests {
         s.set_archive_stem("Xk3mQp".to_string());
         assert!(s.validate_run(&fp(768_000)));
         assert_eq!(s.archive_stem(), Some("Xk3mQp"));
+    }
+
+    #[test]
+    fn encrypt_password_fingerprint_invalidation() {
+        let mut s = ResumeState::default();
+        let mut fp1 = fp(768_000);
+        fp1.encrypt_password = Some(hash_secret("pw1"));
+        assert!(s.validate_run(&fp1));
+        assert!(s.validate_run(&fp1));
+
+        let mut fp2 = fp(768_000);
+        fp2.encrypt_password = Some(hash_secret("pw2"));
+        assert!(!s.validate_run(&fp2));
     }
 
     #[test]
@@ -691,6 +821,7 @@ mod tests {
                 check_disabled: true,
                 server_idx: 2,
                 wire_identity: None,
+                segment_identity: None,
             },
         );
         s.record("a.bin", 2, "id2@x", 50);
@@ -711,6 +842,7 @@ mod tests {
             check_disabled: false,
             server_idx: 0,
             wire_identity: None,
+            segment_identity: None,
         };
         let unconfirmed = SegmentRecord {
             confirmed: false,
@@ -750,9 +882,179 @@ mod tests {
                 check_disabled: true,
                 server_idx: 0,
                 wire_identity: None,
+                segment_identity: None,
             },
         );
         let rec = s.get("a.bin", 1).unwrap();
         assert!(!rec.confirmed && rec.check_disabled);
+    }
+
+    #[test]
+    fn session_identity_and_record_identity_round_trip() {
+        use crate::poster::{ReleaseLayout, SegmentIdentity};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session_state.json");
+        let mut state = ResumeState::default();
+
+        let salt = [0x5au8; 16];
+        let layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
+        state.set_session_identity(UploadSessionIdentity::new(Some(salt), layout.clone()));
+
+        let id1 = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+        state.record_with(
+            "file1.bin",
+            1,
+            SegmentRecord {
+                message_id: "msg1@example.com".into(),
+                bytes: 1024,
+                confirmed: true,
+                check_disabled: false,
+                server_idx: 1,
+                wire_identity: None,
+                segment_identity: Some(id1),
+            },
+        );
+
+        state.save(&path).unwrap();
+
+        // Verify serialized state contains no plaintext password
+        let serialized = std::fs::read_to_string(&path).unwrap();
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("secret"));
+
+        // Load back
+        let loaded = ResumeState::load(&path).unwrap();
+        assert_eq!(loaded.session_salt(), Some(&salt));
+        assert_eq!(loaded.session_layout(), Some(&layout));
+
+        let rec = loaded.get("file1.bin", 1).unwrap();
+        assert_eq!(rec.segment_identity, Some(id1));
+        assert_eq!(rec.message_id, "msg1@example.com");
+        assert_eq!(rec.bytes, 1024);
+
+        // Repeated save/load is idempotent
+        let path2 = dir.path().join("session_state_2.json");
+        loaded.save(&path2).unwrap();
+        let loaded2 = ResumeState::load(&path2).unwrap();
+        assert_eq!(loaded.session_identity(), loaded2.session_identity());
+        assert_eq!(loaded.get("file1.bin", 1), loaded2.get("file1.bin", 1));
+    }
+
+    #[test]
+    fn pre_schema_json_loads_with_absent_session_and_record_identity() {
+        let json = r#"{"files":{},"segments":{"a.bin\u00001":{"message_id":"id1@x","bytes":100}}}"#;
+        let loaded: ResumeState = serde_json::from_str(json).unwrap();
+        assert!(loaded.session_identity().is_none());
+        assert!(loaded.session_salt().is_none());
+        assert!(loaded.session_layout().is_none());
+        let rec = loaded.get("a.bin", 1).unwrap();
+        assert!(rec.segment_identity.is_none());
+    }
+
+    #[test]
+    fn session_validation_invalidates_all_state_on_layout_mismatches() {
+        use crate::poster::{ReleaseLayout, SegmentIdentity};
+
+        let base_parts = &[(1, 2), (2, 3)];
+        let base_layout = ReleaseLayout::from_parts(2, base_parts).unwrap();
+        let salt = [0xabu8; 16];
+
+        let make_state = || {
+            let mut s = ResumeState::default();
+            s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
+            s.set_archive_stem("arch_stem".into());
+            s.set_release_identity("rel_prefix".into(), "rel_from".into());
+            s.record_file(
+                "a.bin",
+                FileFingerprint {
+                    size: 200,
+                    mtime: Some(100),
+                },
+            );
+            s.record_file(
+                "b.bin",
+                FileFingerprint {
+                    size: 300,
+                    mtime: Some(100),
+                },
+            );
+            let id = SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+            s.record_with(
+                "a.bin",
+                1,
+                SegmentRecord {
+                    message_id: "msg@x".into(),
+                    bytes: 100,
+                    confirmed: false,
+                    check_disabled: false,
+                    server_idx: 0,
+                    wire_identity: None,
+                    segment_identity: Some(id),
+                },
+            );
+            s
+        };
+
+        // Added file (total_files: 3 instead of 2)
+        let mut s = make_state();
+        let added_layout = ReleaseLayout::from_parts(3, &[(1, 2), (2, 3), (3, 1)]).unwrap();
+        assert!(!s.validate_session(&added_layout));
+        assert!(s.session_identity().is_none());
+        assert!(s.archive_stem().is_none());
+        assert!(s.release_identity().is_none());
+        assert_eq!(s.len(), 0);
+        assert!(s.file_matches(
+            "a.bin",
+            &FileFingerprint {
+                size: 999,
+                mtime: None
+            }
+        )); // files cleared
+
+        // Removed file (total_files: 1 instead of 2)
+        let mut s = make_state();
+        let removed_layout = ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
+        assert!(!s.validate_session(&removed_layout));
+        assert!(s.session_identity().is_none());
+        assert_eq!(s.len(), 0);
+
+        // Resized file (parts for file 1: 5 instead of 2)
+        let mut s = make_state();
+        let resized_layout = ReleaseLayout::from_parts(2, &[(1, 5), (2, 3)]).unwrap();
+        assert!(!s.validate_session(&resized_layout));
+        assert!(s.session_identity().is_none());
+        assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn session_validation_invalidates_on_conflicting_stored_segment_identity() {
+        use crate::poster::{ReleaseLayout, SegmentIdentity};
+
+        let base_layout = ReleaseLayout::from_parts(2, &[(1, 2), (2, 3)]).unwrap();
+        let salt = [0xabu8; 16];
+
+        let mut s = ResumeState::default();
+        s.set_session_identity(UploadSessionIdentity::new(Some(salt), base_layout.clone()));
+
+        // Record a segment with a conflicting identity (wrong part_number / segment_index)
+        let conflicting_id = SegmentIdentity::checked(10, 1, 2, 1).unwrap(); // prefix sum 10 instead of 0
+        s.record_with(
+            "a.bin",
+            1,
+            SegmentRecord {
+                message_id: "msg@x".into(),
+                bytes: 100,
+                confirmed: false,
+                check_disabled: false,
+                server_idx: 0,
+                wire_identity: None,
+                segment_identity: Some(conflicting_id),
+            },
+        );
+
+        assert!(!s.validate_session(&base_layout));
+        assert!(s.session_identity().is_none());
+        assert_eq!(s.len(), 0);
     }
 }

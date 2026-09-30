@@ -204,3 +204,56 @@ fn file_upload_rate_used_when_cli_absent() {
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
     assert_eq!(cfg.upload_rate, 1024);
 }
+
+#[test]
+fn cli_overrides_encrypt_password() {
+    let cfg = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("secret123".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.encrypt_password.as_deref(), Some("secret123"));
+}
+
+#[test]
+fn cli_rejects_empty_encrypt_password() {
+    let result = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("".into()),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_rejects_conflicting_encrypt_and_nzb_password() {
+    let result = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("secret1".into()),
+            nzb_password: Some("secret2".into()),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_accepts_matching_encrypt_and_nzb_password() {
+    let cfg = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("secret".into()),
+            nzb_password: Some("secret".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.encrypt_password.as_deref(), Some("secret"));
+    assert_eq!(cfg.nzb_password.as_deref(), Some("secret"));
+}

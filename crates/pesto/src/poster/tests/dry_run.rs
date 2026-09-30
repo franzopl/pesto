@@ -56,7 +56,8 @@ async fn light_release_override_unifies_a_compressed_volume_identity() {
         &outcome.segments,
         &crate::nzb::NzbMeta::default(),
         config.obfuscate,
-    );
+    )
+    .unwrap();
     assert!(nzb.contains("shareToken.7z.001"));
 }
 

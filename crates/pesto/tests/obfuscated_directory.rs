@@ -47,6 +47,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -158,7 +159,8 @@ async fn full_obfuscation_randomises_subjects_but_keeps_paths_in_nzb() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    );
+    )
+    .unwrap();
     for rel in &expected {
         assert!(
             nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
@@ -202,7 +204,8 @@ async fn full_obfuscation_nzb_reflects_random_dates() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    );
+    )
+    .unwrap();
 
     // Collect all date="..." values from the NZB.
     let mut dates: Vec<u64> = Vec::new();

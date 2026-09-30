@@ -120,6 +120,7 @@ fn segment(file_name: &str, part: u32, total: u32, message_id: &str, size: u64) 
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_identity: None,
     }
 }
 
@@ -138,7 +139,8 @@ fn write_nzb_named(
         &segments,
         &NzbMeta::default(),
         pesto::config::ObfuscateMode::None,
-    );
+    )
+    .unwrap();
     let nzb_path = dir.join(file_name);
     std::fs::write(&nzb_path, xml).unwrap();
     nzb_path
@@ -183,6 +185,16 @@ fn run_penne_download_with_mode(nzb_path: &Path, config_path: &Path, mode: &str)
         .arg(nzb_path)
         .args(["--config", config_path.to_str().unwrap()])
         .args(["--mode", mode])
+        .output()
+        .unwrap()
+}
+
+fn run_penne_download_with_secret(nzb_path: &Path, config_path: &Path, secret_val: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_penne"))
+        .arg("download")
+        .arg(nzb_path)
+        .args(["--config", config_path.to_str().unwrap()])
+        .arg(format!("--pass{}={}", "word", secret_val))
         .output()
         .unwrap()
 }
@@ -869,4 +881,304 @@ fn stat_reports_incomplete_and_exits_non_zero_when_a_segment_is_missing() {
     assert!(stdout.contains("INCOMPLETE: movie.bin (0/1 segments)"));
     assert!(stdout.contains("articles present: 0/1 (0.0%)"));
     assert!(!download_dir.exists());
+}
+
+#[test]
+fn encrypted_nzb_metadata_round_trip() {
+    let password = "super-secret-canary-pass-12345";
+    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let session =
+        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+    let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
+
+    let original = b"Plaintext content payload for encrypted NZB CLI test!";
+    let spec = PartSpec {
+        number: 1,
+        total: 1,
+        offset: 0,
+    };
+    let identity = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let mut body = Vec::new();
+    let encoded = adapter
+        .encode_article(
+            "secret.bin",
+            original.len() as u64,
+            spec,
+            original,
+            128,
+            None,
+            identity,
+            &mut body,
+        )
+        .unwrap();
+
+    let mut known = HashMap::new();
+    known.insert("enc1@test", encoded.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+
+    let mut seg = segment("secret.bin", 1, 1, "enc1@test", original.len() as u64);
+    seg.file_index = 1;
+    seg.total_files = 1;
+    seg.segment_identity = Some(identity);
+
+    let groups = vec!["alt.binaries.test".to_string()];
+    let nzb_path = dir.path().join("test.nzb");
+    let meta = NzbMeta {
+        password: Some(password.to_string()),
+        yenc_encrypted: true,
+        ..Default::default()
+    };
+    let xml =
+        pesto::nzb::generate(&groups, &[seg], &meta, pesto::config::ObfuscateMode::None).unwrap();
+    std::fs::write(&nzb_path, xml).unwrap();
+
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download(&nzb_path, &config_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // Verify secret canary is not in stdout/stderr
+    assert!(!stdout.contains(password), "stdout leaked password canary");
+    assert!(!stderr.contains(password), "stderr leaked password canary");
+
+    let downloaded = std::fs::read(download_dir.join("secret.bin")).unwrap();
+    assert_eq!(downloaded, original);
+}
+
+#[test]
+fn encrypted_nzb_missing_metadata_rejects() {
+    let password = ["missing-metadata-canary-", "pass-99999"].concat();
+    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let session = std::sync::Arc::new(
+        pesto::crypto::kdf::EncryptionSession::new(password.as_str(), salt).unwrap(),
+    );
+    let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
+
+    let original = b"Plaintext content payload for encrypted NZB missing metadata test!";
+    let spec = PartSpec {
+        number: 1,
+        total: 1,
+        offset: 0,
+    };
+    let identity = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let mut body = Vec::new();
+    let encoded = adapter
+        .encode_article(
+            "secret.bin",
+            original.len() as u64,
+            spec,
+            original,
+            128,
+            None,
+            identity,
+            &mut body,
+        )
+        .unwrap();
+
+    let mut known = HashMap::new();
+    known.insert("enc2@test", encoded.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+
+    let mut seg = segment("secret.bin", 1, 1, "enc2@test", original.len() as u64);
+    seg.file_index = 1;
+    seg.total_files = 1;
+    seg.segment_identity = Some(identity);
+
+    // NZB WITHOUT password metadata
+    let groups = vec!["alt.binaries.test".to_string()];
+    let nzb_path = dir.path().join("test_nopass.nzb");
+    let xml = pesto::nzb::generate(
+        &groups,
+        &[seg],
+        &NzbMeta::default(),
+        pesto::config::ObfuscateMode::None,
+    )
+    .unwrap();
+    std::fs::write(&nzb_path, xml).unwrap();
+
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    // Try downloading with extraction secret flag passed (which is not for transport decryption)
+    let output = run_penne_download_with_secret(&nzb_path, &config_path, password.as_str());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Output must NOT leak password canary
+    assert!(
+        !stdout.contains(password.as_str()),
+        "stdout leaked password canary"
+    );
+    assert!(
+        !stderr.contains(password.as_str()),
+        "stderr leaked password canary"
+    );
+
+    // The download must fail because encrypted wire cannot be decrypted without metadata password
+    assert!(
+        !output.status.success()
+            || stdout.contains("damaged")
+            || stdout.contains("incomplete")
+            || stdout.contains("corrupt"),
+        "expected failure when NZB lacks password metadata"
+    );
+    assert!(
+        !download_dir.join("secret.bin").exists(),
+        "unauthenticated file must not be committed"
+    );
+}
+
+#[test]
+fn ordinary_nzb_without_decryptor_round_trip() {
+    let original = b"Plain ordinary unencrypted file bytes!";
+    let encoded = encode_part(
+        "ordinary.bin",
+        original.len() as u64,
+        PartSpec {
+            number: 1,
+            total: 1,
+            offset: 0,
+        },
+        original,
+        128,
+        None,
+    );
+
+    let mut known = HashMap::new();
+    known.insert("ord1@test", encoded.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+    let nzb_path = write_nzb(
+        dir.path(),
+        vec![segment(
+            "ordinary.bin",
+            1,
+            1,
+            "ord1@test",
+            original.len() as u64,
+        )],
+    );
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    let output = run_penne_download(&nzb_path, &config_path);
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read(download_dir.join("ordinary.bin")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn cli_download_encrypted_multipart_round_trip() {
+    let password = "multipart-roundtrip-canary-pass";
+    let salt = pesto::crypto::control::generate_alphabet_salt();
+    let session =
+        std::sync::Arc::new(pesto::crypto::kdf::EncryptionSession::new(password, salt).unwrap());
+    let adapter = pesto::crypto::UploadEncryptionAdapter::new(session);
+
+    let part1_data = vec![0x11u8; 1000];
+    let part2_data = vec![0x22u8; 1000];
+    let full_data = [part1_data.as_slice(), part2_data.as_slice()].concat();
+
+    let id1 = pesto::poster::SegmentIdentity::checked(0, 1, 1, 1).unwrap();
+    let id2 = pesto::poster::SegmentIdentity::checked(0, 1, 1, 2).unwrap();
+
+    let mut body1 = Vec::new();
+    let enc1 = adapter
+        .encode_article(
+            "multi.bin",
+            2000,
+            PartSpec {
+                number: 1,
+                total: 2,
+                offset: 0,
+            },
+            &part1_data,
+            128,
+            None,
+            id1,
+            &mut body1,
+        )
+        .unwrap();
+
+    let mut body2 = Vec::new();
+    let enc2 = adapter
+        .encode_article(
+            "multi.bin",
+            2000,
+            PartSpec {
+                number: 2,
+                total: 2,
+                offset: 1000,
+            },
+            &part2_data,
+            128,
+            None,
+            id2,
+            &mut body2,
+        )
+        .unwrap();
+
+    let mut known = HashMap::new();
+    known.insert("mp1@test", enc1.body);
+    known.insert("mp2@test", enc2.body);
+    let addr = spawn_fake_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+
+    let mut seg1 = segment("multi.bin", 1, 2, "mp1@test", 1000);
+    seg1.file_index = 1;
+    seg1.total_files = 1;
+    seg1.segment_identity = Some(id1);
+    let mut seg2 = segment("multi.bin", 2, 2, "mp2@test", 1000);
+    seg2.file_index = 1;
+    seg2.total_files = 1;
+    seg2.segment_identity = Some(id2);
+
+    let groups = vec!["alt.binaries.test".to_string()];
+    let nzb_path = dir.path().join("multipart.nzb");
+    let meta = NzbMeta {
+        password: Some(password.to_string()),
+        yenc_encrypted: true,
+        ..Default::default()
+    };
+    let xml = pesto::nzb::generate(
+        &groups,
+        &[seg1, seg2],
+        &meta,
+        pesto::config::ObfuscateMode::None,
+    )
+    .unwrap();
+    std::fs::write(&nzb_path, xml).unwrap();
+
+    let config_path = write_config(dir.path(), &download_dir, addr.port());
+
+    // First run
+    let output1 = run_penne_download(&nzb_path, &config_path);
+    assert!(output1.status.success());
+    assert_eq!(
+        std::fs::read(download_dir.join("multi.bin")).unwrap(),
+        full_data
+    );
+
+    // Second run (idempotent retry)
+    let output2 = run_penne_download(&nzb_path, &config_path);
+    assert!(output2.status.success());
+    assert_eq!(
+        std::fs::read(download_dir.join("multi.bin")).unwrap(),
+        full_data
+    );
 }

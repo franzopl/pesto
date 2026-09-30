@@ -88,58 +88,127 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
             ResumeAction::Post => {}
             action @ (ResumeAction::Skip | ResumeAction::ReStatStoredId) => {
                 let existing = existing.expect("skip/re-STAT arms require a record");
-                let wire_subject = existing
-                    .wire_identity
-                    .as_ref()
-                    .map(|i| i.subject_name.as_str())
-                    .unwrap_or(&task.subject_name);
-                let wire_yenc = existing
-                    .wire_identity
-                    .as_ref()
-                    .map(|i| i.yenc_name.as_str())
-                    .unwrap_or(&task.yenc_name);
-                let from = existing
-                    .wire_identity
-                    .as_ref()
-                    .map(|i| i.from.as_str())
-                    .unwrap_or(&task.from);
-                let date = existing
-                    .wire_identity
-                    .as_ref()
-                    .map(|i| (i.date.clone(), i.unix_date))
-                    .unwrap_or_else(|| task.date.clone());
-                let seg = PostedSegment {
-                    file_name: task.meta.real_name.clone(),
-                    file_path: Arc::from(task.meta.path.as_path()),
-                    subject_name: Arc::from(task.meta.client_path.as_str()),
-                    wire_name: Arc::from(wire_subject),
-                    wire_yenc_name: Arc::from(wire_yenc),
-                    file_size: task.meta.size,
-                    part: task.part,
-                    total: task.total,
-                    message_id: existing.message_id,
-                    bytes: existing.bytes,
-                    from: Arc::from(from),
-                    date,
-                    full_crc32: task.file_crc32.unwrap_or(0),
-                    server_idx: existing.server_idx,
-                    file_index: task.meta.file_index,
-                    total_files: shared.total_files,
-                };
-                shared.results.lock().unwrap().push(seg.clone());
-                if action == ResumeAction::ReStatStoredId {
-                    if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
-                        let _ = tx.send(seg);
+                if let Some(stored_id) = existing.segment_identity {
+                    if stored_id != task.segment_identity {
+                        warn!(
+                            file = %task.meta.real_name,
+                            part = task.part,
+                            "stored segment identity disagrees with planned task; invalidating session and re-posting"
+                        );
+                        resume.lock().unwrap().invalidate_session();
+                        if let Some(dir) = &shared.spool_dir {
+                            crate::spool::remove_all(dir);
+                        }
+                    } else {
+                        let wire_subject = existing
+                            .wire_identity
+                            .as_ref()
+                            .map(|i| i.subject_name.as_str())
+                            .unwrap_or(&task.subject_name);
+                        let wire_yenc = existing
+                            .wire_identity
+                            .as_ref()
+                            .map(|i| i.yenc_name.as_str())
+                            .unwrap_or(&task.yenc_name);
+                        let from = existing
+                            .wire_identity
+                            .as_ref()
+                            .map(|i| i.from.as_str())
+                            .unwrap_or(&task.from);
+                        let date = existing
+                            .wire_identity
+                            .as_ref()
+                            .map(|i| (i.date.clone(), i.unix_date))
+                            .unwrap_or_else(|| task.date.clone());
+                        let seg = PostedSegment {
+                            file_name: task.meta.real_name.clone(),
+                            file_path: Arc::from(task.meta.path.as_path()),
+                            subject_name: Arc::from(task.meta.client_path.as_str()),
+                            wire_name: Arc::from(wire_subject),
+                            wire_yenc_name: Arc::from(wire_yenc),
+                            file_size: task.meta.size,
+                            part: task.part,
+                            total: task.total,
+                            message_id: existing.message_id,
+                            bytes: existing.bytes,
+                            from: Arc::from(from),
+                            date,
+                            full_crc32: task.file_crc32.unwrap_or(0),
+                            server_idx: existing.server_idx,
+                            file_index: task.meta.file_index,
+                            total_files: shared.total_files,
+                            segment_identity: Some(task.segment_identity),
+                        };
+                        shared.results.lock().unwrap().push(seg.clone());
+                        if action == ResumeAction::ReStatStoredId {
+                            if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+                                let _ = tx.send(seg);
+                            }
+                        }
+                        let raw_bytes = task.data.len() as u64;
+                        shared.release_buffer(task.data);
+                        shared.emit(ProgressEvent::SegmentDone {
+                            file: task.meta.real_name.clone(),
+                            bytes: raw_bytes,
+                            ok: true,
+                        });
+                        return None;
                     }
+                } else {
+                    let wire_subject = existing
+                        .wire_identity
+                        .as_ref()
+                        .map(|i| i.subject_name.as_str())
+                        .unwrap_or(&task.subject_name);
+                    let wire_yenc = existing
+                        .wire_identity
+                        .as_ref()
+                        .map(|i| i.yenc_name.as_str())
+                        .unwrap_or(&task.yenc_name);
+                    let from = existing
+                        .wire_identity
+                        .as_ref()
+                        .map(|i| i.from.as_str())
+                        .unwrap_or(&task.from);
+                    let date = existing
+                        .wire_identity
+                        .as_ref()
+                        .map(|i| (i.date.clone(), i.unix_date))
+                        .unwrap_or_else(|| task.date.clone());
+                    let seg = PostedSegment {
+                        file_name: task.meta.real_name.clone(),
+                        file_path: Arc::from(task.meta.path.as_path()),
+                        subject_name: Arc::from(task.meta.client_path.as_str()),
+                        wire_name: Arc::from(wire_subject),
+                        wire_yenc_name: Arc::from(wire_yenc),
+                        file_size: task.meta.size,
+                        part: task.part,
+                        total: task.total,
+                        message_id: existing.message_id,
+                        bytes: existing.bytes,
+                        from: Arc::from(from),
+                        date,
+                        full_crc32: task.file_crc32.unwrap_or(0),
+                        server_idx: existing.server_idx,
+                        file_index: task.meta.file_index,
+                        total_files: shared.total_files,
+                        segment_identity: Some(task.segment_identity),
+                    };
+                    shared.results.lock().unwrap().push(seg.clone());
+                    if action == ResumeAction::ReStatStoredId {
+                        if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
+                            let _ = tx.send(seg);
+                        }
+                    }
+                    let raw_bytes = task.data.len() as u64;
+                    shared.release_buffer(task.data);
+                    shared.emit(ProgressEvent::SegmentDone {
+                        file: task.meta.real_name.clone(),
+                        bytes: raw_bytes,
+                        ok: true,
+                    });
+                    return None;
                 }
-                let raw_bytes = task.data.len() as u64;
-                shared.release_buffer(task.data);
-                shared.emit(ProgressEvent::SegmentDone {
-                    file: task.meta.real_name.clone(),
-                    bytes: raw_bytes,
-                    ok: true,
-                });
-                return None;
             }
         }
     }
@@ -161,6 +230,67 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                 part = task.part,
                 "ignoring legacy spool entry without obfuscated wire identity"
             );
+            None
+        }
+        Some(entry)
+            if entry.segment_identity.is_some()
+                && entry.segment_identity != Some(task.segment_identity) =>
+        {
+            warn!(
+                file = %task.meta.real_name,
+                part = task.part,
+                "spooled article segment identity disagrees with planned task; clearing spool and re-encoding"
+            );
+            if let Some(dir) = &shared.spool_dir {
+                crate::spool::remove_all(dir);
+            }
+            if let Some(resume) = &shared.resume {
+                resume.lock().unwrap().invalidate_session();
+            }
+            None
+        }
+        Some(entry)
+            if entry.layout_fingerprint.is_some()
+                && entry.layout_fingerprint.as_deref()
+                    != Some(shared.release_layout.fingerprint().as_str()) =>
+        {
+            warn!(
+                file = %task.meta.real_name,
+                part = task.part,
+                "spooled article layout fingerprint disagrees with current release; clearing spool and re-encoding"
+            );
+            if let Some(dir) = &shared.spool_dir {
+                crate::spool::remove_all(dir);
+            }
+            if let Some(resume) = &shared.resume {
+                resume.lock().unwrap().invalidate_session();
+            }
+            None
+        }
+        Some(entry)
+            if entry.session_salt.is_some()
+                && shared
+                    .resume
+                    .as_ref()
+                    .and_then(|r| r.lock().unwrap().session_salt().copied())
+                    .is_some()
+                && entry.session_salt
+                    != shared
+                        .resume
+                        .as_ref()
+                        .and_then(|r| r.lock().unwrap().session_salt().copied()) =>
+        {
+            warn!(
+                file = %task.meta.real_name,
+                part = task.part,
+                "spooled article session salt disagrees with current session; clearing spool and re-encoding"
+            );
+            if let Some(dir) = &shared.spool_dir {
+                crate::spool::remove_all(dir);
+            }
+            if let Some(resume) = &shared.resume {
+                resume.lock().unwrap().invalidate_session();
+            }
             None
         }
         entry => entry,
@@ -186,19 +316,45 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         let t_enc = Instant::now();
         let file_crc32 = task.file_crc32;
         let mut encode_buf = shared.acquire_encode_buf();
-        let encoded = yenc::encode_part_into(
-            &task.yenc_name,
-            task.meta.size,
-            yenc::PartSpec {
-                number: task.part,
-                total: task.total,
-                offset: task.offset,
-            },
-            &task.data,
-            shared.config.line_length,
-            file_crc32,
-            &mut encode_buf,
-        );
+        let spec = yenc::PartSpec {
+            number: task.part,
+            total: task.total,
+            offset: task.offset,
+        };
+        let encoded = if let Some(adapter) = &shared.encryption_adapter {
+            match adapter.encode_article(
+                &task.yenc_name,
+                task.meta.size,
+                spec,
+                &task.data,
+                shared.config.line_length,
+                file_crc32,
+                task.segment_identity,
+                &mut encode_buf,
+            ) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    warn!(
+                        file = %task.meta.real_name,
+                        part = task.part,
+                        error = %e,
+                        "failed to encrypt article segment"
+                    );
+                    shared.release_encode_buf(encode_buf);
+                    return None;
+                }
+            }
+        } else {
+            yenc::encode_part_into(
+                &task.yenc_name,
+                task.meta.size,
+                spec,
+                &task.data,
+                shared.config.line_length,
+                file_crc32,
+                &mut encode_buf,
+            )
+        };
         let encode_time = t_enc.elapsed();
         let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
         let (rfc_date, _ts) = &task.date;
@@ -222,14 +378,23 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         if let Some(dir) = &shared.spool_dir {
             let identity =
                 persisted_identity(&task.subject_name, &task.yenc_name, &task.from, &task.date);
-            if let Err(e) = crate::spool::write_with_identity(
+            let metadata = crate::spool::SpoolMetadata {
+                wire_identity: Some(identity),
+                segment_identity: Some(task.segment_identity),
+                session_salt: shared
+                    .resume
+                    .as_ref()
+                    .and_then(|r| r.lock().unwrap().session_salt().copied()),
+                layout_fingerprint: Some(shared.release_layout.fingerprint()),
+            };
+            if let Err(e) = crate::spool::write_with_metadata(
                 dir,
                 &task.meta.real_name,
                 task.part,
                 &message_id,
                 &headers,
                 &encoded.body,
-                &identity,
+                &metadata,
             )
             .await
             {
@@ -377,6 +542,7 @@ pub(super) async fn worker(
                     server_idx: 0,
                     file_index: p.task.meta.file_index,
                     total_files: shared.total_files,
+                    segment_identity: Some(p.task.segment_identity),
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);

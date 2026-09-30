@@ -64,6 +64,8 @@ mod tests {
         DownloadQueue {
             files: vec![QueuedFile {
                 name: "f.bin".to_string(),
+                file_ordinal: None,
+                total_files: None,
                 segments: sizes
                     .iter()
                     .enumerate()
@@ -71,6 +73,7 @@ mod tests {
                         message_id: format!("id{i}@test"),
                         part: i as u32 + 1,
                         bytes,
+                        segment_index: None,
                     })
                     .collect(),
             }],
@@ -82,10 +85,13 @@ mod tests {
         let mut queue = queue_with_bytes(&[100, 200]);
         queue.files.push(QueuedFile {
             name: "g.bin".to_string(),
+            file_ordinal: None,
+            total_files: None,
             segments: vec![QueuedSegment {
                 message_id: "id-g@test".to_string(),
                 part: 1,
                 bytes: 50,
+                segment_index: None,
             }],
         });
         assert_eq!(required_bytes(&queue), 350);

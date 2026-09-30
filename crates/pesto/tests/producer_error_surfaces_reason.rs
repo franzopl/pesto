@@ -64,6 +64,7 @@ async fn producer_error_is_reported_via_failure_reason_not_a_bare_cancellation()
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,

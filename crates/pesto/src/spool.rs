@@ -18,10 +18,16 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::resume::PersistedWireIdentity;
 
 const V2_MAGIC: &[u8; 4] = b"PST2";
+const V3_MAGIC: &[u8; 4] = b"PST3";
+
+const MAX_METADATA_LEN: usize = 64 * 1024;
+const MAX_ID_LEN: usize = 4096;
+const MAX_HEADERS_LEN: usize = 64 * 1024;
 
 /// Directory holding spooled articles for one upload session — a sibling of
 /// the `.pesto-state` file (not nested inside it, since that path is a
@@ -38,12 +44,28 @@ fn entry_path(dir: &Path, file_name: &str, part: u32) -> PathBuf {
     dir.join(format!("{safe_name}.{part}.spool"))
 }
 
+/// Metadata object stored in PST3 spool envelopes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SpoolMetadata {
+    #[serde(default)]
+    pub wire_identity: Option<PersistedWireIdentity>,
+    #[serde(default)]
+    pub segment_identity: Option<crate::poster::SegmentIdentity>,
+    #[serde(default)]
+    pub session_salt: Option<[u8; 16]>,
+    #[serde(default)]
+    pub layout_fingerprint: Option<String>,
+}
+
 /// One spooled article, as read back for replay.
 pub struct SpooledArticle {
     pub message_id: String,
     pub headers: Vec<u8>,
     pub body: Vec<u8>,
     pub wire_identity: Option<PersistedWireIdentity>,
+    pub segment_identity: Option<crate::poster::SegmentIdentity>,
+    pub session_salt: Option<[u8; 16]>,
+    pub layout_fingerprint: Option<String>,
 }
 
 /// Persist a fully-encoded article to the spool, creating the directory on
@@ -64,6 +86,7 @@ pub async fn write(
 /// Versioned spool writer used by the poster. Unlike the legacy public
 /// helper, this records the logical wire identity alongside the exact bytes
 /// so resume metadata cannot disagree with a replayed article.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_with_identity(
     dir: &Path,
@@ -84,6 +107,47 @@ pub(crate) async fn write_with_identity(
         Some(wire_identity),
     )
     .await
+}
+
+/// Write a PST3 versioned spool entry containing exact article payload and
+/// full session/layout/segment metadata.
+pub async fn write_with_metadata(
+    dir: &Path,
+    file_name: &str,
+    part: u32,
+    message_id: &str,
+    headers: &[u8],
+    body: &[u8],
+    metadata: &SpoolMetadata,
+) -> Result<()> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating spool directory `{}`", dir.display()))?;
+
+    let meta_json = serde_json::to_vec(metadata).context("serialising spool metadata")?;
+    let mut buf = Vec::with_capacity(
+        V3_MAGIC.len()
+            + 4
+            + meta_json.len()
+            + 4
+            + message_id.len()
+            + 4
+            + headers.len()
+            + body.len(),
+    );
+    buf.extend_from_slice(V3_MAGIC);
+    buf.extend_from_slice(&(meta_json.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&meta_json);
+    buf.extend_from_slice(&(message_id.len() as u32).to_le_bytes());
+    buf.extend_from_slice(message_id.as_bytes());
+    buf.extend_from_slice(&(headers.len() as u32).to_le_bytes());
+    buf.extend_from_slice(headers);
+    buf.extend_from_slice(body);
+
+    let path = entry_path(dir, file_name, part);
+    tokio::fs::write(&path, buf)
+        .await
+        .with_context(|| format!("writing spool entry `{}`", path.display()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -129,30 +193,75 @@ async fn write_inner(
 
 fn parse(buf: &[u8]) -> Option<SpooledArticle> {
     let mut pos = 0usize;
-    let wire_identity = if buf.starts_with(V2_MAGIC) {
-        pos += V2_MAGIC.len();
-        let identity_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
-        pos += 4;
-        let identity = serde_json::from_slice(buf.get(pos..pos + identity_len)?).ok()?;
-        pos += identity_len;
-        Some(identity)
-    } else {
-        None
-    };
+    let (wire_identity, segment_identity, session_salt, layout_fingerprint) =
+        if buf.starts_with(V3_MAGIC) {
+            pos += V3_MAGIC.len();
+            if buf.len() < pos + 4 {
+                return None;
+            }
+            let meta_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
+            pos += 4;
+            if meta_len > MAX_METADATA_LEN || buf.len() < pos + meta_len {
+                return None;
+            }
+            let meta: SpoolMetadata = serde_json::from_slice(buf.get(pos..pos + meta_len)?).ok()?;
+            pos += meta_len;
+            (
+                meta.wire_identity,
+                meta.segment_identity,
+                meta.session_salt,
+                meta.layout_fingerprint,
+            )
+        } else if buf.starts_with(V2_MAGIC) {
+            pos += V2_MAGIC.len();
+            if buf.len() < pos + 4 {
+                return None;
+            }
+            let identity_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
+            pos += 4;
+            if identity_len > MAX_METADATA_LEN || buf.len() < pos + identity_len {
+                return None;
+            }
+            let identity: PersistedWireIdentity =
+                serde_json::from_slice(buf.get(pos..pos + identity_len)?).ok()?;
+            pos += identity_len;
+            (Some(identity), None, None, None)
+        } else {
+            (None, None, None, None)
+        };
+
+    if buf.len() < pos + 4 {
+        return None;
+    }
     let id_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
+    if id_len > MAX_ID_LEN || buf.len() < pos + id_len {
+        return None;
+    }
     let message_id = String::from_utf8(buf.get(pos..pos + id_len)?.to_vec()).ok()?;
     pos += id_len;
+
+    if buf.len() < pos + 4 {
+        return None;
+    }
     let headers_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
+    if headers_len > MAX_HEADERS_LEN || buf.len() < pos + headers_len {
+        return None;
+    }
     let headers = buf.get(pos..pos + headers_len)?.to_vec();
     pos += headers_len;
+
     let body = buf.get(pos..)?.to_vec();
+
     Some(SpooledArticle {
         message_id,
         headers,
         body,
         wire_identity,
+        segment_identity,
+        session_salt,
+        layout_fingerprint,
     })
 }
 
@@ -286,5 +395,139 @@ mod tests {
         // No subdirectory was implied by the '/' in the file name.
         assert!(!spool.join("season01").exists());
         assert!(read(&spool, "season01/ep01.mkv", 1).is_some());
+    }
+
+    #[test]
+    fn pst3_versioned_spool_round_trips_exact_identity() {
+        use crate::poster::SegmentIdentity;
+
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("release.pesto-spool");
+        let wire_id = PersistedWireIdentity {
+            subject_name: "test-subj".into(),
+            yenc_name: "test-yenc".into(),
+            from: "sender <s@x>".into(),
+            date: Some("Thu, 24 Sep 2026 00:00:00 GMT".into()),
+            unix_date: Some(1790208000),
+        };
+        let seg_id = SegmentIdentity::checked(10, 2, 5, 3).unwrap();
+        let salt = [0x42u8; 16];
+        let layout_fp = "d3b07384d113edec49eaa6238ad5ff00";
+
+        let meta = SpoolMetadata {
+            wire_identity: Some(wire_id.clone()),
+            segment_identity: Some(seg_id),
+            session_salt: Some(salt),
+            layout_fingerprint: Some(layout_fp.to_string()),
+        };
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(write_with_metadata(
+                &spool,
+                "data.bin",
+                3,
+                "msg3@example.com",
+                b"headers-pst3",
+                b"body-pst3\x00\xff",
+                &meta,
+            ))
+            .unwrap();
+
+        let entry = read(&spool, "data.bin", 3).unwrap();
+        assert_eq!(entry.message_id, "msg3@example.com");
+        assert_eq!(entry.headers, b"headers-pst3");
+        assert_eq!(entry.body, b"body-pst3\x00\xff");
+        assert_eq!(entry.wire_identity, Some(wire_id));
+        assert_eq!(entry.segment_identity, Some(seg_id));
+        assert_eq!(entry.session_salt, Some(salt));
+        assert_eq!(entry.layout_fingerprint.as_deref(), Some(layout_fp));
+    }
+
+    #[test]
+    fn legacy_pst2_and_pre_magic_remain_readable_with_new_fields_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("release.pesto-spool");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // 1. Pre-magic legacy entry
+        rt.block_on(write(
+            &spool,
+            "legacy.bin",
+            1,
+            "leg@example.com",
+            b"head-leg",
+            b"body-leg",
+        ))
+        .unwrap();
+
+        let leg_entry = read(&spool, "legacy.bin", 1).unwrap();
+        assert_eq!(leg_entry.message_id, "leg@example.com");
+        assert_eq!(leg_entry.headers, b"head-leg");
+        assert_eq!(leg_entry.body, b"body-leg");
+        assert!(leg_entry.wire_identity.is_none());
+        assert!(leg_entry.segment_identity.is_none());
+        assert!(leg_entry.session_salt.is_none());
+        assert!(leg_entry.layout_fingerprint.is_none());
+
+        // 2. PST2 legacy entry
+        let wire_id = PersistedWireIdentity {
+            subject_name: "pst2-subj".into(),
+            yenc_name: "pst2-yenc".into(),
+            from: "pst2 <p@x>".into(),
+            date: None,
+            unix_date: None,
+        };
+        rt.block_on(write_with_identity(
+            &spool,
+            "pst2.bin",
+            2,
+            "pst2@example.com",
+            b"head-pst2",
+            b"body-pst2",
+            &wire_id,
+        ))
+        .unwrap();
+
+        let pst2_entry = read(&spool, "pst2.bin", 2).unwrap();
+        assert_eq!(pst2_entry.message_id, "pst2@example.com");
+        assert_eq!(pst2_entry.wire_identity, Some(wire_id));
+        assert!(pst2_entry.segment_identity.is_none());
+        assert!(pst2_entry.session_salt.is_none());
+        assert!(pst2_entry.layout_fingerprint.is_none());
+    }
+
+    #[test]
+    fn corrupt_and_oversized_metadata_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("release.pesto-spool");
+        std::fs::create_dir_all(&spool).unwrap();
+
+        // Truncated PST3 length
+        let path1 = entry_path(&spool, "trunc.bin", 1);
+        std::fs::write(&path1, b"PST3\x05\x00\x00").unwrap();
+        assert!(read(&spool, "trunc.bin", 1).is_none());
+
+        // Oversized PST3 metadata length (> 1 MB limit)
+        let path2 = entry_path(&spool, "big.bin", 1);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PST3");
+        buf.extend_from_slice(&(2 * 1024 * 1024u32).to_le_bytes()); // 2MB length claim
+        std::fs::write(&path2, buf).unwrap();
+        assert!(read(&spool, "big.bin", 1).is_none());
+
+        // Invalid JSON inside PST3
+        let path3 = entry_path(&spool, "bad_json.bin", 1);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"PST3");
+        buf.extend_from_slice(&(4u32).to_le_bytes());
+        buf.extend_from_slice(b"{bad");
+        buf.extend_from_slice(&(1u32).to_le_bytes());
+        buf.extend_from_slice(b"x");
+        buf.extend_from_slice(&(1u32).to_le_bytes());
+        buf.extend_from_slice(b"h");
+        buf.extend_from_slice(b"b");
+        std::fs::write(&path3, buf).unwrap();
+        assert!(read(&spool, "bad_json.bin", 1).is_none());
     }
 }

@@ -12,6 +12,43 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-29
+
+### Breaking Changes
+
+- **`pesto::nzb::generate` returns `Result<String>` instead of `String`.**
+  NZB generation now validates release-wide invariants (contiguous segment indices, consistent file counters, non-overlapping ordinals) before writing NZB 1.1 XML. Callers must handle the fallible `Result`.
+- **`PostedSegment` and `FailedTask` structs extended with `segment_identity`.**
+  `PostedSegment.segment_identity: Option<SegmentIdentity>` and `FailedTask.segment_identity: SegmentIdentity` now carry 1-based release-wide segment numbering. Callers constructing `PostedSegment` directly should supply `None` for legacy unencrypted segments or use `SegmentIdentity::checked(...)`. Callers constructing `FailedTask` directly must supply a valid `SegmentIdentity`.
+- **`NzbMeta` struct extended with `yenc_encrypted`.**
+  `NzbMeta` now includes `yenc_encrypted: bool` (emitted as `<meta type="yenc_encrypted">true</meta>`, `<meta type="yenc_version">1.0</meta>`, and `<meta type="yenc_cipher">XChaCha20-Poly1305</meta>`). Callers should construct using `NzbMeta { ..Default::default() }` or specify the field.
+- **`Config` and `FileConfig` extended with `encryption`.**
+  Added `EncryptionConfig` for opt-in yEnc body & control-line encryption.
+
+#### Migration Guide
+
+```rust
+// Before (0.10.x):
+let xml: String = pesto::nzb::generate(&groups, &segments, &meta, obfuscate);
+
+// After (0.11.0):
+let xml: String = pesto::nzb::generate(&groups, &segments, &meta, obfuscate)?;
+
+// Struct initializations:
+let meta = pesto::nzb::NzbMeta {
+    name: Some("release".into()),
+    ..Default::default()
+};
+```
+
+### Added
+
+- **Opt-in yEnc body and control-line encryption (`--encrypt`, `--encrypt-password`).**
+  Per-segment AEAD encryption using XChaCha20-Poly1305 before yEnc encoding, and NIST SP 800-38G FF1 Radix 253 format-preserving encryption of yEnc control lines (`=ybegin`, `=ypart`, `=yend`, `=yencryption`).
+- **Explicit NZB encryption metadata.**
+  Generated NZBs include `<meta type="yenc_encrypted">true</meta>`, `<meta type="yenc_version">1.0</meta>`, and `<meta type="yenc_cipher">XChaCha20-Poly1305</meta>` to explicitly declare wire protocol versions to compliant downloaders.
+
+
 ## [0.10.4] — 2026-09-12
 
 ### Fixed

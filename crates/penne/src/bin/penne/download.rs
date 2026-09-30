@@ -99,12 +99,15 @@ pub(super) async fn run(
         None
     };
 
-    let outcome = penne::download::download_queue(
+    let decryptor = penne::nzb::download_decryptor(&parsed.meta)?;
+
+    let outcome = penne::download::download_queue_with_decryptor(
         &queue,
         &config.server_tiers,
         &dest_dir,
         config.retries,
         Some(tx),
+        decryptor,
     )
     .await?;
     // `download_queue` now assembles every file internally as it completes,

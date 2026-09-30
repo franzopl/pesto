@@ -113,6 +113,7 @@ fn test_config(port: u16) -> Config {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -232,4 +233,269 @@ async fn changed_file_with_par2_invalidates_previously_resumed_par2_volumes_too(
     // Every segment was freshly (re-)posted: the whole recovery set had to
     // be regenerated once the underlying data was considered changed.
     assert_eq!(posts.load(Ordering::Relaxed), outcome.segments.len());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn par2_geometry_or_data_change_invalidates_session_salt_and_spool() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+
+    {
+        let posts = posts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(handle_connection(stream, posts.clone()));
+            }
+        });
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.bin");
+    std::fs::write(&path, vec![0x11_u8; 1000]).unwrap();
+    let state_path = dir.path().join("data.bin.pesto-state");
+    let spool_dir = dir.path().join("data.bin.pesto-spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+
+    let mut config = test_config(addr.port());
+    config.par2 = 50;
+
+    // Simulate prior session identity with salt and PST3 spool entry
+    let mut prior = ResumeState::default();
+    prior.validate_run(&RunFingerprint::from_config(&config));
+    let salt = [0x5Au8; 16];
+    let old_layout = pesto::poster::ReleaseLayout::from_parts(2, &[(1, 2), (2, 1)]).unwrap();
+    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
+        Some(salt),
+        old_layout,
+    ));
+    prior.record_file(
+        "data.bin",
+        FileFingerprint {
+            size: 500, // Different from 1000 on disk!
+            mtime: Some(1),
+        },
+    );
+    prior.save(&state_path).unwrap();
+
+    // Create a spool file with the old session salt
+    let spool_meta = pesto::spool::SpoolMetadata {
+        wire_identity: None,
+        segment_identity: None,
+        session_salt: Some(salt),
+        layout_fingerprint: Some("old_fingerprint".to_string()),
+    };
+    pesto::spool::write_with_metadata(
+        &spool_dir,
+        "data.bin",
+        1,
+        "<old@msg>",
+        b"headers",
+        b"body",
+        &spool_meta,
+    )
+    .await
+    .unwrap();
+    assert!(spool_dir.join("data.bin.1.spool").exists());
+
+    let inputs = vec![pesto::walk::InputFile {
+        path: path.clone(),
+        name: "data.bin".to_string(),
+    }];
+
+    let outcome = post_files_with_progress(&config, &inputs, None, Some(&state_path), None)
+        .await
+        .unwrap();
+
+    assert!(outcome.failures.is_empty());
+    // Layout and content changed: old spool file and old session identity must have been purged/invalidated.
+    assert!(!spool_dir.join("data.bin.1.spool").exists());
+
+    // Verified complete segment_identity is present on all segments
+    for seg in &outcome.segments {
+        assert!(seg.segment_identity.is_some());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn added_file_invalidates_entire_session_and_reposts_all_with_fresh_indices() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+
+    {
+        let posts = posts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(handle_connection(stream, posts.clone()));
+            }
+        });
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let f1_path = dir.path().join("f1.bin");
+    let f2_path = dir.path().join("f2.bin");
+    std::fs::write(&f1_path, vec![0x11_u8; 1000]).unwrap();
+    std::fs::write(&f2_path, vec![0x22_u8; 1000]).unwrap();
+    let state_path = dir.path().join("release.pesto-state");
+    let spool_dir = dir.path().join("release.pesto-spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+
+    let mut config = test_config(addr.port());
+    config.par2 = 0; // Data only
+
+    // Simulate prior session identity for a single file f1.bin only (layout: 1 file, 2 parts)
+    let mut prior = ResumeState::default();
+    prior.validate_run(&RunFingerprint::from_config(&config));
+    let salt = [0x99u8; 16];
+    let old_layout = pesto::poster::ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
+    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
+        Some(salt),
+        old_layout,
+    ));
+    prior.record_file(
+        "f1.bin",
+        FileFingerprint {
+            size: 1000,
+            mtime: Some(1),
+        },
+    );
+    prior.record("f1.bin", 1, "<old-f1p1@msg>", 500);
+    prior.save(&state_path).unwrap();
+
+    let spool_meta = pesto::spool::SpoolMetadata {
+        wire_identity: None,
+        segment_identity: None,
+        session_salt: Some(salt),
+        layout_fingerprint: Some("old_layout_fingerprint".to_string()),
+    };
+    pesto::spool::write_with_metadata(
+        &spool_dir,
+        "f1.bin",
+        1,
+        "<old-f1p1@msg>",
+        b"headers",
+        b"body",
+        &spool_meta,
+    )
+    .await
+    .unwrap();
+
+    // Now post [f1, f2] (2 files instead of 1). Layout changed from 1 file to 2 files.
+    let inputs = vec![
+        pesto::walk::InputFile {
+            path: f1_path,
+            name: "f1.bin".to_string(),
+        },
+        pesto::walk::InputFile {
+            path: f2_path,
+            name: "f2.bin".to_string(),
+        },
+    ];
+
+    let outcome = post_files_with_progress(&config, &inputs, None, Some(&state_path), None)
+        .await
+        .unwrap();
+
+    assert!(outcome.failures.is_empty());
+    // Mismatched layout must have cleared the old spool file and posted all 4 segments freshly.
+    assert!(!spool_dir.join("f1.bin.1.spool").exists());
+    assert_eq!(outcome.segments.len(), 4);
+    assert_eq!(posts.load(Ordering::Relaxed), 4);
+
+    let f1_s1 = outcome
+        .segments
+        .iter()
+        .find(|s| s.file_name == "f1.bin" && s.part == 1)
+        .unwrap();
+    let f2_s2 = outcome
+        .segments
+        .iter()
+        .find(|s| s.file_name == "f2.bin" && s.part == 2)
+        .unwrap();
+    assert_eq!(f1_s1.segment_identity.unwrap().total_files, 2);
+    assert_eq!(f2_s2.segment_identity.unwrap().total_files, 2);
+    assert_eq!(f2_s2.segment_identity.unwrap().segment_index, 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_mtime_change_with_identical_layout_clears_spool_and_invalidates_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+
+    {
+        let posts = posts.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(handle_connection(stream, posts.clone()));
+            }
+        });
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.bin");
+    std::fs::write(&path, vec![0x22_u8; 1000]).unwrap();
+    let state_path = dir.path().join("data.bin.pesto-state");
+    let spool_dir = dir.path().join("data.bin.pesto-spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+
+    let mut config = test_config(addr.port());
+    config.par2 = 0; // disable par2 so only file identity is in play
+    config.article_size = 500;
+
+    // Prior session state with matching 1-file, 2-part layout but DIFFERENT mtime
+    let mut prior = ResumeState::default();
+    prior.validate_run(&RunFingerprint::from_config(&config));
+    let matching_layout = pesto::poster::ReleaseLayout::from_parts(1, &[(1, 2)]).unwrap();
+    prior.set_session_identity(pesto::resume::UploadSessionIdentity::new(
+        None,
+        matching_layout.clone(),
+    ));
+    prior.record_file(
+        "data.bin",
+        FileFingerprint {
+            size: 1000,
+            mtime: Some(1), // Stale mtime
+        },
+    );
+    prior.save(&state_path).unwrap();
+
+    // Spool file from pre-change run
+    let spool_meta = pesto::spool::SpoolMetadata {
+        wire_identity: None,
+        segment_identity: matching_layout.segment_identity(1, 1),
+        session_salt: None,
+        layout_fingerprint: Some(matching_layout.fingerprint()),
+    };
+    pesto::spool::write_with_metadata(
+        &spool_dir,
+        "data.bin",
+        1,
+        "<stale@msg>",
+        b"headers",
+        b"stale-body",
+        &spool_meta,
+    )
+    .await
+    .unwrap();
+    assert!(spool_dir.join("data.bin.1.spool").exists());
+
+    let inputs = vec![pesto::walk::InputFile {
+        path: path.clone(),
+        name: "data.bin".to_string(),
+    }];
+
+    let outcome = post_files_with_progress(&config, &inputs, None, Some(&state_path), None)
+        .await
+        .unwrap();
+
+    assert!(outcome.failures.is_empty());
+    // Mtime mismatch must have invalidated session and cleared the stale spool file
+    assert!(!spool_dir.join("data.bin.1.spool").exists());
+    // Both segments must be freshly posted to network (not replayed)
+    assert_eq!(posts.load(Ordering::Relaxed), 2);
 }

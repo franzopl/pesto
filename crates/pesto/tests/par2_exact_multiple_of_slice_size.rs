@@ -155,6 +155,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,

@@ -59,6 +59,7 @@ fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -186,7 +187,8 @@ async fn full_shared_obfuscation_uses_one_prefix_across_all_files() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    );
+    )
+    .unwrap();
     for rel in &expected {
         assert!(
             nzb.contains(&format!("subject=\"&quot;{rel}&quot;")),
@@ -464,6 +466,7 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -664,6 +667,7 @@ async fn light_obfuscation_par2_set_shares_prefix_and_matches_subject_exactly() 
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -803,7 +807,8 @@ async fn light_obfuscation_nzb_subject_mirrors_the_wire_subject() {
         &outcome.segments,
         &pesto::nzb::NzbMeta::default(),
         config.obfuscate,
-    );
+    )
+    .unwrap();
     assert!(
         !nzb.contains("movie.mkv"),
         "the real filename must not appear in a light NZB"

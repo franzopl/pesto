@@ -187,6 +187,10 @@ pub(super) async fn run_batch(
         anyhow::bail!("no entries found to post");
     }
 
+    if season_nzb.is_some() && params.config.encrypt_password.is_some() {
+        anyhow::bail!("encrypted season consolidation is not supported: individual episode uploads use independent session salts and segment indices; individual per-episode NZBs have been generated");
+    }
+
     // A season batch merges every entry's NZB into one at the end, so they
     // all need the *same* archive password — resolved once, up front, and
     // handed to every entry below. A plain --each batch has no such merge,
@@ -385,7 +389,7 @@ pub(super) async fn run_batch(
             // - Keep: episode data files (no .par2 in name)
             // - Remove: per-episode PAR2 sets (have .par2 in name)
             // - Add: global season PAR2 (replaces individual sets with single coherent rsid)
-            let season_segments: Vec<PostedSegment> = if !season_par2_segments.is_empty() {
+            let mut season_segments: Vec<PostedSegment> = if !season_par2_segments.is_empty() {
                 let data_segments: Vec<_> = all_segments
                     .iter()
                     .filter(|s| !s.file_name.ends_with(".par2"))
@@ -412,6 +416,16 @@ pub(super) async fn run_batch(
                 all_segments.clone()
             };
 
+            // Each ordinary episode upload has its own deterministic release layout,
+            // so its internal identities restart at segment 1. They remain attached
+            // to the posted result and resume state, but are not one shared encryption
+            // session and therefore cannot be validated as globally unique in this
+            // combined NZB. Encrypted season consolidation is rejected above; ordinary
+            // NZBs neither serialize nor consume segmentIndex.
+            for segment in &mut season_segments {
+                segment.segment_identity = None;
+            }
+
             let mut nzb_tags = config.nzb_tags.clone();
             add_obfuscation_tag(&mut nzb_tags, &config.obfuscate);
             let nzb_meta = NzbMeta {
@@ -434,9 +448,12 @@ pub(super) async fn run_batch(
                 }),
                 mal_id: config.mal_id.clone(),
                 tags: nzb_tags,
+                yenc_encrypted: false,
+                yenc_version: None,
+                yenc_cipher: None,
             };
             let xml =
-                pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta, config.obfuscate);
+                pesto::nzb::generate(&all_groups, &season_segments, &nzb_meta, config.obfuscate)?;
             tokio::fs::write(&season_path, &xml)
                 .await
                 .with_context(|| format!("writing season nzb `{}`", season_path.display()))?;

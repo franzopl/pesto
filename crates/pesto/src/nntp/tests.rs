@@ -193,6 +193,25 @@ fn dot_stuffs_lines_starting_with_dot() {
     assert_eq!(out, b"..hello\r\nworld\r\n..dot\r\n");
 }
 
+#[tokio::test]
+async fn post_parts_dot_stuffs_an_encrypted_control_line_starting_with_dot() {
+    let (mut conn, mut server) = mock_conn(b"340 Send article\r\n240 Article received\r\n").await;
+    let body = b"header\r\n.encrypted-control\r\npayload\r\n";
+
+    conn.post_parts(b"Subject: test\r\n\r\n", body)
+        .await
+        .unwrap();
+
+    let mut sent = vec![0u8; 256];
+    let count = tokio::io::AsyncReadExt::read(&mut server, &mut sent)
+        .await
+        .unwrap();
+    sent.truncate(count);
+    assert!(sent
+        .windows(b"\r\n..encrypted-control\r\n".len())
+        .any(|window| window == b"\r\n..encrypted-control\r\n"));
+}
+
 #[test]
 fn dot_stuff_leaves_other_lines_untouched() {
     let mut out = Vec::new();

@@ -62,3 +62,197 @@ fn post_refusal_is_441_and_other_4xx_except_auth() {
     assert!(!is_post_refusal(&err("connection reset by peer")));
     assert!(!is_post_refusal(&err("timed out")));
 }
+
+fn test_inner(results: Arc<Mutex<Vec<PostedSegment>>>) -> Inner {
+    use crate::config::{Config, FileConfig, Overrides};
+    let mut file = FileConfig::default();
+    file.posting.groups = Some(vec!["alt.test".into()]);
+    let config = Config::resolve(
+        file,
+        Overrides {
+            dry_run: Some(true),
+            par2: Some(0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    Inner {
+        heaps: vec![Mutex::new(BinaryHeap::new())],
+        in_flight: AtomicUsize::new(0),
+        open: AtomicBool::new(true),
+        config,
+        groups: vec!["alt.test".into()],
+        results,
+        still_missing: Mutex::new(Vec::new()),
+        inconclusive: Mutex::new(Vec::new()),
+        events: None,
+        cancel: None,
+        servers: Arc::new(Vec::new()),
+        checked_count: AtomicUsize::new(0),
+        reposted_count: AtomicUsize::new(0),
+        first_checks: AtomicUsize::new(0),
+        first_misses: AtomicUsize::new(0),
+        resume: None,
+        encryption_adapter: None,
+    }
+}
+
+#[test]
+fn splice_preserves_logical_identity_and_subject_ordinals() {
+    let id = crate::poster::outcome::SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let initial = PostedSegment {
+        file_name: "file.bin".into(),
+        file_path: Arc::from(std::path::Path::new("file.bin")),
+        subject_name: Arc::from("file.bin"),
+        wire_name: Arc::from("file.bin"),
+        wire_yenc_name: Arc::from("file.bin"),
+        file_size: 100,
+        part: 1,
+        total: 1,
+        message_id: "<orig@test>".into(),
+        bytes: 100,
+        from: Arc::from("p@x"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 1,
+        total_files: 2,
+        segment_identity: Some(id),
+    };
+    let results = Arc::new(Mutex::new(vec![initial]));
+    let inner = test_inner(Arc::clone(&results));
+
+    let replacement = PostedSegment {
+        file_name: "file.bin".into(),
+        file_path: Arc::from(std::path::Path::new("file.bin")),
+        subject_name: Arc::from("file.bin"),
+        wire_name: Arc::from("fresh_wire"),
+        wire_yenc_name: Arc::from("fresh_yenc"),
+        file_size: 100,
+        part: 1,
+        total: 1,
+        message_id: "<fresh@test>".into(),
+        bytes: 100,
+        from: Arc::from("p@x"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 1,
+        total_files: 2,
+        segment_identity: Some(id),
+    };
+
+    inner.splice(&replacement).unwrap();
+    let r = results.lock().unwrap();
+    assert_eq!(r[0].message_id, "<fresh@test>");
+    assert_eq!(r[0].segment_identity, Some(id));
+    assert_eq!(r[0].file_index, 1);
+    assert_eq!(r[0].total_files, 2);
+}
+
+#[test]
+fn splice_errors_if_repost_mutates_segment_identity() {
+    let id1 = crate::poster::outcome::SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let id2 = crate::poster::outcome::SegmentIdentity::checked(1, 2, 2, 1).unwrap();
+    let initial = PostedSegment {
+        file_name: "file.bin".into(),
+        file_path: Arc::from(std::path::Path::new("file.bin")),
+        subject_name: Arc::from("file.bin"),
+        wire_name: Arc::from("file.bin"),
+        wire_yenc_name: Arc::from("file.bin"),
+        file_size: 100,
+        part: 1,
+        total: 1,
+        message_id: "<orig@test>".into(),
+        bytes: 100,
+        from: Arc::from("p@x"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 1,
+        total_files: 2,
+        segment_identity: Some(id1),
+    };
+    let results = Arc::new(Mutex::new(vec![initial]));
+    let inner = test_inner(Arc::clone(&results));
+
+    let replacement = PostedSegment {
+        file_name: "file.bin".into(),
+        file_path: Arc::from(std::path::Path::new("file.bin")),
+        subject_name: Arc::from("file.bin"),
+        wire_name: Arc::from("fresh_wire"),
+        wire_yenc_name: Arc::from("fresh_yenc"),
+        file_size: 100,
+        part: 1,
+        total: 1,
+        message_id: "<fresh@test>".into(),
+        bytes: 100,
+        from: Arc::from("p@x"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 1,
+        total_files: 2,
+        segment_identity: Some(id2), // MUTATED!
+    };
+
+    let res = inner.splice(&replacement);
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("check repost altered logical segment identity"));
+}
+
+#[test]
+fn splice_errors_if_repost_mutates_file_index() {
+    let id = crate::poster::outcome::SegmentIdentity::checked(0, 1, 2, 1).unwrap();
+    let initial = PostedSegment {
+        file_name: "file.bin".into(),
+        file_path: Arc::from(std::path::Path::new("file.bin")),
+        subject_name: Arc::from("file.bin"),
+        wire_name: Arc::from("file.bin"),
+        wire_yenc_name: Arc::from("file.bin"),
+        file_size: 100,
+        part: 1,
+        total: 1,
+        message_id: "<orig@test>".into(),
+        bytes: 100,
+        from: Arc::from("p@x"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 1,
+        total_files: 2,
+        segment_identity: Some(id),
+    };
+    let results = Arc::new(Mutex::new(vec![initial]));
+    let inner = test_inner(Arc::clone(&results));
+
+    let replacement = PostedSegment {
+        file_name: "file.bin".into(),
+        file_path: Arc::from(std::path::Path::new("file.bin")),
+        subject_name: Arc::from("file.bin"),
+        wire_name: Arc::from("fresh_wire"),
+        wire_yenc_name: Arc::from("fresh_yenc"),
+        file_size: 100,
+        part: 1,
+        total: 1,
+        message_id: "<fresh@test>".into(),
+        bytes: 100,
+        from: Arc::from("p@x"),
+        date: (None, None),
+        full_crc32: 0,
+        server_idx: 0,
+        file_index: 99, // MUTATED!
+        total_files: 2,
+        segment_identity: Some(id),
+    };
+
+    let res = inner.splice(&replacement);
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("check repost altered file index or total files"));
+}

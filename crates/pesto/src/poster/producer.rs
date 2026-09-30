@@ -475,6 +475,10 @@ pub(super) async fn producer(
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
+                            let identity = shared
+                                .release_layout
+                                .segment_identity(meta.release_ordinal, i)
+                                .expect("valid segment identity for planned data file");
                             if tx
                                 .send(make_task(
                                     meta.clone(),
@@ -482,6 +486,7 @@ pub(super) async fn producer(
                                     total_parts,
                                     offset,
                                     buf,
+                                    identity,
                                     file_crc32,
                                     &shared.config,
                                 ))
@@ -670,12 +675,12 @@ pub(super) async fn producer(
                         // the recovery set.
                         let wire_override =
                             shared.release_prefix.as_deref().map(layout::index_name);
-                        let file_index = metas.len() as u32 + 1;
+                        let release_ordinal = metas.len() as u32 + 1;
                         push_par2_file(
                             &index_path,
                             index_name,
                             wire_override,
-                            file_index,
+                            release_ordinal,
                             &shared,
                             tx,
                         )
@@ -720,6 +725,10 @@ pub(super) async fn producer(
                 file.write_all(&pkt).await.with_context(|| {
                     format!("writing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
+                file.flush().await.with_context(|| {
+                    format!("flushing PAR2 recovery volume `{}`", vol_path.display())
+                })?;
+                drop(file);
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
@@ -731,9 +740,17 @@ pub(super) async fn producer(
                             .map(|prefix| layout::volume_name(prefix, *vol));
                         let index_offset =
                             u32::from(shared.config.obfuscate.policy().publish_par2_index);
-                        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
-                        push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
-                            .await?;
+                        let release_ordinal =
+                            metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                        push_par2_file(
+                            &vol_path,
+                            vol_name,
+                            wire_override,
+                            release_ordinal,
+                            &shared,
+                            tx,
+                        )
+                        .await?;
                     }
                 }
             }

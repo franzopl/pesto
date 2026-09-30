@@ -57,8 +57,9 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
     let metadata = NzbMeta {
         name: config.nzb_title.clone(),
         password: config
-            .nzb_password
+            .encrypt_password
             .clone()
+            .or_else(|| config.nzb_password.clone())
             .or_else(|| effective_password.map(str::to_string)),
         category: config.nzb_category.clone(),
         tmdb_id: config.tmdb_id.clone(),
@@ -74,13 +75,19 @@ pub(crate) async fn write(request: ArtifactRequest<'_>) -> Result<Option<PathBuf
         }),
         mal_id: config.mal_id.clone(),
         tags: nzb_tags,
+        yenc_encrypted: config.encrypt_password.is_some(),
+        yenc_version: config.encrypt_password.as_ref().map(|_| "1.0".to_string()),
+        yenc_cipher: config
+            .encrypt_password
+            .as_ref()
+            .map(|_| "XChaCha20-Poly1305".to_string()),
     };
     let xml = pesto::nzb::generate(
         &outcome.groups,
         &outcome.segments,
         &metadata,
         config.obfuscate,
-    );
+    )?;
     tokio::fs::write(&archive_path, &xml)
         .await
         .with_context(|| format!("writing nzb file `{}`", archive_path.display()))?;

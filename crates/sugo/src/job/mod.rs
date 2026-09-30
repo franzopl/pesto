@@ -301,6 +301,7 @@ mod tests {
             server_idx: 0,
             file_index: 0,
             total_files: 0,
+            segment_identity: None,
         }];
         pesto::nzb::generate(
             &groups,
@@ -308,6 +309,7 @@ mod tests {
             &pesto::nzb::NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
         )
+        .unwrap()
         .into_bytes()
     }
 

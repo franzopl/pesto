@@ -39,6 +39,16 @@ pub fn store(dest_dir: &Path, message_id: &str, body: &[u8]) -> Result<()> {
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Remove a single cached body by Message-ID.
+/// If the entry does not exist, succeeds as a no-op.
+pub fn remove(dest_dir: &Path, message_id: &str) -> Result<()> {
+    let path = cache_path(dest_dir, message_id);
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Remove the whole cache directory. Call once a download completes
 /// successfully (every file assembled, and PAR2-clean or repaired) so
 /// cached bodies don't accumulate forever once they're no longer needed —

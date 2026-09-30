@@ -230,7 +230,7 @@ cargo run --bin penne -- info path/to/release.nzb
 
 # Download, assemble, deobfuscate, PAR2-verify/repair, and extract.
 # --out-dir defaults to the config's download_dir; --password overrides
-# the .nzb's own embedded password. Both optional.
+# the .nzb's own embedded password (for archive extraction and encrypted yEnc).
 cargo run --bin penne -- download path/to/release.nzb \
     --out-dir ./downloads \
     --password hunter2
@@ -246,7 +246,10 @@ cargo run --bin penne -- download path/to/release.nzb --stat
    parallel connections per server. A segment already cached from a
    previous, interrupted run is never re-fetched (see Resume below).
 2. **Decode** each fetched article body (yEnc) and cache the raw bytes for
-   resume.
+   resume. For encrypted releases (`<meta type="yenc_encrypted">true</meta>`),
+   Penne restores FF1-encrypted control lines and authenticates/decrypts the
+   body via XChaCha20-Poly1305 before assembly. Unauthenticated segments fail
+   closed with zero plaintext committed.
 3. **Assemble** each file from its decoded segments. A file missing any
    segment is left unwritten entirely — a partial file that looks complete
    is worse than none.
@@ -543,6 +546,32 @@ automatically once a run completes with nothing left incomplete or
 damaged — at `--mode download`, that only happens if the fetch itself was
 already fully clean; otherwise it's kept so a later `--mode repair` (or
 higher) run can still use it.
+
+### Encrypted releases (yEnc encryption)
+
+Penne and Sugo support downloading releases encrypted with yEnc body and control-line
+encryption (XChaCha20-Poly1305 and Radix 253 FF1). Third-party downloader implementations
+(SABnzbd, NZBGet) are currently in active development.
+
+When an NZB includes `<meta type="yenc_encrypted">true</meta>`, decryption occurs
+automatically using the password embedded in `<meta type="password">`.
+
+To supply or override the password manually:
+
+```bash
+cargo run --bin penne -- download path/to/encrypted.nzb --password MySecretPassword
+```
+
+Decryption operates on an article-by-article basis. Failed authentication releases
+zero plaintext and triggers alternate-server failover before failing the job.
+
+**Security and Threat Model:**
+- Content encryption at the article layer (XChaCha20-Poly1305) protects stored Usenet articles from unauthorized retrieval.
+- Transport encryption (TLS) secures the network connection to the Usenet provider, while content encryption secures payload data at rest on servers.
+- Because the encryption password is conventionally distributed within the NZB (`<meta type="password">`), confidentiality relies upon private distribution of the NZB file itself.
+
+**Protocol Status:**
+The yEnc encryption protocol is experimental. Canonical test vectors, key derivation parameters, and control-line formats are frozen for this release. An independent formal cryptographic review is recommended before stabilization.
 
 ## Roadmap
 

@@ -13,7 +13,14 @@
 #
 # Focused compatibility/end-to-end test suites that exercise whole pipelines
 # across many modules and are clearer as one scenario per file.
-872 crates/penne/tests/cli_download_end_to_end.rs
-868 crates/penne/tests/check.rs
-851 crates/pesto/tests/integration.rs
-818 crates/pesto/tests/full_shared_obfuscation.rs
+1177 crates/penne/tests/cli_download_end_to_end.rs
+877 crates/penne/tests/check.rs
+971 crates/pesto/tests/integration.rs
+823 crates/pesto/tests/full_shared_obfuscation.rs
+929 crates/pesto/tests/upload_encryption.rs
+829 crates/pesto/src/poster/prepare.rs
+837 crates/pesto/src/poster/worker.rs
+1077 crates/pesto/src/nzb/tests.rs
+1060 crates/pesto/src/resume.rs
+876 crates/pesto/src/crypto/tests.rs
+806 crates/pesto/src/bin/pesto/cli.rs

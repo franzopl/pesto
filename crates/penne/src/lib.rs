@@ -15,6 +15,8 @@
 /// Shown by `--version`.
 pub const DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use pesto::crypto::DownloadDecryptionAdapter;
+
 pub mod assemble;
 pub mod cache;
 pub mod check;

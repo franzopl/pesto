@@ -255,3 +255,39 @@ fn file_nzb_tags_used_when_cli_absent() {
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
     assert_eq!(cfg.nzb_tags, vec!["config-a", "config-b"]);
 }
+
+#[test]
+fn toml_encryption_section_sets_password() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [encryption]
+        password = "toml-encryption-secret"
+        "#,
+    )
+    .unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert_eq!(
+        cfg.encrypt_password.as_deref(),
+        Some("toml-encryption-secret")
+    );
+}
+
+#[test]
+fn toml_encryption_section_empty_password_rejected() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [encryption]
+        password = ""
+        "#,
+    )
+    .unwrap();
+    assert!(Config::resolve(file, Overrides::default()).is_err());
+}

@@ -80,6 +80,13 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
 
     let mut idx = ybegin_idx + 1;
     let (begin, end) = if ybegin.total > 1 {
+        while idx < lines.len()
+            && lines[idx].starts_with(b"=y")
+            && !lines[idx].starts_with(b"=ypart")
+            && !lines[idx].starts_with(b"=yend")
+        {
+            idx += 1;
+        }
         let line = *lines
             .get(idx)
             .context("multi-part article is missing its =ypart line")?;
@@ -102,6 +109,10 @@ pub fn decode_part(body: &[u8]) -> Result<DecodedPart> {
 
     let mut data = Vec::with_capacity((end.saturating_sub(begin) + 1) as usize);
     for line in &lines[idx..yend_idx] {
+        // COMPAT-02: Standard yEnc parsers must ignore unknown =y control lines gracefully
+        if line.starts_with(b"=y") {
+            continue;
+        }
         decode_data_line(&mut data, line);
     }
 
@@ -405,5 +416,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("=ypart"));
+    }
+
+    #[test]
+    fn test_standard_decoder_ignores_yencryption() {
+        let payload = b"standard yenc payload bytes with some varied content 1234567890".to_vec();
+        let encoded = encode_part(
+            "test_file.bin",
+            payload.len() as u64,
+            PartSpec {
+                number: 1,
+                total: 1,
+                offset: 0,
+            },
+            &payload,
+            128,
+            None,
+        );
+
+        // Inject =yencryption line after =ybegin
+        let mut body = Vec::new();
+        let mut lines = encoded.body.split(|&b| b == b'\n');
+        if let Some(first_line) = lines.next() {
+            body.extend_from_slice(first_line);
+            body.push(b'\n');
+            body.extend_from_slice(
+                b"=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b\r\n",
+            );
+        }
+        for rest in lines {
+            body.extend_from_slice(rest);
+            body.push(b'\n');
+        }
+
+        let decoded = decode_part(&body).expect("decode_part should succeed");
+        assert_eq!(decoded.data, payload);
+        assert!(decoded.crc_matches(), "CRC should match wire CRC");
     }
 }

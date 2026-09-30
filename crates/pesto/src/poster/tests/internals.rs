@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use super::result::record_failure;
 use super::*;
 
@@ -40,45 +38,6 @@ fn ready_queue_matches_nyuu_article_buffer() {
 }
 
 // ── Shared buffer pool ────────────────────────────────────────────────────
-
-fn minimal_shared(article_size: usize) -> Arc<Shared> {
-    use crate::config::{FileConfig, Overrides};
-    let mut file = FileConfig::default();
-    file.posting.groups = Some(vec!["alt.test".into()]);
-    let mut config = Config::resolve(
-        file,
-        Overrides {
-            dry_run: Some(true),
-            par2: Some(0),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    config.article_size = article_size;
-    let post_group = pick_post_group(&config.groups);
-    Arc::new(Shared {
-        config,
-        servers: Arc::new(vec![]),
-        results: Arc::new(Mutex::new(Vec::new())),
-        failures: Mutex::new(Vec::new()),
-        failed_tasks: Mutex::new(Vec::new()),
-        events: None,
-        cancelled: Arc::new(AtomicBool::new(false)),
-        paused: Arc::new(AtomicBool::new(false)),
-        resume: None,
-        resume_path: None,
-        spool_dir: None,
-        pool: Arc::new(Mutex::new(Vec::new())),
-        encode_pool: Arc::new(Mutex::new(Vec::new())),
-        total_retries: std::sync::atomic::AtomicUsize::new(0),
-        post_group,
-        release_prefix: None,
-        release_from: None,
-        run_id: 0,
-        total_files: 0,
-        check_tx: Mutex::new(None),
-    })
-}
 
 #[test]
 fn buffer_pool_reuses_released_buffer() {
@@ -122,6 +81,7 @@ fn record_failure_appends_description() {
         total: 5,
         offset: 0,
         data: vec![],
+        segment_identity: SegmentIdentity::checked(0, 1, 1, 2).unwrap(),
         subject_name: "ep.mkv".into(),
         yenc_name: "ep.mkv".into(),
         from: String::new(),

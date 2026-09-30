@@ -50,8 +50,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pesto::config::ServerEntry;
+use pesto::crypto::DownloadDecryptionAdapter;
 use pesto::yenc::decode_part;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinSet;
@@ -115,6 +116,7 @@ struct WorkItem {
     file_name: String,
     part: u32,
     message_id: String,
+    segment_index: Option<u32>,
 }
 
 /// Per-file completion tracking shared across the cache-hit prepass and
@@ -152,6 +154,7 @@ struct PassContext {
     retries: u32,
     progress: Option<ProgressSender>,
     shared: Arc<SharedState>,
+    decryptor: Option<Arc<DownloadDecryptionAdapter>>,
 }
 
 /// Fetch and decode every segment in `queue` from `tiers`, tried in
@@ -175,6 +178,58 @@ pub async fn download_queue(
     retries: u32,
     progress: Option<ProgressSender>,
 ) -> Result<DownloadOutcome> {
+    download_queue_with_decryptor(queue, tiers, dest_dir, retries, progress, None).await
+}
+
+/// Preflight validation for queue segment identities before any download side effects.
+///
+/// Fails closed if the queue is encrypted and contains missing, zero, duplicate, or conflicting segment indices.
+pub fn validate_queue_identity(queue: &DownloadQueue, encrypted: bool) -> Result<()> {
+    if !encrypted {
+        return Ok(());
+    }
+    let mut by_message_id = HashMap::<&str, u32>::new();
+    let mut by_index = HashMap::<u32, &str>::new();
+    for segment in queue.files.iter().flat_map(|file| &file.segments) {
+        let index = segment.segment_index.context("MISSING_SEGMENT_INDEX")?;
+        anyhow::ensure!(index > 0, "INVALID_SEGMENT_INDEX_ZERO");
+        if let Some(&existing) = by_message_id.get(segment.message_id.as_str()) {
+            anyhow::ensure!(existing == index, "CONFLICTING_MESSAGE_ID_INDEX");
+        } else {
+            by_message_id.insert(segment.message_id.as_str(), index);
+        }
+        if let Some(&existing_mid) = by_index.get(&index) {
+            anyhow::ensure!(
+                existing_mid == segment.message_id.as_str(),
+                "DUPLICATE_SEGMENT_INDEX"
+            );
+        } else {
+            by_index.insert(index, segment.message_id.as_str());
+        }
+    }
+    Ok(())
+}
+
+/// Fetch and decode every segment in `queue` from `tiers`, optionally using
+/// `decryptor` to restore encrypted control lines and authenticate body ciphertext.
+pub async fn download_queue_with_decryptor(
+    queue: &DownloadQueue,
+    tiers: &[ServerTier],
+    dest_dir: &Path,
+    retries: u32,
+    progress: Option<ProgressSender>,
+    decryptor: Option<Arc<DownloadDecryptionAdapter>>,
+) -> Result<DownloadOutcome> {
+    let is_encrypted_queue = queue
+        .files
+        .iter()
+        .any(|f| f.segments.iter().any(|s| s.segment_index.is_some()));
+
+    if is_encrypted_queue && decryptor.is_none() {
+        anyhow::bail!("queue contains encrypted segments but no decryption adapter was provided");
+    }
+
+    validate_queue_identity(queue, is_encrypted_queue || decryptor.is_some())?;
     anyhow::ensure!(!tiers.is_empty(), "no servers configured");
 
     emit(&progress, || ProgressEvent::Started {
@@ -225,8 +280,15 @@ pub async fn download_queue(
     let mut pending: Vec<WorkItem> = Vec::new();
     for file in &queue.files {
         for seg in &file.segments {
+            let segment_index = seg.segment_index;
+
             if let Some(cached) = cache::load(dest_dir, &seg.message_id) {
-                if let Ok(decoded) = decode_part(&cached) {
+                let decoded_result = if let Some(ref d) = decryptor {
+                    d.decode_article(&cached, segment_index)
+                } else {
+                    decode_part(&cached)
+                };
+                if let Ok(decoded) = decoded_result {
                     emit(&progress, || ProgressEvent::SegmentDownloaded {
                         file_name: file.name.clone(),
                         part: seg.part,
@@ -242,6 +304,9 @@ pub async fn download_queue(
                     )
                     .await?;
                     continue;
+                } else {
+                    // Evict corrupted/unauthenticated cache entry
+                    let _ = cache::remove(dest_dir, &seg.message_id);
                 }
                 // A corrupted cache entry (shouldn't happen, but a killed
                 // write mid-flush is possible) falls through to a normal
@@ -251,6 +316,7 @@ pub async fn download_queue(
                 file_name: file.name.clone(),
                 part: seg.part,
                 message_id: seg.message_id.clone(),
+                segment_index,
             });
         }
     }
@@ -265,6 +331,7 @@ pub async fn download_queue(
         retries,
         progress,
         shared,
+        decryptor,
     });
 
     let last_tier_idx = tiers.len() - 1;
@@ -559,7 +626,13 @@ async fn worker_loop(
             }
         };
 
-        match decode_part(&body) {
+        let decoded_result = if let Some(ref decryptor) = ctx.decryptor {
+            decryptor.decode_article(&body, item.segment_index)
+        } else {
+            decode_part(&body)
+        };
+
+        match decoded_result {
             Ok(decoded) => {
                 // Cache the raw body, not the decoded form — see the module
                 // docs on `crate::cache` for why.
@@ -581,6 +654,12 @@ async fn worker_loop(
                 fetched.push(item);
             }
             Err(e) => {
+                tracing::warn!(
+                    message_id = %item.message_id,
+                    file = %item.file_name,
+                    part = item.part,
+                    "article decode/decryption failed: {e}"
+                );
                 if is_last_server {
                     emit(&ctx.progress, || ProgressEvent::SegmentCorrupt {
                         file_name: item.file_name.clone(),

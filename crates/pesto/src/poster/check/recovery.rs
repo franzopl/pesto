@@ -51,6 +51,7 @@ pub(crate) async fn recover_missing(
     segments: Vec<PostedSegment>,
     events: Option<&ProgressSender>,
     mut slots: Vec<ConnectionSlot>,
+    encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
 ) -> RecoverOutcome {
     if segments.is_empty() || slots.is_empty() {
         return RecoverOutcome {
@@ -82,6 +83,7 @@ pub(crate) async fn recover_missing(
         let recovered = Arc::clone(&recovered);
         let inconclusive = Arc::clone(&inconclusive);
         let events = events.cloned();
+        let encryption_adapter = encryption_adapter.clone();
 
         workers.push(tokio::spawn(async move {
             loop {
@@ -90,7 +92,7 @@ pub(crate) async fn recover_missing(
 
                 slot.retarget(seg.server_idx);
 
-                let ok = match repost_one(&config, &mut slot, &seg, &groups).await {
+                let ok = match repost_one(&config, &mut slot, &seg, &groups, encryption_adapter.as_deref()).await {
                     Ok(new_seg) => {
                         tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
                         match slot.ensure_connected().await {

@@ -19,6 +19,7 @@ pub(super) async fn repost_one(
     slot: &mut ConnectionSlot,
     seg: &PostedSegment,
     groups: &[String],
+    encryption_adapter: Option<&crate::crypto::UploadEncryptionAdapter>,
 ) -> anyhow::Result<PostedSegment> {
     let offset = (seg.part as u64 - 1) * config.article_size as u64;
 
@@ -61,14 +62,31 @@ pub(super) async fn repost_one(
     // doc comment) — using it here would repost an obfuscated release under
     // its real name, undoing `--obfuscate` the moment one article needs a
     // repost. `wire_name` carries the identity actually posted with.
-    let encoded = yenc::encode_part(
-        &wire_yenc,
-        seg.file_size,
-        spec,
-        &buf,
-        config.line_length,
-        file_crc32,
-    );
+    let encoded = if let Some(adapter) = encryption_adapter {
+        let mut enc_buf = Vec::new();
+        let identity = seg
+            .segment_identity
+            .expect("identity must be present for live upload");
+        adapter.encode_article(
+            &wire_yenc,
+            seg.file_size,
+            spec,
+            &buf,
+            config.line_length,
+            file_crc32,
+            identity,
+            &mut enc_buf,
+        )?
+    } else {
+        yenc::encode_part(
+            &wire_yenc,
+            seg.file_size,
+            spec,
+            &buf,
+            config.line_length,
+            file_crc32,
+        )
+    };
     let (rfc_date, _ts) = &date;
     let mut message_id = generate_message_id(config.message_id_domain.as_deref());
     let article = Article {
@@ -120,6 +138,7 @@ pub(super) async fn repost_one(
                         server_idx: slot.server_idx(),
                         file_index: seg.file_index,
                         total_files: seg.total_files,
+                        segment_identity: seg.segment_identity,
                     });
                 }
                 Err(e) => {

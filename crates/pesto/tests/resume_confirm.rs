@@ -206,6 +206,7 @@ fn test_config(port: u16, check: bool) -> Config {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -343,6 +344,7 @@ async fn t13_new_schema_three_arms() {
             check_disabled: false,
             server_idx: 0,
             wire_identity: None,
+            segment_identity: None,
         },
     );
     prior.record_with(
@@ -355,6 +357,7 @@ async fn t13_new_schema_three_arms() {
             check_disabled: false,
             server_idx: 0,
             wire_identity: None,
+            segment_identity: None,
         },
     );
     prior.save(&state_path).unwrap();
@@ -638,4 +641,110 @@ async fn t23_cancel_during_check_drain_persists_unconfirmed() {
     assert_eq!(outcome2.segments.len(), 2);
     assert_eq!(counts2.posts.load(Ordering::Relaxed), 0);
     assert!(counts2.stats.load(Ordering::Relaxed) >= 2);
+}
+
+/// Verify that cancellation and resume round-trip preserves exact SegmentIdentity
+/// across interrupted save, load, and replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_preserves_exact_segment_identity_across_cancel_and_replay() {
+    let (port, _counts) = spawn_mock(None, None, 0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file1 = input(dir.path(), "file1.bin", 150); // 2 segments
+    let file2 = input(dir.path(), "file2.bin", 80); // 1 segment
+    let state_path = dir.path().join("release.pesto-state");
+    let mut config = test_config(port, true);
+    config.check_delay_secs = 30;
+    config.check_recover_max = 0;
+    config.file_counter = true;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = {
+        let cancel = cancel.clone();
+        let file1 = file1.clone();
+        let file2 = file2.clone();
+        let state_path = state_path.clone();
+        tokio::spawn(async move {
+            post_files_with_progress_and_cancel(
+                &config,
+                &[file1, file2],
+                Some(tx),
+                Some(&state_path),
+                Some(cancel),
+                None,
+            )
+            .await
+        })
+    };
+
+    let mut done = 0usize;
+    while let Some(ev) = rx.recv().await {
+        if let ProgressEvent::SegmentDone { ok: true, .. } = ev {
+            done += 1;
+            if done >= 2 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+    let outcome1 = run.await.unwrap().unwrap();
+    assert!(outcome1.cancelled);
+    assert!(state_path.exists());
+
+    let state1 = ResumeState::load(&state_path).unwrap();
+    // Segment records persisted during cancel must carry valid segment_identity.
+    for seg in &outcome1.segments {
+        let rec = state1.get(&seg.file_name, seg.part).unwrap();
+        assert_eq!(rec.segment_identity, seg.segment_identity);
+        assert!(rec.segment_identity.is_some());
+    }
+
+    // Now resume and finish the remaining segment.
+    let (port2, _counts2) = spawn_mock(None, None, 0).await;
+    let mut config2 = test_config(port2, true);
+    config2.resume = true;
+    config2.file_counter = true;
+    let file1_res = pesto::walk::InputFile {
+        path: dir.path().join("file1.bin"),
+        name: "file1.bin".into(),
+    };
+    let file2_res = pesto::walk::InputFile {
+        path: dir.path().join("file2.bin"),
+        name: "file2.bin".into(),
+    };
+    let outcome2 = post_files_with_progress(
+        &config2,
+        &[file1_res, file2_res],
+        None,
+        Some(&state_path),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome2.failures.is_empty());
+    assert_eq!(outcome2.segments.len(), 3);
+
+    // Verify all 3 segments have contiguous 1..=3 segment_index and matching ordinals.
+    let s1 = outcome2
+        .segments
+        .iter()
+        .find(|s| s.file_name == "file1.bin" && s.part == 1)
+        .unwrap();
+    let s2 = outcome2
+        .segments
+        .iter()
+        .find(|s| s.file_name == "file1.bin" && s.part == 2)
+        .unwrap();
+    let s3 = outcome2
+        .segments
+        .iter()
+        .find(|s| s.file_name == "file2.bin" && s.part == 1)
+        .unwrap();
+
+    assert_eq!(s1.segment_identity.unwrap().segment_index, 1);
+    assert_eq!(s1.segment_identity.unwrap().file_ordinal, 1);
+    assert_eq!(s2.segment_identity.unwrap().segment_index, 2);
+    assert_eq!(s2.segment_identity.unwrap().file_ordinal, 1);
+    assert_eq!(s3.segment_identity.unwrap().segment_index, 3);
+    assert_eq!(s3.segment_identity.unwrap().file_ordinal, 2);
 }

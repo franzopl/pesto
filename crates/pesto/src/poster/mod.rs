@@ -39,14 +39,15 @@ use identity::{
 };
 mod outcome;
 pub use outcome::{
-    nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
-    PostedSegment,
+    nzb_write_decision, reconstruct_identities, should_write_season_nzb, FailedTask,
+    FileIdentityInput, NzbWriteDecision, PostOutcome, PostedSegment, SegmentIdentity,
 };
 mod options;
 mod orchestrator;
 mod pipeline;
 mod prepare;
 pub use orchestrator::post_files_inner_with_release_prefix;
+pub use prepare::{LayoutEntry, ReleaseLayout};
 mod producer;
 mod result;
 pub use result::repost_failed_tasks;
@@ -71,6 +72,11 @@ struct FileMeta {
     /// Fixed dates have `Some` RFC but `None` timestamp.
     date: (Option<String>, Option<u64>),
     size: u64,
+    /// Modification time (unix timestamp in seconds) if known.
+    mtime: Option<u64>,
+    /// 1-based position in the release order (natural order for data files,
+    /// followed by PAR2 index and volumes). Always assigned.
+    release_ordinal: u32,
     /// This file's 1-based position among every file in the release (data
     /// files, then the PAR2 index, then the PAR2 volumes) — used for the
     /// `--file-counter` `[filenum/total]` subject prefix. Meaningless
@@ -301,12 +307,12 @@ async fn post_pregenerated_release(
         let index_name = layout::index_name(par2_release_base(&metas[0].real_name));
         let index_path = par2_dir.join(&index_name);
         let wire_override = shared.release_prefix.as_deref().map(layout::index_name);
-        let file_index = metas.len() as u32 + 1;
+        let release_ordinal = metas.len() as u32 + 1;
         push_par2_file(
             &index_path,
             index_name,
             wire_override,
-            file_index,
+            release_ordinal,
             shared,
             tx,
         )
@@ -322,8 +328,16 @@ async fn post_pregenerated_release(
             .as_deref()
             .map(|prefix| layout::volume_name(prefix, *vol));
         let index_offset = u32::from(shared.config.obfuscate.policy().publish_par2_index);
-        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
-        push_par2_file(&vol_path, vol_name, wire_override, file_index, shared, tx).await?;
+        let release_ordinal = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+        push_par2_file(
+            &vol_path,
+            vol_name,
+            wire_override,
+            release_ordinal,
+            shared,
+            tx,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -433,6 +447,10 @@ async fn post_data_files(
             };
 
             i += 1;
+            let identity = shared
+                .release_layout
+                .segment_identity(meta.release_ordinal, i)
+                .expect("valid segment identity for planned data file");
             if tx
                 .send(make_task(
                     meta.clone(),
@@ -440,6 +458,7 @@ async fn post_data_files(
                     total_parts,
                     offset,
                     buf,
+                    identity,
                     file_crc32,
                     &shared.config,
                 ))
@@ -463,7 +482,7 @@ async fn push_par2_file(
     path: &PathBuf,
     real_name: String,
     wire_override: Option<String>,
-    file_index: u32,
+    release_ordinal: u32,
     shared: &Arc<Shared>,
     tx: &TaskDispatcher<PostTask>,
 ) -> Result<()> {
@@ -523,8 +542,10 @@ async fn push_par2_file(
         from,
         date,
         size,
+        mtime: None,
+        release_ordinal,
         file_index: if shared.config.file_counter {
-            file_index
+            release_ordinal
         } else {
             0
         },
@@ -543,13 +564,19 @@ async fn push_par2_file(
         file.read_exact(&mut buf).await?;
         crc.update(&buf);
         let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
+        let part_number = i as u32 + 1;
+        let identity = shared
+            .release_layout
+            .segment_identity(release_ordinal, part_number)
+            .expect("valid segment identity for planned PAR2 file");
         if tx
             .send(make_task(
                 meta.clone(),
-                i as u32 + 1,
+                part_number,
                 total,
                 offset,
                 buf,
+                identity,
                 file_crc32,
                 &shared.config,
             ))
@@ -564,12 +591,14 @@ async fn push_par2_file(
 
 /// Build a `PostTask`, generating per-article identities for the two
 /// article-level modes; otherwise copies them from `FileMeta`.
+#[allow(clippy::too_many_arguments)]
 fn make_task(
     meta: Arc<FileMeta>,
     part: u32,
     total: u32,
     offset: u64,
     data: Vec<u8>,
+    segment_identity: SegmentIdentity,
     file_crc32: Option<u32>,
     config: &Config,
 ) -> PostTask {
@@ -606,6 +635,7 @@ fn make_task(
         total,
         offset,
         data,
+        segment_identity,
         subject_name,
         yenc_name,
         from,

@@ -302,8 +302,9 @@ pub async fn run_upload(
                         .map(|n| n.to_string_lossy().into_owned())
                 }),
                 password: config
-                    .nzb_password
+                    .encrypt_password
                     .clone()
+                    .or_else(|| config.nzb_password.clone())
                     .or_else(|| effective_password.clone()),
                 category: config.nzb_category.clone(),
                 tmdb_id: config.tmdb_id.clone(),
@@ -311,6 +312,12 @@ pub async fn run_upload(
                 tvdb_id: config.tvdb_id.clone(),
                 mal_id: config.mal_id.clone(),
                 tags: config.nzb_tags.clone(),
+                yenc_encrypted: config.encrypt_password.is_some(),
+                yenc_version: config.encrypt_password.as_ref().map(|_| "1.0".to_string()),
+                yenc_cipher: config
+                    .encrypt_password
+                    .as_ref()
+                    .map(|_| "XChaCha20-Poly1305".to_string()),
             };
             crate::memory::set_phase(crate::memory::Phase::Nzb);
             let xml = crate::nzb::generate(
@@ -318,7 +325,7 @@ pub async fn run_upload(
                 &outcome.segments,
                 &nzb_meta,
                 config.obfuscate,
-            );
+            )?;
             match tokio::fs::write(&out, &xml).await {
                 Ok(()) => {
                     emit_status(&progress_tx, format!("wrote nzb: {}", out.display()));

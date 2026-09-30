@@ -1,0 +1,332 @@
+{
+  "schema_version": "1.0",
+  "standard": "yEnc Body & Control Lines Encryption Standards v1.0",
+  "requirement": "VEC-05",
+  "vectors": [
+    {
+      "id": "malformed-header-01-bad-cipher",
+      "category": "header_syntax",
+      "description": "Unsupported cipher algorithm (AES-256-GCM)",
+      "input_line": "=yencryption cipher=AES-256-GCM salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "UNSUPPORTED_CIPHER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-02-chacha20-unauth",
+      "category": "header_syntax",
+      "description": "Unauthenticated cipher (ChaCha20 without Poly1305)",
+      "input_line": "=yencryption cipher=ChaCha20 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "UNSUPPORTED_CIPHER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-03-empty-cipher",
+      "category": "header_syntax",
+      "description": "Empty cipher parameter value",
+      "input_line": "=yencryption cipher= salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_CIPHER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-04-missing-salt",
+      "category": "header_syntax",
+      "description": "Missing salt parameter entirely",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "MISSING_SALT",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-05-truncated-salt",
+      "category": "header_syntax",
+      "description": "Salt shorter than 32 hex characters (30 hex chars / 15 bytes)",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef12345678 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_SALT_LENGTH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-06-extended-salt",
+      "category": "header_syntax",
+      "description": "Salt longer than 32 hex characters (34 hex chars / 17 bytes)",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890ff tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_SALT_LENGTH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-07-non-hex-salt",
+      "category": "header_syntax",
+      "description": "Salt containing non-hex characters ('g', 'z')",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef12345678gz tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_SALT_HEX",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-08-missing-tag",
+      "category": "header_syntax",
+      "description": "Missing tag parameter entirely",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890",
+      "expected_error": "MISSING_TAG",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-09-truncated-tag",
+      "category": "header_syntax",
+      "description": "Tag shorter than 32 hex characters (30 hex chars / 15 bytes)",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d",
+      "expected_error": "INVALID_TAG_LENGTH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-10-extended-tag",
+      "category": "header_syntax",
+      "description": "Tag longer than 32 hex characters (34 hex chars / 17 bytes)",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22d5b00",
+      "expected_error": "INVALID_TAG_LENGTH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "malformed-header-11-non-hex-tag",
+      "category": "header_syntax",
+      "description": "Tag containing non-hex characters ('x', 'y')",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=0cd77ce245a654463f90b945b1d22dxy",
+      "expected_error": "INVALID_TAG_HEX",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "auth-failure-01-tampered-ciphertext",
+      "category": "auth_failure",
+      "description": "Bit flip in body ciphertext must trigger authentication failure and zero output",
+      "transport_kdf_input": "test123",
+      "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "segment_index": 1,
+      "tampered_ciphertext_hex": "6b0d1eb225f844920540fa3628eb9ff9d3174ea7e14a5ba7da1f0f6e970aed28",
+      "tag_hex": "ed70d238067735a20783df5e094ccafa",
+      "expected_error": "AUTHENTICATION_FAILURE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "auth-failure-02-tampered-tag",
+      "category": "auth_failure",
+      "description": "Bit flip in authentication tag must trigger authentication failure and zero output",
+      "transport_kdf_input": "test123",
+      "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "segment_index": 1,
+      "ciphertext_hex": "6a0d1eb225f844920540fa3628eb9ff9d3174ea7e14a5ba7da1f0f6e970aed28",
+      "tampered_tag_hex": "ec70d238067735a20783df5e094ccafa",
+      "expected_error": "AUTHENTICATION_FAILURE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "auth-failure-03-wrong-password",
+      "category": "auth_failure",
+      "description": "Incorrect password must trigger authentication failure and zero output",
+      "transport_kdf_input": "wrong_password_999",
+      "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "segment_index": 1,
+      "ciphertext_hex": "6a0d1eb225f844920540fa3628eb9ff9d3174ea7e14a5ba7da1f0f6e970aed28",
+      "tag_hex": "ed70d238067735a20783df5e094ccafa",
+      "expected_error": "AUTHENTICATION_FAILURE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "auth-failure-04-mismatched-segment-index",
+      "category": "auth_failure",
+      "description": "Segment index mismatch (encrypted with index 1, decrypted with index 2)",
+      "transport_kdf_input": "test123",
+      "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "segment_index": 2,
+      "ciphertext_hex": "6a0d1eb225f844920540fa3628eb9ff9d3174ea7e14a5ba7da1f0f6e970aed28",
+      "tag_hex": "ed70d238067735a20783df5e094ccafa",
+      "expected_error": "AUTHENTICATION_FAILURE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-01-forbidden-lf-in-salt",
+      "category": "control_syntax",
+      "description": "Line 1 salt contains forbidden byte 0x0A (LF)",
+      "tampered_salt_hex": "4b376d5839704c320a5238764e34775a",
+      "expected_error": "INVALID_SALT_CHARACTER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-02-forbidden-cr-in-salt",
+      "category": "control_syntax",
+      "description": "Line 1 salt contains forbidden byte 0x0D (CR)",
+      "tampered_salt_hex": "4b376d5839704c320d5238764e34775a",
+      "expected_error": "INVALID_SALT_CHARACTER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-03-forbidden-nul-in-salt",
+      "category": "control_syntax",
+      "description": "Line 1 salt contains forbidden byte 0x00 (NUL)",
+      "tampered_salt_hex": "4b376d5839704c32005238764e34775a",
+      "expected_error": "INVALID_SALT_CHARACTER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-04-line-too-short",
+      "category": "control_syntax",
+      "description": "Control line shorter than 2 characters",
+      "line_hex": "3d",
+      "expected_error": "LINE_TOO_SHORT",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-05-line1-truncated",
+      "category": "control_syntax",
+      "description": "Line 1 length < 18 bytes (cannot contain 16B salt + 2B minlen)",
+      "line1_hex": "4b376d5839704c32715238764e34775a3d",
+      "expected_error": "LINE_TRUNCATED",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "control-syntax-06-wrong-password",
+      "category": "control_syntax",
+      "description": "Wrong password for control line decryption results in non-'=y' plaintext",
+      "wrong_password": "wrong_control_password",
+      "expected_error": "CONTROL_LINE_DECRYPT_FAILURE",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "metadata-01-missing-provenance",
+      "category": "metadata_validation",
+      "description": "Encrypted article without the required transport provenance marker",
+      "expected_error": "MISSING_ENCRYPTION_PROVENANCE",
+      "expected_rejection_stage": "METADATA_VALIDATION",
+      "provider_failover_permitted": false,
+      "zero_output_required": true
+    },
+    {
+      "id": "metadata-02-false-provenance",
+      "category": "metadata_validation",
+      "description": "Transport provenance explicitly set to false",
+      "expected_error": "INVALID_ENCRYPTION_PROVENANCE",
+      "expected_rejection_stage": "METADATA_VALIDATION",
+      "provider_failover_permitted": false,
+      "zero_output_required": true
+    },
+    {
+      "id": "header-12-uppercase-hex",
+      "category": "header_syntax",
+      "description": "Uppercase hexadecimal is not canonical",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1A2B3C4D5E6F7890ABCDEF1234567890 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "INVALID_SALT_HEX",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "header-13-extra-token",
+      "category": "header_syntax",
+      "description": "An extra parameter violates the four-token grammar",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa extra=value",
+      "expected_error": "EXTRA_PARAMETER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "header-14-reordered-token",
+      "category": "header_syntax",
+      "description": "Parameter order is canonical and mandatory",
+      "input_line": "=yencryption salt=1a2b3c4d5e6f7890abcdef1234567890 cipher=XChaCha20-Poly1305 tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "REORDERED_HEADER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "placement-01-single-part-line-three",
+      "category": "placement",
+      "description": "Single-part encryption header must be on physical line 2",
+      "line_index": 3,
+      "multipart": false,
+      "expected_error": "MISPLACED_ENCRYPTION_HEADER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "placement-02-multipart-after-data",
+      "category": "placement",
+      "description": "Multipart encryption header must immediately follow =ypart",
+      "line_index": 4,
+      "multipart": true,
+      "expected_error": "MISPLACED_ENCRYPTION_HEADER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "salt-01-dual-salt-mismatch",
+      "category": "salt_mismatch",
+      "line1_salt_hex": "4b376d5839704c32715238764e34775a",
+      "header_salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "expected_error": "SALT_MISMATCH",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "header-15-duplicate-token",
+      "category": "header_syntax",
+      "description": "Duplicate parameters are rejected",
+      "input_line": "=yencryption cipher=XChaCha20-Poly1305 salt=1a2b3c4d5e6f7890abcdef1234567890 tag=ed70d238067735a20783df5e094ccafa tag=ed70d238067735a20783df5e094ccafa",
+      "expected_error": "DUPLICATE_PARAMETER",
+      "zero_output_required": true,
+      "expected_rejection_stage": "PROVIDER_FAILOVER",
+      "provider_failover_permitted": true
+    },
+    {
+      "id": "metadata-03-missing-password",
+      "category": "metadata_validation",
+      "description": "Encrypted transport requires a password metadata value",
+      "expected_error": "MISSING_PASSWORD",
+      "expected_rejection_stage": "METADATA_VALIDATION",
+      "provider_failover_permitted": false,
+      "zero_output_required": true
+    }
+  ]
+}

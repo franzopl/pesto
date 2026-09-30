@@ -94,6 +94,13 @@ category has no `dir` of its own or doesn't match anything configured.
 
 Every call needs `?apikey=<key>` matching `[web].api_key`.
 
+## Encrypted releases
+
+Sugo inherits `penne`'s yEnc body and control-line decryption support. When an
+uploaded or fetched NZB contains `<meta type="yenc_encrypted">true</meta>`,
+Sugo automatically authenticates and decrypts articles using the embedded
+`<meta type="password">` value before assembly.
+
 ## Architecture
 
 - `src/job/` — the job model (including per-file progress, speed/ETA, and

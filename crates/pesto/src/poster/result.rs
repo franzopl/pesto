@@ -68,6 +68,7 @@ pub(super) fn commit_result(
                         &task.from,
                         &date,
                     )),
+                    segment_identity: Some(task.segment_identity),
                 },
             );
         }
@@ -93,6 +94,7 @@ pub(super) fn commit_result(
             server_idx,
             file_index: task.meta.file_index,
             total_files: shared.total_files,
+            segment_identity: Some(task.segment_identity),
         };
         shared.results.lock().unwrap().push(seg.clone());
         if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
@@ -196,6 +198,7 @@ pub(super) fn record_failure(
         full_crc32: task.file_crc32.unwrap_or(0),
         file_index: meta.file_index,
         total_files: shared.total_files,
+        segment_identity: task.segment_identity,
     });
 }
 
@@ -211,6 +214,7 @@ pub async fn repost_failed_tasks(
     events: Option<&ProgressSender>,
     cancel: Option<&Arc<AtomicBool>>,
     slots: &mut [ConnectionSlot],
+    encryption_adapter: Option<&crate::crypto::UploadEncryptionAdapter>,
 ) -> Result<Vec<PostedSegment>> {
     if failed.is_empty() {
         return Ok(Vec::new());
@@ -262,14 +266,34 @@ pub async fn repost_failed_tasks(
             offset,
         };
         let file_crc32 = (task.part == task.total).then_some(task.full_crc32);
-        let encoded = yenc::encode_part(
-            &task.yenc_name,
-            task.file_size,
-            spec,
-            &buf,
-            config.line_length,
-            file_crc32,
-        );
+        let encoded = if let Some(adapter) = encryption_adapter {
+            let mut enc_buf = Vec::new();
+            match adapter.encode_article(
+                &task.yenc_name,
+                task.file_size,
+                spec,
+                &buf,
+                config.line_length,
+                file_crc32,
+                task.segment_identity,
+                &mut enc_buf,
+            ) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    warn!(file = %task.file_name, part = task.part, "retry: encryption failed: {e}");
+                    continue;
+                }
+            }
+        } else {
+            yenc::encode_part(
+                &task.yenc_name,
+                task.file_size,
+                spec,
+                &buf,
+                config.line_length,
+                file_crc32,
+            )
+        };
         // Re-post with the *same* Message-ID the in-run attempts used, so a
         // server that already has the article (lost `240` ack) deduplicates it
         // via `435 Already exists` instead of accepting a duplicate under a
@@ -354,6 +378,7 @@ pub async fn repost_failed_tasks(
                 full_crc32: task.full_crc32,
                 file_index: task.file_index,
                 total_files: task.total_files,
+                segment_identity: Some(task.segment_identity),
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::PostRetryRecovered {

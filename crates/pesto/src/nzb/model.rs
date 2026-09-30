@@ -1,6 +1,8 @@
 //! Shared NZB model: head metadata, external-reference IDs and escaping.
 
-use crate::poster::PostedSegment;
+use std::collections::HashMap;
+
+use crate::poster::{PostedSegment, SegmentIdentity};
 
 /// NZB `<head>` metadata fields emitted as `<meta type="...">` elements.
 ///
@@ -29,6 +31,12 @@ pub struct NzbMeta {
     pub mal_id: Option<String>,
     /// Arbitrary tags emitted as multiple `<meta type="tag">` elements.
     pub tags: Vec<String>,
+    /// Explicit yEnc wire encryption flag emitted as `<meta type="yenc_encrypted">true</meta>`.
+    pub yenc_encrypted: bool,
+    /// Explicit yEnc encryption specification version, e.g. "1.0" (`<meta type="yenc_version">`).
+    pub yenc_version: Option<String>,
+    /// Explicit yEnc encryption cipher identifier, e.g. "XChaCha20-Poly1305" (`<meta type="yenc_cipher">`).
+    pub yenc_cipher: Option<String>,
 }
 
 /// Media type of a [`parse_tmdb_ref`] result.
@@ -178,6 +186,7 @@ fn parse_numeric_ref(s: &str, label: &str) -> Result<String, String> {
 }
 
 /// The contents of a parsed `.nzb` file.
+#[derive(Debug)]
 pub struct ParsedNzb {
     /// `From` header found in the first `<file>` element.
     pub poster: String,
@@ -187,6 +196,12 @@ pub struct ParsedNzb {
     pub segments: Vec<PostedSegment>,
     /// `<head>` metadata (`name`, `password`, `category`, `tags`).
     pub meta: NzbMeta,
+    /// Per-segment identity keyed by immutable article Message-ID.
+    ///
+    /// Populated from explicit `segmentIndex` attributes in `<segment>` tags
+    /// for encrypted releases. `None` for ordinary unencrypted NZBs without
+    /// explicit indices or archive-password-only releases.
+    pub segment_identities: Option<HashMap<String, SegmentIdentity>>,
 }
 
 /// Escape the five XML predefined entities.

@@ -204,6 +204,7 @@ async fn check_fast_reposts_an_isolated_miss_instead_of_waiting_out_patient_retr
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,

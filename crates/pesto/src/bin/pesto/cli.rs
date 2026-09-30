@@ -310,6 +310,24 @@ pub(super) struct Cli {
     #[arg(long, value_name = "PASS")]
     nzb_password: Option<String>,
 
+    /// Encrypt articles using yEnc body and control-line encryption. Optional
+    /// PASSWORD: bare `--encrypt` generates a random 24-character password
+    /// and prints it; `--encrypt=mypass` uses an explicit one
+    /// [config: encryption.password].
+    #[arg(
+        long,
+        value_name = "PASSWORD",
+        num_args = 0..=1,
+        default_missing_value = "",
+        require_equals = true
+    )]
+    pub(super) encrypt: Option<String>,
+
+    /// Encryption password for yEnc body and control-line encryption
+    /// [config: encryption.password].
+    #[arg(long, value_name = "PASS")]
+    pub(super) encrypt_password: Option<String>,
+
     /// Category written to `<meta type="category">` in the `.nzb`
     /// [config: output.nzb_category].
     #[arg(long, value_name = "CAT")]
@@ -633,6 +651,22 @@ pub(super) struct Cli {
 impl Cli {
     /// Build config [`Overrides`] from the parsed flags.
     pub(super) fn overrides(&self) -> Overrides {
+        let encrypt_password = match (&self.encrypt_password, &self.encrypt) {
+            (Some(pass), _) if !pass.is_empty() => Some(pass.clone()),
+            (None, Some(pass)) if !pass.is_empty() => Some(pass.clone()),
+            (None, Some(pass)) if pass.is_empty() => {
+                let pass = pesto::compress::random_password();
+                if self.output_format.trim().eq_ignore_ascii_case("json") {
+                    eprintln!("encryption password: {pass}");
+                } else {
+                    println!("encryption password: {pass}");
+                }
+                Some(pass)
+            }
+            (Some(pass), _) if pass.is_empty() => Some(String::new()),
+            _ => None,
+        };
+
         Overrides {
             host: self.host.clone(),
             port: self.port,
@@ -715,6 +749,7 @@ impl Cli {
                 })
             }),
             nzb_password: self.nzb_password.clone(),
+            encrypt_password,
             nzb_category: self.nzb_category.clone(),
             nzb_tags: self.nzb_tag.clone(),
             tmdb: self.tmdb.clone(),
@@ -772,5 +807,35 @@ impl Cli {
             check_recover_max: self.check_recover_max,
             pipeline_depth: self.pipeline_depth,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_bare_encrypt_preserves_positional_files() {
+        let args = vec!["pesto", "--encrypt", "file.mkv"];
+        let cli = Cli::try_parse_from(args).expect("parsing should succeed");
+        assert_eq!(cli.encrypt, Some("".to_string()));
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
+    }
+
+    #[test]
+    fn test_explicit_encrypt_with_equals_preserves_positional_files() {
+        let args = vec!["pesto", "--encrypt=my_secret", "file.mkv"];
+        let cli = Cli::try_parse_from(args).expect("parsing should succeed");
+        assert_eq!(cli.encrypt, Some("my_secret".to_string()));
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
+    }
+
+    #[test]
+    fn test_encrypt_password_preserves_positional_files() {
+        let args = vec!["pesto", "--encrypt-password", "my_secret", "file.mkv"];
+        let cli = Cli::try_parse_from(args).expect("parsing should succeed");
+        assert_eq!(cli.encrypt_password, Some("my_secret".to_string()));
+        assert_eq!(cli.files, vec![PathBuf::from("file.mkv")]);
     }
 }

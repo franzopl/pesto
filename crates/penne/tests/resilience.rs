@@ -50,10 +50,13 @@ fn queue_with_one_segment(message_id: &str) -> DownloadQueue {
     DownloadQueue {
         files: vec![QueuedFile {
             name: "movie.bin".to_string(),
+            file_ordinal: None,
+            total_files: None,
             segments: vec![QueuedSegment {
                 message_id: message_id.to_string(),
                 part: 1,
                 bytes: 4,
+                segment_index: None,
             }],
         }],
     }

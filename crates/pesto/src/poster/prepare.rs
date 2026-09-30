@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::article::{obfuscated_name, obfuscated_name_with_prefix, random_from};
@@ -17,7 +18,10 @@ use parmesan::packet;
 
 use super::connections::split_connections;
 use super::file_md5_16k;
-use super::identity::{normalize_client_path, obfuscated_yenc_name, resolve_date};
+use super::identity::{
+    normalize_client_path, obfuscated_yenc_name, par2_release_base, resolve_date,
+};
+use super::outcome::SegmentIdentity;
 use super::par2::par2_geometry;
 use super::FileMeta;
 
@@ -168,6 +172,7 @@ pub(super) async fn prepare_inputs(
     resume_arc: Option<Arc<Mutex<ResumeState>>>,
     release_prefix: Option<String>,
     release_from: Option<String>,
+    spool_dir: Option<&Path>,
 ) -> Result<(Vec<Arc<FileMeta>>, u64)> {
     let common_release_root = files
         .first()
@@ -207,7 +212,16 @@ pub(super) async fn prepare_inputs(
             let file_fp = crate::resume::FileFingerprint { size, mtime };
             let mut state = resume.lock().unwrap();
             if !state.file_matches(&real_name, &file_fp) {
-                if config.par2 > 0 {
+                if state.session_identity().is_some() {
+                    eprintln!(
+                        "resume: `{real_name}` changed size or modification time since the \
+                         saved session state was recorded — invalidating entire session"
+                    );
+                    state.invalidate_session();
+                    if let Some(dir) = spool_dir {
+                        crate::spool::remove_all(dir);
+                    }
+                } else if config.par2 > 0 {
                     // PAR2 recovery blocks are computed over the whole
                     // recovery set together, not per file — one file's
                     // content changing invalidates every volume's segments
@@ -223,6 +237,9 @@ pub(super) async fn prepare_inputs(
                          PAR2 volumes, since recovery data no longer matches this file"
                     );
                     state.forget_all_segments();
+                    if let Some(dir) = spool_dir {
+                        crate::spool::remove_all(dir);
+                    }
                 } else {
                     eprintln!(
                         "resume: `{real_name}` changed size or modification time since the \
@@ -312,8 +329,14 @@ pub(super) async fn prepare_inputs(
             from,
             date,
             size: md.len(),
+            mtime: md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
             // Assigned below, once `metas`' final posting order is settled —
-            // see the `config.file_counter` pass after the File-ID sort.
+            // see the natural order pass after the File-ID sort.
+            release_ordinal: 0,
             file_index: 0,
         }));
     }
@@ -336,36 +359,36 @@ pub(super) async fn prepare_inputs(
         metas = keyed.into_iter().map(|(_, meta)| meta).collect();
     }
 
-    // `--file-counter`'s `[filenum/total]` numbers every file in the release,
-    // so it can only be assigned now that the full file list is settled — not
-    // at push time above.
+    // Assign `release_ordinal` based on the release's natural filename order
+    // (`part1.rar` is ordinal 1, `part2.rar` is ordinal 2). This order is
+    // independent of `metas`' processing order (File-ID sort for PAR2) and
+    // serves as the immutable release ordinal for segment identity.
     //
-    // The number must follow the release's own order (`part1.rar` is `[1/N]`,
-    // the PAR2 set closes it out), *not* `metas`' order: the File-ID sort
-    // above keys on an MD5, i.e. it shuffles the volumes with respect to their
-    // volume numbers. Indexers sort a collection by Subject and the counter is
-    // the Subject's leading field, so inheriting that order listed the release
-    // scrambled — a real upload came out with `part4.rar` as `[1/14]`.
-    // `metas` itself stays in File-ID order, since the producer feeds PAR2
-    // slices in that order and the par2 spec requires it (see the sort above).
-    if config.file_counter {
-        let mut order: Vec<usize> = (0..metas.len()).collect();
-        order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
-        let mut rank = vec![0u32; metas.len()];
-        for (pos, &idx) in order.iter().enumerate() {
-            rank[idx] = pos as u32 + 1;
-        }
-        metas = metas
-            .into_iter()
-            .zip(rank)
-            .map(|(m, file_index)| {
-                Arc::new(FileMeta {
-                    file_index,
-                    ..(*m).clone()
-                })
-            })
-            .collect();
+    // When `--file-counter` is enabled, `file_index` reflects this ordinal for
+    // the `[filenum/total]` subject prefix. When disabled, `file_index` remains
+    // 0 while `release_ordinal` is always assigned.
+    let mut order: Vec<usize> = (0..metas.len()).collect();
+    order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
+    let mut rank = vec![0u32; metas.len()];
+    for (pos, &idx) in order.iter().enumerate() {
+        rank[idx] = pos as u32 + 1;
     }
+    metas = metas
+        .into_iter()
+        .zip(rank)
+        .map(|(m, release_ordinal)| {
+            let file_index = if config.file_counter {
+                release_ordinal
+            } else {
+                0
+            };
+            Arc::new(FileMeta {
+                release_ordinal,
+                file_index,
+                ..(*m).clone()
+            })
+        })
+        .collect();
 
     let mut initial_segments = 0;
     for meta in &metas {
@@ -373,6 +396,257 @@ pub(super) async fn prepare_inputs(
     }
 
     Ok((metas, initial_segments))
+}
+
+/// An entry in a release layout representing one file's ordinal, part count,
+/// and prefix part sum (total segments preceding this file in release order).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutEntry {
+    pub release_ordinal: u32,
+    pub part_count: u32,
+    pub prefix_parts: u64,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub fingerprint: Option<crate::resume::FileFingerprint>,
+}
+
+/// An immutable, complete release layout computed before concurrent task dispatch.
+///
+/// Maps every 1-based release ordinal `1..=total_files` to its part count and
+/// preceding segment prefix sum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseLayout {
+    pub(crate) total_files: u32,
+    pub(crate) total_segments: u64,
+    pub(crate) entries: Vec<LayoutEntry>,
+}
+
+impl ReleaseLayout {
+    /// Construct a ReleaseLayout from a slice of `(release_ordinal, part_count)`.
+    ///
+    /// Validates that:
+    /// - `total_files > 0`
+    /// - Every ordinal from 1 to `total_files` is present exactly once
+    /// - Every file has `part_count >= 1`
+    /// - Cumulative segments and individual indices do not overflow `u32::MAX`
+    pub fn from_parts(total_files: u32, parts: &[(u32, u32)]) -> Result<Self> {
+        let detailed: Vec<(
+            u32,
+            u32,
+            Option<String>,
+            Option<crate::resume::FileFingerprint>,
+        )> = parts
+            .iter()
+            .map(|&(ord, count)| (ord, count, None, None))
+            .collect();
+        Self::from_detailed_parts(total_files, &detailed)
+    }
+
+    /// Construct a ReleaseLayout from a slice with file name and fingerprint details.
+    pub fn from_detailed_parts(
+        total_files: u32,
+        parts: &[(
+            u32,
+            u32,
+            Option<String>,
+            Option<crate::resume::FileFingerprint>,
+        )],
+    ) -> Result<Self> {
+        if total_files == 0 {
+            bail!("release layout cannot have 0 total files");
+        }
+        if parts.len() != total_files as usize {
+            bail!(
+                "release layout parts count ({}) does not match total files ({})",
+                parts.len(),
+                total_files
+            );
+        }
+
+        let mut sorted = parts.to_vec();
+        sorted.sort_by_key(|&(ord, _, _, _)| ord);
+
+        let mut entries = Vec::with_capacity(sorted.len());
+        let mut prefix_parts = 0u64;
+
+        for (expected_idx, &(ord, count, ref name, ref fp)) in sorted.iter().enumerate() {
+            let expected_ord = expected_idx as u32 + 1;
+            if ord != expected_ord {
+                bail!("release layout missing or non-contiguous ordinal: expected {expected_ord}, got {ord}");
+            }
+            if count == 0 {
+                bail!("release layout file {ord} has zero parts");
+            }
+            entries.push(LayoutEntry {
+                release_ordinal: ord,
+                part_count: count,
+                prefix_parts,
+                file_name: name.clone(),
+                fingerprint: *fp,
+            });
+            prefix_parts = prefix_parts
+                .checked_add(u64::from(count))
+                .context("release layout cumulative segment count overflow")?;
+            if prefix_parts > u64::from(u32::MAX) {
+                bail!("release layout total segments exceeds u32::MAX: {prefix_parts}");
+            }
+        }
+
+        Ok(ReleaseLayout {
+            total_files,
+            total_segments: prefix_parts,
+            entries,
+        })
+    }
+
+    /// Total files in the release.
+    pub fn total_files(&self) -> u32 {
+        self.total_files
+    }
+
+    /// Total segments in the release.
+    pub fn total_segments(&self) -> u64 {
+        self.total_segments
+    }
+
+    /// Entries in the release layout.
+    pub fn entries(&self) -> &[LayoutEntry] {
+        &self.entries
+    }
+
+    /// Layout fingerprint computed deterministically from layout fields.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.total_files.to_le_bytes());
+        hasher.update(self.total_segments.to_le_bytes());
+        for entry in &self.entries {
+            hasher.update(entry.release_ordinal.to_le_bytes());
+            hasher.update(entry.part_count.to_le_bytes());
+            hasher.update(entry.prefix_parts.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Get the layout entry for a given 1-based release ordinal.
+    pub fn entry(&self, release_ordinal: u32) -> Option<&LayoutEntry> {
+        if release_ordinal == 0 || release_ordinal > self.total_files {
+            None
+        } else {
+            self.entries.get((release_ordinal - 1) as usize)
+        }
+    }
+
+    /// Compute the SegmentIdentity for a given file ordinal and part number.
+    pub fn segment_identity(
+        &self,
+        release_ordinal: u32,
+        part_number: u32,
+    ) -> Option<SegmentIdentity> {
+        let entry = self.entry(release_ordinal)?;
+        if part_number == 0 || part_number > entry.part_count {
+            return None;
+        }
+        SegmentIdentity::checked(
+            entry.prefix_parts,
+            release_ordinal,
+            self.total_files,
+            part_number,
+        )
+    }
+
+    /// Build the release layout from prepared input files and PAR2 configuration.
+    pub(super) fn build(
+        metas: &[Arc<FileMeta>],
+        config: &Config,
+        recovery_count: usize,
+        par2_slice_size: usize,
+    ) -> Result<Self> {
+        let article_size = config.article_size;
+        let mut parts_list = Vec::with_capacity(metas.len() + 16);
+
+        for meta in metas {
+            let segs = yenc::segments(meta.size, article_size);
+            let part_count =
+                u32::try_from(segs.len()).context("data file part count exceeds u32")?;
+            let fp = crate::resume::FileFingerprint {
+                size: meta.size,
+                mtime: meta.mtime,
+            };
+            parts_list.push((
+                meta.release_ordinal,
+                part_count,
+                Some(meta.real_name.clone()),
+                Some(fp),
+            ));
+        }
+
+        let par2_file_count = if recovery_count > 0 {
+            let publish_index = config.obfuscate.policy().publish_par2_index;
+            let base_len = par2_base_packets_len(metas, par2_slice_size);
+            let base_name = metas.first().map(|m| par2_release_base(&m.real_name));
+
+            if publish_index {
+                let index_ordinal = metas.len() as u32 + 1;
+                let index_parts = u32::try_from(yenc::segments(base_len, article_size).len())
+                    .context("PAR2 index part count exceeds u32")?;
+                let index_name = base_name.map(layout::index_name);
+                parts_list.push((index_ordinal, index_parts, index_name, None));
+            }
+
+            let volumes = layout::plan_volumes(recovery_count as u32);
+            let index_offset = u32::from(publish_index);
+            for (vol_idx, vol) in volumes.iter().enumerate() {
+                let vol_ordinal = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                let vol_len = par2_volume_len(base_len, vol.count, par2_slice_size);
+                let vol_parts = u32::try_from(yenc::segments(vol_len, article_size).len())
+                    .context("PAR2 volume part count exceeds u32")?;
+                let vol_name = base_name.map(|base| layout::volume_name(base, *vol));
+                parts_list.push((vol_ordinal, vol_parts, vol_name, None));
+            }
+
+            usize::from(publish_index) + volumes.len()
+        } else {
+            0
+        };
+
+        let total_files = u32::try_from(metas.len() + par2_file_count)
+            .context("total release files exceed u32")?;
+
+        Self::from_detailed_parts(total_files, &parts_list)
+    }
+}
+
+/// Compute the exact byte length of PAR2 base packets (Main + Creator + FileDesc + IFSC)
+/// without performing any file reads or hashes.
+pub(crate) fn par2_base_packets_len(metas: &[Arc<FileMeta>], par2_slice_size: usize) -> u64 {
+    let mut total: u64 = 64 + 12 + 16 * metas.len() as u64; // Main packet
+    total += 72; // Creator packet ("pesto")
+    let s = par2_slice_size.max(1);
+    for meta in metas {
+        let path_len = meta.client_path.len();
+        let padded_path = (path_len + 3) & !3;
+        total += 64 + 56 + padded_path as u64; // File Description
+
+        let slice_count = if meta.size == 0 {
+            0
+        } else {
+            (meta.size as usize).div_ceil(s)
+        };
+        total += 64 + 16 + 20 * slice_count as u64; // IFSC
+    }
+    total
+}
+
+/// Compute the exact byte length of a PAR2 recovery volume.
+pub(crate) fn par2_volume_len(
+    base_packets_len: u64,
+    recovery_slice_count: u32,
+    par2_slice_size: usize,
+) -> u64 {
+    base_packets_len + (recovery_slice_count as u64) * (68 + par2_slice_size as u64)
 }
 
 /// Connection, buffer-pool and PAR2 geometry resources prepared before the
@@ -388,6 +662,8 @@ pub(super) struct RunResources {
     pub(super) par2_slice_size: usize,
     pub(super) recovery_count: usize,
     pub(super) total_files: u32,
+    pub(super) release_layout: Arc<ReleaseLayout>,
+    pub(super) encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
     pub(super) initial_pool: Vec<Vec<u8>>,
 }
 
@@ -397,6 +673,8 @@ pub(super) async fn prepare_resources(
     config: &Config,
     metas: &[Arc<FileMeta>],
     initial_segments: u64,
+    resume_arc: Option<&Arc<Mutex<ResumeState>>>,
+    spool_dir: Option<&Path>,
 ) -> Result<RunResources> {
     let servers: Arc<Vec<crate::config::ServerEntry>> = Arc::new(config.all_servers().collect());
     // This validation intentionally happens before workers exist, so a bad
@@ -479,6 +757,60 @@ pub(super) async fn prepare_resources(
         0
     };
 
+    let release_layout = Arc::new(ReleaseLayout::build(
+        metas,
+        config,
+        recovery_count,
+        par2_slice_size,
+    )?);
+
+    if let Some(resume) = resume_arc {
+        let mut state = resume.lock().unwrap();
+        let was_invalidated = state.take_session_invalidated();
+        let valid = state.validate_session(&release_layout);
+        if was_invalidated || !valid {
+            if !valid {
+                eprintln!(
+                    "resume: release layout changed since the saved state was recorded \
+                     — clearing session identity, records, and spool"
+                );
+            }
+            if let Some(dir) = spool_dir {
+                crate::spool::remove_all(dir);
+            }
+        }
+        if state.session_identity().is_none() {
+            state.set_session_identity(crate::resume::UploadSessionIdentity::new(
+                None,
+                (*release_layout).clone(),
+            ));
+        }
+    }
+
+    let encryption_adapter = if let Some(ref password) = config.encrypt_password {
+        let salt = if let Some(resume) = resume_arc {
+            let mut state = resume.lock().unwrap();
+            if let Some(existing_salt) = state.session_salt() {
+                *existing_salt
+            } else {
+                let fresh_salt = crate::crypto::control::generate_alphabet_salt();
+                state.set_session_identity(crate::resume::UploadSessionIdentity::new(
+                    Some(fresh_salt),
+                    (*release_layout).clone(),
+                ));
+                fresh_salt
+            }
+        } else {
+            crate::crypto::control::generate_alphabet_salt()
+        };
+        let session = Arc::new(crate::crypto::EncryptionSession::new(password, salt)?);
+        Some(Arc::new(crate::crypto::UploadEncryptionAdapter::new(
+            session,
+        )))
+    } else {
+        None
+    };
+
     Ok(RunResources {
         servers,
         proxy_status,
@@ -490,6 +822,8 @@ pub(super) async fn prepare_resources(
         par2_slice_size,
         recovery_count,
         total_files,
+        release_layout,
+        encryption_adapter,
         initial_pool,
     })
 }

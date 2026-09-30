@@ -13,6 +13,9 @@ pub struct QueuedSegment {
     pub message_id: String,
     pub part: u32,
     pub bytes: u64,
+    /// Explicit globally unique segment index read directly from the NZB
+    /// `segmentIndex` attribute. `None` for unencrypted NZBs.
+    pub segment_index: Option<u32>,
 }
 
 /// One file to reassemble, and the segments it is made of, in part order.
@@ -20,6 +23,12 @@ pub struct QueuedSegment {
 pub struct QueuedFile {
     pub name: String,
     pub segments: Vec<QueuedSegment>,
+    /// 1-based file position in the release (`N` in `[N/M]`).
+    /// `None` for unencrypted NZBs or NZBs without a valid counter.
+    pub file_ordinal: Option<u32>,
+    /// Total file count in the release (`M` in `[N/M]`).
+    /// `None` for unencrypted NZBs or NZBs without a valid counter.
+    pub total_files: Option<u32>,
 }
 
 /// The full set of files/segments to download for one `.nzb`.
@@ -36,23 +45,41 @@ pub struct DownloadQueue {
 /// first — a `.nzb` is untrusted external input, and `QueuedFile::name`
 /// eventually gets joined straight onto a destination directory
 /// (`assemble::StreamingAssembly::new`).
+///
+/// When `parsed.segment_identities` is present, the identity fields are
+/// copied into the queue before sanitization can obscure the original
+/// Message-IDs.
 pub fn build(parsed: &ParsedNzb) -> DownloadQueue {
+    let identities = parsed.segment_identities.as_ref();
     let mut files: Vec<QueuedFile> = Vec::new();
     for seg in &parsed.segments {
         let name = sanitize_file_name(&seg.file_name);
+        let identity = identities.and_then(|m| m.get(&seg.message_id));
+        let queued_seg = QueuedSegment {
+            message_id: seg.message_id.clone(),
+            part: seg.part,
+            bytes: seg.bytes,
+            segment_index: identity.map(|id| id.segment_index),
+        };
+        let file_ordinal = if identities.is_some() && seg.file_index > 0 {
+            Some(seg.file_index)
+        } else {
+            None
+        };
+        let total_files = if identities.is_some() && seg.total_files > 0 {
+            Some(seg.total_files)
+        } else {
+            None
+        };
         match files.last_mut() {
-            Some(f) if f.name == name => f.segments.push(QueuedSegment {
-                message_id: seg.message_id.clone(),
-                part: seg.part,
-                bytes: seg.bytes,
-            }),
+            Some(f) if f.name == name && f.file_ordinal == file_ordinal => {
+                f.segments.push(queued_seg);
+            }
             _ => files.push(QueuedFile {
                 name,
-                segments: vec![QueuedSegment {
-                    message_id: seg.message_id.clone(),
-                    part: seg.part,
-                    bytes: seg.bytes,
-                }],
+                segments: vec![queued_seg],
+                file_ordinal,
+                total_files,
             }),
         }
     }
@@ -86,6 +113,8 @@ pub fn sample(queue: &DownloadQueue, per_file: usize) -> DownloadQueue {
             .iter()
             .map(|f| QueuedFile {
                 name: f.name.clone(),
+                file_ordinal: f.file_ordinal,
+                total_files: f.total_files,
                 segments: distributed_indices(f.segments.len(), per_file)
                     .map(|i| f.segments[i].clone())
                     .collect(),
@@ -167,6 +196,7 @@ mod tests {
             server_idx: 0,
             file_index: 0,
             total_files: 0,
+            segment_identity: None,
         }
     }
 
@@ -183,7 +213,8 @@ mod tests {
             &segments,
             &NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        );
+        )
+        .unwrap();
         let parsed = pesto::nzb::parse(&xml).unwrap();
 
         let queue = build(&parsed);
@@ -207,7 +238,8 @@ mod tests {
             &segments,
             &NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        );
+        )
+        .unwrap();
         let parsed = pesto::nzb::parse(&xml).unwrap();
 
         let queue = build(&parsed);
@@ -230,7 +262,8 @@ mod tests {
             &segments,
             &NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        );
+        )
+        .unwrap();
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -256,7 +289,8 @@ mod tests {
             &segments,
             &NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        );
+        )
+        .unwrap();
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -281,7 +315,8 @@ mod tests {
             &segments,
             &NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        );
+        )
+        .unwrap();
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -298,7 +333,8 @@ mod tests {
             &segments,
             &NzbMeta::default(),
             pesto::config::ObfuscateMode::None,
-        );
+        )
+        .unwrap();
         let parsed = pesto::nzb::parse(&xml).unwrap();
         let queue = build(&parsed);
 
@@ -320,5 +356,201 @@ mod tests {
     fn sanitize_file_name_neutralizes_dot_and_dotdot() {
         assert_eq!(sanitize_file_name("."), "_.");
         assert_eq!(sanitize_file_name(".."), "_..");
+    }
+
+    #[test]
+    fn two_file_numbered_release_reconstructs_canonical_segment_indices() {
+        let groups = vec!["alt.test".to_string()];
+        // File 1 has 2 parts; File 2 has 1 part.
+        let mut s1 = seg("f1.bin", 1, 2, "<f1p1@x>");
+        s1.file_index = 1;
+        s1.total_files = 2;
+        s1.segment_identity = Some(pesto::poster::SegmentIdentity::checked(0, 1, 2, 1).unwrap());
+        let mut s2 = seg("f1.bin", 2, 2, "<f1p2@x>");
+        s2.file_index = 1;
+        s2.total_files = 2;
+        s2.segment_identity = Some(pesto::poster::SegmentIdentity::checked(0, 1, 2, 2).unwrap());
+        let mut s3 = seg("f2.bin", 1, 1, "<f2p1@x>");
+        s3.file_index = 2;
+        s3.total_files = 2;
+        s3.segment_identity = Some(pesto::poster::SegmentIdentity::checked(2, 2, 2, 1).unwrap());
+
+        let meta = NzbMeta {
+            password: Some("secret".into()),
+            yenc_encrypted: true,
+            ..Default::default()
+        };
+
+        let xml = pesto::nzb::generate(
+            &groups,
+            &[s1, s2, s3],
+            &meta,
+            pesto::config::ObfuscateMode::None,
+        )
+        .unwrap();
+
+        let parsed = pesto::nzb::parse(&xml).unwrap();
+        let queue = build(&parsed);
+
+        assert_eq!(queue.files.len(), 2);
+        assert_eq!(queue.files[0].name, "f1.bin");
+        assert_eq!(queue.files[0].file_ordinal, Some(1));
+        assert_eq!(queue.files[0].total_files, Some(2));
+        assert_eq!(queue.files[0].segments[0].segment_index, Some(1));
+        assert_eq!(queue.files[0].segments[1].segment_index, Some(2));
+
+        assert_eq!(queue.files[1].name, "f2.bin");
+        assert_eq!(queue.files[1].file_ordinal, Some(2));
+        assert_eq!(queue.files[1].total_files, Some(2));
+        assert_eq!(queue.files[1].segments[0].segment_index, Some(3));
+    }
+
+    #[test]
+    fn reversing_xml_file_order_preserves_canonical_indices() {
+        // Construct NZB XML where File 2 appears BEFORE File 1 carrying explicit segmentIndex.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="poster" date="1700000000" subject="[2/2] - &quot;f2.bin&quot; yEnc (1/1)">
+    <groups><group>alt.test</group></groups>
+    <segments>
+      <segment bytes="500" number="1" segmentIndex="3">f2p1@x</segment>
+    </segments>
+  </file>
+  <file poster="poster" date="1700000000" subject="[1/2] - &quot;f1.bin&quot; yEnc (1/2)">
+    <groups><group>alt.test</group></groups>
+    <segments>
+      <segment bytes="500" number="1" segmentIndex="1">f1p1@x</segment>
+      <segment bytes="500" number="2" segmentIndex="2">f1p2@x</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+        let parsed = pesto::nzb::parse(xml).unwrap();
+        let queue = build(&parsed);
+
+        // Files are sorted by name in parsed: f1.bin then f2.bin.
+        let f1 = queue.files.iter().find(|f| f.name == "f1.bin").unwrap();
+        assert_eq!(f1.file_ordinal, Some(1));
+        assert_eq!(f1.segments[0].segment_index, Some(1));
+        assert_eq!(f1.segments[1].segment_index, Some(2));
+
+        let f2 = queue.files.iter().find(|f| f.name == "f2.bin").unwrap();
+        assert_eq!(f2.file_ordinal, Some(2));
+        assert_eq!(f2.segments[0].segment_index, Some(3));
+    }
+
+    #[test]
+    fn repeated_parsing_yields_identical_complete_assignments() {
+        let groups = vec!["alt.test".to_string()];
+        let mut s1 = seg("f1.bin", 1, 1, "<f1p1@x>");
+        s1.file_index = 1;
+        s1.total_files = 2;
+        let mut s2 = seg("f2.bin", 1, 1, "<f2p1@x>");
+        s2.file_index = 2;
+        s2.total_files = 2;
+
+        let xml = pesto::nzb::generate(
+            &groups,
+            &[s1, s2],
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        )
+        .unwrap();
+
+        let parsed1 = pesto::nzb::parse(&xml).unwrap();
+        let queue1 = build(&parsed1);
+
+        let parsed2 = pesto::nzb::parse(&xml).unwrap();
+        let queue2 = build(&parsed2);
+
+        assert_eq!(queue1, queue2);
+    }
+
+    #[test]
+    fn ordinary_nzb_without_counters_imports_with_identity_unset() {
+        let groups = vec!["alt.test".to_string()];
+        let s1 = seg("f1.bin", 1, 1, "<f1p1@x>");
+        let xml = pesto::nzb::generate(
+            &groups,
+            &[s1],
+            &NzbMeta::default(),
+            pesto::config::ObfuscateMode::None,
+        )
+        .unwrap();
+
+        let parsed = pesto::nzb::parse(&xml).unwrap();
+        assert!(parsed.segment_identities.is_none());
+
+        let queue = build(&parsed);
+        assert_eq!(queue.files.len(), 1);
+        assert_eq!(queue.files[0].file_ordinal, None);
+        assert_eq!(queue.files[0].total_files, None);
+        assert_eq!(queue.files[0].segments[0].segment_index, None);
+    }
+
+    #[test]
+    fn part_gap_preserves_declared_parts_with_identity_unset() {
+        // XML with part 1 and part 3 (part 2 missing).
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head></head>
+  <file poster="poster" date="1700000000" subject="[1/1] - &quot;gap.bin&quot; yEnc (1/3)">
+    <groups><group>alt.test</group></groups>
+    <segments>
+      <segment bytes="500" number="1">gap1@x</segment>
+      <segment bytes="500" number="3">gap3@x</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+        let parsed = pesto::nzb::parse(xml).unwrap();
+        assert!(parsed.segment_identities.is_none());
+
+        let queue = build(&parsed);
+        assert_eq!(queue.files.len(), 1);
+        assert_eq!(queue.files[0].file_ordinal, None);
+        assert_eq!(queue.files[0].total_files, None);
+        assert_eq!(queue.files[0].segments.len(), 2);
+        // Declared part 3 must NEVER be compacted to 2!
+        assert_eq!(queue.files[0].segments[0].part, 1);
+        assert_eq!(queue.files[0].segments[0].segment_index, None);
+        assert_eq!(queue.files[0].segments[1].part, 3);
+        assert_eq!(queue.files[0].segments[1].segment_index, None);
+    }
+
+    #[test]
+    fn sanitized_name_collision_with_different_ordinals_creates_distinct_queued_files() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="yenc_encrypted">true</meta>
+  </head>
+  <file poster="poster" date="1700000000" subject="[1/2] - &quot;data.bin&quot; yEnc (1/1)">
+    <groups><group>alt.test</group></groups>
+    <segments>
+      <segment bytes="500" number="1" segmentIndex="1">s1@x</segment>
+    </segments>
+  </file>
+  <file poster="poster" date="1700000000" subject="[2/2] - &quot;data.bin&quot; yEnc (1/1)">
+    <groups><group>alt.test</group></groups>
+    <segments>
+      <segment bytes="500" number="1" segmentIndex="2">s2@x</segment>
+    </segments>
+  </file>
+</nzb>"#;
+
+        let parsed = pesto::nzb::parse(xml).unwrap();
+        let queue = build(&parsed);
+        assert_eq!(queue.files.len(), 2);
+        assert_eq!(queue.files[0].file_ordinal, Some(1));
+        assert_eq!(queue.files[0].segments.len(), 1);
+        assert_eq!(queue.files[0].segments[0].segment_index, Some(1));
+
+        assert_eq!(queue.files[1].file_ordinal, Some(2));
+        assert_eq!(queue.files[1].segments.len(), 1);
+        assert_eq!(queue.files[1].segments[0].segment_index, Some(2));
     }
 }

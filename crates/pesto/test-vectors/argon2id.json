@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "standard": "yEnc Body & Control Lines Encryption Standards v1.0",
+  "requirement": "VEC-01",
+  "parameters": {
+    "algorithm": "Argon2id",
+    "version": "0x13",
+    "time_cost": 1,
+    "memory_cost_kib": 65536,
+    "parallelism": 4,
+    "output_length_bytes": 32
+  },
+  "vectors": [
+    {
+      "id": "argon2id-01-basic",
+      "description": "Basic alphanumeric password with 16-byte random salt from spec Section 10",
+      "transport_kdf_input": "test123",
+      "salt_hex": "1a2b3c4d5e6f7890abcdef1234567890",
+      "expected_key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7"
+    },
+    {
+      "id": "argon2id-02-control-salt",
+      "description": "Control-line 16-byte alphabet salt (ASCII 'K7mX9pL2qR8vN4wZ')",
+      "transport_kdf_input": "test123",
+      "salt_hex": "4b376d5839704c32715238764e34775a",
+      "expected_key_hex": "de3bfc39034371d589b34d485c572c12ce2ac6d4464adaea47fc1fb1e0fbfbd3"
+    },
+    {
+      "id": "argon2id-03-complex-password",
+      "description": "Password with spaces and punctuation symbols",
+      "transport_kdf_input": "P@ssw0rd with spaces & symbols!#$%",
+      "salt_hex": "0102030405060708090a0b0c0d0e0f10",
+      "expected_key_hex": "f3b358755d7036115673c2e1af1d5fc7052c8861e331bece7ec9908863e1407b"
+    },
+    {
+      "id": "argon2id-04-utf8-unicode",
+      "description": "UTF-8 multi-byte unicode password with emoji",
+      "transport_kdf_input": "Mötörhëad-Usenet-🔑-2026",
+      "salt_hex": "fedcba98765432100123456789abcdef",
+      "expected_key_hex": "8bceca5d02e6a8c87fd0de85da52e34657f1a60eb181883aa447c1ef0c40e283"
+    },
+    {
+      "id": "argon2id-05-single-char",
+      "description": "Single-character minimal password",
+      "transport_kdf_input": "a",
+      "salt_hex": "ffffffffffffffffffffffffffffffff",
+      "expected_key_hex": "32876118c269f03f6fe51d63ace5918555d8218e08cea87af262aca9c9064cfd"
+    },
+    {
+      "id": "argon2id-06-long-password",
+      "description": "128-character long alphanumeric password",
+      "transport_kdf_input": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6A1b2C3d4E5f6G7h8I9j0K1l2M3n4",
+      "salt_hex": "102030405060708090a0b0c0d0e0f000",
+      "expected_key_hex": "1743d4b5614edb4e0aac20e9a74474fd3d2fe84f20cc4093369b9fe2a1546b7a"
+    }
+  ]
+}

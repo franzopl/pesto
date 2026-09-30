@@ -78,6 +78,9 @@ const FIELD_SECTIONS: &[(&str, &str)] = &[
     // [notify]
     ("webhook_url", "[notify]"),
     ("ntfy_topic", "[notify]"),
+    // [encryption]
+    ("password", "[encryption]"),
+    ("encrypt_password", "[encryption]"),
 ];
 
 /// Given a TOML deserialize error, if it's an `unknown field` rejection for a
@@ -292,6 +295,13 @@ impl Config {
             }
         }
 
+        let nzb_password = cli.nzb_password.or(file.output.nzb_password);
+        let encrypt_password = cli.encrypt_password.or(file.encryption.password);
+        super::validation::validate_encryption(
+            encrypt_password.as_deref(),
+            nzb_password.as_deref(),
+        )?;
+
         Ok(Config {
             host,
             port,
@@ -398,7 +408,8 @@ impl Config {
                     })
                 })
             }),
-            nzb_password: cli.nzb_password.or(file.output.nzb_password),
+            nzb_password,
+            encrypt_password,
             nzb_category: {
                 let explicit = cli.nzb_category.or(file.output.nzb_category);
                 explicit

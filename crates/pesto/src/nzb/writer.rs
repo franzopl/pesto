@@ -1,12 +1,204 @@
 //! NZB generation: rendering posted segments to the NZB 1.1 XML format.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{ensure, Context, Result};
 
 use crate::article::default_subject;
 use crate::config::ObfuscateMode;
 use crate::poster::PostedSegment;
 
 use super::{escape, NzbMeta};
+
+/// Validate segment groups before NZB serialization.
+///
+/// Ensures that:
+/// - Within each file group, all segments agree on `total` (declared parts),
+///   `file_index`, and `total_files`.
+/// - Declared part numbers are unique within the file group and in `1..=total`.
+/// - For identity-bearing groups (`segment_identity.is_some()`):
+///   - All segments in the group carry identity (no partial presence).
+///   - Identity `part_number` matches declared `part`.
+///   - Identity `file_ordinal` and `total_files` are identical across all segments in the group.
+///   - If file counter is on (`total_files > 0`), identity matches `file_index` and `total_files`.
+///   - The global index mapping is contiguous with part numbers:
+///     `base = segment_index - part_number` is constant across all segments in the group.
+/// - Across all groups in the release:
+///   - All identity-bearing files agree on `total_files`.
+///   - `file_ordinal` is in `1..=total_files` and unique per file name.
+///   - Global segment indices across all files are unique and non-overlapping.
+fn validate_segments(segments: &[PostedSegment]) -> Result<()> {
+    if segments.is_empty() {
+        return Ok(());
+    }
+
+    let mut i = 0;
+    let mut file_groups: Vec<&[PostedSegment]> = Vec::new();
+    while i < segments.len() {
+        let name = &segments[i].file_name;
+        let count = segments[i..]
+            .iter()
+            .take_while(|s| &s.file_name == name)
+            .count();
+        file_groups.push(&segments[i..i + count]);
+        i += count;
+    }
+
+    let mut release_total_files: Option<u32> = None;
+    let mut seen_ordinals: HashMap<u32, String> = HashMap::new();
+    let mut release_segment_indices: HashSet<u32> = HashSet::new();
+    let mut completed_files: HashSet<String> = HashSet::new();
+
+    for group in file_groups {
+        let first = &group[0];
+        let file_name = &first.file_name;
+
+        ensure!(
+            completed_files.insert(file_name.clone()),
+            "segments for file `{}` are not contiguous in input",
+            file_name
+        );
+
+        let mut seen_parts = HashSet::new();
+        let first_has_identity = first.segment_identity.is_some();
+
+        for seg in group {
+            ensure!(
+                seg.total == first.total,
+                "inconsistent declared total parts for file `{}`: part {} declared total {} but expected {}",
+                file_name,
+                seg.part,
+                seg.total,
+                first.total
+            );
+            ensure!(
+                seg.file_index == first.file_index && seg.total_files == first.total_files,
+                "inconsistent file counter for file `{}`: part {} has [{}/{}] but expected [{}/{}]",
+                file_name,
+                seg.part,
+                seg.file_index,
+                seg.total_files,
+                first.file_index,
+                first.total_files
+            );
+            ensure!(
+                seg.part >= 1 && seg.part <= seg.total,
+                "segment part {} out of range 1..={} for file `{}`",
+                seg.part,
+                seg.total,
+                file_name
+            );
+            ensure!(
+                seen_parts.insert(seg.part),
+                "duplicate segment part {} for file `{}`",
+                seg.part,
+                file_name
+            );
+            ensure!(
+                seg.segment_identity.is_some() == first_has_identity,
+                "inconsistent segment identity presence for file `{}`: some segments carry identity while others do not",
+                file_name
+            );
+        }
+
+        if first_has_identity {
+            ensure!(
+                seen_parts.len() == first.total as usize,
+                "incomplete segment set for identity-bearing file `{}`: found {} parts, expected declared total {}",
+                file_name,
+                seen_parts.len(),
+                first.total
+            );
+        }
+
+        if let Some(first_id) = &first.segment_identity {
+            for seg in group {
+                let id = seg.segment_identity.as_ref().unwrap();
+                ensure!(
+                    id.part_number == seg.part,
+                    "segment identity part number {} does not match segment part {} for file `{}`",
+                    id.part_number,
+                    seg.part,
+                    file_name
+                );
+                ensure!(
+                    id.file_ordinal == first_id.file_ordinal,
+                    "inconsistent file ordinal in segment identity for file `{}`: part {} has ordinal {} but expected {}",
+                    file_name,
+                    seg.part,
+                    id.file_ordinal,
+                    first_id.file_ordinal
+                );
+                ensure!(
+                    id.total_files == first_id.total_files,
+                    "inconsistent total files in segment identity for file `{}`: part {} has total {} but expected {}",
+                    file_name,
+                    seg.part,
+                    id.total_files,
+                    first_id.total_files
+                );
+
+                if seg.total_files > 0 {
+                    ensure!(
+                        id.total_files == seg.total_files && id.file_ordinal == seg.file_index,
+                        "segment identity ({}/{}) contradicts file counter [{}/{}] for file `{}`",
+                        id.file_ordinal,
+                        id.total_files,
+                        seg.file_index,
+                        seg.total_files,
+                        file_name
+                    );
+                }
+
+                ensure!(
+                    release_segment_indices.insert(id.segment_index),
+                    "duplicate global segment index {} encountered in file `{}`",
+                    id.segment_index,
+                    file_name
+                );
+            }
+
+            // For counted geometry (total_files > 0): validate ordinals.
+            // For uncounted geometry (file_ordinal == 0 && total_files == 0), skip file ordinal checks.
+            if first_id.total_files > 0 {
+                if let Some(rel_total) = release_total_files {
+                    ensure!(
+                        first_id.total_files == rel_total,
+                        "release total_files mismatch: file `{}` declares {} total files but previous files declared {}",
+                        file_name,
+                        first_id.total_files,
+                        rel_total
+                    );
+                } else {
+                    release_total_files = Some(first_id.total_files);
+                }
+
+                ensure!(
+                    first_id.file_ordinal >= 1 && first_id.file_ordinal <= first_id.total_files,
+                    "file ordinal {} out of range 1..={} for file `{}`",
+                    first_id.file_ordinal,
+                    first_id.total_files,
+                    file_name
+                );
+
+                if let Some(prev_file) =
+                    seen_ordinals.insert(first_id.file_ordinal, file_name.clone())
+                {
+                    ensure!(
+                        prev_file == *file_name,
+                        "conflicting file ordinal {}: used by both `{}` and `{}`",
+                        first_id.file_ordinal,
+                        prev_file,
+                        file_name
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Generate the contents of an `.nzb` file describing the posted segments.
 ///
@@ -38,8 +230,11 @@ pub fn generate(
     segments: &[PostedSegment],
     meta: &NzbMeta,
     _obfuscate: ObfuscateMode,
-) -> String {
+) -> Result<String> {
+    validate_segments(segments)?;
+
     let mut out = String::new();
+
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     out.push_str(
         "<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \
@@ -47,10 +242,12 @@ pub fn generate(
     );
     out.push_str("<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n");
 
+    let is_encrypted = meta.yenc_encrypted;
+
     // Collect only the meta fields that are set.
     // "title" is SABnzbd's documented meta type for a human-readable name;
     // plain "name" isn't part of the NZB spec (see NzbMeta::name's doc).
-    let metas: Vec<(&str, &str)> = [
+    let mut metas: Vec<(&str, &str)> = [
         ("title", meta.name.as_deref()),
         ("password", meta.password.as_deref()),
         ("category", meta.category.as_deref()),
@@ -58,6 +255,12 @@ pub fn generate(
     .into_iter()
     .filter_map(|(k, v)| v.map(|s| (k, s)))
     .collect();
+
+    if is_encrypted {
+        metas.push(("yenc_encrypted", "true"));
+        metas.push(("yenc_version", "1.0"));
+        metas.push(("yenc_cipher", "XChaCha20-Poly1305"));
+    }
 
     out.push_str("  <head>\n");
     for (k, v) in &metas {
@@ -102,12 +305,18 @@ pub fn generate(
             .iter()
             .take_while(|s| &s.file_name == name)
             .count();
-        write_file(&mut out, groups, &segments[i..i + count], _obfuscate);
+        write_file(
+            &mut out,
+            groups,
+            &segments[i..i + count],
+            _obfuscate,
+            is_encrypted,
+        )?;
         i += count;
     }
 
     out.push_str("</nzb>\n");
-    out
+    Ok(out)
 }
 
 /// Reconstruct the exact `Subject:` header that was actually sent to the
@@ -167,7 +376,8 @@ pub(super) fn write_file(
     groups: &[String],
     segs: &[PostedSegment],
     _obfuscate: ObfuscateMode,
-) {
+    is_encrypted: bool,
+) -> Result<()> {
     let first = &segs[0];
     let file_counter = (first.total_files > 0).then_some((first.file_index, first.total_files));
     // `light` deliberately makes the NZB's subject search token identical to
@@ -208,13 +418,32 @@ pub(super) fn write_file(
     for seg in segs {
         // NZB segment bodies carry the Message-ID without angle brackets.
         let id = seg.message_id.trim_start_matches('<').trim_end_matches('>');
-        out.push_str(&format!(
-            "      <segment bytes=\"{}\" number=\"{}\">{}</segment>\n",
-            seg.bytes,
-            seg.part,
-            escape(id),
-        ));
+        if is_encrypted {
+            let seg_idx = seg
+                .segment_identity
+                .as_ref()
+                .map(|i| i.segment_index)
+                .context(format!(
+                    "missing segment identity on encrypted segment for file `{}` part {}",
+                    seg.file_name, seg.part
+                ))?;
+            out.push_str(&format!(
+                "      <segment bytes=\"{}\" number=\"{}\" segmentIndex=\"{}\">{}</segment>\n",
+                seg.bytes,
+                seg.part,
+                seg_idx,
+                escape(id),
+            ));
+        } else {
+            out.push_str(&format!(
+                "      <segment bytes=\"{}\" number=\"{}\">{}</segment>\n",
+                seg.bytes,
+                seg.part,
+                escape(id),
+            ));
+        }
     }
     out.push_str("    </segments>\n");
     out.push_str("  </file>\n");
+    Ok(())
 }

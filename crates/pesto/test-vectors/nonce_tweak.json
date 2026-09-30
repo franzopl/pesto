@@ -1,0 +1,166 @@
+{
+  "schema_version": "1.0",
+  "standard": "yEnc Body & Control Lines Encryption Standards v1.0",
+  "requirement": "VEC-02",
+  "parameters": {
+    "integer_encoding": "uint32_be (4-byte unsigned big-endian network byte order)",
+    "body_nonce_message_format": "ASCII 'yenc-body nonce' (15B) + uint32_be(segmentIndex) (4B) = 19B",
+    "control_enc_key_format": "ASCII 'yenc-control key' (16B) = 16B",
+    "control_tweak_message_format": "ASCII 'yenc-control tweak' (18B) + uint32_be(segmentIndex) (4B) + uint32_be(lineIndex) (4B) = 26B"
+  },
+  "body_nonce_vectors": [
+    {
+      "id": "body-nonce-seg-1",
+      "description": "Body nonce derivation for segmentIndex=1",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 1,
+      "message_hex": "79656e632d626f6479206e6f6e636500000001",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "f6f6e23118719f87d11c9984c71de61cb38c8e50e13562427eac427ce8738ce3",
+      "expected_nonce_hex": "f6f6e23118719f87d11c9984c71de61cb38c8e50e1356242"
+    },
+    {
+      "id": "body-nonce-seg-2",
+      "description": "Body nonce derivation for segmentIndex=2",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 2,
+      "message_hex": "79656e632d626f6479206e6f6e636500000002",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "2dad96a23a557711eaeb8d010d23f897524ad90d3c73914fcac7ffbfff988ab5",
+      "expected_nonce_hex": "2dad96a23a557711eaeb8d010d23f897524ad90d3c73914f"
+    },
+    {
+      "id": "body-nonce-seg-255",
+      "description": "Body nonce derivation for segmentIndex=255",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 255,
+      "message_hex": "79656e632d626f6479206e6f6e6365000000ff",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "8c75c5a7a60e71cd16bc3e76d0b4354c289a6fb3c66576d0ea285ba3cc7b4c7f",
+      "expected_nonce_hex": "8c75c5a7a60e71cd16bc3e76d0b4354c289a6fb3c66576d0"
+    },
+    {
+      "id": "body-nonce-seg-256",
+      "description": "Body nonce derivation for segmentIndex=256",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 256,
+      "message_hex": "79656e632d626f6479206e6f6e636500000100",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "7909240ac18ce4a6f3dd81a7c6484c7379333707b675882cea218364001a3d20",
+      "expected_nonce_hex": "7909240ac18ce4a6f3dd81a7c6484c7379333707b675882c"
+    },
+    {
+      "id": "body-nonce-seg-65535",
+      "description": "Body nonce derivation for segmentIndex=65535",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 65535,
+      "message_hex": "79656e632d626f6479206e6f6e63650000ffff",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "5b060ad38bca7a319298ac61c3943c5df97c77d3ae32934b51231af4ce5e3690",
+      "expected_nonce_hex": "5b060ad38bca7a319298ac61c3943c5df97c77d3ae32934b"
+    },
+    {
+      "id": "body-nonce-seg-65536",
+      "description": "Body nonce derivation for segmentIndex=65536",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 65536,
+      "message_hex": "79656e632d626f6479206e6f6e636500010000",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "e98890034bc9d2530612501d4c88b1614b4884cbc481a62b00bd9aebf632367d",
+      "expected_nonce_hex": "e98890034bc9d2530612501d4c88b1614b4884cbc481a62b"
+    },
+    {
+      "id": "body-nonce-seg-16777215",
+      "description": "Body nonce derivation for segmentIndex=16777215",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 16777215,
+      "message_hex": "79656e632d626f6479206e6f6e636500ffffff",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "9f0933d58cd76e0a8f5ba85537cd76650ef2d332c9ca22286145d9eb0afbfcf7",
+      "expected_nonce_hex": "9f0933d58cd76e0a8f5ba85537cd76650ef2d332c9ca2228"
+    },
+    {
+      "id": "body-nonce-seg-4294967295",
+      "description": "Body nonce derivation for segmentIndex=4294967295",
+      "key_hex": "5dd5a3371f80a50eb96feb11787dd4567a09b55655aa3c2b1596bf2d45c9a6d7",
+      "segment_index": 4294967295,
+      "message_hex": "79656e632d626f6479206e6f6e6365ffffffff",
+      "message_length_bytes": 19,
+      "full_hmac_hex": "d394289fc7bc2e9c43294b257fb5428e54ec2e4879dba786b66a8c022451b6c3",
+      "expected_nonce_hex": "d394289fc7bc2e9c43294b257fb5428e54ec2e4879dba786"
+    }
+  ],
+  "control_tweak_argon2id_vector": "argon2id-02-control-salt",
+  "control_tweak_vectors": [
+    {
+      "id": "control-tweak-seg-1-line-1",
+      "description": "Control tweak derivation for segmentIndex=1, lineIndex=1 (header line 1 (=ybegin))",
+      "segment_index": 1,
+      "line_index": 1,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000001",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "39e921e8bc1a4f23185fa029d85ed750a7001bc314ba7f1196f7ab47750a8f94",
+      "expected_tweak_hex": "39e921e8bc1a4f23"
+    },
+    {
+      "id": "control-tweak-seg-1-line-2",
+      "description": "Control tweak derivation for segmentIndex=1, lineIndex=2 (header line 2 (=ypart))",
+      "segment_index": 1,
+      "line_index": 2,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000002",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "bf97390bd199f07ac0fc3862d0903b4129eea3c782bd75c10fc007547500879c",
+      "expected_tweak_hex": "bf97390bd199f07a"
+    },
+    {
+      "id": "control-tweak-seg-1-line-3",
+      "description": "Control tweak derivation for segmentIndex=1, lineIndex=3 (header line 3 (=yencryption))",
+      "segment_index": 1,
+      "line_index": 3,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000003",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "88f094595816ae11b4c21da40ab46d9e264dcd0a462a4957b14f8346c2446f45",
+      "expected_tweak_hex": "88f094595816ae11"
+    },
+    {
+      "id": "control-tweak-seg-1-line-54",
+      "description": "Control tweak derivation for segmentIndex=1, lineIndex=54 (footer line (=yend for 54-line article))",
+      "segment_index": 1,
+      "line_index": 54,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b0000000100000036",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "b8f37950717018640058355236c492b4c7b2d7b936e2d2b693be0a9dc9ad7b32",
+      "expected_tweak_hex": "b8f3795071701864"
+    },
+    {
+      "id": "control-tweak-seg-2-line-1",
+      "description": "Control tweak derivation for segmentIndex=2, lineIndex=1 (second segment line 1 (=ybegin))",
+      "segment_index": 2,
+      "line_index": 1,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b0000000200000001",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "ec01d3bfca449a636aef04c703c6156e468301ddf7a8adda672da559a0e0fcb1",
+      "expected_tweak_hex": "ec01d3bfca449a63"
+    },
+    {
+      "id": "control-tweak-seg-2-line-4",
+      "description": "Control tweak derivation for segmentIndex=2, lineIndex=4 (second segment line 4 (=yend))",
+      "segment_index": 2,
+      "line_index": 4,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b0000000200000004",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "d19fb9e5e94728db6ff5ff09af224899b9504f7679ed34837cddefd8b8861fe7",
+      "expected_tweak_hex": "d19fb9e5e94728db"
+    },
+    {
+      "id": "control-tweak-seg-65536-line-1000",
+      "description": "Control tweak derivation for segmentIndex=65536, lineIndex=1000 (high segment and line index pair)",
+      "segment_index": 65536,
+      "line_index": 1000,
+      "message_hex": "79656e632d636f6e74726f6c20747765616b00010000000003e8",
+      "message_length_bytes": 26,
+      "full_hmac_hex": "de20f4fed294b79e21790d64f7b5e1f59fd4a305e688d33a81bd05754bbdb716",
+      "expected_tweak_hex": "de20f4fed294b79e"
+    }
+  ]
+}

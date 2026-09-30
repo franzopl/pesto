@@ -76,12 +76,43 @@ pub(super) fn run_merge_season(
         let mut combined_segments: Vec<pesto::poster::PostedSegment> = Vec::new();
         let mut poster = String::new();
         let mut all_groups: Vec<String> = Vec::new();
+        let mut any_encrypted = false;
+        let mut shared_password: Option<String> = None;
+        let mut seen_indices = std::collections::HashSet::new();
 
         for src in &sources {
             let content = std::fs::read_to_string(src)
                 .with_context(|| format!("reading {}", src.display()))?;
             let parsed = pesto::nzb::parse(&content)
                 .with_context(|| format!("parsing {}", src.display()))?;
+
+            let is_this_encrypted = parsed.meta.yenc_encrypted
+                || parsed.segments.iter().any(|s| s.segment_identity.is_some());
+
+            if is_this_encrypted {
+                any_encrypted = true;
+                if let Some(ref pwd) = parsed.meta.password {
+                    if let Some(ref existing) = shared_password {
+                        if existing != pwd {
+                            anyhow::bail!("cannot merge encrypted NZBs with conflicting passwords");
+                        }
+                    } else {
+                        shared_password = Some(pwd.clone());
+                    }
+                } else if shared_password.is_some() {
+                    anyhow::bail!("cannot merge encrypted NZBs with conflicting passwords");
+                }
+
+                for seg in &parsed.segments {
+                    if let Some(ref id) = seg.segment_identity {
+                        if !seen_indices.insert(id.segment_index) {
+                            anyhow::bail!(
+                                "cannot merge encrypted NZBs with overlapping segment indices"
+                            );
+                        }
+                    }
+                }
+            }
 
             let ep_name = src
                 .file_stem()
@@ -113,13 +144,24 @@ pub(super) fn run_merge_season(
             name: display_name
                 .map(str::to_string)
                 .or_else(|| Some(key.clone())),
-            password: None,
+            password: if any_encrypted { shared_password } else { None },
             category: None,
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
             mal_id: None,
             tags: nzb_tags.clone(),
+            yenc_encrypted: any_encrypted,
+            yenc_version: if any_encrypted {
+                Some("1.0".to_string())
+            } else {
+                None
+            },
+            yenc_cipher: if any_encrypted {
+                Some("XChaCha20-Poly1305".to_string())
+            } else {
+                None
+            },
         };
         // Segments here come from `nzb::parse`, which always leaves
         // `wire_name` empty (see its doc comment) — there is no live wire
@@ -131,7 +173,7 @@ pub(super) fn run_merge_season(
             &combined_segments,
             &meta,
             pesto::config::ObfuscateMode::None,
-        );
+        )?;
 
         std::fs::write(&output_path, &xml)
             .with_context(|| format!("writing {}", output_path.display()))?;
