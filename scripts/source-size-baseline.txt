@@ -15,5 +15,3 @@
 # across many modules and are clearer as one scenario per file.
 872 crates/penne/tests/cli_download_end_to_end.rs
 868 crates/penne/tests/check.rs
-851 crates/pesto/tests/integration.rs
-818 crates/pesto/tests/full_shared_obfuscation.rs

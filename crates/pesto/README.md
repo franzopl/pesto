@@ -233,10 +233,12 @@ it prints a summary and writes `movie.nzb` next to the binary (or in
 pesto ./MyShow.S01/
 ```
 
-The directory is walked recursively. Every file is posted as part of one logical
-upload, with the folder structure preserved in the `.nzb` and PAR2 metadata so
-a downloader can reconstruct the original layout. Files starting with `.` are
-included; symbolic links are skipped. The `.nzb` is named after the root folder
+The directory is walked recursively. Files selected by the input filters are
+posted as one logical upload, with the folder structure preserved in the `.nzb`
+and PAR2 metadata so a downloader can reconstruct the original layout.
+Known OS/FUSE metadata and symbolic links are skipped. Other hidden files,
+including `.courseid`, are included unless a custom exclusion or extension
+allowlist removes them. See [directory exclusions](#directory-exclusions). The `.nzb` is named after the root folder
 (`MyShow.S01.nzb`).
 
 ### Multiple files
@@ -618,6 +620,50 @@ Entries already present in the watched directory when `pesto` starts are ignored
 only new arrivals are posted. Completed entries are moved to `--watch-done` or
 deleted if `--watch-done` is not set.
 
+### Directory exclusions
+
+Directory uploads skip OS/FUSE metadata by default: `.DS_Store`, `._*`,
+`.fuse_hidden*`, `.Spotlight-V100`, `.Trashes`, `.fseventsd`, `Thumbs.db`,
+`ehthumbs.db`, `desktop.ini`, and `@eaDir`. Matching directories are pruned
+before traversal; each excluded entry produces a warning. Other hidden files,
+subtitles and `.nfo` files are preserved.
+
+Add exclusions with repeatable `--exclude 'GLOB'` arguments. Globs are
+case-sensitive and support `*`, `?`, character classes and `**`. Patterns
+without `/` match basenames at any depth; patterns containing `/` match paths
+relative to each input directory. `*` stays within a path component and `**`
+crosses directories. Use `/` separators on every platform and quote globs to
+prevent shell expansion. Absolute patterns do not match relative paths.
+
+```bash
+pesto --exclude '*.tmp' --exclude 'extras/sample?.mkv' ./Release/
+pesto --no-exclude ./Release/
+```
+
+For persistent filters, put these keys **before the first TOML section**
+(such as `[server]`):
+
+```toml
+ext = [] # All extensions, including files without an extension
+exclude = [".courseid", "*.tmp", "*.log"]
+no_exclude = false
+
+[server]
+host = "news.example.com"
+```
+
+To allow only media and selected extras, use
+`ext = ["mkv", "mp4", "srt", "nfo"]`. A nonempty extension allowlist also
+rejects files without an extension. `.courseid` is otherwise included by
+default, even though it is hidden; add it to `exclude` to ignore it.
+
+Root-level TOML keys `exclude = ["*.tmp"]` and `no_exclude = false` configure
+the same behavior. CLI patterns replace the config's custom patterns; defaults
+remain enabled unless `--no-exclude` (or `no_exclude = true`) disables both.
+Explicit file arguments always bypass exclusions, but still obey `ext`.
+An empty filtered upload fails before posting. `--each`, `--season`, and `--watch` also filter entries
+discovered under their directory arguments.
+
 ### `--ext` — restrict uploads to specific extensions
 
 ```bash
@@ -631,9 +677,12 @@ pesto --watch ./incoming/ --each --ext mkv
 pesto --each --ext mkv,mp4 ./Season01/
 ```
 
-`--ext` is a no-op by default (every file is included). It's most useful with
-`--each`/`--season`/`--watch`, where a downloaded release folder often mixes
-the video with subtitles, samples, or other extras you don't want posted as
+`--ext` is a no-op by default (every file is included). Set the root-level
+TOML key `ext = ["mkv", "mp4"]` to configure the same allowlist; CLI `--ext`
+replaces it. Extensions are case-insensitive, and `ext = []` allows all.
+Exclusions run before this allowlist, and `--no-exclude` does not disable it.
+The extension allowlist is most useful with `--each`/`--season`/`--watch`,
+where a downloaded release folder often mixes the video with subtitles, samples, or other extras you don't want posted as
 their own release or bundled into one.
 
 ---
@@ -1090,7 +1139,9 @@ picked up automatically — no config change needed.
 | `--watch <DIR>` | — | — | Watch a directory and post new entries automatically |
 | `--watch-done <DIR>` | — | delete | Move completed watch entries here instead of deleting |
 | `--watch-interval <SECS>` | — | `30` | Poll interval for `--watch` |
-| `--ext <EXT[,EXT...]>` | — | off | Only post files with these extensions (case-insensitive); drops non-matching top-level entries and files nested inside a directory |
+| `--exclude <GLOB>` | `exclude` (TOML root) | OS/FUSE defaults | Additional directory-entry globs; repeatable |
+| `--no-exclude` | `no_exclude` (TOML root) | false | Disable default and custom directory exclusions |
+| `--ext <EXT[,EXT...]>` | `ext` (TOML root) | off | Only post files with these extensions (case-insensitive); drops non-matching top-level entries and files nested inside a directory |
 
 ---
 

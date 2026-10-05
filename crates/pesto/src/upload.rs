@@ -56,7 +56,9 @@ pub async fn run_upload(
     pause: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<UploadOutcome> {
     let upload_start = std::time::Instant::now();
-    let mut inputs = crate::walk::expand_inputs(entry_paths)?;
+    let mut inputs =
+        crate::walk::expand_inputs_with_options(entry_paths, &config.exclude, config.no_exclude)?;
+    crate::walk::apply_ext_filter(&mut inputs, &config.ext, entry_label)?;
     let total_bytes: u64 = inputs
         .iter()
         .filter_map(|f| std::fs::metadata(&f.path).ok())

@@ -1,11 +1,5 @@
-//! Regression test: `PESTO_INPUT_PATHS` must still list the original input
-//! filenames after `--compress`, not just the compressed archive.
-//!
-//! Post-upload hooks (e.g. a hook that screenshots a video file) detect a
-//! video by checking the extension of each path in `PESTO_INPUT_PATHS`. When
-//! `--compress` replaces the upload payload with a single `.7z`/`.zip`/`.rar`
-//! archive, a hook that only sees the archive path can never find a `.mkv`/
-//! `.mp4` extension to trigger on — so screenshots would silently never run.
+//! Compression integration using a mock NNTP server, without executing hooks.
+//! Hook input paths and environment values are checked by pure CLI unit tests.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -79,7 +73,7 @@ fn handle_connection(stream: TcpStream) {
 }
 
 #[test]
-fn compress_preserves_original_filenames_in_hook_input_paths() {
+fn compression_posts_the_archive_without_executing_hooks() {
     if which_7z_missing() {
         eprintln!("skipping: 7z not found in PATH");
         return;
@@ -92,24 +86,6 @@ fn compress_preserves_original_filenames_in_hook_input_paths() {
     let out = dir.path().join("out.nzb");
 
     let xdg_home = tempfile::tempdir().unwrap();
-    let hooks_dir = xdg_home.path().join("pesto").join("hooks");
-    std::fs::create_dir_all(&hooks_dir).unwrap();
-    let captured = dir.path().join("captured_input_paths.txt");
-    let hook_path = hooks_dir.join("capture.sh");
-    std::fs::write(
-        &hook_path,
-        format!(
-            "#!/bin/sh\necho \"$PESTO_INPUT_PATHS\" > {}\n",
-            captured.to_str().unwrap()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
     let output = Command::new(env!("CARGO_BIN_EXE_pesto"))
         .env("XDG_CONFIG_HOME", xdg_home.path())
         .arg("--no-ssl")
@@ -118,7 +94,12 @@ fn compress_preserves_original_filenames_in_hook_input_paths() {
         .args(["-g", "alt.binaries.test"])
         .args(["-n", "1"])
         .args(["--par2", "0"])
-        .arg("--no-check")
+        .args([
+            "--no-check",
+            "--no-hooks",
+            "--no-history",
+            "--no-session-log",
+        ])
         .arg("--compress")
         .args(["-o", out.to_str().unwrap()])
         .arg(&input)
@@ -133,17 +114,10 @@ fn compress_preserves_original_filenames_in_hook_input_paths() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let captured_paths = std::fs::read_to_string(&captured)
-        .unwrap_or_else(|e| panic!("hook never ran / wrote {}: {e}", captured.display()));
-
+    let nzb = std::fs::read_to_string(out).unwrap();
     assert!(
-        captured_paths.contains("movie.mkv"),
-        "PESTO_INPUT_PATHS should still list the original movie.mkv filename \
-         after --compress, so hooks can detect it by extension; got: {captured_paths:?}"
-    );
-    assert!(
-        !captured_paths.trim().ends_with(".7z"),
-        "PESTO_INPUT_PATHS should not resolve to the compressed archive only; got: {captured_paths:?}"
+        nzb.contains(".7z"),
+        "the upload must contain the compressed archive: {nzb}"
     );
 }
 

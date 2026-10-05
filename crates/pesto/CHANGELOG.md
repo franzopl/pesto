@@ -12,6 +12,30 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+
+- Repeatable `--exclude <GLOB>` and `--no-exclude`, with root-level TOML
+  `exclude` and `no_exclude` keys. Exclusions prune discovered directories,
+  warn for skipped entries, and reject an empty upload. Explicit file arguments
+  bypass exclusions. CLI custom patterns replace the config's custom list.
+- Root-level TOML `ext` extension allowlist, overridden by CLI `--ext`.
+  Extension matching is case-insensitive; an empty list allows all extensions.
+  The resolved allowlist also applies to library uploads used by UpaPasta.
+
+### Fixed
+
+- Split `--each`, `--season` and `--watch` uploads keep path exclusion globs
+  relative to the original discovery root instead of each child directory.
+- Season-wide PAR2 uploads bypass the source extension allowlist so a filter
+  such as `ext = ["mkv"]` cannot discard generated `.par2` volumes.
+
+### Changed
+
+- Directory discovery now skips common macOS, Windows, Synology and FUSE
+  metadata by default (#194). Other hidden files, including `.courseid`, remain
+  eligible. `--no-exclude` restores discovery without exclusions while leaving
+  any extension allowlist active.
+
 ## [0.10.4] — 2026-09-12
 
 ### Fixed

@@ -306,6 +306,9 @@ fn test_config(port: u16) -> Config {
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],
+        ext: Vec::new(),
+        exclude: Vec::new(),
+        no_exclude: false,
         no_hooks: true,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
@@ -461,22 +464,16 @@ async fn t6_stat_480_is_inconclusive() {
 }
 
 /// T21 + T11 library path: `run_upload` writes the NZB on MissingConfirmed
-/// + `--allow-incomplete-nzb`, keeps state, strips the missing id, and sets
-/// `PESTO_INCOMPLETE=1`.
+/// + `--allow-incomplete-nzb`, keeps state and strips the missing id.
 #[tokio::test(flavor = "multi_thread")]
-async fn t11_t21_run_upload_allow_incomplete_keeps_state_and_sets_hook_env() {
+async fn t11_t21_run_upload_allow_incomplete_keeps_state() {
     let (port, _) = spawn_mock(StatBehaviour::Missing, true).await;
     let dir = tempfile::tempdir().unwrap();
     let file = input(dir.path(), "movie.bin", 80);
     let nzb = dir.path().join("out.nzb");
-    let captured = dir.path().join("incomplete.env");
     let mut config = test_config(port);
     config.allow_incomplete_nzb = true;
     config.no_hooks = true;
-    config.post_hooks = vec![format!(
-        "printf %s \"$PESTO_INCOMPLETE\" > {}",
-        captured.display()
-    )];
 
     let outcome = run_upload(
         &config,
@@ -506,13 +503,6 @@ async fn t11_t21_run_upload_allow_incomplete_keeps_state_and_sets_hook_env() {
     assert!(
         state.get("movie.bin", 1).is_none(),
         "T11: MissingConfirmed ids must be stripped from resume"
-    );
-    let env = std::fs::read_to_string(&captured)
-        .unwrap_or_else(|e| panic!("run_upload hook never wrote {}: {e}", captured.display()));
-    assert_eq!(
-        env.trim(),
-        "1",
-        "T11: PESTO_INCOMPLETE=1 on the library hook path"
     );
 }
 

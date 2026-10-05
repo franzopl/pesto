@@ -1,3 +1,25 @@
+# Input filters: root-level keys, BEFORE [server] or any other section.
+# Defaults: all extensions allowed; known OS/FUSE metadata excluded.
+#
+# ext — case-insensitive extension allowlist (without the dot).
+# [] allows all files, including hidden files and files without an extension.
+# A nonempty list also filters explicit file arguments. CLI --ext replaces it.
+# ext = []
+# ext = ["mkv", "mp4", "srt", "nfo"]
+#
+# exclude — extra case-sensitive globs, added to the built-in OS/FUSE list:
+# .DS_Store, ._*, .fuse_hidden*, .Spotlight-V100, .Trashes, .fseventsd,
+# Thumbs.db, ehthumbs.db, desktop.ini, @eaDir.
+# Matching directories are skipped with their whole subtree.
+# Basename globs match at any depth; path globs are relative to each input
+# directory and use / separators. * stays within a component; ** crosses them.
+# Explicit file arguments bypass exclusions. CLI --exclude replaces this list.
+# .courseid is included by default; exclude it explicitly if unwanted.
+# exclude = [".courseid", "*.tmp", "*.log", "extras/sample?.mkv"]
+#
+# no_exclude — disable both default and custom exclusions; ext still applies.
+# no_exclude = false
+
 # Example pesto configuration.
 #
 # Copy this file to your config directory so pesto loads it automatically:

@@ -10,12 +10,12 @@ use pesto::config::ObfuscateMode;
 use pesto::nntp::pool::ConnectionBroker;
 use tracing::{error, info};
 
-use super::super::batch::apply_ext_filter;
 use super::super::hooks::{run_pre_hook, run_pre_hooks_dir, HookEnv};
 use super::{
     plan_upload_paths, resolve_entry_password, resume_flags_string, PhaseTimings, UploadParams,
     UploadResult,
 };
+use pesto::walk::apply_ext_filter;
 
 /// Run one complete upload: expand `entry_paths`, compress, post, write NZB.
 ///
@@ -52,7 +52,19 @@ pub(crate) async fn run_single_upload(
     let upload_start = std::time::Instant::now();
     let mut timings = PhaseTimings::default();
 
-    let mut inputs = pesto::walk::expand_inputs(entry_paths)?;
+    let mut inputs = match params.exclusion_root.as_deref() {
+        Some(root) => pesto::walk::expand_inputs_from_root(
+            entry_paths,
+            root,
+            &config.exclude,
+            config.no_exclude,
+        )?,
+        None => pesto::walk::expand_inputs_with_options(
+            entry_paths,
+            &config.exclude,
+            config.no_exclude,
+        )?,
+    };
     apply_ext_filter(&mut inputs, &params.ext_filter, entry_label)?;
     let (_file_count, _folder_count, total_bytes) = upload_summary(&inputs);
     // Snapshot the pre-compression file list: `inputs` gets overwritten below

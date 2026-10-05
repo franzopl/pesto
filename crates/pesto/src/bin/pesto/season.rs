@@ -97,6 +97,8 @@ async fn post_season_par2_volumes_with_progress(
     // Prevent recursively generating recovery data for the recovery volumes.
     let mut par2_config = (*params.config).clone();
     par2_config.par2 = 0;
+    // Source extension filters must not discard internally generated recovery files.
+    par2_config.ext.clear();
 
     // `run_upload` derives compression from the config again. Leaving the
     // season compression settings enabled would encrypt each generated PAR2
@@ -167,6 +169,7 @@ mod tests {
     fn test_upload_params() -> Arc<UploadParams> {
         Arc::new(UploadParams {
             config: Arc::new(test_config()),
+            exclusion_root: None,
             archive_password_raw: None,
             nzb_default: None,
             json_mode: true,
@@ -176,6 +179,28 @@ mod tests {
             ext_filter: Vec::new(),
             cleanup_mode: CleanupMode::Leave,
         })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn generated_recovery_volumes_bypass_source_extension_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let episode = dir.path().join("episode.mkv");
+        std::fs::write(&episode, [0x11; 256]).unwrap();
+        let mut params = test_upload_params();
+        let config = Arc::make_mut(&mut Arc::make_mut(&mut params).config);
+        config.ext = vec!["mkv".into()];
+        config.par2_slice_size = Some(64);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let segments =
+            post_season_par2_volumes_with_progress(&[episode], "Season", &params, &cancel, tx)
+                .await
+                .unwrap();
+        assert!(!segments.is_empty());
+        assert!(segments
+            .iter()
+            .all(|segment| segment.file_name.ends_with(".par2")));
+        assert_eq!(params.config.ext, ["mkv"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

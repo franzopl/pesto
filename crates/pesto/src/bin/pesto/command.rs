@@ -127,6 +127,7 @@ pub(super) async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
 
     let params = Arc::new(UploadParams {
         config: Arc::clone(&config),
+        exclusion_root: None,
         archive_password_raw: cli.archive_password.clone(),
         nzb_default: nzb_default.map(|s| s.to_string()),
         json_mode,
@@ -137,11 +138,7 @@ pub(super) async fn run(tuning: pesto::memory::ThreadTuning) -> Result<()> {
             bell: cli.bell || config.bell,
             plain: logs_to_stderr,
         },
-        ext_filter: cli
-            .ext
-            .iter()
-            .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
-            .collect(),
+        ext_filter: config.ext.clone(),
         cleanup_mode,
     });
 

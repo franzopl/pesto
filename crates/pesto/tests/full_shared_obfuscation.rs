@@ -9,6 +9,9 @@
 //! verbatim rather than the prefix plus its own random suffix — see the
 //! `light_obfuscation_*` tests below for the exact-match assertions
 //! `full_shared_obfuscation_par2_set_shares_prefix_with_content` doesn't make.
+#[path = "full_shared_obfuscation/config.rs"]
+mod config;
+use config::dry_run_config;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -17,87 +20,6 @@ use std::sync::{Arc, Mutex};
 use pesto::config::{Config, ObfuscateMode};
 use pesto::poster::post_files;
 use pesto::walk::expand_inputs;
-
-/// A config that processes files without touching the network (`dry_run`),
-/// with the given obfuscation mode and no PAR2.
-fn dry_run_config(obfuscate: ObfuscateMode) -> Config {
-    Config {
-        host: "unused".to_string(),
-        port: 563,
-        ssl: false,
-        connections: 4,
-        username: None,
-        password: None,
-        from: "tester <t@pesto.test>".to_string(),
-        groups: vec!["alt.binaries.test".to_string()],
-        article_size: 65536,
-        line_length: 128,
-        retries: 1,
-        retry_delay: 1,
-        timeout: pesto::config::DEFAULT_TIMEOUT_SECS,
-        proxy: None,
-        proxy_check_ip: false,
-        obfuscate,
-        dry_run: true,
-        par2: 0,
-        par2_slice_size: None,
-        par2_slice_count: None,
-        par2_recovery_count: None,
-        par2_memory_limit: Some(1_000_000_000),
-        memory_limit: None,
-        par2_temp_dir: None,
-        compress_temp_dir: None,
-        par2_only: false,
-        par2_before_upload: false,
-        threads: 0,
-        simd: pesto::par2::SimdPath::Auto,
-        extra_servers: vec![],
-        resume: false,
-        upload_rate: 0,
-        compress_format: None,
-        compress_password: None,
-        compress_volume_size: None,
-        nzb_title: None,
-        nzb_password: None,
-        nzb_category: None,
-        nzb_tags: vec![],
-        tmdb_id: None,
-        tmdb_kind: None,
-        imdb_id: None,
-        tvdb_id: None,
-        tvdb_kind: None,
-        mal_id: None,
-        indexer_url: None,
-        indexer_api_key: None,
-        notify_webhook: None,
-        notify_ntfy: None,
-        notify: None,
-        history: true,
-        history_dir: None,
-        nzb_dir: None,
-        date: None,
-        no_archive: false,
-        file_counter: false,
-        message_id_domain: None,
-        pre_hooks: vec![],
-        post_hooks: vec![],
-        no_hooks: false,
-        nfo: false,
-        nzb_conflict: pesto::config::NzbConflict::Overwrite,
-        quiet: false,
-        bell: false,
-        check: false,
-        check_delay_secs: 30,
-        check_retries: 2,
-        check_connections: 1,
-        check_post_retries: 1,
-        allow_incomplete_nzb: false,
-        check_recover_percent: 15,
-        check_recover_max: 0,
-        pipeline_depth: 1,
-        keepalive_interval: 0,
-    }
-}
 
 /// Build a two-root directory tree under a fresh temp directory and return
 /// `(temp_root, [directory args], [expected relative paths])`.
@@ -486,6 +408,9 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],
+        ext: Vec::new(),
+        exclude: Vec::new(),
+        no_exclude: false,
         no_hooks: false,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,
@@ -686,6 +611,9 @@ async fn light_obfuscation_par2_set_shares_prefix_and_matches_subject_exactly() 
         message_id_domain: None,
         pre_hooks: vec![],
         post_hooks: vec![],
+        ext: Vec::new(),
+        exclude: Vec::new(),
+        no_exclude: false,
         no_hooks: false,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,

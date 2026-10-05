@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 /// `[compression]` and `[posting]`, or to drop under `[output]` by analogy
 /// with `history_dir`.
 const FIELD_SECTIONS: &[(&str, &str)] = &[
+    ("ext", "the TOML root"),
+    ("exclude", "the TOML root"),
+    ("no_exclude", "the TOML root"),
     // [server]
     ("host", "[server]"),
     ("port", "[server]"),
@@ -134,6 +137,15 @@ pub fn default_config_path() -> Option<PathBuf> {
 impl Config {
     /// Resolve a [`Config`] from an optional file config plus CLI overrides.
     pub fn resolve(file: FileConfig, cli: Overrides) -> Result<Self> {
+        let ext = cli
+            .ext
+            .unwrap_or(file.ext)
+            .into_iter()
+            .map(|extension| extension.trim_start_matches('.').to_ascii_lowercase())
+            .collect();
+        let exclude = cli.exclude.unwrap_or(file.exclude);
+        let no_exclude = cli.no_exclude.or(file.no_exclude).unwrap_or(false);
+        crate::walk::Exclusions::new(&exclude, no_exclude)?;
         let dry_run = cli.dry_run.unwrap_or(false);
         let par2_only = cli.par2_only.unwrap_or(false);
         let proxy = cli
@@ -293,6 +305,9 @@ impl Config {
         }
 
         Ok(Config {
+            ext,
+            exclude,
+            no_exclude,
             host,
             port,
             ssl,

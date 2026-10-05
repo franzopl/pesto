@@ -15,9 +15,26 @@ The preferred high-level entry points are:
 
 - `pesto::{post, post_cancelable, post_pausable}` for a posting run;
 - `pesto::config` for configuration types, parsing and validation;
-- `pesto::walk::{InputFile, expand_inputs}` for input discovery;
+- `pesto::walk::{InputFile, expand_inputs, expand_inputs_with_options}` for input discovery;
 - `pesto::progress` for progress events and receivers; and
 - `pesto::poster::PostOutcome` and its related outcome types.
+
+`expand_inputs` applies built-in OS/FUSE metadata exclusions to discovered
+entries. `expand_inputs_with_options(paths, &config.exclude, config.no_exclude)`
+adds custom globs or disables all exclusions. Explicit files bypass exclusions.
+For split uploads, use `expand_inputs_from_root(paths, root, &config.exclude,
+config.no_exclude)` to retain the original directory root for path globs.
+`Exclusions::with_root(root)` applies the same root during batch/watch entry
+selection. Discovered entries remain subject to exclusions; explicitly named
+file arguments use the ordinary expansion API and bypass them.
+
+Extension filtering is a separate step:
+`pesto::walk::apply_ext_filter(&mut inputs, &config.ext, entry_label)`.
+It applies to explicit files as well as discovered files and rejects an empty
+filtered list. `pesto::upload::run_upload` applies both configured filters;
+callers constructing inputs for `post` must apply their chosen filters before
+posting. See the [input filter documentation](../crates/pesto/README.md#directory-exclusions)
+for matching rules and examples.
 
 Workspace applications also rely on the following domain APIs:
 

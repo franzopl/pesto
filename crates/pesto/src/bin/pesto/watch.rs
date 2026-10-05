@@ -68,10 +68,14 @@ pub(super) async fn run_watch(
         poll_interval
     );
 
+    let exclusions =
+        pesto::walk::Exclusions::new(&params.config.exclude, params.config.no_exclude)?
+            .with_root(watch_dir);
+
     // `done`: entries that have been successfully uploaded (or permanently failed).
     let mut done: HashSet<PathBuf> = HashSet::new();
     // Pre-populate done with whatever is already present so we don't re-post on startup.
-    if let Ok(existing) = top_level_entries(watch_dir, &params.ext_filter) {
+    if let Ok(existing) = top_level_entries(watch_dir, &params.ext_filter, &exclusions) {
         for e in existing {
             done.insert(e);
         }
@@ -140,7 +144,7 @@ pub(super) async fn run_watch(
             }
         }
 
-        let entries = match top_level_entries(watch_dir, &params.ext_filter) {
+        let entries = match top_level_entries(watch_dir, &params.ext_filter, &exclusions) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("watch: error reading {}: {e}", watch_dir.display());
@@ -182,7 +186,9 @@ pub(super) async fn run_watch(
                     // while the upload task holds the semaphore permit.
                     done.insert(entry.clone());
 
-                    let params = Arc::clone(&params);
+                    let mut entry_params = (*params).clone();
+                    entry_params.exclusion_root = Some(watch_dir.to_path_buf());
+                    let params = Arc::new(entry_params);
                     let watch_done = watch_done.map(PathBuf::from);
                     let tx = result_tx.clone();
                     let label = release_label(&entry);
