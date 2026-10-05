@@ -20,6 +20,8 @@ use super::output::expand_tilde;
 #[derive(Clone)]
 pub(super) struct UploadParams {
     pub(super) config: Arc<Config>,
+    /// Original root for entries discovered by batch/watch traversal.
+    pub(super) exclusion_root: Option<PathBuf>,
     /// The raw `--password` value, used to distinguish a bare flag.
     pub(super) archive_password_raw: Option<String>,
     pub(super) nzb_default: Option<String>,

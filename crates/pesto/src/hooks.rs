@@ -416,6 +416,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prepares_incomplete_environment_without_executing_a_hook() {
+        for incomplete in [false, true] {
+            let ctx = HookContext {
+                name: "movie".into(),
+                total_bytes: 64,
+                input_paths: "movie.mkv".into(),
+                server: String::new(),
+                servers: String::new(),
+                group: String::new(),
+                groups: String::new(),
+                password: String::new(),
+                category: String::new(),
+                nzb_title: String::new(),
+                obfuscate: "none".into(),
+                par2: 0,
+                tags: String::new(),
+                nzb_path: String::new(),
+                nfo_path: String::new(),
+                wire_subject: String::new(),
+                incomplete,
+            };
+            let mut command = Command::new("unused-hook-stub");
+            apply_env(&mut command, &ctx);
+            let values: std::collections::HashMap<_, _> = command.get_envs().collect();
+            assert_eq!(
+                values[std::ffi::OsStr::new("PESTO_INCOMPLETE")],
+                Some(std::ffi::OsStr::new(if incomplete { "1" } else { "0" }))
+            );
+            assert_eq!(
+                values[std::ffi::OsStr::new("PESTO_INPUT_PATHS")],
+                Some(std::ffi::OsStr::new("movie.mkv"))
+            );
+        }
+    }
+
+    #[test]
     fn is_disabled_matches_known_suffixes() {
         assert!(is_disabled(Path::new("/hooks/foo.disabled")));
         assert!(is_disabled(Path::new("/hooks/foo.off")));

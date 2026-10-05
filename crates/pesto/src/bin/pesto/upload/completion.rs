@@ -72,11 +72,7 @@ pub(crate) async fn run(request: CompletionRequest<'_>) -> Result<()> {
     .await?;
 
     if upload_ok && !config.par2_only && !config.dry_run {
-        let input_paths = original_inputs
-            .iter()
-            .map(|input| input.path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(":");
+        let input_paths = super::super::hooks::hook_input_paths(original_inputs);
         let obfuscate = match config.obfuscate {
             ObfuscateMode::None => "none",
             ObfuscateMode::Full => "full",

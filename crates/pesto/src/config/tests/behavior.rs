@@ -71,3 +71,104 @@ fn config_explicit_check_false_disables_it() {
     assert!(!cfg.check);
     assert_eq!(cfg.check_delay_secs, 5);
 }
+
+#[test]
+fn exclusion_config_defaults_and_precedence() {
+    let cfg = Config::resolve(minimal_file(), Overrides::default()).unwrap();
+    assert!(cfg.exclude.is_empty());
+    assert!(!cfg.no_exclude);
+    let file = || {
+        toml::from_str::<FileConfig>(
+            r#"
+            exclude = ["*.tmp"]
+            no_exclude = true
+            [server]
+            host = "h"
+            [posting]
+            groups = ["alt.test"]
+        "#,
+        )
+        .unwrap()
+    };
+    let cfg = Config::resolve(file(), Overrides::default()).unwrap();
+    assert_eq!(cfg.exclude, ["*.tmp"]);
+    assert!(cfg.no_exclude);
+    let cfg = Config::resolve(
+        file(),
+        Overrides {
+            exclude: Some(vec!["*.bak".into()]),
+            no_exclude: Some(false),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.exclude, ["*.bak"]);
+    assert!(!cfg.no_exclude);
+    let cfg = Config::resolve(
+        file(),
+        Overrides {
+            exclude: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(cfg.exclude.is_empty());
+}
+
+#[test]
+fn invalid_exclusion_globs_fail_during_config_resolution_unless_disabled() {
+    let file = || {
+        let mut file = minimal_file();
+        file.exclude = vec!["[".into()];
+        file
+    };
+    assert!(Config::resolve(file(), Overrides::default()).is_err());
+    assert!(Config::resolve(
+        file(),
+        Overrides {
+            no_exclude: Some(true),
+            ..Default::default()
+        }
+    )
+    .is_ok());
+}
+
+#[test]
+fn extension_config_defaults_normalization_and_cli_precedence() {
+    let cfg = Config::resolve(minimal_file(), Overrides::default()).unwrap();
+    assert!(cfg.ext.is_empty());
+    let file = || {
+        toml::from_str::<FileConfig>(
+            r#"
+            ext = [".MKV", "srt"]
+            exclude = ["*.tmp"]
+            [server]
+            host = "h"
+            [posting]
+            groups = ["alt.test"]
+        "#,
+        )
+        .unwrap()
+    };
+    let cfg = Config::resolve(file(), Overrides::default()).unwrap();
+    assert_eq!(cfg.ext, ["mkv", "srt"]);
+    assert_eq!(cfg.exclude, ["*.tmp"]);
+    let cfg = Config::resolve(
+        file(),
+        Overrides {
+            ext: Some(vec![".MP4".into()]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.ext, ["mp4"]);
+    let cfg = Config::resolve(
+        file(),
+        Overrides {
+            ext: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(cfg.ext.is_empty());
+}

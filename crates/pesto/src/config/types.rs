@@ -515,6 +515,14 @@ pub struct NotifySection {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
+    /// Allowed file extensions, without the dot; empty allows every extension.
+    #[serde(default)]
+    pub ext: Vec<String>,
+    /// Additional directory-entry exclusion globs, appended to OS/FUSE defaults.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Disable default and custom directory-entry exclusions.
+    pub no_exclude: Option<bool>,
     #[serde(default)]
     pub proxy: Option<String>,
     #[serde(default)]
@@ -536,6 +544,9 @@ pub struct FileConfig {
 /// CLI-supplied overrides.
 #[derive(Debug, Default)]
 pub struct Overrides {
+    pub ext: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
+    pub no_exclude: Option<bool>,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub ssl: Option<bool>,
@@ -612,6 +623,9 @@ pub struct Overrides {
 /// Fully resolved, validated configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub ext: Vec<String>,
+    pub exclude: Vec<String>,
+    pub no_exclude: bool,
     pub host: String,
     pub port: u16,
     pub ssl: bool,

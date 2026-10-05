@@ -496,6 +496,16 @@ pub(super) struct Cli {
     #[arg(long, value_name = "EXT", value_delimiter = ',')]
     pub(super) ext: Vec<String>,
 
+    /// Exclude directory entries matching GLOB (repeatable, case-sensitive).
+    /// Basename globs match at any depth; paths are relative to the input root.
+    /// Adds to built-in OS/FUSE exclusions. Explicit files bypass exclusions.
+    #[arg(long, value_name = "GLOB")]
+    exclude: Vec<String>,
+
+    /// Disable default and custom directory-entry exclusions.
+    #[arg(long)]
+    no_exclude: bool,
+
     /// Watch DIR for new entries and post each one automatically. A directory
     /// entry is posted as a single combined NZB by default, or split per
     /// top-level entry (one NZB per file) when --each or --season is also
@@ -745,6 +755,17 @@ impl Cli {
             message_id_domain: self.message_id_domain.clone(),
             pre_hooks: self.pre_hook.clone(),
             post_hooks: self.post_hook.clone(),
+            ext: if self.ext.is_empty() {
+                None
+            } else {
+                Some(self.ext.clone())
+            },
+            exclude: if self.exclude.is_empty() {
+                None
+            } else {
+                Some(self.exclude.clone())
+            },
+            no_exclude: if self.no_exclude { Some(true) } else { None },
             no_hooks: if self.no_hooks { Some(true) } else { None },
             nfo: if self.nfo { Some(true) } else { None },
             nzb_conflict: if self.no_overwrite {
@@ -774,3 +795,6 @@ impl Cli {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -24,6 +24,7 @@ path = "src/bin/pesto/main.rs"
 [dependencies]
 parmesan = { package = "parmesan-par2", version = "0.5.5", path = "../parmesan", default-features = false }
 anyhow = "1"
+glob = "0.3"
 clap = { version = "4", features = ["derive"] }
 md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }

@@ -6,6 +6,11 @@
 # Do not bake credentials into the image. Paths below match docker/compose.yaml.
 # Full option list: ../config.example.toml
 
+# Input filters belong before any section. See ../config.example.toml.
+# ext = [] # All extensions; use ["mkv", "mp4", "srt", "nfo"] for an allowlist.
+# exclude = [".courseid", "*.tmp", "*.log"] # Adds to default OS/FUSE exclusions.
+# no_exclude = false # true disables exclusions, but ext still applies.
+
 [server]
 host = "news.example.com"
 # port = 563

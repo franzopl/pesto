@@ -23,42 +23,7 @@ fn is_artifact_entry(path: &Path) -> bool {
         .is_some_and(|ext| ext == "nfo" || ext == "nzb")
 }
 
-/// Whether `path`'s extension is one of `ext_filter` (case-insensitive). An
-/// empty `ext_filter` matches everything (the `--ext` default: no filtering).
-fn matches_ext_filter(path: &Path, ext_filter: &[String]) -> bool {
-    if ext_filter.is_empty() {
-        return true;
-    }
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| {
-            ext_filter
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(ext))
-        })
-}
-
-/// Apply `--ext` to an already-expanded input list, in place. A no-op when
-/// `ext_filter` is empty. Errors out if the filter drops every input, so a
-/// mistyped extension (or an entry that is 100% subtitles/extras) fails
-/// loudly instead of silently posting nothing.
-pub(super) fn apply_ext_filter(
-    inputs: &mut Vec<pesto::walk::InputFile>,
-    ext_filter: &[String],
-    entry_label: &str,
-) -> Result<()> {
-    if ext_filter.is_empty() {
-        return Ok(());
-    }
-    inputs.retain(|f| matches_ext_filter(&f.path, ext_filter));
-    if inputs.is_empty() {
-        anyhow::bail!(
-            "no files matching --ext {} found in `{entry_label}`",
-            ext_filter.join(",")
-        );
-    }
-    Ok(())
-}
+use pesto::walk::matches_ext_filter;
 
 /// Enumerate top-level entries of `dir` (files and subdirectories), sorted by
 /// name using natural lexical ordering (so `E02` comes before `E10`).
@@ -66,11 +31,19 @@ pub(super) fn apply_ext_filter(
 /// `ext_filter` (from `--ext`) drops non-matching *files*; subdirectories are
 /// always kept regardless of their name, since matching files may live inside
 /// them.
-pub(super) fn top_level_entries(dir: &Path, ext_filter: &[String]) -> Result<Vec<PathBuf>> {
+pub(super) fn top_level_entries(
+    dir: &Path,
+    ext_filter: &[String],
+    exclusions: &pesto::walk::Exclusions,
+) -> Result<Vec<PathBuf>> {
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading directory `{}`", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            !exclusions.excludes_entry(p, &name, &name)
+        })
         .filter(|p| !is_artifact_entry(p))
         .filter(|p| p.is_dir() || matches_ext_filter(p, ext_filter))
         .collect();
@@ -172,14 +145,22 @@ pub(super) async fn run_batch(
     cancel: Arc<AtomicBool>,
 ) -> Result<(Vec<PostedSegment>, bool, bool)> {
     // Collect all entries from every directory argument.
-    let mut entries: Vec<PathBuf> = Vec::new();
+    let mut entries: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
     for dir in dirs {
         let md = std::fs::metadata(dir).with_context(|| format!("reading `{}`", dir.display()))?;
         if md.is_dir() {
-            entries.extend(top_level_entries(dir, &params.ext_filter)?);
+            let root = params.exclusion_root.as_deref().unwrap_or(dir);
+            let exclusions =
+                pesto::walk::Exclusions::new(&params.config.exclude, params.config.no_exclude)?
+                    .with_root(root);
+            entries.extend(
+                top_level_entries(dir, &params.ext_filter, &exclusions)?
+                    .into_iter()
+                    .map(|entry| (entry, Some(root.to_path_buf()))),
+            );
         } else {
             // A plain file is its own "entry".
-            entries.push(dir.clone());
+            entries.push((dir.clone(), params.exclusion_root.clone()));
         }
     }
 
@@ -243,7 +224,7 @@ pub(super) async fn run_batch(
 
     let total_entries = entries.len();
     let mut handles = Vec::new();
-    for (entry_idx, entry) in entries.iter().enumerate() {
+    for (entry_idx, (entry, root)) in entries.iter().enumerate() {
         // Acquire the permit before spawning so uploads start in the sorted
         // order. With the permit inside the task, the scheduler decided which
         // upload ran first, making --each non-deterministic.
@@ -252,7 +233,9 @@ pub(super) async fn run_batch(
             .await
             .expect("semaphore closed");
         let entry = entry.clone();
-        let params = Arc::clone(&params);
+        let mut entry_params = (*params).clone();
+        entry_params.exclusion_root = root.clone();
+        let params = Arc::new(entry_params);
         let task_cancel = cancel.clone();
         let task_password = season_password.clone();
         let task_broker = broker.clone();

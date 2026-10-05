@@ -1,5 +1,6 @@
 use super::*;
 use pesto::config::{Config, FileConfig, Overrides};
+use pesto::walk::apply_ext_filter;
 
 use crate::cleanup::CleanupMode;
 
@@ -10,6 +11,7 @@ fn test_upload_params(groups: Vec<String>) -> Arc<UploadParams> {
     let config = Config::resolve(file, Overrides::default()).unwrap();
     Arc::new(UploadParams {
         config: Arc::new(config),
+        exclusion_root: None,
         archive_password_raw: None,
         nzb_default: None,
         json_mode: true,
@@ -108,11 +110,15 @@ fn top_level_entries_skips_generated_artifacts() {
     std::fs::write(dir.join("ep01.nfo"), b"x").unwrap();
     std::fs::write(dir.join("ep01.nzb"), b"x").unwrap();
 
-    let names: Vec<String> = top_level_entries(&dir, &[])
-        .unwrap()
-        .iter()
-        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
+    let names: Vec<String> = top_level_entries(
+        &dir,
+        &[],
+        &pesto::walk::Exclusions::new(&[], false).unwrap(),
+    )
+    .unwrap()
+    .iter()
+    .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+    .collect();
     assert_eq!(names, ["ep01.mkv"]);
 
     std::fs::remove_dir_all(&dir).unwrap();
@@ -141,11 +147,15 @@ fn top_level_entries_filters_loose_files_by_ext_but_keeps_directories() {
     std::fs::write(dir.join("ep01.mkv"), b"x").unwrap();
     std::fs::write(dir.join("ep01.srt"), b"x").unwrap();
 
-    let names: Vec<String> = top_level_entries(&dir, &["mkv".to_string()])
-        .unwrap()
-        .iter()
-        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
+    let names: Vec<String> = top_level_entries(
+        &dir,
+        &["mkv".to_string()],
+        &pesto::walk::Exclusions::new(&[], false).unwrap(),
+    )
+    .unwrap()
+    .iter()
+    .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+    .collect();
     // The loose .srt sibling is dropped; the subdirectory is kept even
     // though "Extras" has no matching extension of its own, since a
     // matching file could live inside it.
@@ -221,4 +231,33 @@ fn derive_season_nzb_path_names_dot_after_current_directory() {
 fn derive_season_nzb_path_falls_back_to_cwd_relative_name() {
     let path = derive_season_nzb_path(None, Path::new("/downloads/Show.S01"), None);
     assert_eq!(path, PathBuf::from("Show.S01.nzb"));
+}
+
+#[test]
+fn discovered_batch_entries_follow_directory_exclusions() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in [
+        "._movie.mkv",
+        ".DS_Store",
+        "movie2.mkv",
+        "movie10.mkv",
+        "extra.tmp",
+    ] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    std::fs::create_dir(dir.path().join("@eaDir")).unwrap();
+    let exclusions = pesto::walk::Exclusions::new(&["*.tmp".into()], false).unwrap();
+    let entries = top_level_entries(dir.path(), &[], &exclusions).unwrap();
+    assert_eq!(
+        entries,
+        [
+            dir.path().join("movie2.mkv"),
+            dir.path().join("movie10.mkv")
+        ]
+    );
+    let disabled = pesto::walk::Exclusions::new(&["*.tmp".into()], true).unwrap();
+    assert_eq!(
+        top_level_entries(dir.path(), &[], &disabled).unwrap().len(),
+        6
+    );
 }

@@ -130,7 +130,15 @@ pub(crate) fn handle_upload_trigger(app: &mut App, tx: mpsc::UnboundedSender<App
 
             // PerFile / Season: expand the folder into its files and upload each
             // as its own NZB, recording each in the catalog as it lands.
-            let files = match pesto::walk::expand_inputs(std::slice::from_ref(path)) {
+            let files = match pesto::walk::expand_inputs_with_options(
+                std::slice::from_ref(path),
+                &config.exclude,
+                config.no_exclude,
+            )
+            .and_then(|mut files| {
+                pesto::walk::apply_ext_filter(&mut files, &config.ext, &label)?;
+                Ok(files)
+            }) {
                 Ok(f) => f,
                 Err(e) => {
                     let _ = tx.send(AppEvent::UploadError(format!("expand {label}: {e}")));
@@ -441,6 +449,9 @@ pub(crate) fn build_dry_run_config() -> Config {
         notify: None,
         pre_hooks: vec![],
         post_hooks: vec![],
+        ext: Vec::new(),
+        exclude: Vec::new(),
+        no_exclude: false,
         no_hooks: true,
         nfo: false,
         nzb_conflict: pesto::config::NzbConflict::Overwrite,

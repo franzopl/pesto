@@ -107,6 +107,23 @@ docker run --rm \
 
 There is no `--watch-include-existing` flag yet; that is a follow-up.
 
+## Input filters
+
+Configure filters in the mounted `/config/pesto/config.toml`, before its first
+section. The same keys are illustrated in [`config.toml.example`](config.toml.example):
+
+```toml
+ext = []
+exclude = [".courseid", "*.tmp", "*.log"]
+no_exclude = false
+```
+
+OS/FUSE metadata is excluded by default; `.courseid` needs the custom pattern
+above. `ext = []` includes all extensions; use `ext = ["mkv", "mp4"]` for an
+allowlist. CLI `--ext` and `--exclude` replace their respective config lists.
+`no_exclude = true` disables exclusions while leaving `ext` active.
+See the [full filter rules](../crates/pesto/README.md#directory-exclusions).
+
 ## Hooks
 
 The image is Linux. Shell hooks work if the script lives on the config

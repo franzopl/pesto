@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use pesto::config::Config;
 
+#[cfg_attr(test, derive(Default))]
 pub(super) struct HookEnv<'a> {
     pub(super) nzb_path: Option<&'a std::path::Path>,
     pub(super) nfo_path: Option<&'a std::path::Path>,
@@ -43,6 +44,15 @@ pub(super) struct HookEnv<'a> {
     pub(super) mal_id: Option<&'a str>,
     /// True when the NZB was published despite MissingConfirmed.
     pub(super) incomplete: bool,
+}
+
+/// Paths from the source snapshot, before compression replaces the payload.
+pub(super) fn hook_input_paths(inputs: &[pesto::walk::InputFile]) -> String {
+    inputs
+        .iter()
+        .map(|input| input.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn apply_hook_env(child: &mut std::process::Command, env: &HookEnv<'_>) {
@@ -277,4 +287,36 @@ fn is_executable(path: &std::path::Path) -> bool {
             .as_deref(),
         Some("exe" | "cmd" | "bat" | "ps1" | "py")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepares_original_input_paths_and_incomplete_flag_without_running_hooks() {
+        let original = [pesto::walk::InputFile {
+            path: PathBuf::from("movie.mkv"),
+            name: "movie.mkv".into(),
+        }];
+        let input_paths = hook_input_paths(&original);
+        for incomplete in [false, true] {
+            let env = HookEnv {
+                input_paths: &input_paths,
+                incomplete,
+                ..Default::default()
+            };
+            let mut command = std::process::Command::new("unused-hook-stub");
+            apply_hook_env(&mut command, &env);
+            let values: std::collections::HashMap<_, _> = command.get_envs().collect();
+            assert_eq!(
+                values[std::ffi::OsStr::new("PESTO_INPUT_PATHS")],
+                Some(std::ffi::OsStr::new("movie.mkv"))
+            );
+            assert_eq!(
+                values[std::ffi::OsStr::new("PESTO_INCOMPLETE")],
+                Some(std::ffi::OsStr::new(if incomplete { "1" } else { "0" }))
+            );
+        }
+    }
 }
