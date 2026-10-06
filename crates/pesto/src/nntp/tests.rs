@@ -494,6 +494,11 @@ async fn body_returns_decoded_bytes_on_222() {
         body,
         b"line one\r\n.dot-stuffed line\r\nline three\r\n".to_vec()
     );
+    assert_eq!(
+        conn.bytes_read(),
+        b"222 0 <mid@host> body\r\nline one\r\n..dot-stuffed line\r\nline three\r\n.\r\n".len()
+            as u64
+    );
 }
 
 #[tokio::test]

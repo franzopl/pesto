@@ -464,6 +464,9 @@ impl Connection {
                         )
                     })?
                     .context("reading NNTP body")?;
+            // Count the wire block, including dot-stuffing and the terminator
+            // (RFC 3977 §3.1.1), so download budgets include article payloads.
+            self.bytes_read += n as u64;
             if n == 0 {
                 bail!("NNTP connection closed by server while reading body");
             }

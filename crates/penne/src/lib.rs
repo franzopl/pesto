@@ -26,6 +26,7 @@ pub mod diskspace;
 pub mod download;
 pub mod extract;
 pub mod health;
+pub mod mediainfo;
 pub mod nzb;
 pub mod progress;
 pub mod queue;

@@ -1,6 +1,6 @@
 [package]
 name = "penne"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast NZB downloader: fetches articles over NNTP, reassembles files, verifies and repairs with PAR2."
@@ -26,9 +26,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "fs", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "net", "io-util", "macros", "fs", "signal", "sync", "time"] }
 tracing = "0.1"
 serde_json = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fs4 = "1.1.0"
 tempfile = "3"
+
+# Parse encrypted/compressed 7z headers without downloading media streams.
+sevenz-rust2 = { version = "0.23", default-features = false, features = ["aes256"] }
+# RAR4/RAR5 byte-range decryption (same RustCrypto versions as sevenz-rust2).
+aes = "0.9"
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"

@@ -46,11 +46,88 @@ cargo run --bin penne -- check path/to/release.nzb --fail-fast --quiet
 
 `penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = confirmed missing, 2 = fatal error, 3 = inconclusive). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead. See [`check`: dedicated availability-check subcommand](#check-dedicated-availability-check-subcommand) below for every flag and the full `--json` schema.
 
-Run `penne --help` to see the configuration, availability-check, and download
+Run `penne --help` to see the configuration, availability-check, MediaInfo, and download
 workflows together. `penne check --help` and `penne help check` are equivalent
 ways to see availability-check-specific options and examples.
 
 A confirmed-missing article (a server returned a definitive `430`/`423`/`420`) is reported separately from an unreachable one (every tried server failed to connect or timed out before ever answering) — `missing` vs `unreachable` in the JSON output, `conclusive: false` when any segment falls in the latter bucket. This distinction matters for callers that act on a check's result (e.g. deciding whether to declare a release dead): a transient network hiccup must never be read as confirmed data loss.
+
+## Partial MediaInfo from an NZB
+
+```bash
+penne mediainfo RELEASE.nzb --config penne.toml
+penne mediainfo RELEASE.nzb --file movie.mkv --max-bytes 33554432
+penne mediainfo RELEASE.nzb --server primary > metadata.json
+# Native text for posting on sites; display it and save the same report.
+penne mediainfo RELEASE.nzb --format text --output mediainfo.txt
+# The CLI value takes precedence over the NZB metadata.
+penne mediainfo RELEASE.nzb --password "$ARCHIVE_PASSWORD" --format text
+```
+
+Install the `mediainfo` CLI and make it available on `PATH`. The command
+selects the largest non-sample media file by default, or an archive when no
+standalone main media is listed. Known auxiliary files are skipped; otherwise
+obfuscated filenames are probed by content. `--file` selects an exact NZB filename (an archive
+filename selects the first supported media member in that archive).
+
+Penne fetches complete NNTP articles, checks yEnc CRCs when present, and
+uses their decoded byte offsets to read selected ranges. It probes the first
+64 KiB, then the last 64 KiB if needed, growing samples to 256 KiB, 1 MiB,
+and at most 4 MiB per end only when MediaInfo cannot identify an audio/video
+stream. Downloaded articles are reused throughout the inspection. Temporary
+sparse files preserve the media's logical size, allowing trailing MP4/MOV
+metadata to be read without fetching the intervening media payload.
+
+Supported inputs:
+
+- Standalone audio/video, including MKV, MP4/MOV, AVI, MPEG/TS, FLAC and MP3.
+  Use `--file` to choose a particular obfuscated filename.
+- RAR4/RAR5 **stored** media members, including AES-encrypted data, encrypted
+  filenames/headers, and `.partNN.rar` or `.rar`/`.rNN` volume sets. Continuation
+  headers are fetched only when the requested range extends beyond the first volume.
+- 7z **Copy** streams, optionally protected by AES-256, including compressed or
+  encrypted archive metadata and multiple stored media entries. The largest
+  non-sample supported media entry is selected. Ciphertext ranges need only
+  their aligned AES blocks and, when required, one preceding CBC block.
+
+The password comes from `--password`, or from the NZB's `<meta type="password">`
+when that option is omitted. Missing passwords produce an actionable error;
+RAR5 password checks and encrypted-header checks detect incorrect passwords.
+For data-only encryption without a password check (for example RAR4 and 7z
+with plain headers), a wrong password can be indistinguishable from non-media
+content in a partial sample. Passwords and encryption keys are never included
+in reports or diagnostics.
+
+Compressed RAR/7z media payloads, filtered 7z streams, split 7z archives,
+legacy pre-AES RAR encryption, and ZIP archives return explicit
+unsupported/compressed-archive errors. Archives without a
+supported media member and samples without identifiable audio/video tracks
+also fail clearly. There is no automatic full-download, repair, extraction,
+or hook execution fallback.
+
+The default transfer budget is 16 MiB, including failed article transfers.
+`--max-bytes` changes it. NZB byte estimates are checked before each fetch;
+because NNTP transfers must consume a complete article, inaccurate estimates
+can exceed the budget by one article, after which inspection fails. Tiny files
+can fit entirely within the first sample. 7z metadata is limited to 2 MiB decoded
+and a 64 MiB dictionary; password derivation is capped at 2^20 rounds to bound
+inspection work. More demanding archive parameters return a clear limit error.
+
+Stdout contains a JSON report with `file`, `file_size`, `downloaded_bytes`,
+`fetched_articles`, `sampled_bytes`, `partial`, and the native `mediainfo`
+JSON object. `--format text` instead prints the native English MediaInfo report
+with the usual General / Video / Audio sections, spacing, and human-readable
+units. `--output FILE` (or `-o FILE`) saves the selected report while also
+printing it. The text is generated from the same sampled data without extra
+article downloads; fields absent from that data are not invented. Temporary
+filesystem paths are replaced with the media filename.
+
+Transfer statistics and the partial-metadata notice print only to stderr, so
+redirected stdout and saved files contain just the report. `partial: true` means
+only sampled container metadata was inspected: track discovery, duration,
+bitrate, and other fields may be incomplete, and the report does not verify
+that the rest of the media is intact. Exit status is 0 on success and nonzero
+for input, network, budget, format, or MediaInfo errors.
 
 ## Configuration
 

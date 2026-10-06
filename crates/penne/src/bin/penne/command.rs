@@ -1,8 +1,8 @@
 use std::process;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use super::cli::{Cli, Command};
+use super::cli::{Cli, Command, MediaInfoFormat};
 use super::{check, download, info};
 
 /// Exit codes for the download command.
@@ -22,6 +22,67 @@ pub(super) async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Some(Command::Info { nzb }) => info::run(&nzb),
+        Some(Command::MediaInfo {
+            nzb,
+            max_bytes,
+            file,
+            password,
+            format,
+            output,
+            server,
+        }) => {
+            let config_path = cli
+                .config
+                .flatten()
+                .or_else(penne::config::default_config_path)
+                .ok_or_else(|| anyhow::anyhow!("cannot locate config; use --config <FILE>"))?;
+            let config_toml = std::fs::read_to_string(&config_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "reading {}: {e}; run `penne --config` to configure servers",
+                    config_path.display()
+                )
+            })?;
+            let config = penne::config::RawConfig::parse(&config_toml)?
+                .select(&server)?
+                .resolve()?;
+            let parsed = penne::nzb::load(&nzb)?;
+            let password = password.or(parsed.meta.password.clone());
+            let queue = penne::queue::build(&parsed);
+            let report = penne::mediainfo::inspect(
+                &queue,
+                &config,
+                &penne::mediainfo::Options {
+                    max_bytes,
+                    file,
+                    text: matches!(format, MediaInfoFormat::Text),
+                    password,
+                },
+            )
+            .await?;
+            eprintln!(
+                "MediaInfo: {} bytes in {} article(s); {} sampled bytes of {}{}",
+                report.downloaded_bytes,
+                report.fetched_articles,
+                report.sampled_bytes,
+                report.file_size,
+                if report.partial {
+                    " (partial metadata)"
+                } else {
+                    ""
+                }
+            );
+            let rendered = match format {
+                MediaInfoFormat::Json => serde_json::to_string_pretty(&report)?,
+                MediaInfoFormat::Text => report.text.context("MediaInfo text report is missing")?,
+            };
+            let rendered = format!("{}\n", rendered.trim_end());
+            if let Some(path) = output {
+                std::fs::write(&path, &rendered)
+                    .with_context(|| format!("saving MediaInfo report to {}", path.display()))?;
+            }
+            print!("{rendered}");
+            Ok(())
+        }
         Some(Command::Download {
             nzb,
             out_dir,

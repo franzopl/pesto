@@ -11,6 +11,11 @@ decoding, streaming assembly, resume/cache, availability checks, PAR2
 verification/repair, de-obfuscation, extraction and processing modes are
 covered by tests. `sugo` is the separate web UI built on this library.
 
+Partial MediaInfo inspection is implemented for standalone media, stored
+RAR4/RAR5 volume sets, and 7z Copy streams, including supported AES-protected
+data and headers. See the [README](README.md#partial-mediainfo-from-an-nzb)
+for password handling, report formats, transfer limits, and unsupported layouts.
+
 ## Active work
 
 ### Recovery and visibility
