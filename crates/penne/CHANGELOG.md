@@ -7,6 +7,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-06
+
+### Added
+
+- **`penne mediainfo NZB`** inspects audio/video metadata with bounded partial
+  downloads instead of fetching the entire release. It reuses NNTP/yEnc
+  retrieval, caches articles, samples the media's beginning and end as needed,
+  and defaults to a 16 MiB transfer budget configurable with `--max-bytes`.
+  `--file` selects an NZB filename and `--server` selects configured servers.
+- Standalone media, stored RAR4/RAR5 members (including volume sets), and 7z
+  Copy streams support partial inspection. AES-protected data and archive
+  headers are supported with `--password` or the NZB's password metadata;
+  the CLI password takes precedence. Compressed/encrypted 7z metadata is
+  supported within explicit memory and CPU limits.
+- **`--format text`** produces the native English MediaInfo report for posting
+  on sites; JSON remains the default. **`--output` / `-o`** saves the selected
+  report while also printing it, with transfer statistics kept on stderr.
+- Clear errors for missing/incorrect passwords, compressed media payloads,
+  unsupported archive layouts, missing media, and transfer-budget exhaustion.
+  Inspection never falls back to a full download, repair, extraction, or hooks.
+  Metadata may be incomplete when only part of the media is sampled. The
+  external `mediainfo` CLI must be installed on `PATH`; see the README for
+  supported formats, limits, output fields, and examples.
+
+### Fixed
+
+- NNTP BODY byte accounting now includes the complete wire block, including
+  dot-stuffing and the terminator, so transfer budgets count article payloads.
+
 ## [0.5.0] — 2026-08-18
 
 ### Added

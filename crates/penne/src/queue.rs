@@ -131,7 +131,7 @@ fn distributed_indices(total: usize, count: usize) -> impl Iterator<Item = usize
 /// name becomes one flat component instead of several. It does nothing for
 /// a name that's *already* exactly `.`/`..` with no separator to replace,
 /// so that case is checked separately.
-fn sanitize_file_name(name: &str) -> String {
+pub(crate) fn sanitize_file_name(name: &str) -> String {
     let flat: String = name
         .chars()
         .map(|c| if c == '/' || c == '\\' { '_' } else { c })
