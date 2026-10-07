@@ -6,12 +6,12 @@ use pesto::yenc::DecodedPart;
 
 use crate::{client::DownloadClient, config::Config, queue::QueuedFile};
 
-pub(super) trait Source {
+pub(crate) trait Source {
     async fn fetch(&mut self, file: &QueuedFile, index: usize) -> Result<DecodedPart>;
     fn stats(&self) -> (u64, usize);
 }
 
-pub(super) struct NntpSource {
+pub(crate) struct NntpSource {
     config: Config,
     clients: Vec<Option<DownloadClient>>,
     limit: u64,
@@ -54,7 +54,7 @@ impl Source for NntpSource {
             for attempt in 0..=self.config.retries {
                 ensure!(
                     self.bytes < self.limit && segment.bytes <= self.limit - self.bytes,
-                    "partial MediaInfo download budget exhausted ({} bytes); increase --max-bytes",
+                    "metadata download budget exhausted ({} bytes); increase --max-bytes",
                     self.limit
                 );
                 if attempt > 0 {
@@ -79,7 +79,7 @@ impl Source for NntpSource {
                     .bytes
                     .saturating_add(client.bytes_read().saturating_sub(before));
                 self.articles += 1;
-                ensure!(self.bytes <= self.limit, "partial MediaInfo download budget exhausted ({} bytes); an article cannot be fetched partially", self.limit);
+                ensure!(self.bytes <= self.limit, "metadata download budget exhausted ({} bytes); an article cannot be fetched partially", self.limit);
                 match body {
                     Ok(Some(body)) => match pesto::yenc::decode_part(&body) {
                         Ok(part) if part.crc_matches() => return Ok(part),
@@ -106,7 +106,7 @@ impl Source for NntpSource {
     }
 }
 
-pub(super) struct Remote<S> {
+pub(crate) struct Remote<S> {
     pub files: Vec<QueuedFile>,
     pub source: S,
     parts: HashMap<(usize, usize), DecodedPart>,

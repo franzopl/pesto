@@ -3,8 +3,8 @@
 use super::{
     archive::{Media, Span},
     crypto, is_media_name,
-    remote::{Remote, Source},
 };
+use crate::remote::{Remote, Source};
 use anyhow::{ensure, Context, Result};
 use sevenz_rust2::{Archive, Password};
 use std::{

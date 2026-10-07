@@ -21,6 +21,48 @@ pub(super) async fn run(cli: Cli) -> Result<()> {
     }
 
     match cli.command {
+        Some(Command::Hashes {
+            nzb,
+            max_bytes,
+            file,
+            output,
+            server,
+        }) => {
+            let config_path = cli
+                .config
+                .flatten()
+                .or_else(penne::config::default_config_path)
+                .ok_or_else(|| anyhow::anyhow!("cannot locate config; use --config <FILE>"))?;
+            let config_toml = std::fs::read_to_string(&config_path).with_context(|| {
+                format!(
+                    "reading {}; run `penne --config` to configure servers",
+                    config_path.display()
+                )
+            })?;
+            let config = penne::config::RawConfig::parse(&config_toml)?
+                .select(&server)?
+                .resolve()?;
+            let parsed = penne::nzb::load(&nzb)?;
+            let report = penne::hashes::inspect(
+                &penne::queue::build(&parsed),
+                &config,
+                &penne::hashes::Options { max_bytes, file },
+            )
+            .await?;
+            eprintln!(
+                "PAR2: {} declared file hash(es); {} bytes in {} article(s); content not verified",
+                report.files.len(),
+                report.downloaded_bytes,
+                report.fetched_articles
+            );
+            let rendered = format!("{}\n", serde_json::to_string_pretty(&report)?);
+            if let Some(path) = output {
+                std::fs::write(&path, &rendered)
+                    .with_context(|| format!("saving hash report to {}", path.display()))?;
+            }
+            print!("{rendered}");
+            Ok(())
+        }
         Some(Command::Info { nzb }) => info::run(&nzb),
         Some(Command::MediaInfo {
             nzb,
