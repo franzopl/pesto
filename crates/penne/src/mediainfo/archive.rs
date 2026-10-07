@@ -1,8 +1,6 @@
 //! Stored RAR byte mapping, including AES-protected headers and media.
-use super::{
-    is_media_name,
-    remote::{Remote, Source},
-};
+use super::is_media_name;
+use crate::remote::{Remote, Source};
 use anyhow::{bail, ensure, Result};
 
 #[derive(Debug)]

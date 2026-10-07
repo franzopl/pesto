@@ -46,11 +46,47 @@ cargo run --bin penne -- check path/to/release.nzb --fail-fast --quiet
 
 `penne check` verifies if every article is still present on the configured servers without downloading the bodies or writing anything to disk. It's a high-performance availability check that can pipeline hundreds of STAT commands at once, emitting JSON if asked (`--json`) and exiting with meaningful codes (0 = all present, 1 = confirmed missing, 2 = fatal error, 3 = inconclusive). It natively supports checking multiple `.nzb` files sequentially while reusing the same active connection pool, avoiding reconnection overhead. See [`check`: dedicated availability-check subcommand](#check-dedicated-availability-check-subcommand) below for every flag and the full `--json` schema.
 
-Run `penne --help` to see the configuration, availability-check, MediaInfo, and download
+Run `penne --help` to see the configuration, availability-check, hashes, MediaInfo, and download
 workflows together. `penne check --help` and `penne help check` are equivalent
 ways to see availability-check-specific options and examples.
 
 A confirmed-missing article (a server returned a definitive `430`/`423`/`420`) is reported separately from an unreachable one (every tried server failed to connect or timed out before ever answering) — `missing` vs `unreachable` in the JSON output, `conclusive: false` when any segment falls in the latter bucket. This distinction matters for callers that act on a check's result (e.g. deciding whether to declare a release dead): a transient network hiccup must never be read as confirmed data loss.
+
+## Declared file hashes from an NZB's PAR2
+
+```bash
+penne hashes RELEASE.nzb --config penne.toml
+penne hashes RELEASE.nzb --server primary --output hashes.json
+penne hashes RELEASE.nzb --file obfuscated-par2-name --max-bytes 33554432
+```
+
+The command downloads only PAR2 candidates and prints JSON. It prefers a
+named `.par2` index over recovery volumes, trying other named PAR2 files if
+the first cannot provide a complete manifest. `--file` selects an exact NZB
+filename, including an obfuscated PAR2. Without named PAR2 files, explicit
+selection is required; payload files are never probed automatically.
+
+The default transfer budget is 16 MiB, including retries and protocol bytes.
+Complete articles are consumed and can overshoot the budget by one article;
+an exhausted budget produces an error. A candidate's entire decoded PAR2
+must fit within the budget. This command does not download protected files,
+repair, extract, or run hooks, and requires no MediaInfo installation.
+
+The report contains `schema_version: 1`, `par2_file`, `recovery_set_id`, `hash_source: "par2"`,
+`verification_status: "declared"`, `downloaded_bytes`, `fetched_articles`,
+and `files`. Each file has `name`, `size_bytes`, lowercase hexadecimal `md5`
+of the whole file and `md5_16k` of its first 16 KiB. Packet checksums are
+validated, but these are **declared hashes**, not confirmation that the
+protected content exists or matches. Only the selected recovery set's
+protected files are reported; use `--file` to select another set.
+
+Consumers should check `schema_version` and reject unsupported versions.
+Additive fields retain the same version; incompatible changes increment it.
+
+Use this manifest for cataloging or matching files with an independently
+computed MD5. If PAR2 protects RAR/7z volumes, their hashes describe the
+archives, not the media inside. Neither hash is a BitTorrent info hash.
+No NZB metadata is modified and no report is sent to an indexer automatically.
 
 ## Partial MediaInfo from an NZB
 

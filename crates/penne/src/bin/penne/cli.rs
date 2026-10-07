@@ -15,7 +15,7 @@ given, penne loads it from the OS-standard location: $XDG_CONFIG_HOME/penne/conf
 (or, failing that, ~/.config/penne/config.toml) on Linux/macOS, or \
 %APPDATA%\\penne\\config.toml on Windows. Create that file interactively \
 with `penne --config`, or point at a specific file with `--config <FILE>`.",
-after_help = "QUICK START:\n  penne --config                         Configure a news server\n  penne check RELEASE.nzb                Verify availability without downloading\n  penne check RELEASE.nzb --fail-fast -q Stop at the first confirmed miss\n  penne mediainfo RELEASE.nzb            Inspect media with partial downloads\n  penne download RELEASE.nzb             Download, repair, and extract\n\n\
+after_help = "QUICK START:\n  penne --config                         Configure a news server\n  penne check RELEASE.nzb                Verify availability without downloading\n  penne check RELEASE.nzb --fail-fast -q Stop at the first confirmed miss\n  penne hashes RELEASE.nzb               Extract declared PAR2 file hashes\n  penne mediainfo RELEASE.nzb            Inspect media with partial downloads\n  penne download RELEASE.nzb             Download, repair, and extract\n\n\
 Run `penne <command> --help` (or `penne help <command>`) for command options."
 )]
 pub(super) struct Cli {
@@ -52,6 +52,24 @@ pub(super) enum MediaInfoFormat {
 
 #[derive(Subcommand)]
 pub(super) enum Command {
+    /// Extract declared MD5 hashes from PAR2 metadata without downloading protected files.
+    #[command(about = "Get declared file hashes from an NZB's PAR2")]
+    Hashes {
+        /// Path to the NZB file.
+        nzb: PathBuf,
+        /// Maximum transfer budget in bytes (complete articles are fetched).
+        #[arg(long, default_value_t = 16 * 1024 * 1024)]
+        max_bytes: u64,
+        /// Exact NZB filename of a PAR2, including an obfuscated one.
+        #[arg(long)]
+        file: Option<String>,
+        /// Also save the JSON report to a UTF-8 file.
+        #[arg(long, short = 'o', value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Use only the named configured servers.
+        #[arg(long = "server")]
+        server: Vec<String>,
+    },
     /// Inspect media metadata using bounded partial article downloads.
     #[command(
         name = "mediainfo",

@@ -1,9 +1,7 @@
 //! Archive-specific key derivation and AES-CBC range decryption.
 //! Keys/passwords are never included in Debug output or error messages.
-use super::{
-    archive::Reader,
-    remote::{Remote, Source},
-};
+use super::archive::Reader;
+use crate::remote::{Remote, Source};
 use aes::{
     cipher::{Array, BlockCipherDecrypt, KeyInit},
     Aes128, Aes256,

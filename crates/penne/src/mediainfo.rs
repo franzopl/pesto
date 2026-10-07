@@ -4,7 +4,6 @@
 //! only container metadata visible in the sampled ranges can be returned.
 mod archive;
 mod crypto;
-mod remote;
 mod sevenz;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -15,12 +14,12 @@ use std::{
     path::Path,
 };
 
+use crate::remote::{NntpSource, Remote, Source};
 use crate::{
     config::Config,
     queue::{DownloadQueue, QueuedFile},
 };
 use archive::{Media, Span};
-use remote::{NntpSource, Remote, Source};
 
 /// Limits and file selection for partial inspection.
 #[derive(Clone)]
