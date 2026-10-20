@@ -720,6 +720,11 @@ pub(super) async fn producer(
                 file.write_all(&pkt).await.with_context(|| {
                     format!("writing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
+                // Tokio File writes can still be pending after write_all.
+                // Finish this append before reopening or posting the volume.
+                file.flush().await.with_context(|| {
+                    format!("flushing PAR2 recovery volume `{}`", vol_path.display())
+                })?;
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
