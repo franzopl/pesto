@@ -120,9 +120,16 @@ git push origin parmesan-v<version>
 
 Pushing a `parmesan-v*` tag triggers
 `.github/workflows/release-parmesan.yml`, which builds the `parmesan`
-binary for `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, and
-`x86_64-pc-windows-msvc`, then creates a GitHub Release at that tag with all
-three attached. It does **not** use GitHub's auto-generated release notes —
+binary for `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-gnu`, and `x86_64-pc-windows-msvc`, then creates a
+GitHub Release with all four attached. ARM64 uses the shared
+`build-linux-aarch64.yml` workflow on a native ARM runner in
+`rust:1.96-bookworm` (glibc 2.36), producing `parmesan-linux-aarch64`.
+The full package test suite and architecture/CLI smoke checks run before
+upload, including on pull requests. A new `parmesan-v*` tag is required to
+publish the ARM64 asset; existing releases are unchanged.
+
+The release does **not** use GitHub's auto-generated release notes —
 those pick the "previous tag" by creation time across the *whole repo*,
 which would pull in unrelated `pesto` (`v*`) tags interleaved with
 `parmesan-v*` ones. The release body just links to `CHANGELOG.md`,
@@ -141,7 +148,7 @@ gh run watch <run-id>
 gh release view parmesan-v<version> --json url,assets -q '{url, assets: [.assets[].name]}'
 ```
 
-Should list all three binaries and a working URL.
+Should list all four binaries and a working URL.
 
 ## Checklist summary
 
@@ -154,4 +161,4 @@ Should list all three binaries and a working URL.
 - [ ] `cargo publish --dry-run` then `cargo publish`
 - [ ] Confirm docs.rs built (`status.json`)
 - [ ] `git tag parmesan-v<version>` + push
-- [ ] Confirm the GitHub Actions run succeeded and the release has all three binaries
+- [ ] Confirm the GitHub Actions run succeeded and the release has all four binaries

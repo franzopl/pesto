@@ -40,23 +40,38 @@ struct GhAsset {
 
 /// Name of the release asset matching the platform this binary was built
 /// for. Must match the names `.github/workflows/release-pesto.yml` uploads.
-fn asset_name() -> &'static str {
-    #[cfg(all(target_os = "linux", target_env = "musl"))]
-    {
-        "pesto-linux-x86_64-musl"
+fn asset_name() -> Result<&'static str> {
+    asset_name_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        if cfg!(target_env = "musl") {
+            "musl"
+        } else if cfg!(target_env = "msvc") {
+            "msvc"
+        } else {
+            "gnu"
+        },
+    )
+}
+
+fn asset_name_for(os: &str, arch: &str, libc: &str) -> Result<&'static str> {
+    match (os, arch, libc) {
+        ("linux", "x86_64", "gnu") => Ok("pesto-linux-x86_64"),
+        ("linux", "x86_64", "musl") => Ok("pesto-linux-x86_64-musl"),
+        ("linux", "aarch64", "gnu") => Ok("pesto-linux-aarch64"),
+        ("windows", "x86_64", _) => Ok("pesto-windows-x86_64.exe"),
+        _ => anyhow::bail!(
+            "no prebuilt pesto update for {os}/{arch} ({libc}); update from source with cargo install pesto-poster"
+        ),
     }
-    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-    {
-        "pesto-linux-x86_64"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "pesto-windows-x86_64.exe"
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        compile_error!("pesto --update has no published release binary for this platform");
-    }
+}
+
+fn release_asset<'a>(release: &'a GhRelease, name: &str) -> Result<&'a GhAsset> {
+    release
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .with_context(|| format!("release {} has no asset named {name}", release.tag_name))
 }
 
 /// Find the hex SHA256 for `want` inside a `sha256sum`-formatted checksums
@@ -128,6 +143,8 @@ fn current_version() -> Result<semver::Version> {
 /// Run `pesto --update`: check the latest release, download it if newer,
 /// verify its checksum, and replace the running binary.
 pub async fn run() -> Result<()> {
+    // Reject unsupported platforms before requesting or downloading a release.
+    let want = asset_name()?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("pesto-update/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -146,12 +163,7 @@ pub async fn run() -> Result<()> {
 
     println!("Updating pesto {current_version} -> {latest_version}...");
 
-    let want = asset_name();
-    let asset = latest
-        .assets
-        .iter()
-        .find(|a| a.name == want)
-        .with_context(|| format!("release {} has no asset named {want}", latest.tag_name))?;
+    let asset = release_asset(&latest, want)?;
     let sums_asset = latest
         .assets
         .iter()
@@ -357,14 +369,80 @@ mod tests {
     }
 
     #[test]
-    fn asset_name_is_one_of_the_release_pesto_workflow_assets() {
-        // Must stay in lockstep with the `mv`/`sha256sum` filenames in
-        // .github/workflows/release-pesto.yml — a mismatch here means
-        // `--update` can never find its own platform's asset.
-        assert!(matches!(
-            asset_name(),
-            "pesto-linux-x86_64" | "pesto-linux-x86_64-musl" | "pesto-windows-x86_64.exe"
-        ));
+    fn update_asset_matches_architecture_and_libc() {
+        for (os, arch, libc, expected) in [
+            ("linux", "x86_64", "gnu", "pesto-linux-x86_64"),
+            ("linux", "x86_64", "musl", "pesto-linux-x86_64-musl"),
+            ("linux", "aarch64", "gnu", "pesto-linux-aarch64"),
+            ("windows", "x86_64", "msvc", "pesto-windows-x86_64.exe"),
+        ] {
+            assert_eq!(asset_name_for(os, arch, libc).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn unsupported_update_platforms_never_fall_back_to_x86_64() {
+        for (os, arch, libc) in [
+            ("linux", "aarch64", "musl"),
+            ("linux", "arm", "gnu"),
+            ("linux", "riscv64", "gnu"),
+            ("macos", "aarch64", ""),
+            ("windows", "aarch64", "msvc"),
+        ] {
+            let error = asset_name_for(os, arch, libc).unwrap_err().to_string();
+            assert!(error.contains(&format!("{os}/{arch}")));
+            assert!(error.contains("cargo install pesto-poster"));
+        }
+    }
+
+    #[test]
+    fn native_update_asset_matches_the_running_architecture() {
+        match asset_name() {
+            Ok(asset) => {
+                assert!(asset.contains(std::env::consts::ARCH));
+                assert_eq!(asset.ends_with("-musl"), cfg!(target_env = "musl"));
+            }
+            Err(_) => {
+                assert!(!matches!(
+                    (
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                        cfg!(target_env = "musl")
+                    ),
+                    ("linux", "x86_64", _) | ("linux", "aarch64", false) | ("windows", "x86_64", _)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn arm64_update_requires_its_own_release_asset() {
+        let want = asset_name_for("linux", "aarch64", "gnu").unwrap();
+        let mut release = gh_release("pesto-v0.10.5", false, false);
+        release.assets.push(GhAsset {
+            name: "pesto-linux-x86_64".into(),
+            browser_download_url: "https://example.invalid/x86_64".into(),
+        });
+        assert!(release_asset(&release, want)
+            .unwrap_err()
+            .to_string()
+            .contains(want));
+        release.assets.push(GhAsset {
+            name: want.into(),
+            browser_download_url: "https://example.invalid/aarch64".into(),
+        });
+        assert_eq!(
+            release_asset(&release, want).unwrap().browser_download_url,
+            "https://example.invalid/aarch64"
+        );
+    }
+
+    #[test]
+    fn arm64_checksum_is_not_confused_with_x86_64() {
+        let sums = "abc123  pesto-linux-x86_64\ndef456  pesto-linux-aarch64\n";
+        let asset = asset_name_for("linux", "aarch64", "gnu").unwrap();
+        assert_eq!(find_checksum(sums, asset), Some("def456".to_string()));
+        assert_eq!(find_checksum("abc123  pesto-linux-x86_64\n", asset), None);
     }
 
     #[test]

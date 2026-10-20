@@ -56,7 +56,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-parmesan-cargo-${{ hashFiles('**/Cargo.toml') }}
 
       - name: Build
-        run: cargo build --release -p parmesan-par2 --bin parmesan --target ${{ matrix.target }}
+        run: cargo build --release --locked -p parmesan-par2 --bin parmesan --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -64,8 +64,14 @@ jobs:
           name: ${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
 
+  build-aarch64:
+    uses: ./.github/workflows/build-linux-aarch64.yml
+    with:
+      package: parmesan-par2
+      binary: parmesan
+
   release:
-    needs: build
+    needs: [build, build-aarch64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,6 +83,7 @@ jobs:
       - name: Rename binaries
         run: |
           mv x86_64-unknown-linux-gnu/parmesan parmesan-linux-x86_64
+          mv parmesan-aarch64-unknown-linux-gnu/parmesan parmesan-linux-aarch64
           mv x86_64-unknown-linux-musl/parmesan parmesan-linux-x86_64-musl
           mv x86_64-pc-windows-msvc/parmesan.exe parmesan-windows-x86_64.exe
 
@@ -85,6 +92,7 @@ jobs:
         with:
           files: |
             parmesan-linux-x86_64
+            parmesan-linux-aarch64
             parmesan-linux-x86_64-musl
             parmesan-windows-x86_64.exe
           # Not `generate_release_notes: true` — GitHub's auto-generated notes

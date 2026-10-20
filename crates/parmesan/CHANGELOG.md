@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-10-19
+
+### Added
+
+- Linux ARM64 release artifact `parmesan-linux-aarch64`, built natively against
+  Debian 12 / glibc 2.36 with full package tests and CLI smoke checks (#199).
+
 ## [0.5.7] - 2026-09-16
 
 ### Added

@@ -12,8 +12,12 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.5] — 2026-10-19
+
 ### Added
 
+- Linux ARM64 release artifact `pesto-linux-aarch64`, built natively against
+  Debian 12 / glibc 2.36 and validated with the full package test suite (#199).
 - Repeatable `--exclude <GLOB>` and `--no-exclude`, with root-level TOML
   `exclude` and `no_exclude` keys. Exclusions prune discovered directories,
   warn for skipped entries, and reject an empty upload. Explicit file arguments
@@ -24,6 +28,9 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- The Linux installer and `--update` select assets by CPU architecture as well
+  as libc, and reject unpublished combinations instead of downloading x86_64
+  binaries on ARM64 or other unsupported platforms (#199).
 - Flush recovery-volume writes before reopening or posting PAR2 files, including
   season-wide sets, to prevent silently truncated recovery data (#200).
 - Split `--each`, `--season` and `--watch` uploads keep path exclusion globs

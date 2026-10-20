@@ -108,13 +108,20 @@ case "$(uname -s)" in
     *) die "Unsupported OS: $(uname -s). Install with: cargo install pesto-poster" ;;
 esac
 
-# ── pick the right asset (glibc vs musl) ────────────────────────────────────
+# ── pick the right asset (architecture and libc) ────────────────────────────
 
-ASSET_NAME="pesto-linux-x86_64"
-if [ -n "$FORCE_MUSL" ]; then
-    ASSET_NAME="pesto-linux-x86_64-musl"
-elif [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl); then
-    ASSET_NAME="pesto-linux-x86_64-musl"
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64) ASSET_NAME="pesto-linux-x86_64" ;;
+    aarch64|arm64) ASSET_NAME="pesto-linux-aarch64" ;;
+    *) die "No Linux build is published for ${ARCH}. Install with: cargo install pesto-poster" ;;
+esac
+
+if [ -n "$FORCE_MUSL" ] || [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl); then
+    case "$ARCH" in
+        x86_64|amd64) ASSET_NAME="pesto-linux-x86_64-musl" ;;
+        *) die "No Linux musl build is published for ${ARCH}. Use a glibc-based container or install with: cargo install pesto-poster" ;;
+    esac
 fi
 
 # ── locate the latest pesto-v* release ──────────────────────────────────────
@@ -126,7 +133,7 @@ log "Looking up the latest pesto release..."
 
 RELEASES_JSON="$(curl -fsSL -H "User-Agent: pesto-install-script" "https://api.github.com/repos/${REPO}/releases")"
 
-DOWNLOAD_URL="$(printf '%s' "$RELEASES_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${ASSET_NAME}\"" | head -n1 | sed -E 's/.*"(https:[^"]+)"/\1/')"
+DOWNLOAD_URL="$(printf '%s' "$RELEASES_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${ASSET_NAME}\"" | head -n1 | sed -E 's/.*"(https:[^"]+)"/\1/' || true)"
 TAG_NAME="$(printf '%s' "$RELEASES_JSON" | grep -o '"tag_name": *"pesto-v[^"]*"' | head -n1 | sed -E 's/.*"(pesto-v[^"]+)"/\1/')"
 
 [ -n "$DOWNLOAD_URL" ] || die "Could not find a pesto-v* release with asset ${ASSET_NAME}. Check https://github.com/${REPO}/releases manually."

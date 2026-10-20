@@ -107,15 +107,25 @@ git push origin pesto-v<version>
 Pushing a `pesto-v*` tag triggers `.github/workflows/release-pesto.yml`,
 which builds the `pesto` binary for `x86_64-unknown-linux-gnu` (Ubuntu
 22.04 / glibc 2.35, so it loads on Debian 12 and in the Docker image),
-`x86_64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`, then creates a
-GitHub Release at that tag with all three attached. The same workflow
-publishes `ghcr.io/franzopl/pesto:<semver>` and `:latest` from the
+`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, and
+`x86_64-pc-windows-msvc`, then creates a GitHub Release with all four
+binaries and `SHA256SUMS`. The ARM64 build uses the shared
+`build-linux-aarch64.yml` workflow on a native ARM runner in
+`rust:1.96-bookworm` (glibc 2.36), and runs the full package test suite plus
+architecture and CLI smoke checks. The same workflow runs on pull requests.
+It publishes `pesto-linux-aarch64`; the installer recognizes both `aarch64`
+and `arm64`, and `--update` selects the matching architecture. A new tag is
+required to make this asset available; changing the workflow does not add it
+to existing releases.
+
+The pesto release workflow also publishes `ghcr.io/franzopl/pesto:<semver>` and `:latest` from the
 linux-gnu artifact (not a second compile), so the image binary matches
 `pesto-linux-x86_64`. v1 is `linux/amd64` only. It does **not** use
 GitHub's auto-generated release notes — those pick the "previous tag" by
 creation time across the *whole repo*, which would pull in unrelated
 `parmesan-v*`/`penne-v*` tags interleaved with `pesto-v*` ones. The release
-body just links to `CHANGELOG.md`, crates.io, and docs.rs instead.
+body embeds the version’s changelog entries and links to the full history,
+crates.io, and docs.rs instead.
 
 The first GHCR package may be private; set it **public** in the GitHub
 package settings (or consumers must `docker login ghcr.io`).
@@ -133,7 +143,7 @@ gh run watch <run-id>
 gh release view pesto-v<version> --json url,assets -q '{url, assets: [.assets[].name]}'
 ```
 
-Should list all three binaries and a working URL.
+Should list all four binaries and a working URL.
 
 ```bash
 docker pull ghcr.io/franzopl/pesto:<version>
@@ -145,12 +155,12 @@ docker run --rm ghcr.io/franzopl/pesto:<version> --version
 
 - [ ] Decide version bump (semver 0.x rules)
 - [ ] Bump `crates/pesto/Cargo.toml` version (and `description` if stale)
-- [ ] Bump the version requirement in any workspace `Cargo.toml` that pins one (none as of this writing — all path-only)
+- [ ] Bump the version requirement in any workspace `Cargo.toml` that pins one (`crates/penne/Cargo.toml` today)
 - [ ] `CHANGELOG.md`: `[Unreleased]` → `[<version>] — <date>`, fresh empty `[Unreleased]` above
 - [ ] `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` / `cargo doc --no-deps -p pesto-poster` all clean
 - [ ] Commit + push to `main`
 - [ ] `cargo publish --dry-run` then `cargo publish`
 - [ ] Confirm docs.rs built (`status.json`)
 - [ ] `git tag pesto-v<version>` + push
-- [ ] Confirm the GitHub Actions run succeeded and the release has all three binaries
+- [ ] Confirm the GitHub Actions run succeeded and the release has all four binaries
 - [ ] Confirm `ghcr.io/franzopl/pesto:<version>` and `:latest` were published (`docker run --rm ... --version`)

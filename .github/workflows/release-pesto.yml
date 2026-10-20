@@ -59,7 +59,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-pesto-cargo-${{ hashFiles('**/Cargo.toml') }}
 
       - name: Build
-        run: cargo build --release -p pesto-poster --bin pesto --target ${{ matrix.target }}
+        run: cargo build --release --locked -p pesto-poster --bin pesto --target ${{ matrix.target }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -67,8 +67,14 @@ jobs:
           name: ${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.artifact }}
 
+  build-aarch64:
+    uses: ./.github/workflows/build-linux-aarch64.yml
+    with:
+      package: pesto-poster
+      binary: pesto
+
   release:
-    needs: build
+    needs: [build, build-aarch64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,13 +90,14 @@ jobs:
       - name: Rename binaries
         run: |
           mv x86_64-unknown-linux-gnu/pesto pesto-linux-x86_64
+          mv pesto-aarch64-unknown-linux-gnu/pesto pesto-linux-aarch64
           mv x86_64-unknown-linux-musl/pesto pesto-linux-x86_64-musl
           mv x86_64-pc-windows-msvc/pesto.exe pesto-windows-x86_64.exe
 
       # `pesto --update` refuses to install a binary whose SHA256 doesn't
       # match this file, so it must exist for every release from now on.
       - name: Generate checksums
-        run: sha256sum pesto-linux-x86_64 pesto-linux-x86_64-musl pesto-windows-x86_64.exe > SHA256SUMS
+        run: sha256sum pesto-linux-x86_64 pesto-linux-aarch64 pesto-linux-x86_64-musl pesto-windows-x86_64.exe > SHA256SUMS
 
       # Extracts this version's own section from crates/pesto/CHANGELOG.md
       # (between its "## [<version>]" heading and the next "## [" heading)
@@ -142,6 +149,7 @@ jobs:
         with:
           files: |
             pesto-linux-x86_64
+            pesto-linux-aarch64
             pesto-linux-x86_64-musl
             pesto-windows-x86_64.exe
             SHA256SUMS
@@ -151,7 +159,7 @@ jobs:
   # compile, so `ghcr.io/franzopl/pesto:<semver>` is the same binary as
   # `pesto-linux-x86_64` on the GitHub Release (issue #185).
   docker:
-    needs: build
+    needs: [build, build-aarch64]
     runs-on: ubuntu-latest
     permissions:
       contents: read

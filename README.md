@@ -55,8 +55,14 @@ Download the latest binary for your platform from the
 | Platform | File |
 |----------|------|
 | Linux x86-64 (glibc) | `pesto-linux-x86_64` |
+| Linux ARM64 (glibc 2.36+) | `pesto-linux-aarch64` |
 | Linux x86-64 (musl / Alpine) | `pesto-linux-x86_64-musl` |
 | Windows x86-64 | `pesto-windows-x86_64.exe` |
+
+ARM64 assets are produced by the new release workflow; older tags do not
+contain them. Linux ARM64 runs in Linux containers on Apple Silicon, not
+as a native macOS executable. ARM64/musl builds are not published; use a
+glibc-based container or build from source.
 
 Copy the binary to a directory on your `PATH` (e.g. `/usr/local/bin` on
 Linux/macOS), marking it executable on Linux/macOS (`chmod +x`). On Windows,

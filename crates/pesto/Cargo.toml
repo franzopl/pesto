@@ -2,7 +2,7 @@
 name = "pesto-poster"
 # pesto is versioned, published, and released independently of the rest of
 # the workspace (own CHANGELOG.md, own `pesto-v*` tag) — see RELEASING.md.
-version = "0.10.4"
+version = "0.10.5"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast, lean Usenet poster: yEnc, NNTP and .nzb generation. Also provides the core library used by upapasta."
@@ -10,6 +10,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+# This repository-only test exercises scripts/install.sh outside the crate.
+exclude = ["/tests/install_platform.rs"]
 keywords = ["usenet", "nntp", "yenc", "nzb", "par2"]
 categories = ["command-line-utilities", "network-programming"]
 
@@ -22,7 +24,7 @@ name = "pesto"
 path = "src/bin/pesto/main.rs"
 
 [dependencies]
-parmesan = { package = "parmesan-par2", version = "0.5.5", path = "../parmesan", default-features = false }
+parmesan = { package = "parmesan-par2", version = "0.5.8", path = "../parmesan", default-features = false }
 anyhow = "1"
 glob = "0.3"
 clap = { version = "4", features = ["derive"] }

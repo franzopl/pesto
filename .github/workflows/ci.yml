@@ -62,6 +62,20 @@ jobs:
       - name: Test (pesto + parmesan)
         run: cargo test -p pesto-poster -p parmesan-par2 --lib
 
+  # Exercise the actual ARM64 release build on PRs, not only after tagging.
+  build-aarch64:
+    strategy:
+      matrix:
+        include:
+          - package: pesto-poster
+            binary: pesto
+          - package: parmesan-par2
+            binary: parmesan
+    uses: ./.github/workflows/build-linux-aarch64.yml
+    with:
+      package: ${{ matrix.package }}
+      binary: ${{ matrix.binary }}
+
   # Packaging only: Compose validity + the Debian runtime stage. The full
   # from-source image is `docker build` locally; GHCR is published from the
   # linux-gnu release artifact (see release-pesto.yml).
