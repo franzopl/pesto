@@ -24,6 +24,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- Flush recovery-volume writes before reopening or posting PAR2 files, including
+  season-wide sets, to prevent silently truncated recovery data (#200).
 - Split `--each`, `--season` and `--watch` uploads keep path exclusion globs
   relative to the original discovery root instead of each child directory.
 - Season-wide PAR2 uploads bypass the source extension allowlist so a filter

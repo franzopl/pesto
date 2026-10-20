@@ -130,6 +130,14 @@ async fn append_season_recovery_slices(
             &packet::recovery_body(slice.exponent, &slice.data),
         );
         file.write_all(&pkt).await?;
+        // Finish Tokio's pending write before reopening the volume or
+        // returning it to a caller that can immediately start posting it.
+        file.flush().await.with_context(|| {
+            format!(
+                "flushing season PAR2 recovery volume `{}`",
+                vol_path.display()
+            )
+        })?;
         if let Some(tx) = events {
             let _ = tx.send(ProgressEvent::Par2SliceWritten);
         }
