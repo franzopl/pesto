@@ -12,6 +12,23 @@ other PAR2 tools (verified against `par2cmdline` — see
 It is designed to be used both as a CLI binary and as a library embedded in
 [pesto](https://github.com/franzopl/pesto), a fast Usenet poster.
 
+## Prebuilt binaries
+
+The `parmesan-v*` [GitHub Releases](https://github.com/franzopl/pesto/releases)
+provide these plain executables; rename the downloaded file to `parmesan`
+(or `parmesan.exe` on Windows) and mark it executable on Linux.
+
+| Platform | File |
+|----------|------|
+| Linux x86-64 (glibc) | `parmesan-linux-x86_64` |
+| Linux ARM64 (glibc 2.36+) | `parmesan-linux-aarch64` |
+| Linux x86-64 (musl / Alpine) | `parmesan-linux-x86_64-musl` |
+| Windows x86-64 | `parmesan-windows-x86_64.exe` |
+
+ARM64 assets require a release built with the ARM64 workflow; older tags
+lack them. This is a Linux build for ARM64 hosts or Linux containers on
+Apple Silicon. Native macOS and ARM64/musl binaries are not published.
+
 ## Library usage
 
 Applications can create a complete recovery set directly, without spawning

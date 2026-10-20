@@ -1,0 +1,84 @@
+name: Build Linux ARM64
+
+# Shared by PR validation and the independently tagged binary releases.
+on:
+  workflow_call:
+    inputs:
+      package:
+        required: true
+        type: string
+      binary:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    # Build natively against glibc 2.36, not the runner's newer glibc, so
+    # release binaries also run in Debian 12 / Bookworm containers (#199).
+    container: rust:1.96-bookworm
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: linux-aarch64-bookworm-rust-1.96-${{ inputs.package }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --locked -p '${{ inputs.package }}' --bin '${{ inputs.binary }}' --target aarch64-unknown-linux-gnu
+
+      - name: Compile release tests
+        run: cargo test --release --locked --no-run -p '${{ inputs.package }}' --target aarch64-unknown-linux-gnu
+
+      - name: Test release binary and library
+        # Tests use local mock services. Refuse outbound HTTP, including the
+        # CLI's best-effort update notice, after dependencies are compiled.
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: localhost,127.0.0.1,127.0.0.2,::1,0.0.0.0
+        run: cargo test --offline --release --locked -p '${{ inputs.package }}' --target aarch64-unknown-linux-gnu
+
+      - name: Check architecture and runtime
+        env:
+          BINARY: ${{ inputs.binary }}
+        run: |
+          binary_path="target/aarch64-unknown-linux-gnu/release/${BINARY}"
+          LC_ALL=C readelf -h "$binary_path" | grep -F 'AArch64'
+          "$binary_path" --version
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          head -c 65537 /dev/zero > "$smoke_dir/data.bin"
+          # A fresh local cache keeps the courtesy update notice offline.
+          export XDG_CONFIG_HOME="$smoke_dir/config"
+          mkdir -p "$XDG_CONFIG_HOME/pesto"
+          printf '{"checked_at":%s,"latest_version":"0.0.0"}\n' "$(date +%s)" \
+            > "$XDG_CONFIG_HOME/pesto/update_check.json"
+          if [ "$BINARY" = pesto ]; then
+            touch "$smoke_dir/config.toml"
+            "$binary_path" --config "$smoke_dir/config.toml" \
+              --dry-run --no-hooks --no-history --no-session-log --no-check \
+              -s news.invalid -g alt.binaries.test --par2 10 \
+              --out "$smoke_dir/test.nzb" "$smoke_dir/data.bin"
+          else
+            "$binary_path" create --out-dir "$smoke_dir" --base-name smoke "$smoke_dir/data.bin"
+            "$binary_path" verify "$smoke_dir/smoke.par2"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.binary }}-aarch64-unknown-linux-gnu
+          path: target/aarch64-unknown-linux-gnu/release/${{ inputs.binary }}
+          if-no-files-found: error
