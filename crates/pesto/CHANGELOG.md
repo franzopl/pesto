@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.10.6] — 2026-10-27
+
 ### Fixed
 
 - `--season` no longer gets OOM-killed under a cgroup memory limit in the
