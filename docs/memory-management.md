@@ -803,3 +803,59 @@ run, it is paid on every run rather than only multi-pass ones, and the fix is
 cheaper. `PostedSegment` (`poster/mod.rs:186`) carries six heap strings and is stored
 twice — once in `results`, once cloned into the check heap. `Arc<str>` for the
 repeated `from` / `subject_name` / `file_path` fields should reclaim most of it.
+
+### 9.5 The cgroup path and the season step (#205)
+
+The model above was applied only where `RLIMIT_AS` is set. Under a cgroup (or
+host RAM, or `--memory-limit`) the automatic budget was the bare Par2 share,
+`0.60 × effective`, and the pass then occupied more than that once the flush
+queue (`clamp(budget / 4, 256 MiB, 2 GiB)`) and pipeline slack were added —
+1.40× measured on glibc in the report. The season step made it worse: it ran
+after the episode loop, sized as if the process were empty, while ~1.45 GiB of
+episode results and allocator state were still resident. On a 4 GiB
+`memory.max` that came to ~3.97 GiB predicted, and the cgroup OOM killer took
+pesto at 3.75 GiB.
+
+The automatic branch of `par2_memory_plan` now solves
+`budget + flush_queue_limit(budget) ≤ share`:
+
+```text
+share  = 0.60 × (effective − already_held)
+budget = min(share / PASS_WORKING_SET_FACTOR, share − 256 MiB)
+```
+
+- `already_held` is the process's resident set when the step starts
+  (`process_held_bytes`). The season step passes it; the per-file producer
+  passes 0. cgroup `memory.current` is deliberately not used: it includes
+  page cache, which after reading a whole season sits near `memory.max` and
+  is reclaimable.
+- Before reading RSS, `memory::release_free_memory` calls `malloc_trim(0)` on
+  glibc. Slices under `M_MMAP_THRESHOLD` (4 MiB) come from an arena, and the
+  pages a finished pass frees stay resident behind live chunks: a dry run of
+  four 512 MiB episodes (268 KiB slices) sat at 662 MiB RSS between steps with
+  2.6 MiB of live heap. Counted as held, that pushed the season budget to its
+  256 MiB floor (5 passes); after the trim it read 14 MiB.
+- The `share − 256 MiB` branch covers the queue floor, which dominates on
+  small ceilings (a 546 MiB budget measured a 256 MiB queue, not 136 MiB).
+
+Dry-run `--season --par2 50` of 4 × 512 MiB episodes inside a systemd scope
+(`MemorySwapMax=0`), old plan simulated with `--par2-memory-limit` set to the
+old automatic value:
+
+| `memory.max` | old plan | new plan |
+|---|---|---|
+| 1 GiB | OOM-killed (anon 889 MiB) | ok, peak anon 853 MiB, 5 passes |
+| 1.5 GiB | OOM-killed (anon 1239 MiB) | ok, peak anon 1049 MiB, 3 passes |
+| 2 GiB | OOM-killed (anon 1776 MiB) | ok, peak anon 1224 MiB, 2 passes |
+
+For the failing run in the report this gives ~0.68 GiB/pass instead of
+1.8 GiB, for a predicted peak of ~2.9 GiB under the 4 GiB limit. An explicit
+`--par2-memory-limit` is still validated against the plain share, so the
+documented workaround keeps working where it did.
+
+Still open: the pipeline slack (`DEFAULT_CHANNEL_DEPTH` slices per channel) is
+outside every budget and was ~0.3 GiB in these runs; the pressure sampler
+compares VmSize, not RSS, against a cgroup-derived ceiling, so it reports
+"emergency" on runs that sit well under `memory.max`; and on an `RLIMIT_AS`
+host the season step still relies on the flat 1 GiB baseline in the reserve.
+Not yet validated on a real post.

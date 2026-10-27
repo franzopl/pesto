@@ -17,7 +17,7 @@ use parmesan::worker::Par2Worker;
 
 use super::super::file_md5_16k;
 use super::geometry::par2_geometry_from_sizes;
-use super::memory::par2_memory_plan;
+use super::memory::{flush_queue_limit, par2_memory_plan, process_held_bytes};
 
 /// One episode's identity within a season-wide PAR2 recovery set: enough to
 /// emit a File Description + IFSC packet pair for it. `name` is the bare
@@ -324,11 +324,17 @@ async fn generate_season_par2(
     );
 
     // Same budget/pass split as the per-file producer. Connection reserve
-    // is 0: season generation runs before (or without) the NNTP pool, like
-    // `--par2-before-upload`.
-    let (memory_limit, passes) = par2_memory_plan(config, par2_slice_size, recovery_count, 0)?;
+    // is 0: under `--season` the episode loop has already shut the NNTP pool
+    // down. The process is not empty, though — every episode's results and
+    // the allocator state its PAR2 passes left behind are still resident, so
+    // the budget is taken of what is left after them (#205).
+    let already_held = process_held_bytes();
+    let (memory_limit, passes) =
+        par2_memory_plan(config, par2_slice_size, recovery_count, 0, already_held)?;
     info!(
         memory_limit,
+        already_held,
+        live_heap = crate::memory::alloc::live_bytes(),
         passes = passes.len(),
         "season PAR2 memory plan"
     );
@@ -388,7 +394,7 @@ async fn generate_season_par2(
         if pass_idx == 0 {
             enc = enc.with_checksums();
         }
-        let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+        let queue_limit = flush_queue_limit(memory_limit);
         let enc = enc.with_flush_limit(queue_limit);
         let worker = Par2Worker::spawn(enc, pass_idx == 0, parmesan::worker::DEFAULT_CHANNEL_DEPTH);
 

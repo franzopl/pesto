@@ -186,8 +186,8 @@ pub(super) struct Cli {
     /// Global memory budget for the whole process (PAR2, uploads, check
     /// queue together), not just PAR2: an absolute size ("8 GiB"), a
     /// percentage of host RAM ("70%"), or "auto" (default) to derive it from
-    /// RLIMIT_AS/cgroup/host RAM with no explicit override. PAR2 draws a 60%
-    /// share of this ceiling, bounded together with (not looser than)
+    /// RLIMIT_AS/cgroup/host RAM with no explicit override. PAR2 buffers plus
+    /// flush queue draw a 60% share of what is left of it, capped by
     /// --par2-memory-limit and the RLIMIT_AS-specific pass-sizing model
     /// [config: posting.memory_limit, default "auto"].
     #[arg(long, value_name = "SIZE|PCT|auto")]
