@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-26
+
+### Added
+
+- **`penne check --json`** lines now carry `schema_version` (currently `1`)
+  and `penne_version`, so consumers can detect the format and binary that
+  produced them.
+- **`retention_days`** — optional per-`[[servers]]` field declaring the
+  plan's retention. Informational only; reported as
+  `declared_retention_days` on `check --json --independent-servers` lines.
+- **`penne servers [--json] [--server NAME]`** lists the selected servers'
+  `name`, `host` and `retention_days`, never credentials.
+
 ## [0.6.0] — 2026-10-06
 
 ### Added

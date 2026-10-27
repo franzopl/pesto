@@ -170,6 +170,7 @@ fn build_server(
     name: Option<String>,
     explicit_only: bool,
     group: Option<u32>,
+    retention_days: Option<u32>,
 ) -> RawServer {
     RawServer {
         host: form.host,
@@ -188,6 +189,7 @@ fn build_server(
         name,
         explicit_only,
         group,
+        retention_days,
     }
 }
 
@@ -195,7 +197,7 @@ pub async fn add_server(
     State(state): State<SharedState>,
     Form(form): Form<ServerForm>,
 ) -> Response {
-    let entry = build_server(form, None, false, None);
+    let entry = build_server(form, None, false, None, None);
     let snapshot = {
         let mut config = state.config.write().await;
         config.core.servers.push(entry);
@@ -220,7 +222,13 @@ pub async fn update_server(
         let Some(existing) = config.core.servers.get(index).cloned() else {
             return (StatusCode::NOT_FOUND, "no such server").into_response();
         };
-        let mut updated = build_server(form, existing.name, existing.explicit_only, existing.group);
+        let mut updated = build_server(
+            form,
+            existing.name,
+            existing.explicit_only,
+            existing.group,
+            existing.retention_days,
+        );
         if updated.password.is_none() {
             updated.password = existing.password;
         }

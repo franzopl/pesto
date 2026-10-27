@@ -211,3 +211,119 @@ fn fail_fast_quiet_summary_identifies_the_confirmed_miss() {
         "expected the first missing article, got: {stdout}"
     );
 }
+
+fn parse_ndjson(output: &Output) -> Vec<serde_json::Value> {
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+        .collect()
+}
+
+#[test]
+fn json_lines_carry_schema_and_penne_version() {
+    let mut known = HashSet::new();
+    known.insert("seg1@test");
+    let addr = spawn_fake_stat_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let nzb_path = write_nzb(dir.path());
+    let config_path = write_config(dir.path(), addr.port());
+
+    let lines = parse_ndjson(&run_penne_check(
+        &nzb_path,
+        &config_path,
+        &["--json", "--quiet"],
+    ));
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["schema_version"], 1);
+    assert_eq!(lines[0]["penne_version"], penne::DISPLAY_VERSION);
+    // The combined (failover) mode has no single server to attribute a
+    // declared retention to.
+    assert!(lines[0].get("declared_retention_days").is_none());
+}
+
+#[test]
+fn independent_servers_report_each_servers_declared_retention() {
+    let mut known = HashSet::new();
+    known.insert("seg1@test");
+    let without_retention = spawn_fake_stat_server(known.clone());
+    let with_retention = spawn_fake_stat_server(known);
+
+    let dir = tempfile::tempdir().unwrap();
+    let nzb_path = write_nzb(dir.path());
+    // Two distinct hostnames for the same loopback interface, so each line's
+    // `server` identifies which config entry it came from.
+    let config_path = dir.path().join("penne.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "download_dir = \"{dir}\"\n\n\
+             [[servers]]\nhost = \"127.0.0.1\"\nport = {p1}\nssl = false\n\n\
+             [[servers]]\nhost = \"localhost\"\nport = {p2}\nssl = false\nretention_days = 5000\n",
+            dir = dir.path().display(),
+            p1 = without_retention.port(),
+            p2 = with_retention.port(),
+        ),
+    )
+    .unwrap();
+
+    let lines = parse_ndjson(&run_penne_check(
+        &nzb_path,
+        &config_path,
+        &["--json", "--quiet", "--independent-servers"],
+    ));
+    assert_eq!(lines.len(), 2);
+    let by_server = |host: &str| {
+        lines
+            .iter()
+            .find(|l| l["server"] == host)
+            .unwrap_or_else(|| panic!("no line for {host}: {lines:?}"))
+    };
+    assert!(by_server("127.0.0.1")
+        .get("declared_retention_days")
+        .is_none());
+    assert_eq!(by_server("localhost")["declared_retention_days"], 5000);
+}
+
+#[test]
+fn servers_json_lists_selected_servers_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("penne.toml");
+    std::fs::write(
+        &config_path,
+        "[[servers]]\nname = \"main\"\nhost = \"news.example.com\"\n\
+         username = \"secret-user\"\npassword = \"secret-pass\"\nretention_days = 6000\n\n\
+         [[servers]]\nhost = \"backup.example.com\"\n\n\
+         [[servers]]\nname = \"block\"\nhost = \"block.example.com\"\nexplicit_only = true\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_penne"))
+        .args([
+            "servers",
+            "--json",
+            "--config",
+            config_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("secret"), "credentials leaked: {stdout}");
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        parsed,
+        serde_json::json!([
+            { "name": "main", "host": "news.example.com", "retention_days": 6000 },
+            { "name": null, "host": "backup.example.com", "retention_days": null },
+        ]),
+        "explicit_only entries stay out of the default set, as in `check`"
+    );
+}

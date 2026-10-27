@@ -3,7 +3,7 @@ use std::process;
 use anyhow::{Context, Result};
 
 use super::cli::{Cli, Command, MediaInfoFormat};
-use super::{check, download, info};
+use super::{check, download, info, servers};
 
 /// Exit codes for the download command.
 pub(super) const EXIT_COMPLETE: i32 = 0;
@@ -64,6 +64,9 @@ pub(super) async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Command::Info { nzb }) => info::run(&nzb),
+        Some(Command::Servers { json, server }) => {
+            servers::run(cli.config.flatten(), &server, json)
+        }
         Some(Command::MediaInfo {
             nzb,
             max_bytes,

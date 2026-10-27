@@ -241,4 +241,16 @@ EXIT STATUS:\n  0  All checked articles are present\n  1  At least one article i
         #[arg(long)]
         independent_servers: bool,
     },
+    #[command(about = "List the configured servers (never their credentials)")]
+    /// List the `[[servers]]` entries `penne check`/`download` would use
+    /// with the same `--server` selection, in config-file order: name, host,
+    /// and declared `retention_days`. Credentials are never printed.
+    Servers {
+        /// Machine-readable JSON output (a single array).
+        #[arg(long)]
+        json: bool,
+        /// Use only the named server(s) from the config file.
+        #[arg(long = "server")]
+        server: Vec<String>,
+    },
 }
