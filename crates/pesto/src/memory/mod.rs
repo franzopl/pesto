@@ -197,6 +197,31 @@ pub fn tune_allocator() {
     }
 }
 
+/// Hand free allocator memory back to the OS before a step that sizes itself
+/// against what the process holds.
+///
+/// `M_TRIM_THRESHOLD` only trims the top of a heap. PAR2 slices below
+/// `M_MMAP_THRESHOLD` come from an arena, and once a pass frees them the
+/// pages stay resident behind any live chunk above them: a dry-run `--season`
+/// of four 512 MiB episodes (268 KiB slices) sat at 662 MiB RSS between
+/// steps with nothing of PAR2 alive. Counted as held, that memory shrank the
+/// season budget to its floor although the season's own allocations would
+/// have reused it. `malloc_trim` releases free pages from the middle of every
+/// arena too, so the RSS read after it is what is actually occupied.
+///
+/// A no-op outside glibc: musl has no `malloc_trim`.
+pub fn release_free_memory() {
+    #[cfg(all(unix, target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` takes a padding size and only returns free
+        // allocator pages to the kernel; it has no memory-safety
+        // preconditions and is thread-safe (it takes each arena's lock).
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 /// Default cap on tokio worker threads.
 ///
 /// Posting is network-bound: 30-60 TLS connections moving articles, with

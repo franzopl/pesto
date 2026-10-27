@@ -52,8 +52,8 @@ const CEILING_TARGET: f64 = 0.85;
 /// A pass's real working set as a multiple of its memory budget.
 ///
 /// The budget sizes the recovery buffers; on top of those the encoder gets a
-/// flush queue of `memory_limit / 4` (see the `queue_limit` computation in
-/// `producer`), so a pass actually occupies ~1.25x what it is budgeted.
+/// flush queue of `memory_limit / 4` (see [`flush_queue_limit`]), so a pass
+/// actually occupies ~1.25x what it is budgeted.
 const PASS_WORKING_SET_FACTOR: f64 = 1.25;
 
 /// Share of a finished pass's working set still held by the allocator when the
@@ -117,13 +117,76 @@ fn address_space_budget(reserve: u64, slice_size: usize, recovery_count: usize) 
     Some((headroom / (PASS_WORKING_SET_FACTOR * (1.0 + CROSS_PASS_RETENTION))) as u64)
 }
 
+/// What this process already occupies, for a caller that budgets PAR2 late in
+/// a run (the season step runs after every episode has posted).
+///
+/// Resident set rather than cgroup `memory.current`: the latter includes page
+/// cache, which after reading a whole season sits near `memory.max` and is
+/// reclaimable — subtracting it would leave almost no headroom. Free memory
+/// the allocator still keeps resident is released first
+/// ([`crate::memory::release_free_memory`]), so it is neither counted as held
+/// nor left charged to the cgroup; what remains (fragmentation, musl's
+/// retention) the cgroup charges just the same as live data.
+/// [`crate::memory::alloc::live_bytes`] covers platforms without `/proc`.
+pub(crate) fn process_held_bytes() -> u64 {
+    crate::memory::release_free_memory();
+    let rss = crate::memory::VmStats::read().map_or(0, |s| s.vm_rss);
+    rss.max(crate::memory::alloc::live_bytes())
+}
+
+/// Bounds of the encoder's flush queue — see [`flush_queue_limit`].
+const FLUSH_QUEUE_MIN: usize = 256 * 1024 * 1024;
+const FLUSH_QUEUE_MAX: usize = 2 * 1024 * 1024 * 1024;
+
+/// Bytes the encoder may queue before flushing, for a pass budgeted at
+/// `memory_limit`.
+///
+/// On passes with many recovery blocks a larger queue (cache blocking)
+/// amortizes the flush cost over more input data, so it gets a quarter of the
+/// budget, clamped between 256 MiB and 2 GiB. It sits *on top of* the
+/// recovery buffers, which is what [`PASS_WORKING_SET_FACTOR`] and
+/// [`ceiling_budget`] account for.
+pub(crate) fn flush_queue_limit(memory_limit: usize) -> usize {
+    (memory_limit / 4).clamp(FLUSH_QUEUE_MIN, FLUSH_QUEUE_MAX)
+}
+
+/// Automatic per-pass budget under the non-`RLIMIT_AS` ceiling (cgroup, host
+/// RAM or `--memory-limit`).
+///
+/// Two corrections on top of the raw PAR2 share, both from #205:
+///
+/// - the share is taken of what is *left* after `already_held`, not of the
+///   whole ceiling — the season step otherwise sized its passes as if the
+///   episodes' results and allocator state did not exist;
+/// - recovery buffers plus the flush queue must fit inside the share, as
+///   [`address_space_budget`] already requires for `RLIMIT_AS`. The queue is
+///   `budget / 4` (hence [`PASS_WORKING_SET_FACTOR`]) but never below
+///   [`FLUSH_QUEUE_MIN`], which dominates on small ceilings: a 1.5 GiB cgroup
+///   dry run measured a 256 MiB queue on a 546 MiB budget. Above the 2 GiB
+///   cap the `/ 1.25` branch under-uses the share slightly, which only costs
+///   passes on hosts large enough not to care.
+fn ceiling_budget(effective: u64, already_held: u64) -> u64 {
+    let share = crate::memory::budget::share_of(
+        effective.saturating_sub(already_held),
+        crate::memory::budget::Stage::Par2,
+    );
+    let proportional = (share as f64 / PASS_WORKING_SET_FACTOR) as u64;
+    proportional.min(share.saturating_sub(FLUSH_QUEUE_MIN as u64))
+}
+
 /// Shared PAR2 memory budget + pass list used by the per-file producer and
 /// the season path so `--memory-limit` cannot drift between them.
+///
+/// `already_held` is what the process occupies before the PAR2 step starts
+/// (see [`process_held_bytes`]). The per-file producer passes 0: what it
+/// runs alongside — connections, in-flight articles — is already covered by
+/// the other stage shares and the connection reserve.
 pub(crate) fn par2_memory_plan(
     config: &Config,
     par2_slice_size: usize,
     recovery_count: usize,
     active_connections: usize,
+    already_held: u64,
 ) -> Result<(usize, Vec<(u32, usize)>)> {
     let reserve_threads = if config.threads > 0 {
         config.threads
@@ -185,7 +248,14 @@ pub(crate) fn par2_memory_plan(
             }
             limit
         }
-        None => (binding_budget as usize).max(256 * 1024 * 1024),
+        // An explicit `--par2-memory-limit` is still validated against the
+        // plain share above, unchanged: it is the documented workaround for
+        // tight containers and must keep working where it did.
+        None => {
+            let auto = ceiling_budget(ceiling.effective_excluding_address_space(), already_held);
+            let auto = as_budget.map_or(auto, |b| b.min(auto));
+            (auto as usize).max(256 * 1024 * 1024)
+        }
     };
 
     let slices_per_pass = (memory_limit / par2_slice_size.max(1)).max(1);
@@ -313,5 +383,89 @@ mod tests {
         let ceiling = 512 * 1024 * 1024u64;
         let reserve = 4 * 1024 * 1024 * 1024u64;
         assert_eq!(budget_for(ceiling, reserve, 40 * 1024 * 1024, 100), 0);
+    }
+
+    // ── ceiling_budget (cgroup / host / --memory-limit path) ─────────────────
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn ceiling_budget_keeps_buffers_plus_flush_queue_inside_the_share() {
+        // A pass occupies its recovery buffers plus the flush queue sized
+        // from them; that sum, not the bare budget, must fit inside the PAR2
+        // share — on small ceilings (queue floor), mid-size ones (budget / 4)
+        // and large ones (queue cap).
+        for effective in [GIB, 1152 * 1024 * 1024, 3 * GIB, 6 * GIB, 64 * GIB] {
+            let budget = ceiling_budget(effective, 0);
+            let share =
+                crate::memory::budget::share_of(effective, crate::memory::budget::Stage::Par2);
+            let working_set = budget + flush_queue_limit(budget as usize) as u64;
+            assert!(
+                working_set <= share,
+                "effective {effective}: buffers {budget} + queue exceed share {share}"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_budget_uses_the_proportional_branch_when_the_queue_is_budget_over_4() {
+        let effective = 6 * GIB;
+        let share = crate::memory::budget::share_of(effective, crate::memory::budget::Stage::Par2);
+        let budget = ceiling_budget(effective, 0);
+        assert_eq!(budget, (share as f64 / PASS_WORKING_SET_FACTOR) as u64);
+        assert_eq!(flush_queue_limit(budget as usize), budget as usize / 4);
+    }
+
+    #[test]
+    fn flush_queue_limit_is_a_clamped_quarter() {
+        assert_eq!(flush_queue_limit(0), FLUSH_QUEUE_MIN);
+        assert_eq!(flush_queue_limit(4 * GIB as usize), GIB as usize);
+        assert_eq!(flush_queue_limit(64 * GIB as usize), FLUSH_QUEUE_MAX);
+    }
+
+    #[test]
+    fn ceiling_budget_is_taken_of_the_headroom_left() {
+        let effective = 6 * GIB;
+        let fresh = ceiling_budget(effective, 0);
+        let late = ceiling_budget(effective, 2 * GIB);
+        assert!(late < fresh);
+        assert_eq!(late, ceiling_budget(4 * GIB, 0));
+    }
+
+    #[test]
+    fn ceiling_budget_is_zero_when_already_held_exceeds_the_ceiling() {
+        // Saturates instead of wrapping; the caller's 256 MiB floor then
+        // turns this into more passes, not an absurd budget.
+        assert_eq!(ceiling_budget(3 * GIB, 4 * GIB), 0);
+        // Same once the share no longer covers the queue floor alone.
+        assert_eq!(ceiling_budget(3 * GIB, 3 * GIB - 256 * 1024 * 1024), 0);
+    }
+
+    #[test]
+    fn issue_205_season_step_fits_a_4_gib_cgroup() {
+        // The failing run from #205: `memory.max` = 4 GiB (effective ceiling
+        // 3 GiB after the cgroup haircut), ~1.45 GiB already resident when
+        // the season step starts, and a measured working set of 1.40x the
+        // budget on glibc. The old plan handed out 1.8 GiB/pass and was
+        // OOM-killed at ~3.97 GiB predicted.
+        let memory_max = 4 * GIB;
+        let effective = memory_max * 3 / 4;
+        let held = 1450 * 1024 * 1024;
+        let measured_factor = 1.40;
+
+        let old_budget =
+            crate::memory::budget::share_of(effective, crate::memory::budget::Stage::Par2);
+        let old_peak = held as f64 + old_budget as f64 * measured_factor;
+        assert!(
+            old_peak > memory_max as f64 * 0.95,
+            "old plan should reproduce the kill"
+        );
+
+        let budget = ceiling_budget(effective, held);
+        let peak = held as f64 + budget as f64 * measured_factor;
+        assert!(
+            peak < effective as f64,
+            "predicted peak {peak} must stay under the effective ceiling {effective}"
+        );
     }
 }

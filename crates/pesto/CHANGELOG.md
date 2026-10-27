@@ -12,6 +12,19 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+
+- `--season` no longer gets OOM-killed under a cgroup memory limit in the
+  season-wide PAR2 step. The step now sizes its passes against the headroom
+  left after what the process already holds (resident set at that point,
+  after returning free allocator pages to the OS on glibc), instead of
+  against the whole ceiling (#205).
+- Under a cgroup, host-RAM or `--memory-limit` ceiling, the automatic PAR2
+  budget now leaves room for the encoder's flush queue, including its 256 MiB
+  floor, as the `RLIMIT_AS` path already did. This can add passes on tightly
+  limited hosts. An explicit `--par2-memory-limit` is validated as before
+  (#205).
+
 ## [0.10.5] — 2026-10-19
 
 ### Added

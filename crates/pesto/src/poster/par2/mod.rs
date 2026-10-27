@@ -7,5 +7,7 @@ pub(super) mod memory;
 mod season;
 
 pub(crate) use geometry::par2_geometry;
-pub(crate) use memory::{address_space_limit, connection_overhead_reserve, par2_memory_plan};
+pub(crate) use memory::{
+    address_space_limit, connection_overhead_reserve, flush_queue_limit, par2_memory_plan,
+};
 pub use season::{generate_and_write_season_par2, generate_and_write_season_par2_with_progress};

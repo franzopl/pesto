@@ -18,7 +18,8 @@ use parmesan::packet::{self, SliceChecksum};
 use parmesan::worker::Par2Worker;
 
 use super::par2::{
-    address_space_limit, connection_overhead_reserve, par2_geometry, par2_memory_plan,
+    address_space_limit, connection_overhead_reserve, flush_queue_limit, par2_geometry,
+    par2_memory_plan,
 };
 use super::shared::Shared;
 use super::task::{PostTask, TaskDispatcher};
@@ -226,6 +227,7 @@ pub(super) async fn producer(
         par2_slice_size,
         recovery_count,
         active_connections,
+        0,
     )?;
 
     if recovery_count > 0 {
@@ -340,11 +342,7 @@ pub(super) async fn producer(
                             e
                         )
                     })?;
-            // On passes with many recovery blocks, increasing the queue size
-            // (cache blocking) amortizes the flush cost over more input data.
-            // We use 1/4 of the available memory limit for the queue, capped
-            // between 256MB and 2GB.
-            let queue_limit = (memory_limit / 4).clamp(256 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+            let queue_limit = flush_queue_limit(memory_limit);
             let enc = enc
                 .with_flush_limit(queue_limit)
                 .with_simd_path(shared.config.simd);
