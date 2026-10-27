@@ -3,6 +3,30 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use penne::check::CheckMethod;
 
+/// Version of the `penne check --json` line format, emitted on every line as
+/// `schema_version`. Bump it only for changes a consumer could misread —
+/// renaming or removing a field, or changing a field's meaning — never for
+/// adding a new optional field.
+const CHECK_JSON_SCHEMA_VERSION: u32 = 1;
+
+/// The explicit `--config <FILE>`, or the OS-standard config path when it
+/// exists — erroring with a pointer to `penne --config` when it doesn't.
+pub(super) fn config_path_or_default(config_path: Option<PathBuf>) -> Result<PathBuf> {
+    match config_path {
+        Some(path) => Ok(path),
+        None => {
+            let default = penne::config::default_config_path()
+                .context("cannot locate a config directory: set $HOME or $XDG_CONFIG_HOME")?;
+            anyhow::ensure!(
+                default.exists(),
+                "no config found at {}; run `penne --config` to create one, or pass --config <FILE>",
+                default.display()
+            );
+            Ok(default)
+        }
+    }
+}
+
 /// `penne check`: first-class article availability checker with JSON output,
 /// exit codes (0=all present, 1=confirmed missing, 2=fatal error,
 /// 3=inconclusive — no confirmed-missing segment, but at least one
@@ -21,24 +45,18 @@ pub(super) async fn run(
     server_names: &[String],
     independent_servers: bool,
 ) -> Result<i32> {
-    let config_path = match config_path {
-        Some(path) => path,
-        None => {
-            let default = penne::config::default_config_path()
-                .context("cannot locate a config directory: set $HOME or $XDG_CONFIG_HOME")?;
-            anyhow::ensure!(
-                default.exists(),
-                "no config found at {}; run `penne --config` to create one, or pass --config <FILE>",
-                default.display()
-            );
-            default
-        }
-    };
+    let config_path = config_path_or_default(config_path)?;
     let config_toml = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
-    let config = penne::config::RawConfig::parse(&config_toml)?
-        .select(server_names)?
-        .resolve()?;
+    let raw_config = penne::config::RawConfig::parse(&config_toml)?.select(server_names)?;
+    // One entry per selected `[[servers]]` entry, in config-file order —
+    // the same order `flat_servers` below flattens the resolved tiers into.
+    let declared_retention: Vec<Option<u32>> = raw_config
+        .servers
+        .iter()
+        .map(|s| s.retention_days)
+        .collect();
+    let config = raw_config.resolve()?;
     anyhow::ensure!(
         !config.server_tiers.is_empty(),
         "no [[servers]] configured in {}",
@@ -83,10 +101,16 @@ pub(super) async fn run(
         );
     }
 
-    let tiers_to_run: Vec<Vec<penne::config::ServerTier>> = if independent_servers {
-        flat_servers.iter().map(|t| vec![t.clone()]).collect()
+    // Each batch carries the retention its single server declared; a
+    // combined batch has no one server to attribute a retention to.
+    let tiers_to_run: Vec<(Vec<penne::config::ServerTier>, Option<u32>)> = if independent_servers {
+        flat_servers
+            .iter()
+            .zip(&declared_retention)
+            .map(|(t, retention)| (vec![t.clone()], *retention))
+            .collect()
     } else {
-        vec![config.server_tiers.clone()]
+        vec![(config.server_tiers.clone(), None)]
     };
 
     // Gated on `!quiet` only, not `!json`: the live bar and this banner both
@@ -124,6 +148,7 @@ pub(super) async fn run(
 
     let (outcome_tx, mut outcome_rx) = tokio::sync::mpsc::unbounded_channel::<(
         Option<String>,
+        Option<u32>,
         usize,
         penne::check::CheckOutcome,
     )>();
@@ -142,9 +167,12 @@ pub(super) async fn run(
 
     let print_task = tokio::spawn(async move {
         if is_json {
-            while let Some((server_label, q_idx, outcome)) = outcome_rx.recv().await {
+            while let Some((server_label, retention_days, q_idx, outcome)) = outcome_rx.recv().await
+            {
                 let nzb_name = &nzb_names_clone[q_idx];
                 let mut json_val = serde_json::json!({
+                    "schema_version": CHECK_JSON_SCHEMA_VERSION,
+                    "penne_version": penne::DISPLAY_VERSION,
                     "nzb": nzb_name,
                     // Wall-clock time this outcome was resolved, not when the
                     // check started — with multiple NZBs/servers finishing at
@@ -194,6 +222,12 @@ pub(super) async fn run(
                         serde_json::to_value(&aggregated_servers).unwrap(),
                     );
                 }
+                if let Some(days) = retention_days {
+                    obj.insert(
+                        "declared_retention_days".to_string(),
+                        serde_json::Value::from(days),
+                    );
+                }
                 if let Some(n) = sample {
                     obj.insert("sample_size".to_string(), serde_json::Value::from(n));
                 }
@@ -207,7 +241,7 @@ pub(super) async fn run(
 
     let mut join_set = tokio::task::JoinSet::new();
 
-    for tiers_batch in tiers_to_run {
+    for (tiers_batch, retention_days) in tiers_to_run {
         let server_label = if independent_servers {
             let s = &tiers_batch[0].members[0];
             Some(s.host.clone())
@@ -228,7 +262,7 @@ pub(super) async fn run(
                 let sl = server_label.clone();
                 tokio::spawn(async move {
                     while let Some((q_idx, outcome)) = rx.recv().await {
-                        let _ = out_tx.send((sl.clone(), q_idx, outcome));
+                        let _ = out_tx.send((sl.clone(), retention_days, q_idx, outcome));
                     }
                 })
             };

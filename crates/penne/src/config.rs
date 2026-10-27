@@ -187,6 +187,14 @@ pub struct RawServer {
     /// instead of being pooled — list group members next to each other.
     #[serde(default)]
     pub group: Option<u32>,
+    /// Article retention of this provider/plan in days, as declared by the
+    /// user. Purely informational: penne never uses it to skip or reorder
+    /// work. It is reported by `penne servers --json` and on each
+    /// `penne check --json --independent-servers` line, so a consumer can
+    /// tell an article that aged out of retention apart from one that was
+    /// taken down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
 }
 
 /// On-disk TOML representation of the whole config file.

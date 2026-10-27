@@ -25,6 +25,8 @@ mod command;
 mod download;
 #[path = "penne/info.rs"]
 mod info;
+#[path = "penne/servers.rs"]
+mod servers;
 
 use cli::Cli;
 

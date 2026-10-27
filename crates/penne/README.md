@@ -335,6 +335,31 @@ cargo run --bin penne -- download path/to/release.nzb --stat --server blocknews
 `explicit_only` requires `name` — otherwise there'd be no way to ever
 select the entry, and `penne` refuses to load the config.
 
+**Declaring a provider's retention with `retention_days`:** optionally
+record how many days of articles a server's plan keeps. `penne` never uses
+it to skip or reorder work — it is only reported, by `penne servers` and on
+each `penne check --json --independent-servers` line, so a consumer of
+those results can tell an article that aged out of retention apart from one
+that was taken down:
+
+```toml
+[[servers]]
+host = "news.example.com"
+retention_days = 6000
+```
+
+### Listing configured servers
+
+`penne servers` lists the `[[servers]]` entries that `check`/`download`
+would use with the same `--server` selection (so `explicit_only` entries
+appear only when named), in config-file order. Credentials are never
+printed. With `--json`, it prints a single array:
+
+```json
+[{"name":"main","host":"news.example.com","retention_days":6000},
+ {"name":null,"host":"backup.example.com","retention_days":null}]
+```
+
 ## Usage
 
 ```bash
@@ -586,6 +611,8 @@ given:
 
 ```json
 {
+  "schema_version": 1,
+  "penne_version": "0.7.0",
   "nzb": "release.name.nzb",
   "checked_at": "2026-08-11T18:04:22.910348Z",
   "method": "stat",
@@ -614,18 +641,21 @@ given:
 
 | Field | Meaning |
 |-------|---------|
+| `schema_version` | Version of this line format, currently `1`. Bumped only when a field is renamed, removed or changes meaning — never for a new optional field. |
+| `penne_version` | Version of the `penne` binary that produced the line. |
 | `nzb` | Basename of the `.nzb` file this line reports on. |
 | `checked_at` | RFC3339 UTC timestamp taken when *this* outcome was resolved — not a single run-start stamp, since NZBs/servers can finish at different times. |
-| `method` | The `--method` used for this check. |
+| `method` | The `--method` used for this check. `penne` never switches method mid-check, so this is also the method every article was actually checked with. |
 | `retries` | Retry attempts per segment per server, from the config file's `retries`. |
 | `servers` | Hostnames tried, in tier priority order. Only present in the combined (non-`--independent-servers`) case. |
-| `server` | The single hostname this line's result came from. Only present with `--independent-servers`, in place of `servers`. |
+| `server` | The single hostname this line's result came from. Only present with `--independent-servers`, in place of `servers`. Combined mode can't report one: failover is decided per article, so different articles of the same `.nzb` may be answered by different servers. |
+| `declared_retention_days` | That server's `retention_days` from the config. Only present with `--independent-servers`, and only when the entry declares it. |
 | `complete` | `true` only if every segment was confirmed present — `false` for both confirmed-missing and merely-unreachable segments. |
 | `conclusive` | `true` if every segment got a definitive present/absent answer from some server. **Check this before trusting `missing`/`missing_pct` as a final verdict** — if `false`, at least one segment's fate is unknown, and `missing` alone isn't enough to declare the release dead. |
 | `stopped_early` | `true` when `--fail-fast` stopped after a confirmed missing article. A result with this field set is intentionally partial. |
 | `total_articles` | Total segments listed in the `.nzb`, including any reported as `skipped` by a fail-fast run. |
 | `present` | Segments confirmed present on at least one server. |
-| `missing` / `missing_pct` | Segments at least one server definitively denied (`430`/`423`/`420`) and none confirmed present — the only case that should be treated as confirmed data loss. |
+| `missing` / `missing_pct` | Segments at least one server definitively denied (`430`/`423`/`420`) and none confirmed present — the only case that should be treated as confirmed data loss (or, with a `declared_retention_days` shorter than the post's age, as having aged out). |
 | `unreachable` / `unreachable_pct` | Segments no tried server ever gave a real answer for (connection failure, exhausted retries) — deliberately kept separate from `missing` so a transient network hiccup is never read as confirmed absence. |
 | `skipped` | Segments not checked because `--fail-fast` had already found a confirmed missing article. They are neither missing nor unreachable. |
 | `files` | Per-file breakdown, `.nzb` order: `name`, `total_segments`, `present_segments`. |
