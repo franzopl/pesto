@@ -53,26 +53,20 @@ pub(super) fn prepare_resume(
     // `.pesto-state` file happens to already sit next to the target, without
     // being asked to, is exactly the "stale state reused blindly" hazard
     // issue #18 warns about.
-    let (resume_arc, resume_path_owned, loaded_state_validated) =
-        if !config.dry_run && !config.par2_only {
-            if let Some(rp) = resume_state_path {
-                let state = if config.resume {
-                    ResumeState::load(rp)?
-                } else {
-                    ResumeState::default()
-                };
-                let validated = config.resume && state.was_loaded_validated();
-                (
-                    Some(Arc::new(Mutex::new(state))),
-                    Some(rp.to_path_buf()),
-                    validated,
-                )
+    let (resume_arc, resume_path_owned) = if !config.dry_run && !config.par2_only {
+        if let Some(rp) = resume_state_path {
+            let state = if config.resume {
+                ResumeState::load(rp)?
             } else {
-                (None, None, false)
-            }
+                ResumeState::default()
+            };
+            (Some(Arc::new(Mutex::new(state))), Some(rp.to_path_buf()))
         } else {
-            (None, None, false)
-        };
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
 
     // Type-1 spool: only when --resume was actually passed (see the field
     // doc on `Shared::spool_dir` for why this is a stricter condition than
@@ -83,19 +77,17 @@ pub(super) fn prepare_resume(
         None
     };
 
-    // PU12-01 (Q3(a), second half): a spool directory that no loaded resume
-    // state validated is cleared. If the state file was removed/corrupt (or
-    // --resume was not given a loadable state) there is no identity the
-    // spool entries could be checked against, so replaying them would post
-    // bytes of unknown encryption provenance. `prepare_resources` still
-    // applies its validated-state invalidation clears for the other cases.
-    if !loaded_state_validated {
-        if let Some(dir) = &spool_dir_owned {
-            if dir.exists() {
-                crate::spool::remove_all(dir);
-            }
-        }
-    }
+    // PU12-01 (Q3(a), second half): this run must not destroy spool entries
+    // merely because there is no non-empty resume state to validate them
+    // against. The type-1 spool exists precisely for the case where the
+    // state file was never written: a segment that was encoded, spooled and
+    // possibly posted, but whose acknowledgement was lost before the run
+    // could record it. Per-entry provenance is enforced at replay time by
+    // the worker instead: an entry is only replayed when its encryption
+    // stamp matches this run exactly (encrypted runs never accept unstamped
+    // or mismatched entries). `prepare_resources` still clears the spool
+    // whenever a loaded session is invalidated (changed fingerprint, layout
+    // or source set), which is the case where stale bytes are dangerous.
 
     // Posting parameters that change how the whole input is chunked or
     // named — compared against whatever fingerprint a loaded state was
