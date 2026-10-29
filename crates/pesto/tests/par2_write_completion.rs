@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use pesto::config::{Config, FileConfig, Overrides};
+use pesto::config::{Config, FileConfig, Overrides, Par2SliceSize};
 use pesto::par2::{layout, packet};
 use pesto::poster::{generate_and_write_season_par2, post_files_with_progress};
 use pesto::progress::ProgressEvent;
@@ -25,7 +25,7 @@ fn config(root: &Path, multi_pass: bool) -> Config {
             connections: Some(1),
             article_size: Some(128 * 1024),
             par2: Some(10),
-            par2_slice_size: Some(SLICE_SIZE as u64),
+            par2_slice_size: Some(Par2SliceSize::Bytes(SLICE_SIZE as u64)),
             par2_recovery_count: Some(RECOVERY_COUNT as usize),
             // Two slices per pass splits the four-block volume across passes.
             par2_memory_limit: Some((SLICE_SIZE * if multi_pass { 2 } else { 16 }) as u64),

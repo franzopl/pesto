@@ -15,6 +15,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `packet::TYPE_UNICODE_FILENAME`, `packet::unicode_filename_body` and
   `packet::serialize_file_description`. An ignored `parpar_compat` test
   compares these packets byte for byte with ParPar's output.
+- `CreateOptions::slice_unit` aligns automatic slice sizes to a unit: every
+  slice is a whole multiple of it, so a lost unit (an article, for a Usenet
+  poster) damages exactly one slice. Sets smaller than 4 GiB get more slices
+  per byte, up to one per unit, at about the total cost of a 4 GiB set.
+  Larger sets keep about 2000 slices. `CreateOptions::effort` scales that
+  slice budget, and the unaligned heuristic's 2000-slice target. Both fields
+  are new, so a `CreateOptions` struct literal must now set them or use
+  `..CreateOptions::default()`. `parmesan create` leaves the unit unset and
+  its geometry unchanged (#217).
 
 ### Changed
 

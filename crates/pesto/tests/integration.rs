@@ -112,6 +112,7 @@ async fn posts_every_segment_to_a_mock_server() {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         par2_only: false,
         par2_before_upload: false,
         threads: 0,
@@ -528,10 +529,11 @@ async fn resume_with_different_article_size_discards_stale_state_instead_of_corr
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         compress_volume_size: None,
         compress_password: None,
         line_length: 128,
-        par2_file_id_order: 0,
+        par2_layout: 0,
     });
     stale.record("resize.bin", 1, "stale-part1@x", 100);
     stale.record("resize.bin", 2, "stale-part2@x", 100);
@@ -619,10 +621,11 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         compress_volume_size: None,
         compress_password: None,
         line_length: config.line_length,
-        par2_file_id_order: 0,
+        par2_layout: 0,
     });
     prior.record_file(
         "a.bin",

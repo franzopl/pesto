@@ -166,6 +166,7 @@ async fn check_stats_the_server_the_article_was_actually_posted_to() {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         par2_memory_limit: Some(1_000_000_000),
         memory_limit: None,
         par2_temp_dir: None,

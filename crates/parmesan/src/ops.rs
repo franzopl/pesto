@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod geometry;
+pub use geometry::calculate_geometry;
+
 /// High-level PAR2 creation parameters.
 #[derive(Debug, Clone)]
 pub struct CreateOptions {
@@ -15,6 +18,20 @@ pub struct CreateOptions {
     pub memory_limit: usize,
     pub threads: usize,
     pub simd: SimdPath,
+    /// Align automatic slice sizes to this unit: every slice is a whole
+    /// multiple of it, so slice boundaries fall on unit boundaries within each
+    /// file. pesto passes its article size, so a lost article damages exactly
+    /// one slice. Small sets get one slice per unit at about the total cost
+    /// of a 4 GiB set; larger sets keep about 2000 × `effort` slices. Ignored when `slice_size` or `slice_count` is set, and when
+    /// padding small files to the aligned size would inflate the set by more
+    /// than 15 %. See [`calculate_geometry`].
+    pub slice_unit: Option<usize>,
+    /// Scales the automatic slice count, and with it the CPU time to create
+    /// and repair the set and the number of recovery blocks: 2.0 aims for
+    /// twice as many slices as 1.0 (the default), so a set aligned to
+    /// `slice_unit` survives twice as many scattered lost units. Must be a
+    /// positive finite number.
+    pub effort: f64,
 }
 
 impl Default for CreateOptions {
@@ -27,6 +44,8 @@ impl Default for CreateOptions {
             memory_limit: 1024 * 1024 * 1024, // 1 GiB
             threads: 0,                       // auto
             simd: SimdPath::Auto,
+            slice_unit: None,
+            effort: 1.0,
         }
     }
 }
@@ -145,129 +164,6 @@ pub fn sort_files_by_file_id(files: &mut Vec<InputFile>) -> Result<()> {
     keyed.sort_by(|(a, _), (b, _)| packet::cmp_file_id(a, b));
     *files = keyed.into_iter().map(|(_, f)| f).collect();
     Ok(())
-}
-
-/// Computes total padded bytes for a given slice size across all files.
-fn total_padded_bytes(files: &[InputFile], slice_size: usize) -> usize {
-    files
-        .iter()
-        .map(|f| (f.size as usize).div_ceil(slice_size) * slice_size)
-        .sum()
-}
-
-/// Computes total input slice count for a given slice size.
-fn total_slice_count(files: &[InputFile], slice_size: usize) -> usize {
-    files
-        .iter()
-        .map(|f| (f.size as usize).div_ceil(slice_size))
-        .sum()
-}
-
-/// Calculates slice size and slice/recovery counts for a PAR2 recovery set.
-///
-/// When no explicit slice size or count is given, the heuristic targets ~2000
-/// slices for reasonable throughput, then detects padding inflation caused by
-/// many small files (common on Blu-ray/DVD disc structures). If the effective
-/// parity overhead would exceed the requested percentage by more than 15%, the
-/// slice size is halved repeatedly until the ratio is acceptable or the slice
-/// count approaches `MAX_SLICES_PADDING_OPT`.
-///
-/// Reducing slice size does not increase peak memory usage: recovery buffer
-/// memory ≈ recovery_count × slice_size ≈ total_padded × pct/100, which is
-/// invariant to slice size for a fixed data set.
-pub fn calculate_geometry(
-    files: &[InputFile],
-    options: &CreateOptions,
-) -> Result<(usize, usize, usize)> {
-    let total_bytes: u64 = files.iter().map(|f| f.size).sum();
-
-    // Upper bound on slices we allow when optimising for padding. Keeps GF
-    // computation time bounded on slow machines (CPU cost ∝ total_slices).
-    const MAX_SLICES_PADDING_OPT: usize = 6_000;
-    // Trigger refinement when padded/actual ratio exceeds this.
-    const PADDING_RATIO_THRESHOLD: f64 = 1.15;
-
-    let (slice_size, total_slices) = if let Some(s) = options.slice_size {
-        let s = (s / 64 * 64).max(64);
-        let n = total_slice_count(files, s);
-        (s, n)
-    } else if let Some(count) = options.slice_count {
-        let s = ((total_bytes as usize).div_ceil(count.max(1)) / 64 * 64).max(64);
-        let n = total_slice_count(files, s);
-        (s, n)
-    } else {
-        // Start with a heuristic targeting ~2000 slices.
-        let target = 2000usize;
-        let mut s = ((total_bytes as usize).div_ceil(target).max(64) / 64 * 64).max(64);
-        let mut n = total_slice_count(files, s);
-
-        // Grow slice size if we'd exceed the PAR2 hard limit.
-        while n > 32768 {
-            let next = s.saturating_mul(2);
-            if next == s {
-                break;
-            }
-            let n2 = total_slice_count(files, next);
-            // One slice per non-empty file is the floor — growing the slice
-            // cannot help a set with more files than the spec allows.
-            if n2 >= n {
-                break;
-            }
-            s = next;
-            n = n2;
-        }
-
-        // Detect small-file padding inflation: many files smaller than slice_size
-        // each consume a full slice, inflating the effective parity ratio well
-        // beyond what the user requested. Halve the slice size until the ratio
-        // is acceptable or we hit MAX_SLICES_PADDING_OPT.
-        if total_bytes > 0 {
-            let padded = total_padded_bytes(files, s);
-            let ratio = padded as f64 / total_bytes as f64;
-
-            if ratio > PADDING_RATIO_THRESHOLD {
-                loop {
-                    // Halve, keeping alignment to 64 bytes.
-                    let s2 = ((s / 2) / 64 * 64).max(64);
-                    if s2 >= s {
-                        break; // already at minimum granularity
-                    }
-                    let n2 = total_slice_count(files, s2);
-                    if n2 > MAX_SLICES_PADDING_OPT.min(32768) {
-                        break; // would cost too much CPU
-                    }
-                    s = s2;
-                    n = n2;
-                    let ratio2 = total_padded_bytes(files, s) as f64 / total_bytes as f64;
-                    if ratio2 <= PADDING_RATIO_THRESHOLD {
-                        break; // good enough
-                    }
-                }
-            }
-        }
-
-        (s, n)
-    };
-
-    let recovery_count = if let Some(n) = options.recovery_count {
-        n
-    } else {
-        let proportional = (total_slices * options.recovery_pct as usize) / 100;
-        if options.recovery_pct > 0 && total_slices > 0 {
-            proportional.max(1)
-        } else {
-            proportional
-        }
-    };
-
-    if total_slices > 32768 {
-        anyhow::bail!("too many input slices: {total_slices} (max 32768)");
-    }
-    if recovery_count > 65535 {
-        anyhow::bail!("too many recovery blocks: {recovery_count} (max 65535)");
-    }
-
-    Ok((slice_size, total_slices, recovery_count))
 }
 
 /// Chunk size for the streaming reader below, and the cutoff under which a
@@ -579,22 +475,6 @@ where
 mod tests {
     use super::*;
 
-    fn make_files(sizes: &[u64]) -> Vec<InputFile> {
-        sizes
-            .iter()
-            .enumerate()
-            .map(|(i, &size)| InputFile {
-                path: format!("file{i}").into(),
-                display_name: format!("file{i}"),
-                size,
-            })
-            .collect()
-    }
-
-    fn opts() -> CreateOptions {
-        CreateOptions::default()
-    }
-
     #[test]
     fn memory_layout_fits_in_one_pass() {
         let plan = plan_memory_layout(1 << 20, 200, 1 << 30);
@@ -621,79 +501,6 @@ mod tests {
         assert_eq!(plan.slice_chunk, 1 << 20);
         assert!(plan.recovery_per_pass < 10_000);
         assert!(plan.recovery_per_pass >= 1);
-    }
-
-    #[test]
-    fn geometry_stays_within_par2_limits() {
-        // 100 files of 1 GiB each — stresses the 32k slice ceiling.
-        let files = make_files(&vec![1024 * 1024 * 1024; 100]);
-        let (_, total_slices, recovery_count) = calculate_geometry(&files, &opts()).unwrap();
-        assert!(total_slices <= 32768, "total_slices={total_slices}");
-        assert!(recovery_count <= 65535, "recovery_count={recovery_count}");
-    }
-
-    #[test]
-    fn geometry_reduces_slice_for_many_small_files() {
-        // Simulates a Blu-ray disc: 3 large .m2ts + 200 tiny support files.
-        let mut sizes: Vec<u64> = vec![5 * 1024 * 1024 * 1024; 3]; // 3 × 5 GiB
-        sizes.extend(vec![50 * 1024; 200]); // 200 × 50 KiB
-
-        let files = make_files(&sizes);
-        let total_actual: u64 = sizes.iter().sum();
-
-        let (slice_size, total_slices, _) = calculate_geometry(&files, &opts()).unwrap();
-
-        let total_padded: u64 = files
-            .iter()
-            .map(|f| (f.size as usize).div_ceil(slice_size) as u64 * slice_size as u64)
-            .sum();
-        let ratio = total_padded as f64 / total_actual as f64;
-
-        assert!(total_slices <= 32768, "total_slices={total_slices}");
-        // Padding overhead should be within 15% of actual data.
-        assert!(
-            ratio <= 1.15,
-            "padding ratio {ratio:.3} exceeds threshold (slice_size={slice_size}, slices={total_slices})"
-        );
-    }
-
-    #[test]
-    fn geometry_does_not_over_optimize_clean_sets() {
-        // A single large file has negligible padding at the heuristic slice size —
-        // the optimiser should leave the slice size alone.
-        let files = make_files(&[8 * 1024 * 1024 * 1024]);
-        let (_, total_slices, _) = calculate_geometry(&files, &opts()).unwrap();
-        // Should stay near ~2000 slices, not balloon to 32768.
-        assert!(total_slices <= 6_000, "total_slices={total_slices}");
-    }
-
-    #[test]
-    fn explicit_slice_size_is_respected() {
-        let files = make_files(&[100 * 1024 * 1024]);
-        let mut o = opts();
-        o.slice_size = Some(512 * 1024);
-        let (slice_size, _, _) = calculate_geometry(&files, &o).unwrap();
-        assert_eq!(slice_size, 512 * 1024);
-    }
-
-    #[test]
-    fn positive_percentage_produces_recovery_for_tiny_set() {
-        let files = make_files(&[1]);
-        let mut o = opts();
-        o.recovery_pct = 1;
-        let (_, total_slices, recovery_count) = calculate_geometry(&files, &o).unwrap();
-        assert_eq!(total_slices, 1);
-        assert_eq!(recovery_count, 1);
-    }
-
-    #[test]
-    fn explicit_zero_recovery_count_remains_zero() {
-        let files = make_files(&[1]);
-        let mut o = opts();
-        o.recovery_pct = 10;
-        o.recovery_count = Some(0);
-        let (_, _, recovery_count) = calculate_geometry(&files, &o).unwrap();
-        assert_eq!(recovery_count, 0);
     }
 
     #[test]

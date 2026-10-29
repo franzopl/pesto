@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+use super::obfuscation::ObfuscateMode;
+
 // ── Defaults ─────────────────────────────────────────────────────────────────
 
 /// Default NNTP-over-TLS port.
@@ -41,6 +43,23 @@ pub const DEFAULT_PIPELINE_DEPTH: usize = 1;
 pub const MAX_AUTO_PIPELINE_DEPTH: usize = 8;
 /// Default percentage of PAR2 recovery data to generate.
 pub const DEFAULT_PAR2: u8 = 10;
+
+/// Default for [`PostingSection::par2_effort`].
+pub const DEFAULT_PAR2_EFFORT: f64 = 1.0;
+
+/// How PAR2 slices are sized: [`PostingSection::par2_slice_size`] and
+/// `--slice-size`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Par2SliceSize {
+    /// A whole multiple of the article size, within the CPU budget set by
+    /// [`PostingSection::par2_effort`].
+    Auto,
+    /// One slice per article: the most protection against lost articles,
+    /// and the most CPU time.
+    Article,
+    /// A fixed size in bytes.
+    Bytes(u64),
+}
 
 // ── Server and proxy ─────────────────────────────────────────────────────────
 
@@ -144,137 +163,6 @@ pub enum NzbConflict {
     Rename,
     /// Abort the NZB write and print an error. The archive copy is still kept.
     Fail,
-}
-
-/// Whether to obfuscate a post.
-///
-/// When enabled, both the subject line and the yEnc `name=` field are
-/// randomised on the wire. The real filename is always preserved in the
-/// generated NZB so that download clients can restore it correctly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum ObfuscateMode {
-    /// No obfuscation: the real file name appears in the subject and yEnc header.
-    #[default]
-    None,
-    /// Private default: every article gets a fresh Subject and From while a
-    /// physical file keeps one opaque yEnc name for client-safe assembly.
-    ///
-    /// `header-fragmented` remains accepted as a compatibility alias.
-    #[serde(alias = "header-fragmented")]
-    #[value(alias = "header-fragmented")]
-    Full,
-    /// Like `full`, but every file posted in the same run (archive parts and
-    /// PAR2 volumes alike) shares one random prefix instead of each getting
-    /// an independently-random name. The real names still stay off the wire;
-    /// what changes is that Usenet indexers can once again recognise the
-    /// PAR2 set and the content as one release, which plain `full` prevents
-    /// (see GitHub issue #58). This trades away resistance to correlation by
-    /// wire metadata for indexer compatibility — the opposite trade `article`
-    /// makes — so it is a distinct mode rather than a `full` variant. The yEnc
-    /// `name=` starts with that same shared prefix but adds its own random
-    /// suffix rather than repeating the Subject verbatim (see `light` below
-    /// for the variant that does repeat it).
-    #[serde(rename = "full-shared")]
-    FullShared,
-    /// Like `full-shared` — one shared random prefix across every file in the
-    /// release — but the yEnc `name=` is that prefixed string verbatim, the
-    /// same as the Subject, instead of adding its own random suffix. This is
-    /// `full-shared`'s behavior prior to `v0.6.1` (commit `bb9e3b2`), which
-    /// decoupled Subject and yEnc name everywhere to close an exact-match
-    /// fingerprint (Subject header == yEnc body name=) that identified posts
-    /// made by this tool. Some indexers key their own grouping off that exact
-    /// match, though (reportedly including NZBIndex), so `light` restores it
-    /// for anyone who needs that over avoiding the fingerprint (see GitHub
-    /// issue #106).
-    Light,
-    /// Legacy experimental mode: each article gets independent Subject, yEnc
-    /// name and From identities. It deliberately remains hidden because
-    /// multipart PAR2 cleanup is not compatible with conventional clients.
-    #[serde(alias = "paranoid")]
-    #[value(alias = "paranoid")]
-    #[value(hide = true)]
-    Article,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IdentityScope {
-    RealPath,
-    Release,
-    File,
-    Article,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NameRelation {
-    Same,
-    SharedPrefix,
-    Independent,
-}
-
-/// The complete wire/privacy contract for an obfuscation mode. Keeping these
-/// decisions together prevents posting, resume and PAR2 paths from drifting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ObfuscationPolicy {
-    pub subject_scope: IdentityScope,
-    pub yenc_scope: IdentityScope,
-    pub from_scope: IdentityScope,
-    pub subject_yenc_relation: NameRelation,
-    pub shared_release_prefix: bool,
-    pub publish_par2_index: bool,
-    pub allow_file_counter: bool,
-}
-
-impl ObfuscateMode {
-    pub(crate) const fn policy(self) -> ObfuscationPolicy {
-        match self {
-            Self::None => ObfuscationPolicy {
-                subject_scope: IdentityScope::RealPath,
-                yenc_scope: IdentityScope::RealPath,
-                from_scope: IdentityScope::Release,
-                subject_yenc_relation: NameRelation::Same,
-                shared_release_prefix: false,
-                publish_par2_index: true,
-                allow_file_counter: true,
-            },
-            Self::Light => ObfuscationPolicy {
-                subject_scope: IdentityScope::Release,
-                yenc_scope: IdentityScope::Release,
-                from_scope: IdentityScope::Release,
-                subject_yenc_relation: NameRelation::Same,
-                shared_release_prefix: true,
-                publish_par2_index: true,
-                allow_file_counter: true,
-            },
-            Self::FullShared => ObfuscationPolicy {
-                subject_scope: IdentityScope::Release,
-                yenc_scope: IdentityScope::Release,
-                from_scope: IdentityScope::Release,
-                subject_yenc_relation: NameRelation::SharedPrefix,
-                shared_release_prefix: true,
-                publish_par2_index: true,
-                allow_file_counter: true,
-            },
-            Self::Full => ObfuscationPolicy {
-                subject_scope: IdentityScope::Article,
-                yenc_scope: IdentityScope::File,
-                from_scope: IdentityScope::Article,
-                subject_yenc_relation: NameRelation::Independent,
-                shared_release_prefix: false,
-                publish_par2_index: false,
-                allow_file_counter: false,
-            },
-            Self::Article => ObfuscationPolicy {
-                subject_scope: IdentityScope::Article,
-                yenc_scope: IdentityScope::Article,
-                from_scope: IdentityScope::Article,
-                subject_yenc_relation: NameRelation::Independent,
-                shared_release_prefix: false,
-                publish_par2_index: false,
-                allow_file_counter: false,
-            },
-        }
-    }
 }
 
 // ── TOML sections ────────────────────────────────────────────────────────────
@@ -425,6 +313,20 @@ pub struct PostingSection {
     /// `ssse3`, `avx2`, `avx2-gfni`, `avx512-gfni`, `avx512-shuffle` or
     /// `neon`. Only needed when automatic detection picks a slower path.
     pub simd: Option<String>,
+    /// PAR2 slice size: `"auto"` (default), `"article"` or a fixed size such
+    /// as `"4 MiB"`. `auto` makes every slice a whole multiple of the
+    /// article size, so a lost article costs exactly one recovery block, and
+    /// sizes the slices by [`Self::par2_effort`]. `article` uses one slice per
+    /// article: `par2` percent of recovery then repairs that percentage of
+    /// lost articles however they are scattered, at the highest CPU cost.
+    /// See `docs/par2-geometry.md`.
+    pub par2_slice_size: Option<String>,
+    /// Scales the CPU budget of `par2_slice_size = "auto"`. `1.0` (default)
+    /// keeps PAR2 creation of large releases as fast as with a 2000-slice
+    /// set. `2.0` doubles the slices, the scattered article loss a large
+    /// release survives and the PAR2 compute time; `0.5` halves them.
+    /// Releases small enough already get one slice per article.
+    pub par2_effort: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -580,7 +482,8 @@ pub struct Overrides {
     /// `None` = auto. See [`PostingSection::memory_limit`].
     pub memory_limit: Option<u64>,
     pub par2_temp_dir: Option<String>,
-    pub par2_slice_size: Option<u64>,
+    pub par2_slice_size: Option<Par2SliceSize>,
+    pub par2_effort: Option<f64>,
     pub par2_slice_count: Option<usize>,
     pub par2_recovery_count: Option<usize>,
     pub threads: Option<usize>,
@@ -669,7 +572,11 @@ pub struct Config {
     /// [`PostingSection::par2_temp_dir`]. `None` falls back to
     /// `std::env::temp_dir()`.
     pub par2_temp_dir: Option<PathBuf>,
+    /// Fixed PAR2 slice size in bytes; `None` is automatic. `"article"`
+    /// resolves to the article size.
     pub par2_slice_size: Option<usize>,
+    /// See [`PostingSection::par2_effort`].
+    pub par2_effort: f64,
     pub par2_slice_count: Option<usize>,
     pub par2_recovery_count: Option<usize>,
     pub par2_only: bool,

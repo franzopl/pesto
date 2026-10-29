@@ -1,5 +1,6 @@
 use crate::article::random_from;
 use crate::config::types::*;
+use crate::config::ObfuscateMode;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -52,6 +53,8 @@ const FIELD_SECTIONS: &[(&str, &str)] = &[
     ("par2_before_upload", "[posting]"),
     ("threads", "[posting]"),
     ("simd", "[posting]"),
+    ("par2_slice_size", "[posting]"),
+    ("par2_effort", "[posting]"),
     // [output]
     ("history", "[output]"),
     ("history_dir", "[output]"),
@@ -305,6 +308,24 @@ impl Config {
                 anyhow::bail!("invalid message_id_domain `{domain}`");
             }
         }
+        let article_size = cli
+            .article_size
+            .or(file.posting.article_size)
+            .unwrap_or(DEFAULT_ARTICLE_SIZE);
+        let par2_slice_size = match cli.par2_slice_size {
+            Some(size) => size,
+            None => match file.posting.par2_slice_size.as_deref() {
+                Some(s) => s.parse().context("parsing posting.par2_slice_size")?,
+                None => Par2SliceSize::Auto,
+            },
+        };
+        let par2_effort = cli
+            .par2_effort
+            .or(file.posting.par2_effort)
+            .unwrap_or(DEFAULT_PAR2_EFFORT);
+        if !(par2_effort.is_finite() && par2_effort > 0.0) {
+            bail!("par2_effort must be a positive number, got {par2_effort}");
+        }
 
         Ok(Config {
             ext,
@@ -323,10 +344,7 @@ impl Config {
             extra_servers,
             from,
             groups,
-            article_size: cli
-                .article_size
-                .or(file.posting.article_size)
-                .unwrap_or(DEFAULT_ARTICLE_SIZE),
+            article_size,
             line_length: cli
                 .line_length
                 .or(file.posting.line_length)
@@ -369,7 +387,12 @@ impl Config {
                     PathBuf::from(&s)
                 }
             }),
-            par2_slice_size: cli.par2_slice_size.map(|s| s as usize),
+            par2_slice_size: match par2_slice_size {
+                Par2SliceSize::Auto => None,
+                Par2SliceSize::Article => Some(article_size),
+                Par2SliceSize::Bytes(bytes) => Some(bytes as usize),
+            },
+            par2_effort,
             par2_slice_count: cli.par2_slice_count,
             par2_recovery_count: cli.par2_recovery_count,
             par2_only,
@@ -564,6 +587,22 @@ pub fn parse_memory_limit_spec(s: &str) -> Result<Option<u64>> {
         return Ok(Some((host_total as f64 * pct / 100.0) as u64));
     }
     Ok(Some(parse_upload_rate(s)?))
+}
+
+impl std::str::FromStr for Par2SliceSize {
+    type Err = anyhow::Error;
+
+    /// `auto`, `article`, or a size such as `768000` or `4 MiB`.
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "article" => Ok(Self::Article),
+            _ => match parse_upload_rate(s)? {
+                0 => bail!("PAR2 slice size must be positive"),
+                bytes => Ok(Self::Bytes(bytes)),
+            },
+        }
+    }
 }
 
 /// Parse a human-readable upload rate string into bytes per second.

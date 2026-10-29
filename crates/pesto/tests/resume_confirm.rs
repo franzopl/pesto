@@ -194,6 +194,7 @@ fn test_config(port: u16, check: bool) -> Config {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         par2_only: false,
         par2_before_upload: false,
         threads: 0,

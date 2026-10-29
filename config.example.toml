@@ -171,6 +171,20 @@ groups = ["alt.binaries.test"]
 # when automatic detection picks a slower path. Default: "auto".
 # simd = "auto"
 
+# par2_slice_size — PAR2 slice size: "auto", "article" or a fixed size such as
+# "4 MiB". "auto" makes every slice a whole multiple of the article size, so a
+# lost article costs exactly one recovery block; releases up to about 2.4 GiB
+# get one slice per article. "article" always uses one slice per article: the
+# par2 percentage then repairs that share of lost articles however they are
+# scattered, at the most CPU time. See docs/par2-geometry.md.
+# Default: "auto".
+# par2_slice_size = "auto"
+
+# par2_effort — scales the CPU budget of par2_slice_size = "auto". 2.0 doubles
+# the slices, the scattered article loss large releases survive, and the PAR2
+# compute time; 0.5 halves them, for a weak shared machine. Default: 1.0.
+# par2_effort = 1.0
+
 # check — confirm every posted article via a streaming STAT check that runs
 # concurrently with the upload: each article is checked check_delay seconds
 # after it posts, and misses are reposted automatically. Default: true.

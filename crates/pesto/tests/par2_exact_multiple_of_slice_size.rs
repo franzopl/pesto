@@ -139,6 +139,7 @@ async fn file_size_exact_multiple_of_par2_slice_size_does_not_panic() {
         par2_slice_size: Some(ARTICLE_SIZE),
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         par2_memory_limit: Some(1_000_000_000),
         memory_limit: None,
         par2_temp_dir: None,

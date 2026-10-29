@@ -194,6 +194,8 @@ where
         memory_limit: request.requested_memory_limit(),
         threads: request.requested_threads().map_or(0, NonZeroUsize::get),
         simd: engine.simd,
+        slice_unit: None,
+        effort: 1.0,
     };
     let (slice_size, total_slices, recovery_count) = calculate_geometry(&input_files, &options)?;
     if recovery_count == 0 {
