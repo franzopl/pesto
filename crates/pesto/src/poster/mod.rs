@@ -217,19 +217,16 @@ pub fn par2_temp_dir(base: Option<&Path>, run_id: u64) -> PathBuf {
     base.join(format!("parmesan_{}_{run_id}", std::process::id()))
 }
 
-/// Restrict the global Rayon pool to physical cores. The PAR2 encoder is pure
-/// SIMD/ALU work; sibling hyperthreads contend for the same execution ports
-/// and add almost nothing, so one worker per logical CPU only heats the
-/// machine. Called once; a no-op if a global pool already exists.
+/// Restrict the global Rayon pool to physical cores, capped by
+/// [`par2::par2_threads`]. The PAR2 encoder is pure SIMD/ALU work; sibling
+/// hyperthreads contend for the same execution ports and add almost nothing,
+/// so one worker per logical CPU only heats the machine. Called once; a no-op
+/// if a global pool already exists.
 fn configure_rayon(threads: usize) {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let n = if threads > 0 {
-            threads
-        } else {
-            parmesan::performance_core_count()
-        };
+        let n = par2::par2_threads(threads);
         // Thread *count* stays at physical cores — PAR2 is the genuinely
         // CPU-bound stage and wants them. Only the per-thread stack shrinks,
         // from Rust's 2 MiB default: on a 128-core host that is ~130 MiB of

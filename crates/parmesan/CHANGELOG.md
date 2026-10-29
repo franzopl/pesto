@@ -18,6 +18,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `performance_core_count` never returns more than
+  `std::thread::available_parallelism`, so the default thread count of
+  `parmesan create` honours CPU affinity and cgroup CPU quotas instead of
+  counting every core of the host (#218).
 - When repair hits a singular matrix, the error now says that PAR2 does not
   guarantee an inverse for non-consecutive recovery blocks, instead of blaming
   a decoder bug. The matrix proptest now checks the property PAR2 does

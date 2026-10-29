@@ -17,9 +17,17 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 - PAR2 sets for files with non-ASCII names now carry a Unicode Filename
   (`UniFileN`) packet next to the File Description, as ParPar does. This
   includes the season-wide set built by `--season`.
+- `threads` and `simd` can now be set under `[posting]` in the config file, as
+  well as with `--threads` and `--simd` (#218).
 
 ### Changed
 
+- The automatic PAR2 thread count is capped at 16 and never exceeds the CPUs
+  the process may use (CPU affinity and cgroup quotas). It used to start one
+  thread per physical core of the host: 64 on a shared 64-core seedbox, where
+  they encoded no faster than 16 but used twice the CPU. An explicit
+  `--threads` is not capped. The PAR2 progress event and the memory reserve
+  now use the same count, including an explicit `--threads` (#218).
 - File and folder names with non-ASCII characters (accents, `ç`, CJK, …) are
   now posted unchanged as UTF-8 in the Subject, yEnc `name=`, `.nzb` and PAR2
   File Description, matching nyuu, ngPost and ParPar. They were previously

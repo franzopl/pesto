@@ -342,11 +342,7 @@ async fn generate_season_par2(
         } else {
             parmesan::detect_simd().to_string()
         };
-        let threads = if config.threads > 0 {
-            config.threads
-        } else {
-            parmesan::performance_core_count()
-        };
+        let threads = super::par2_threads(config.threads);
         let _ = tx.send(ProgressEvent::Par2EncodeStarted {
             input_bytes: sizes.iter().sum(),
             input_slices: total_slices,

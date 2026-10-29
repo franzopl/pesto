@@ -188,11 +188,7 @@ pub(crate) fn par2_memory_plan(
     active_connections: usize,
     already_held: u64,
 ) -> Result<(usize, Vec<(u32, usize)>)> {
-    let reserve_threads = if config.threads > 0 {
-        config.threads
-    } else {
-        parmesan::performance_core_count()
-    };
+    let reserve_threads = super::par2_threads(config.threads);
     let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
     let as_budget = address_space_budget(overhead_reserve, par2_slice_size, recovery_count);
     if as_budget == Some(0) && recovery_count > 0 {

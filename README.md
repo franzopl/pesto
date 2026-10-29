@@ -1259,8 +1259,8 @@ picked up automatically — no config change needed.
 | `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
 | `--memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers |
-| `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
-| `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
+| `--threads <N>` | `posting.threads` | auto | Threads for PAR2 compute (`0` = one per usable physical core, at most 16) |
+| `--simd <MODE>` | `posting.simd` | auto | Force SIMD: `auto`, `avx512-gfni`, `avx512-shuffle`, `avx2-gfni`, `avx2`, `ssse3`, `neon`, `scalar` |
 | `--check` / `--no-check` | `posting.check` | **on** | Streaming STAT check, concurrent with the upload; `--no-check` disables it |
 | `--check-delay <SECS>` | `posting.check_delay` | `5` | Seconds to wait after an article posts before its first STAT check |
 | `--check-retries <N>` | `posting.check_retries` | `3` | STAT attempts per posted copy; 20 s between each |

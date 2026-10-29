@@ -215,14 +215,14 @@ pub(super) struct Cli {
     #[arg(long, value_name = "DIR")]
     par2_temp_dir: Option<String>,
 
-    /// Number of threads for parallel PAR2 compute
-    /// [default: physical cores].
+    /// Number of threads for parallel PAR2 compute; 0 means one per usable
+    /// physical core, at most 16 [config: posting.threads, default 0].
     #[arg(long, value_name = "N")]
     threads: Option<usize>,
 
-    /// Force a specific SIMD multiplication backend for PAR2.
-    #[arg(long, value_enum, value_name = "MODE", default_value_t = SimdPath::Auto)]
-    simd: SimdPath,
+    /// Force a SIMD backend for PAR2 [config: posting.simd, default auto].
+    #[arg(long, value_enum, value_name = "MODE")]
+    simd: Option<SimdPath>,
 
     /// Only generate PAR2 files next to the sources; do not post.
     #[arg(long)]
@@ -692,7 +692,7 @@ impl Cli {
             par2_slice_count: self.slice_count,
             par2_recovery_count: self.recovery_count,
             threads: self.threads,
-            simd: Some(self.simd),
+            simd: self.simd,
             resume: if self.resume { Some(true) } else { None },
             upload_rate: self
                 .rate

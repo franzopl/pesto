@@ -82,6 +82,50 @@ fn toml_posting_section_sets_all_fields() {
 }
 
 #[test]
+fn toml_posting_section_sets_par2_compute() {
+    let toml = r#"
+        [posting]
+        groups = ["alt.test"]
+        threads = 4
+        simd = "SSSE3"
+        "#;
+    let resolve = |overrides| Config::resolve(toml::from_str(toml).unwrap(), overrides).unwrap();
+    let dry_run = || Overrides {
+        dry_run: Some(true),
+        ..Default::default()
+    };
+    let cfg = resolve(dry_run());
+    assert_eq!(cfg.threads, 4);
+    assert_eq!(cfg.simd, parmesan::SimdPath::Ssse3);
+
+    let cfg = resolve(Overrides {
+        threads: Some(0),
+        simd: Some(parmesan::SimdPath::Scalar),
+        ..dry_run()
+    });
+    assert_eq!(cfg.threads, 0);
+    assert_eq!(cfg.simd, parmesan::SimdPath::Scalar);
+}
+
+#[test]
+fn toml_posting_section_rejects_an_unknown_simd_backend() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [posting]
+        groups = ["alt.test"]
+        simd = "avx9000"
+        "#,
+    )
+    .unwrap();
+    let overrides = Overrides {
+        dry_run: Some(true),
+        ..Default::default()
+    };
+    let err = Config::resolve(file, overrides).unwrap_err().to_string();
+    assert!(err.contains("posting.simd"), "{err}");
+}
+
+#[test]
 fn toml_output_section_sets_fields() {
     let file: FileConfig = toml::from_str(
         r#"
