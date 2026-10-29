@@ -285,13 +285,16 @@ pub(super) fn resume_flags_string(config: &Config) -> String {
         flags.push_str(" --file-counter");
     }
     if let Some(n) = config.par2_slice_size {
-        flags.push_str(&format!(" --par2-slice-size {n}"));
+        flags.push_str(&format!(" --slice-size {n}"));
+    }
+    if config.par2_effort != pesto::config::DEFAULT_PAR2_EFFORT {
+        flags.push_str(&format!(" --par2-effort {}", config.par2_effort));
     }
     if let Some(n) = config.par2_slice_count {
-        flags.push_str(&format!(" --par2-slice-count {n}"));
+        flags.push_str(&format!(" --slice-count {n}"));
     }
     if let Some(n) = config.par2_recovery_count {
-        flags.push_str(&format!(" --par2-recovery-count {n}"));
+        flags.push_str(&format!(" --recovery-count {n}"));
     }
     if let Some(v) = &config.compress_volume_size {
         flags.push_str(&format!(" --compress-volume-size {v}"));
@@ -336,6 +339,20 @@ mod tests {
         assert_eq!(
             resume_flags_string(&config),
             "--article-size 384000 --obfuscate=full --par2 10"
+        );
+    }
+
+    #[test]
+    fn resume_flags_string_uses_real_par2_flag_names() {
+        let mut config = test_config(768_000, ObfuscateMode::Full, None, 10);
+        config.par2_slice_size = Some(768_000);
+        config.par2_effort = 2.0;
+        config.par2_slice_count = Some(100);
+        config.par2_recovery_count = Some(7);
+        assert_eq!(
+            resume_flags_string(&config),
+            "--article-size 768000 --obfuscate=full --par2 10 --slice-size 768000 \
+             --par2-effort 2 --slice-count 100 --recovery-count 7"
         );
     }
 

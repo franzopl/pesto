@@ -23,7 +23,7 @@ pub(crate) fn par2_geometry(metas: &[Arc<FileMeta>], config: &Config) -> (usize,
 }
 
 /// Shared PAR2 geometry for the per-file path and the season path so
-/// `--par2-slice-size` / `--par2-slice-count` / `--par2-recovery-count`
+/// `--slice-size` / `--slice-count` / `--recovery-count` / `--par2-effort`
 /// cannot drift between them.
 pub(crate) fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize, usize, usize) {
     let files: Vec<Par2InputFile> = sizes
@@ -40,6 +40,8 @@ pub(crate) fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize
         slice_count: config.par2_slice_count,
         recovery_count: config.par2_recovery_count,
         recovery_pct: config.par2,
+        slice_unit: Some(config.article_size),
+        effort: config.par2_effort,
         ..Par2CreateOptions::default()
     };
     match calculate_geometry(&files, &options) {

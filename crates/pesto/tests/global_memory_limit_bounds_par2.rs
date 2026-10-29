@@ -50,6 +50,7 @@ async fn tiny_global_memory_limit_rejects_an_oversized_par2_memory_limit() {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         // Explicit PAR2-stage limit, deliberately larger than PAR2's 60%
         // share of the tiny global ceiling below.
         par2_memory_limit: Some(2_000_000),

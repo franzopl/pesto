@@ -60,6 +60,7 @@ fn season_config(par2_slice_size: usize) -> Config {
         par2_slice_size: Some(par2_slice_size),
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         par2_memory_limit: Some(1_000_000_000),
         memory_limit: None,
         par2_temp_dir: None,

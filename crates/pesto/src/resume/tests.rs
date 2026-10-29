@@ -10,10 +10,11 @@ fn fp(article_size: u64) -> RunFingerprint {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         compress_volume_size: None,
         compress_password: None,
         line_length: 128,
-        par2_file_id_order: 0,
+        par2_layout: 0,
     }
 }
 
@@ -254,27 +255,36 @@ fn each_new_fingerprint_field_changes_identity() {
     ll.line_length = 256;
     assert_ne!(base, ll);
 
-    let mut order = base.clone();
-    order.par2_file_id_order = PAR2_FILE_ID_ORDER;
-    assert_ne!(base, order);
+    let mut layout = base.clone();
+    layout.par2_layout = PAR2_LAYOUT;
+    assert_ne!(base, layout);
+
+    let mut effort = base.clone();
+    effort.par2_effort = 2.0;
+    assert_ne!(base, effort);
 }
 
 #[test]
-fn par2_state_from_before_the_file_id_order_fix_is_discarded() {
+fn par2_state_from_an_older_layout_is_discarded() {
     // A fingerprint serialized by a pesto that predates the field.
     let mut old = serde_json::to_value(RunFingerprint {
         par2_percent: 10,
         ..fp(768_000)
     })
     .unwrap();
-    old.as_object_mut().unwrap().remove("par2_file_id_order");
+    old.as_object_mut().unwrap().remove("par2_layout");
+    old.as_object_mut().unwrap().remove("par2_effort");
     let json = serde_json::json!({ "fingerprint": old, "files": {}, "segments": {} });
     let mut state: ResumeState = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        state.fingerprint.as_ref().map(|f| f.par2_effort),
+        Some(crate::config::DEFAULT_PAR2_EFFORT)
+    );
     state.record("a.bin.vol00+01.par2", 1, "old@x", 10);
 
     let current = RunFingerprint {
         par2_percent: 10,
-        par2_file_id_order: PAR2_FILE_ID_ORDER,
+        par2_layout: PAR2_LAYOUT,
         ..fp(768_000)
     };
     assert!(!state.validate_run(&current));
@@ -282,9 +292,9 @@ fn par2_state_from_before_the_file_id_order_fix_is_discarded() {
 }
 
 #[test]
-fn state_without_par2_survives_the_file_id_order_field() {
+fn state_without_par2_survives_the_layout_field() {
     let mut old = serde_json::to_value(fp(768_000)).unwrap();
-    old.as_object_mut().unwrap().remove("par2_file_id_order");
+    old.as_object_mut().unwrap().remove("par2_layout");
     let json = serde_json::json!({ "fingerprint": old, "files": {}, "segments": {} });
     let mut state: ResumeState = serde_json::from_value(json).unwrap();
     assert!(state.validate_run(&fp(768_000)));

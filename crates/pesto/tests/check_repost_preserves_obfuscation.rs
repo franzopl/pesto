@@ -134,6 +134,7 @@ fn config(addr: SocketAddr, obfuscate: ObfuscateMode) -> Config {
         par2_slice_size: None,
         par2_slice_count: None,
         par2_recovery_count: None,
+        par2_effort: 1.0,
         par2_memory_limit: Some(1_000_000_000),
         memory_limit: None,
         par2_temp_dir: None,

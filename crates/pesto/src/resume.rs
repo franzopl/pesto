@@ -30,7 +30,7 @@ use crate::config::{Config, ObfuscateMode};
 /// every recorded Message-ID in the state could reference the wrong byte
 /// range or the wrong wire name, so the whole state is discarded rather than
 /// trusted partially.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunFingerprint {
     pub article_size: u64,
     pub obfuscate: ObfuscateMode,
@@ -59,19 +59,28 @@ pub struct RunFingerprint {
     pub compress_password: Option<String>,
     #[serde(default)]
     pub line_length: usize,
-    /// File ID order the PAR2 set was built with: [`PAR2_FILE_ID_ORDER`]
-    /// when `--par2` is on, `0` otherwise. Older pesto versions sorted File
-    /// IDs big-endian (issue #212), which gives a multi-file set a different
-    /// Main packet and different recovery data, so their PAR2 segments must
-    /// not be reused. A state written before this field existed defaults to
-    /// `0` and is discarded if the resumed run has PAR2 enabled.
+    /// See [`Config::par2_effort`]. A state written before this field
+    /// existed was built at the default.
+    #[serde(default = "default_par2_effort")]
+    pub par2_effort: f64,
+    /// PAR2 layout the set was built with: [`PAR2_LAYOUT`] when `--par2` is
+    /// on, `0` otherwise. A state written by an older layout, or before this
+    /// field existed, defaults to `0` and is discarded if the resumed run has
+    /// PAR2 enabled, since its PAR2 segments do not match what this version
+    /// builds.
     #[serde(default)]
-    pub par2_file_id_order: u8,
+    pub par2_layout: u8,
 }
 
-/// [`RunFingerprint::par2_file_id_order`] for PAR2 sets sorted with
-/// `par2::packet::cmp_file_id` (little-endian, per the PAR2 spec).
-pub const PAR2_FILE_ID_ORDER: u8 = 1;
+/// [`RunFingerprint::par2_layout`] for the current PAR2 layout: File IDs
+/// sorted little-endian per the PAR2 spec (issue #212) and slices aligned to
+/// the article size (issue #217). Bump it whenever the same config would
+/// produce different PAR2 bytes.
+pub const PAR2_LAYOUT: u8 = 1;
+
+fn default_par2_effort() -> f64 {
+    crate::config::DEFAULT_PAR2_EFFORT
+}
 
 impl RunFingerprint {
     pub fn from_config(config: &Config) -> Self {
@@ -87,11 +96,8 @@ impl RunFingerprint {
             compress_volume_size: config.compress_volume_size.clone(),
             compress_password: config.compress_password.as_deref().map(hash_secret),
             line_length: config.line_length,
-            par2_file_id_order: if config.par2 > 0 {
-                PAR2_FILE_ID_ORDER
-            } else {
-                0
-            },
+            par2_effort: config.par2_effort,
+            par2_layout: if config.par2 > 0 { PAR2_LAYOUT } else { 0 },
         }
     }
 }

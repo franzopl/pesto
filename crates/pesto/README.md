@@ -450,6 +450,27 @@ pesto --par2-only movie.mkv
 pesto --par2-only ./MyShow.S01/
 ```
 
+### Slice size and protection
+
+Each PAR2 recovery block repairs one slice, however little of it is damaged,
+and on Usenet the damage unit is a missing article. By default every slice is
+a whole multiple of the article size, so a lost article costs exactly one
+recovery block. Releases up to about 2.4 GiB get one slice per article: with
+10 % PAR2 they survive 10 % of their articles missing anywhere. Larger releases
+keep about 2000 slices, so creating their PAR2 costs the same CPU as before.
+
+```bash
+# Most protection: one slice per article, at the most CPU time
+pesto --slice-size article movie.mkv
+
+# Twice the slices of the default for large releases (and twice the CPU)
+pesto --par2-effort 2 movie.mkv
+```
+
+Both can be set as defaults with `par2_slice_size` and `par2_effort` under
+`[posting]`. See [docs/par2-geometry.md](../../docs/par2-geometry.md) for the
+method and the numbers.
+
 ### Memory budget
 
 Two flags, two scopes:
@@ -1101,7 +1122,8 @@ picked up automatically — no config change needed.
 | `--par2-before-upload` | `posting.par2_before_upload` | off | Generate all PAR2 recovery data before posting anything, instead of concurrently with the upload; posts data files then the PAR2 index/volumes back to back |
 | `--dry-run` | — | off | Encode only; never touch the network |
 | `--resume` | `output.resume` | off | Load a prior run's `.pesto-state` file and skip already-posted segments |
-| `--slice-size <SIZE>` | — | auto | Manual PAR2 slice size (e.g. `"1 MiB"`) |
+| `--slice-size <SIZE>` | `posting.par2_slice_size` | auto | PAR2 slice size: `auto`, `article` or a fixed size (e.g. `"4 MiB"`) |
+| `--par2-effort <FACTOR>` | `posting.par2_effort` | 1 | Scale the CPU budget of automatic PAR2 slicing (`2` = twice the slices) |
 | `--slice-count <N>` | — | auto | Target number of PAR2 input slices |
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
 | `--memory-limit <SIZE\|PCT\|auto>` | `posting.memory_limit` | `auto` | Global memory budget for the whole process (PAR2/upload/check share it) |

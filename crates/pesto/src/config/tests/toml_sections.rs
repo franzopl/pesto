@@ -108,6 +108,93 @@ fn toml_posting_section_sets_par2_compute() {
 }
 
 #[test]
+fn par2_slice_size_resolves_auto_article_and_bytes() {
+    let resolve = |toml: &str, overrides: Overrides| {
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        Config::resolve(
+            file,
+            Overrides {
+                dry_run: Some(true),
+                article_size: Some(500_000),
+                ..overrides
+            },
+        )
+        .unwrap()
+    };
+    let posting = |line: &str| format!("[posting]\ngroups = [\"alt.test\"]\n{line}\n");
+
+    let cfg = resolve(&posting(""), Overrides::default());
+    assert_eq!(cfg.par2_slice_size, None);
+    assert_eq!(cfg.par2_effort, DEFAULT_PAR2_EFFORT);
+
+    let cfg = resolve(
+        &posting("par2_slice_size = \"article\""),
+        Overrides::default(),
+    );
+    assert_eq!(cfg.par2_slice_size, Some(500_000));
+
+    let cfg = resolve(
+        &posting("par2_slice_size = \"4 MiB\""),
+        Overrides::default(),
+    );
+    assert_eq!(cfg.par2_slice_size, Some(4 * 1024 * 1024));
+
+    let cfg = resolve(
+        &posting("par2_slice_size = \"4 MiB\"\npar2_effort = 2.5"),
+        Overrides {
+            par2_slice_size: Some(Par2SliceSize::Auto),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cfg.par2_slice_size, None);
+    assert_eq!(cfg.par2_effort, 2.5);
+
+    let cfg = resolve(
+        &posting("par2_effort = 2.5"),
+        Overrides {
+            par2_effort: Some(0.5),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cfg.par2_effort, 0.5);
+}
+
+#[test]
+fn par2_slice_size_parses_names_and_sizes() {
+    assert_eq!(
+        "AUTO".parse::<Par2SliceSize>().unwrap(),
+        Par2SliceSize::Auto
+    );
+    assert_eq!(
+        " article ".parse::<Par2SliceSize>().unwrap(),
+        Par2SliceSize::Article
+    );
+    assert_eq!(
+        "768000".parse::<Par2SliceSize>().unwrap(),
+        Par2SliceSize::Bytes(768_000)
+    );
+    for bad in ["0", "big", "-1"] {
+        assert!(bad.parse::<Par2SliceSize>().is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn par2_effort_must_be_positive() {
+    for effort in ["0.0", "-1.0", "nan", "inf"] {
+        let file: FileConfig = toml::from_str(&format!(
+            "[posting]\ngroups = [\"alt.test\"]\npar2_effort = {effort}\n"
+        ))
+        .unwrap();
+        let overrides = Overrides {
+            dry_run: Some(true),
+            ..Default::default()
+        };
+        let err = Config::resolve(file, overrides).unwrap_err().to_string();
+        assert!(err.contains("par2_effort"), "{effort}: {err}");
+    }
+}
+
+#[test]
 fn toml_posting_section_rejects_an_unknown_simd_backend() {
     let file: FileConfig = toml::from_str(
         r#"
