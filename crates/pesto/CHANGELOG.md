@@ -12,6 +12,18 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Changed
+
+- File and folder names with non-ASCII characters (accents, `ç`, CJK, …) are
+  now posted unchanged as UTF-8 in the Subject, yEnc `name=`, `.nzb` and PAR2
+  File Description, matching nyuu, ngPost and ParPar. They were previously
+  rejected unless the upload used `--compress`. No Unicode normalization is
+  applied. NZBGet decodes PAR2 names as Latin-1 and can restore them garbled;
+  SABnzbd restores them correctly (#209).
+- A compressed upload whose source name is non-ASCII now keeps that name for
+  the archive (`Lição.7z`) instead of falling back to `archive.7z`. The
+  `pesto::compress::portable_archive_stem` function was removed (#209).
+
 ## [0.10.6] — 2026-10-27
 
 ### Fixed
