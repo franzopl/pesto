@@ -30,6 +30,8 @@ pub const TYPE_IFSC: [u8; 16] = *b"PAR 2.0\0IFSC\0\0\0\0";
 pub const TYPE_RECOVERY: [u8; 16] = *b"PAR 2.0\0RecvSlic";
 /// Packet type tag: Creator packet.
 pub const TYPE_CREATOR: [u8; 16] = *b"PAR 2.0\0Creator\0";
+/// Packet type tag: optional Unicode Filename packet.
+pub const TYPE_UNICODE_FILENAME: [u8; 16] = *b"PAR 2.0\0UniFileN";
 
 /// MD5 + CRC32 checksum of one (zero-padded) input slice.
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +179,49 @@ pub fn file_description_body(
     pad_to_4(body)
 }
 
+/// Build the body of a Unicode Filename packet.
+///
+/// PAR 2.0 spec, "Unicode Filename packet" (optional packets): the File ID
+/// followed by the name in UTF-16, zero-padded to a multiple of 4 bytes and
+/// not necessarily NUL-terminated. Encoded little-endian, as ParPar does.
+pub fn unicode_filename_body(file_id: &[u8; 16], name: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(16 + 2 * name.len() + 2);
+    body.extend_from_slice(file_id);
+    for unit in name.encode_utf16() {
+        body.extend_from_slice(&unit.to_le_bytes());
+    }
+    pad_to_4(body)
+}
+
+/// Serialize a file's File Description packet, followed by a Unicode
+/// Filename packet when `name` is not ASCII.
+///
+/// The File Description name is written as UTF-8 either way. Emitting the
+/// Unicode packet only for non-ASCII names matches ParPar's default
+/// (`--unicode` auto-detection), which emits it right after the FileDesc.
+pub fn serialize_file_description(
+    recovery_set_id: &[u8; 16],
+    file_id: &[u8; 16],
+    md5_full: &[u8; 16],
+    md5_16k: &[u8; 16],
+    file_length: u64,
+    name: &str,
+) -> Vec<u8> {
+    let mut packets = serialize_packet(
+        recovery_set_id,
+        &TYPE_FILE_DESC,
+        &file_description_body(file_id, md5_full, md5_16k, file_length, name),
+    );
+    if !name.is_ascii() {
+        packets.extend(serialize_packet(
+            recovery_set_id,
+            &TYPE_UNICODE_FILENAME,
+            &unicode_filename_body(file_id, name),
+        ));
+    }
+    packets
+}
+
 /// Build the body of an Input File Slice Checksum packet.
 pub fn ifsc_body(file_id: &[u8; 16], slices: &[SliceChecksum]) -> Vec<u8> {
     let mut body = Vec::with_capacity(16 + 20 * slices.len());
@@ -239,6 +284,7 @@ mod tests {
             TYPE_IFSC,
             TYPE_RECOVERY,
             TYPE_CREATOR,
+            TYPE_UNICODE_FILENAME,
         ] {
             assert_eq!(tag.len(), 16);
             assert!(tag.starts_with(b"PAR 2.0\0"));
@@ -300,6 +346,44 @@ mod tests {
         assert_eq!(&body[56..58], b"ab");
         assert!(body.len().is_multiple_of(4)); // 58 -> padded to 60
         assert_eq!(body.len(), 60);
+    }
+
+    #[test]
+    fn unicode_filename_body_is_padded_utf16le() {
+        // "é" is one UTF-16 unit: 2 bytes, padded to 4.
+        let body = unicode_filename_body(&[1; 16], "é");
+        assert_eq!(&body[0..16], &[1u8; 16]);
+        assert_eq!(&body[16..], &[0xE9, 0x00, 0x00, 0x00]);
+        // Two units fill a 4-byte boundary exactly: no NUL terminator.
+        let body = unicode_filename_body(&[1; 16], "çã");
+        assert_eq!(&body[16..], &[0xE7, 0x00, 0xE3, 0x00]);
+        // Astral characters become a surrogate pair.
+        let body = unicode_filename_body(&[1; 16], "\u{1F600}");
+        assert_eq!(&body[16..], &[0x3D, 0xD8, 0x00, 0xDE]);
+    }
+
+    #[test]
+    fn file_description_adds_unicode_packet_only_for_non_ascii_names() {
+        let ascii = serialize_file_description(&[0; 16], &[1; 16], &[2; 16], &[3; 16], 9, "a.bin");
+        assert_eq!(ascii.len(), HEADER_LEN + 56 + 8);
+        assert_eq!(&ascii[48..64], &TYPE_FILE_DESC);
+
+        let name = "Ação.bin";
+        let both = serialize_file_description(&[0; 16], &[1; 16], &[2; 16], &[3; 16], 9, name);
+        let desc_len = u64::from_le_bytes(both[8..16].try_into().unwrap()) as usize;
+        assert_eq!(&both[48..64], &TYPE_FILE_DESC);
+        assert_eq!(
+            &both[HEADER_LEN + 56..HEADER_LEN + 56 + name.len()],
+            name.as_bytes(),
+            "FileDesc keeps the UTF-8 name"
+        );
+        let uni = &both[desc_len..];
+        assert_eq!(&uni[48..64], &TYPE_UNICODE_FILENAME);
+        assert_eq!(&uni[HEADER_LEN..HEADER_LEN + 16], &[1u8; 16]);
+        assert_eq!(
+            &uni[HEADER_LEN + 16..],
+            &unicode_filename_body(&[1; 16], name)[16..]
+        );
     }
 
     #[test]
