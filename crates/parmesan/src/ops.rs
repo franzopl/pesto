@@ -142,7 +142,7 @@ pub fn sort_files_by_file_id(files: &mut Vec<InputFile>) -> Result<()> {
         let file_id = packet::compute_file_id(&md5_16k, f.size, &f.display_name);
         keyed.push((file_id, f));
     }
-    keyed.sort_by_key(|(id, _)| *id);
+    keyed.sort_by(|(a, _), (b, _)| packet::cmp_file_id(a, b));
     *files = keyed.into_iter().map(|(_, f)| f).collect();
     Ok(())
 }
@@ -735,7 +735,7 @@ mod tests {
                 &f.display_name,
             ));
         }
-        expected_ids.sort();
+        expected_ids.sort_by(crate::packet::cmp_file_id);
 
         sort_files_by_file_id(&mut files).unwrap();
 
@@ -748,7 +748,9 @@ mod tests {
             })
             .collect();
         assert_eq!(got_ids, expected_ids);
-        assert!(got_ids.windows(2).all(|w| w[0] <= w[1]));
+        assert!(got_ids
+            .windows(2)
+            .all(|w| crate::packet::cmp_file_id(&w[0], &w[1]).is_le()));
 
         std::fs::remove_dir_all(&dir).ok();
     }

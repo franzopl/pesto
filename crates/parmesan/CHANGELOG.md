@@ -22,6 +22,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   could still be writing the last packet when the volumes were published, so a
   reader could see a volume without its final recovery block, most often on
   machines with one or two CPUs.
+- File IDs are now sorted as little-endian 128-bit integers, as the PAR2 spec,
+  par2cmdline and ParPar do. Before, they were sorted as big-endian byte
+  strings, so a multi-file set had a different Main packet, recovery set ID and
+  input slice order than par2cmdline or ParPar would produce. Readers that
+  follow Main's listed order (par2cmdline and tools derived from it) repaired
+  those sets fine; readers that re-sort per the spec would not. Single-file sets
+  are unchanged. New public API: `packet::cmp_file_id`. The ignored
+  `parpar_compat` test now checks every Main, FileDesc, Unicode Filename, IFSC
+  and Recovery Slice packet byte for byte against ParPar (#212).
 
 ## [0.5.8] — 2026-10-19
 

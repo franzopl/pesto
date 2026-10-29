@@ -30,6 +30,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
   the archive (`Lição.7z`) instead of falling back to `archive.7z`. The
   `pesto::compress::portable_archive_stem` function was removed (#209).
 
+### Fixed
+
+- Multi-file PAR2 sets (per-run and `--season`) now list and order files by
+  File ID as the PAR2 spec, par2cmdline and ParPar do, so they match ParPar
+  byte for byte. `--resume` discards state recorded by an older version when
+  PAR2 is enabled, instead of reusing PAR2 volumes built with the old order
+  (#212).
+
 ## [0.10.6] — 2026-10-27
 
 ### Fixed

@@ -60,7 +60,7 @@ pub(crate) fn build_fixture_set(
             packet::compute_file_id(&md5_16k, f.data.len() as u64, f.name)
         })
         .collect();
-    order.sort_by_key(|&i| file_ids_for_sort[i]);
+    order.sort_by(|&a, &b| packet::cmp_file_id(&file_ids_for_sort[a], &file_ids_for_sort[b]));
     let files: Vec<&FixtureFile> = order.into_iter().map(|i| &files[i]).collect();
 
     let total_slices: usize = files

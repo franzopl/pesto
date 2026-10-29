@@ -332,7 +332,7 @@ pub(super) async fn prepare_inputs(
             let file_id = packet::compute_file_id(&md5_16k, meta.size, &meta.client_path);
             keyed.push((file_id, meta.clone()));
         }
-        keyed.sort_by_key(|(file_id, _)| *file_id);
+        keyed.sort_by(|(a, _), (b, _)| packet::cmp_file_id(a, b));
         metas = keyed.into_iter().map(|(_, meta)| meta).collect();
     }
 
