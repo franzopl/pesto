@@ -123,6 +123,11 @@ where
             .open(path)
             .await?;
         file.write_all(&packet).await?;
+        // tokio hands writes to a blocking task; without a flush the write can
+        // land after the next append or after the staged volume is published.
+        file.flush()
+            .await
+            .with_context(|| format!("flushing PAR2 recovery volume `{}`", path.display()))?;
     }
     Ok(())
 }

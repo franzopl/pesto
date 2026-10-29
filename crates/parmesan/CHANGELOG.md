@@ -16,6 +16,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `packet::serialize_file_description`. An ignored `parpar_compat` test
   compares these packets byte for byte with ParPar's output.
 
+### Fixed
+
+- `parmesan create` now flushes each recovery packet before moving on. tokio
+  could still be writing the last packet when the volumes were published, so a
+  reader could see a volume without its final recovery block, most often on
+  machines with one or two CPUs.
+
 ## [0.5.8] — 2026-10-19
 
 ### Added
