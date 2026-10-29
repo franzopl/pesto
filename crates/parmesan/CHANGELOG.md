@@ -16,6 +16,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `packet::serialize_file_description`. An ignored `parpar_compat` test
   compares these packets byte for byte with ParPar's output.
 
+### Changed
+
+- When repair hits a singular matrix, the error now says that PAR2 does not
+  guarantee an inverse for non-consecutive recovery blocks, instead of blaming
+  a decoder bug. The matrix proptest now checks the property PAR2 does
+  guarantee, consecutive exponents, and no longer fails at random (#215).
+
 ### Fixed
 
 - `parmesan create` now flushes each recovery packet before moving on. tokio

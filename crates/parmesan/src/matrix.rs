@@ -4,10 +4,13 @@
 //! square matrix over GF(2¹⁶). Given `m` missing input blocks and `m`
 //! available recovery blocks, the reduced Reed-Solomon matrix `A` (row `r`
 //! = a chosen recovery exponent, column `c` = a missing input block's base
-//! constant) is a submatrix of a Vandermonde-like matrix and is always
-//! invertible over the field — that's the maximum-distance-separable (MDS)
-//! property that makes Reed-Solomon repair work at all. This module builds
-//! that matrix and inverts it via Gauss-Jordan elimination; see
+//! constant) is a submatrix of a Vandermonde-like matrix. When the chosen
+//! exponents are consecutive, as they are for a freshly created recovery set,
+//! `A` is a Vandermonde matrix on distinct bases scaled by nonzero factors and
+//! is always invertible. PAR2 does not guarantee that for an arbitrary choice
+//! of exponents: some non-consecutive selections are singular, a limitation
+//! par2cmdline shares. This module builds that matrix and inverts it via
+//! Gauss-Jordan elimination; see
 //! [`crate::decoder`] for how the inverse is turned into reconstructed slice
 //! data.
 
@@ -212,7 +215,7 @@ mod tests {
         let gf = Gf16::new();
         for &m in &[1usize, 2, 5, 16, 37] {
             let bases = gf.input_bases(m);
-            // Use m distinct, arbitrary recovery exponents.
+            // Use m distinct, non-consecutive recovery exponents.
             let exponents: Vec<u32> = (0..m as u32).map(|i| i * 3 + 1).collect();
             let a = Gf16Matrix::build_reduced(&gf, &bases, &exponents);
             let inv = a.invert(&gf).expect("RS submatrix must be invertible");
@@ -222,9 +225,10 @@ mod tests {
     }
 
     #[test]
-    fn reduced_matrix_is_invertible_for_arbitrary_exponent_choices() {
-        // The MDS property: any m distinct recovery exponents work, not just
-        // consecutive ones starting at zero.
+    fn reduced_matrix_is_invertible_for_this_non_consecutive_choice() {
+        // Many non-consecutive exponent choices are invertible, including this
+        // one, but not all of them; see
+        // `some_non_consecutive_exponent_choices_are_singular`.
         let gf = Gf16::new();
         let bases = gf.input_bases(20);
         let exponents: Vec<u32> = vec![
@@ -234,6 +238,21 @@ mod tests {
         let inv = a.invert(&gf).expect("RS submatrix must be invertible");
         let product = mat_mul(&gf, &a, &inv);
         assert_eq!(product, Gf16Matrix::identity(20));
+    }
+
+    #[test]
+    fn some_non_consecutive_exponent_choices_are_singular() {
+        // PAR2's matrix is a generalized Vandermonde matrix, so distinct
+        // recovery exponents alone do not guarantee an inverse. Found by the
+        // proptest below when it still drew arbitrary exponents (#215).
+        let gf = Gf16::new();
+        let bases = gf.input_bases(24);
+        let exponents: Vec<u32> = vec![
+            5616, 6439, 6769, 8303, 10100, 15905, 18261, 21236, 37296, 38005, 38623, 42429, 43782,
+            43796, 44165, 45329, 52435, 52522, 54087, 55200, 55652, 60808, 64172, 65456,
+        ];
+        let a = Gf16Matrix::build_reduced(&gf, &bases, &exponents);
+        assert_eq!(a.invert(&gf), Err(SingularMatrix));
     }
 
     #[test]
@@ -273,37 +292,37 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
-        /// `m` distinct GF(2^16) exponents in `0..ORDER`, deterministically
-        /// derived from `seed` — a cheap stand-in for
-        /// `prop::collection::btree_set` with a size that depends on another
-        /// strategy's output.
-        fn distinct_exponents(seed: u64, m: usize) -> Vec<u32> {
-            let mut lcg = seed | 1;
-            let mut set = std::collections::BTreeSet::new();
-            while set.len() < m {
-                lcg = lcg
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                set.insert((lcg >> 32) as u32 % crate::gf16::ORDER);
-            }
-            set.into_iter().collect()
+        /// `m` input bases picked from a set of up to 300 input blocks, and
+        /// the first of `m` consecutive recovery exponents.
+        fn missing_bases_and_first_exponent() -> impl Strategy<Value = (Vec<u16>, u32)> {
+            (1usize..300).prop_flat_map(|inputs| {
+                let all = Gf16::new().input_bases(inputs);
+                (1..=inputs.min(40)).prop_flat_map(move |m| {
+                    (
+                        prop::sample::subsequence(all.clone(), m),
+                        0..crate::gf16::ORDER - 40,
+                    )
+                })
+            })
         }
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(200))]
 
-            /// The MDS property, exercised randomly instead of only at the
-            /// fixed sizes/exponents the unit tests above use: any `m`
-            /// distinct input blocks and `m` distinct recovery exponents
-            /// must yield an invertible reduced matrix.
+            /// Any `m` missing input blocks and `m` consecutive recovery
+            /// exponents, starting anywhere, yield an invertible reduced
+            /// matrix. Consecutive exponents are what a recovery set is
+            /// created with; arbitrary ones carry no such guarantee (#215).
             #[test]
-            fn reduced_matrix_always_inverts(m in 1usize..40, seed in any::<u64>()) {
+            fn reduced_matrix_inverts_for_consecutive_exponents(
+                (bases, first) in missing_bases_and_first_exponent()
+            ) {
                 let gf = Gf16::new();
-                let bases = gf.input_bases(m);
-                let exponents = distinct_exponents(seed, m);
+                let m = bases.len();
+                let exponents: Vec<u32> = (first..first + m as u32).collect();
                 let a = Gf16Matrix::build_reduced(&gf, &bases, &exponents);
                 let inv = a.invert(&gf);
-                prop_assert!(inv.is_ok(), "singular for m={m}, seed={seed:#x}");
+                prop_assert!(inv.is_ok(), "singular for bases={bases:?}, first={first}");
                 let product = mat_mul(&gf, &a, &inv.unwrap());
                 prop_assert_eq!(product, Gf16Matrix::identity(m));
             }
