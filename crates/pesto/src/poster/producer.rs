@@ -215,11 +215,7 @@ pub(super) async fn producer(
     // Blowing past it aborts via `handle_alloc_error` — with `panic = "abort"`
     // in the release profile nothing unwinds long enough to flush a log line,
     // so it looks like the process just vanishes mid-upload.
-    let reserve_threads = if shared.config.threads > 0 {
-        shared.config.threads
-    } else {
-        parmesan::performance_core_count()
-    };
+    let reserve_threads = super::par2::par2_threads(shared.config.threads);
     let overhead_reserve = connection_overhead_reserve(active_connections, reserve_threads);
     let ceiling = crate::memory::Ceiling::discover(shared.config.memory_limit);
     let (memory_limit, passes) = par2_memory_plan(
@@ -283,11 +279,7 @@ pub(super) async fn producer(
         } else {
             parmesan::detect_simd().to_string()
         };
-        let effective_threads = if shared.config.threads > 0 {
-            shared.config.threads
-        } else {
-            parmesan::performance_core_count()
-        };
+        let effective_threads = super::par2::par2_threads(shared.config.threads);
         info!(
             simd = simd_method,
             threads = effective_threads,
@@ -306,7 +298,7 @@ pub(super) async fn producer(
             passes: passes.len(),
             chunk_size: chunk_size_bytes,
             simd_method: simd_method.to_string(),
-            threads: parmesan::performance_core_count(),
+            threads: effective_threads,
             memory_limit,
         });
         shared.emit(crate::progress::ProgressEvent::Par2WriteStarted {

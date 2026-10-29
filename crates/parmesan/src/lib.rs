@@ -165,7 +165,20 @@ pub fn physical_core_count() -> usize {
 /// for work distribution. Hyperthreads are excluded as they contend for the
 /// same execution ports and add noise on CPU-bound workloads.
 /// On non-hybrid CPUs falls back to [`physical_core_count`].
+///
+/// The topology above describes the whole host, so the result is capped at
+/// [`std::thread::available_parallelism`], which honours the CPU affinity
+/// mask and cgroup CPU quotas. A process confined to 4 CPUs of a 64-core
+/// host gets 4, not 64.
 pub fn performance_core_count() -> usize {
+    let usable = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(usize::MAX);
+    host_performance_core_count().min(usable).max(1)
+}
+
+/// [`performance_core_count`] before the cap at the usable CPU count.
+fn host_performance_core_count() -> usize {
     #[cfg(target_os = "linux")]
     {
         use std::collections::HashSet;
@@ -209,4 +222,17 @@ pub fn performance_core_count() -> usize {
         }
     }
     physical_core_count()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn performance_core_count_stays_within_usable_cpus() {
+        let usable = std::thread::available_parallelism().map_or(usize::MAX, |n| n.get());
+        let cores = super::performance_core_count();
+        assert!(
+            (1..=usable).contains(&cores),
+            "{cores} cores, {usable} usable"
+        );
+    }
 }

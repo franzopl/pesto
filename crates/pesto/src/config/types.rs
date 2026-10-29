@@ -415,6 +415,16 @@ pub struct PostingSection {
     /// streaming/overlapped pipeline. Default: false. See `ROADMAP.md`,
     /// GitHub issue #68.
     pub par2_before_upload: Option<bool>,
+    /// Threads for PAR2 compute. `0` or omitted means automatic: one per
+    /// physical core the process may use (CPU affinity and cgroup quotas
+    /// honoured), at most 16. More threads seldom encode faster and take CPU
+    /// from the upload and, on a shared seedbox, from other users. Set a
+    /// higher value only on a dedicated machine.
+    pub threads: Option<usize>,
+    /// SIMD backend for PAR2 multiplication: `auto` (default), `scalar`,
+    /// `ssse3`, `avx2`, `avx2-gfni`, `avx512-gfni`, `avx512-shuffle` or
+    /// `neon`. Only needed when automatic detection picks a slower path.
+    pub simd: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

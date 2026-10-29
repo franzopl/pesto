@@ -50,6 +50,8 @@ const FIELD_SECTIONS: &[(&str, &str)] = &[
     ("memory_limit", "[posting]"),
     ("par2_temp_dir", "[posting]"),
     ("par2_before_upload", "[posting]"),
+    ("threads", "[posting]"),
+    ("simd", "[posting]"),
     // [output]
     ("history", "[output]"),
     ("history_dir", "[output]"),
@@ -375,8 +377,16 @@ impl Config {
                 .par2_before_upload
                 .or(file.posting.par2_before_upload)
                 .unwrap_or(false),
-            threads: cli.threads.unwrap_or(0), // 0 means auto
-            simd: cli.simd.unwrap_or_default(),
+            threads: cli.threads.or(file.posting.threads).unwrap_or(0), // 0 means auto
+            simd: match cli.simd {
+                Some(simd) => simd,
+                None => match file.posting.simd.as_deref() {
+                    Some(s) => <parmesan::SimdPath as clap::ValueEnum>::from_str(s, true).map_err(
+                        |_| anyhow::anyhow!("parsing posting.simd: unknown SIMD backend `{s}`"),
+                    )?,
+                    None => parmesan::SimdPath::Auto,
+                },
+            },
             resume: cli.resume.or(file.output.resume).unwrap_or(false),
             upload_rate: {
                 if let Some(rate) = cli.upload_rate {

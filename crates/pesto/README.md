@@ -1106,8 +1106,8 @@ picked up automatically — no config change needed.
 | `--recovery-count <N>` | — | auto | Exact number of PAR2 recovery blocks |
 | `--memory-limit <SIZE\|PCT\|auto>` | `posting.memory_limit` | `auto` | Global memory budget for the whole process (PAR2/upload/check share it) |
 | `--par2-memory-limit <SIZE>` | `posting.par2_memory_limit` | `"1 GiB"` | Max RAM for PAR2 recovery buffers specifically |
-| `--threads <N>` | — | auto | Threads for PAR2 compute (`0` = physical cores) |
-| `--simd <MODE>` | — | auto | Force SIMD: `auto`, `avx2-gfni`, `avx2`, `ssse3`, `scalar` |
+| `--threads <N>` | `posting.threads` | auto | Threads for PAR2 compute (`0` = one per usable physical core, at most 16) |
+| `--simd <MODE>` | `posting.simd` | auto | Force SIMD: `auto`, `avx512-gfni`, `avx512-shuffle`, `avx2-gfni`, `avx2`, `ssse3`, `neon`, `scalar` |
 | `--verify` | `posting.verify` | off | Confirm each article with STAT |
 | `--check` | `posting.check` | off | Run a STAT pass over all articles after upload |
 | `--check-delay <SECS>` | `posting.check_delay` | `30` | Seconds to wait before STAT pass; implies `--check` |

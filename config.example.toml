@@ -159,6 +159,18 @@ groups = ["alt.binaries.test"]
 # ParPar+nyuu (generate, then post). Default: false.
 # par2_before_upload = false
 
+# threads — threads for PAR2 compute. 0 means automatic: one per physical
+# core the process may use (CPU affinity and cgroup quotas are honoured), at
+# most 16. More threads seldom encode faster and take CPU from the upload and,
+# on a shared seedbox, from other users. Raise it only on a dedicated machine.
+# Default: 0.
+# threads = 0
+
+# simd — SIMD backend for PAR2 multiplication: "auto", "scalar", "ssse3",
+# "avx2", "avx2-gfni", "avx512-gfni", "avx512-shuffle" or "neon". Only needed
+# when automatic detection picks a slower path. Default: "auto".
+# simd = "auto"
+
 # check — confirm every posted article via a streaming STAT check that runs
 # concurrently with the upload: each article is checked check_delay seconds
 # after it posts, and misses are reposted automatically. Default: true.
