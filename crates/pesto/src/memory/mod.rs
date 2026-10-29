@@ -229,7 +229,8 @@ pub fn release_free_memory() {
 /// so even a saturated gigabit link needs well under one core of encode
 /// capacity — `ncores` workers on a 128-core seedbox buys nothing and costs
 /// ~270 MiB of address space in stacks. PAR2, the genuinely CPU-bound stage,
-/// has its own rayon pool sized to physical cores and is unaffected.
+/// has its own rayon pool (one thread per usable physical core, at most 16)
+/// and is unaffected.
 const DEFAULT_MAX_WORKER_THREADS: usize = 16;
 
 /// Default cap on the tokio blocking pool.
