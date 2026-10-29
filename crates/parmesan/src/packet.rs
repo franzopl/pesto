@@ -13,6 +13,8 @@
 //!
 //! All integers are little-endian.
 
+use std::cmp::Ordering;
+
 use md5::{Digest, Md5};
 
 pub(crate) const MAGIC: [u8; 8] = *b"PAR2\0PKT";
@@ -130,14 +132,26 @@ pub fn serialize_recovery_packets(
     out_packets
 }
 
+/// Order two File IDs the way the Main packet lists them.
+///
+/// PAR 2.0 spec, Main packet: File IDs "are sorted by numerical value
+/// (treating them as 16-byte unsigned integers)", and every PAR2 integer is
+/// little-endian, so the last byte is the most significant. par2cmdline
+/// (`MD5Hash::operator<`) and ParPar (`BufferCompareReverse`) compare the
+/// same way. This order also fixes which input slice gets which Reed–Solomon
+/// constant, so every place that sorts files for a recovery set must use it.
+pub fn cmp_file_id(a: &[u8; 16], b: &[u8; 16]) -> Ordering {
+    a.iter().rev().cmp(b.iter().rev())
+}
+
 /// Build the body of a Main packet.
 ///
 /// The recovery set contains exactly the given files (no non-recovery files).
-/// File IDs are sorted so the body — and therefore the recovery set ID — is
-/// canonical regardless of input order.
+/// File IDs are sorted with [`cmp_file_id`] so the body — and therefore the
+/// recovery set ID — is canonical regardless of input order.
 pub fn main_body(slice_size: u64, recovery_file_ids: &[[u8; 16]]) -> Vec<u8> {
     let mut sorted = recovery_file_ids.to_vec();
-    sorted.sort_unstable();
+    sorted.sort_unstable_by(cmp_file_id);
 
     let mut body = Vec::with_capacity(12 + 16 * sorted.len());
     body.extend_from_slice(&slice_size.to_le_bytes());
@@ -322,6 +336,23 @@ mod tests {
         assert_eq!(&body[28..44], &[0x02u8; 16]);
         assert_eq!(&body[44..60], &[0x03u8; 16]);
         assert_eq!(recovery_set_id(&body), md5(&body));
+    }
+
+    #[test]
+    fn file_ids_sort_as_little_endian_integers() {
+        // Byte order disagrees with numeric order: `low` starts with 0xFF but
+        // its most significant (last) byte is 0x00.
+        let mut low = [0u8; 16];
+        low[0] = 0xFF;
+        let mut high = [0u8; 16];
+        high[15] = 0x01;
+        assert_eq!(cmp_file_id(&low, &high), Ordering::Less);
+        assert_eq!(cmp_file_id(&high, &low), Ordering::Greater);
+        assert_eq!(cmp_file_id(&low, &low), Ordering::Equal);
+
+        let body = main_body(16_384, &[high, low]);
+        assert_eq!(&body[12..28], &low);
+        assert_eq!(&body[28..44], &high);
     }
 
     #[test]
