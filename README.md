@@ -299,6 +299,12 @@ including `.courseid`, are included unless a custom exclusion or extension
 allowlist removes them. See [directory exclusions](#directory-exclusions). The `.nzb` is named after the root folder
 (`MyShow.S01.nzb`).
 
+File and folder names with accents or other non-ASCII characters are posted
+unchanged as UTF-8 in the Subject, yEnc header, `.nzb` and PAR2 metadata, the
+same way nyuu, ngPost and ParPar do. NZBGet currently decodes PAR2 names as
+Latin-1, so a name it restores from PAR2 can come out garbled; SABnzbd restores
+them correctly. See [`docs/obfuscation.md`](docs/obfuscation.md).
+
 #### DVD / Blu-ray full-disc backups
 
 DVD and Blu-ray structures (e.g. `VIDEO_TS/`) often contain **0-byte

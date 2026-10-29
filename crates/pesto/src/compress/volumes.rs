@@ -100,20 +100,6 @@ pub fn client_archive_name(path: &Path, physical_stem: &str, client_stem: &str) 
     suffix.map_or(physical_name, |suffix| format!("{client_stem}{suffix}"))
 }
 
-/// Return the portable external archive stem used in NZB and PAR2 metadata.
-///
-/// PAR2's base File Description name is ASCII, and NZBGet's bundled
-/// par2cmdline currently treats those bytes as Latin-1. Keeping the archive
-/// name ASCII prevents a compressed upload from reintroducing that ambiguity;
-/// non-ASCII source names are still retained inside formats that support them.
-pub fn portable_archive_stem(stem: &str) -> String {
-    if !stem.is_empty() && stem.is_ascii() {
-        stem.to_owned()
-    } else {
-        "archive".to_owned()
-    }
-}
-
 /// Find the volume files `7z -v` produced for `archive_name` (the full file
 /// name including its `.7z`/`.zip` extension), e.g. `stem.7z.001`,
 /// `stem.7z.002`, ... sorted in volume order (zero-padded, sorts correctly

@@ -57,19 +57,28 @@ clients classify and remove recovery data after a successful repair.
 
 Pesto strips one common outer input directory because the downloader creates
 the job directory, preserves every directory below it, rejects `.`/`..`, empty
-components, absolute paths, backslashes and non-ASCII components, and
-serializes `/` separators. The [PAR2
+components, absolute paths and backslashes, and serializes `/` separators.
+
+Non-ASCII names are published unchanged, as raw UTF-8 with no Unicode
+normalization, in the Subject, the yEnc `name=`, the `.nzb` and the PAR2 File
+Description. This matches nyuu (`articleEncoding: 'utf8'`), ngPost and ParPar
+(`--ascii-charset`, default `utf-8`). The [PAR2
 specification](https://parchive.sourceforge.net/docs/specifications/parity-volume-spec/article-spec.html)
 defines the core File Description name as ASCII and reserves the optional
-`UniFileN` packet for a Unicode override. That is not a portable encoding
-contract: NZBGet 26.1's bundled `par2cmdline-turbo` v1.4.0
+`UniFileN` packet for a Unicode override, but in practice every PAR2 creator
+writes UTF-8 bytes there.
+
+Known client issue: NZBGet's bundled `par2cmdline-turbo` (v1.4.0, the
+`nzbget` branch of `nzbgetcom/par2cmdline-turbo`)
 [interprets the core bytes as Latin-1 and converts them to
 UTF-8](https://github.com/nzbgetcom/par2cmdline-turbo/blob/333913c529dbaae07c88dcdd690564cb680a59ae/src/descriptionpacket.cpp#L87-L113),
-and the tagged source tree has no `UniFileN` reader. Pesto therefore rejects
-non-ASCII raw paths rather than silently restoring a corrupt name. Use
-`--compress=7z` for Unicode source names: Pesto posts an ASCII external archive
-name and preserves the Unicode tree inside the archive. Windows-native MultiPar
-and QuickPar remain explicit external gates rather than assumed compatibility.
+and has no `UniFileN` reader. When NZBGet renames a file from PAR2, a
+non-ASCII name is restored as mojibake. This affects every poster that writes
+UTF-8 FileDesc names, nyuu + ParPar and ngPost included. SABnzbd decodes UTF-8
+first and restores these names correctly. If NZBGet users must receive exact
+non-ASCII names, `--compress=7z` keeps the Unicode tree inside the archive.
+Windows-native MultiPar and QuickPar remain explicit external gates rather than
+assumed compatibility.
 
 ## PAR2 layout
 
@@ -102,10 +111,9 @@ gate; the earlier failure of a 4.5 KiB file with its first article missing was
 the expected consequence of losing the complete 16 KiB par-rename fingerprint.
 
 The same follow-up exposed three interoperability defects. The PAR2 cleanup
-defect is addressed by the supported `full` contract. Raw Unicode
-paths now fail early with an actionable error instead of silently restoring
-under a corrupt name, and compressed posts use an ASCII external archive name.
-The archive root fix is verified for 7z/ZIP and RAR. The RAR regression test
+defect is addressed by the supported `full` contract. The Unicode
+finding is a NZBGet client issue, documented above; pesto publishes UTF-8 names
+like the other posters do (issue #209). The archive root fix is verified for 7z/ZIP and RAR. The RAR regression test
 uses the proprietary CLI when it is installed and is skipped in environments
 where that external binary is unavailable:
 
@@ -117,7 +125,9 @@ where that external binary is unavailable:
 - A raw FileDesc path `Árvore/legenda-ação.txt` retained the correct contents
   but became the mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`. Inspection of
   NZBGet's exact bundled `par2cmdline-turbo` tag confirmed an unconditional
-  Latin-1-to-UTF-8 conversion and no `UniFileN` reader, so Pesto rejects it.
+  Latin-1-to-UTF-8 conversion and no `UniFileN` reader. Pesto briefly
+  rejected non-ASCII paths because of it; since issue #209 it posts them as
+  UTF-8, like nyuu, ngPost and ParPar.
 - A newly posted archive passed `SUCCESS/UNPACK`, canonical rename to
   `archive-source.7z`, extraction, and hash verification. Pesto passes
   absolute compressor inputs to prevent its private staging prefix from being
@@ -155,8 +165,8 @@ classifier inputs. Changing those defaults merely to chase an indexer would
 create more knobs without an honest privacy boundary.
 
 Compression changes what FileDesc describes. Raw-file posts store each input's
-ASCII canonical relative path in PAR2. Compressed posts use an ASCII archive
-part name; the original directory tree (including Unicode names) lives inside
+canonical relative path in PAR2. Compressed posts use the archive part name;
+the original directory tree (including Unicode names) lives inside
 7z/RAR/ZIP and is restored by extraction, not by PAR2 renaming the archive
 back into source files. Header encryption is archive-format dependent.
 

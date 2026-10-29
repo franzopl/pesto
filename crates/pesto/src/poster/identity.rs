@@ -67,6 +67,10 @@ pub(super) fn obfuscated_yenc_name(real_name: &str) -> String {
 }
 
 /// Canonical relative path presented to download clients and PAR2 FileDesc.
+///
+/// Non-ASCII names are published unchanged as UTF-8, with no Unicode
+/// normalization, matching nyuu, ngPost and ParPar (whose FileDesc
+/// `--ascii-charset` defaults to `utf-8`).
 pub(super) fn normalize_client_path<'a>(
     name: &'a str,
     release_root: Option<&str>,
@@ -87,11 +91,6 @@ pub(super) fn normalize_client_path<'a>(
             .any(|component| component.is_empty() || component == "." || component == "..")
     {
         bail!("published path `{name}` does not produce a safe relative client path");
-    }
-    if !path.is_ascii() {
-        bail!(
-            "published path `{name}` is not ASCII; use --compress=7z to preserve Unicode names inside an archive"
-        );
     }
     Ok(path)
 }
@@ -214,20 +213,27 @@ mod tests {
     }
 
     #[test]
-    fn client_path_rejects_unsafe_or_non_ascii_names() {
-        for name in [
-            "",
-            "/abs.bin",
-            "Release/../x",
-            "Release//x",
-            "a\\b",
-            "Árvore/legenda.txt",
-        ] {
+    fn client_path_rejects_unsafe_names() {
+        for name in ["", "/abs.bin", "Release/../x", "Release//x", "a\\b"] {
             assert!(
                 normalize_client_path(name, Some("Release")).is_err(),
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn client_path_keeps_non_ascii_names_unchanged() {
+        assert_eq!(
+            normalize_client_path("Curso/1_ Todo dia/010 - Quem é você.ts", Some("Curso")).unwrap(),
+            "1_ Todo dia/010 - Quem é você.ts"
+        );
+        assert_eq!(normalize_client_path("Ação.pdf", None).unwrap(), "Ação.pdf");
+        // NFD input (combining acute, as macOS stores names) stays NFD.
+        assert_eq!(
+            normalize_client_path("Cafe\u{301}.txt", None).unwrap(),
+            "Cafe\u{301}.txt"
+        );
     }
 
     #[test]

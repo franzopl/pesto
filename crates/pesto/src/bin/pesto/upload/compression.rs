@@ -55,8 +55,8 @@ pub(crate) async fn run(
                     .into_owned()
             })
         })
+        .filter(|stem| !stem.is_empty())
         .unwrap_or_else(|| "archive".to_string());
-    let client_stem = pesto::compress::portable_archive_stem(&client_stem);
     let archive_stem = if config.obfuscate != ObfuscateMode::None {
         reuse_or_generate_archive_stem(resume_path, config)
     } else {

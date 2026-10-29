@@ -25,7 +25,7 @@ mod volumes;
 pub use backend::find_binary;
 use backend::*;
 use volumes::*;
-pub use volumes::{client_archive_name, portable_archive_stem, volume_suffix};
+pub use volumes::{client_archive_name, volume_suffix};
 
 /// Supported archive formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

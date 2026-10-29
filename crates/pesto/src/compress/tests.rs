@@ -115,13 +115,6 @@ fn client_archive_name_falls_back_for_unexpected_output() {
 }
 
 #[test]
-fn portable_archive_stem_avoids_non_ascii_par2_metadata() {
-    assert_eq!(portable_archive_stem("Release-01"), "Release-01");
-    assert_eq!(portable_archive_stem("Árvore"), "archive");
-    assert_eq!(portable_archive_stem(""), "archive");
-}
-
-#[test]
 fn rar_volume_size_larger_than_content_falls_back_to_single_file() {
     if find_binary("rar").is_none() {
         eprintln!("skipping: rar CLI not installed");
