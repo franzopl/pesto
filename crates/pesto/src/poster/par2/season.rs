@@ -298,7 +298,7 @@ async fn generate_season_par2(
 
     // Validate PAR2 spec limits — same check `producer()` does for the
     // per-file path. Sharing `par2_geometry_from_sizes` between the two
-    // paths means an explicit `--par2-slice-count`/`--par2-recovery-count`
+    // paths means an explicit `--slice-count`/`--recovery-count`
     // can equally overflow the GF(2^16) exponent space here.
     if total_slices > 32768 {
         bail!("too many input slices: {total_slices} (max 32768). Increase --slice-size or decrease --slice-count.");
