@@ -60,16 +60,13 @@ pub(super) fn build_base_packets(
     ));
     for (index, file) in input_files.iter().enumerate() {
         let file_id = &file_ids[index];
-        packets.extend(packet::serialize_packet(
+        packets.extend(packet::serialize_file_description(
             &recovery_set_id,
-            &packet::TYPE_FILE_DESC,
-            &packet::file_description_body(
-                file_id,
-                &all_hashes[index].md5_full,
-                &all_hashes[index].md5_16k,
-                file.size,
-                &file.display_name,
-            ),
+            file_id,
+            &all_hashes[index].md5_full,
+            &all_hashes[index].md5_16k,
+            file.size,
+            &file.display_name,
         ));
         packets.extend(packet::serialize_packet(
             &recovery_set_id,

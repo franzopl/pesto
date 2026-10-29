@@ -70,16 +70,13 @@ fn season_base_packets(files: &[SeasonFileEntry], par2_slice_size: usize) -> ([u
     base_packets.extend(pkt_creator);
 
     for file in files {
-        let pkt_file_desc = packet::serialize_packet(
+        let pkt_file_desc = packet::serialize_file_description(
             &rsid,
-            &packet::TYPE_FILE_DESC,
-            &packet::file_description_body(
-                &file.file_id,
-                &file.hashes.md5_full,
-                &file.hashes.md5_16k,
-                file.hashes.length,
-                &file.name,
-            ),
+            &file.file_id,
+            &file.hashes.md5_full,
+            &file.hashes.md5_16k,
+            file.hashes.length,
+            &file.name,
         );
         let pkt_ifsc = packet::serialize_packet(
             &rsid,

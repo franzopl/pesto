@@ -610,16 +610,13 @@ pub(super) async fn producer(
 
                 for (idx, fh) in final_hashes.iter().enumerate() {
                     let fid = &file_ids[idx];
-                    let pkt_file_desc = packet::serialize_packet(
+                    let pkt_file_desc = packet::serialize_file_description(
                         &rsid,
-                        &packet::TYPE_FILE_DESC,
-                        &packet::file_description_body(
-                            fid,
-                            &fh.md5_full,
-                            &fh.md5_16k,
-                            fh.length,
-                            &metas[idx].client_path,
-                        ),
+                        fid,
+                        &fh.md5_full,
+                        &fh.md5_16k,
+                        fh.length,
+                        &metas[idx].client_path,
                     );
                     let pkt_ifsc = packet::serialize_packet(
                         &rsid,

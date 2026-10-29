@@ -7,6 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- PAR2 sets now include a Unicode Filename (`UniFileN`) packet after the File
+  Description of every file whose name is not ASCII, matching ParPar's default.
+  The File Description keeps the UTF-8 name. New public API:
+  `packet::TYPE_UNICODE_FILENAME`, `packet::unicode_filename_body` and
+  `packet::serialize_file_description`. An ignored `parpar_compat` test
+  compares these packets byte for byte with ParPar's output.
+
 ## [0.5.8] — 2026-10-19
 
 ### Added

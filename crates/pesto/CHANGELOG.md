@@ -12,6 +12,12 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Added
+
+- PAR2 sets for files with non-ASCII names now carry a Unicode Filename
+  (`UniFileN`) packet next to the File Description, as ParPar does. This
+  includes the season-wide set built by `--season`.
+
 ### Changed
 
 - File and folder names with non-ASCII characters (accents, `ç`, CJK, …) are
