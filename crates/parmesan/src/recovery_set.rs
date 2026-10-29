@@ -201,8 +201,9 @@ impl RecoverySet {
     /// Read recovery-block bodies into [`Self::recovery_blocks`].
     ///
     /// `max_blocks` limits how many are loaded (lowest exponents first).
-    /// Reed-Solomon over GF(2¹⁶) is MDS, so any `m` blocks reconstruct `m`
-    /// missing inputs — repair only needs `total_bad_slices()` of them.
+    /// Repair only needs `total_bad_slices()` of them. Consecutive blocks
+    /// always suffice; see the [`crate::matrix`] module docs for the
+    /// non-consecutive case.
     pub fn load_recovery_blocks(&mut self, max_blocks: Option<usize>) -> Result<()> {
         let limit = max_blocks.unwrap_or(self.recovery_index.len());
         for (exponent, loc) in self.recovery_index.iter().take(limit) {

@@ -74,8 +74,9 @@ impl RecoveryDecoder {
     ///
     /// `recovery_blocks` must hold at least `self.missing().len()` entries;
     /// the lowest-exponent blocks available are used first (an arbitrary but
-    /// deterministic choice — any `m` distinct recovery blocks work, per the
-    /// MDS property documented on [`Gf16Matrix::build_reduced`]).
+    /// deterministic choice). Consecutive exponents always form an invertible
+    /// matrix; a non-consecutive selection, left after some recovery blocks
+    /// were lost, can be singular (see the [`crate::matrix`] module docs).
     ///
     /// Returns `(global_index, slice_bytes)` pairs, one per entry of
     /// [`missing`](Self::missing), in the same order.
@@ -158,7 +159,8 @@ impl RecoveryDecoder {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context(
                 "the selected recovery/missing blocks produced a singular matrix \
-                 (this indicates a decoder bug, not damaged input data)",
+                 (PAR2 does not guarantee an inverse when the available recovery \
+                 blocks are not consecutive)",
             )?;
 
         // Each output slice `c` is an independent linear combination of the
