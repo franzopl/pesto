@@ -58,6 +58,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- Ordinary (unencrypted) uploads no longer scan every article body for a
+  leading `.` before posting. That check was only ever needed for
+  `--encrypt` articles — their salt bootstrap and FF1-encrypted control
+  lines can legitimately start with `.` and need RFC 3977 dot-stuffing —
+  while the plain yEnc encoder already escapes a leading `.`, so the scan
+  always found nothing and only cost CPU on the posting hot path. The
+  scan and stuffing now run solely on the encrypted posting path
+  (`post_parts_encrypted` / `enqueue_post_encrypted` /
+  `repost_parts_confirmed_encrypted`); ordinary posting is back to the
+  original direct write, with the invariant kept as a debug-only assert.
 - Multi-file PAR2 sets (per-run and `--season`) now list and order files by
   File ID as the PAR2 spec, par2cmdline and ParPar do, so they match ParPar
   byte for byte. `--resume` discards state recorded by an older version when

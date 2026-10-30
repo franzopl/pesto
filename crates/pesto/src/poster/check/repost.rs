@@ -158,7 +158,14 @@ pub(super) async fn repost_one(
     let mut last_err = anyhow::anyhow!("repost: no attempt made");
     for attempt in 1..=max_retries {
         match slot.ensure_connected().await {
-            Ok(conn) => match conn.repost_parts_confirmed(&headers, &encoded.body).await {
+            // Only encrypted reposts take the scanning `*_encrypted`
+            // path; ordinary ones keep the direct write.
+            Ok(conn) => match if adapter.is_some() {
+                conn.repost_parts_confirmed_encrypted(&headers, &encoded.body)
+                    .await
+            } else {
+                conn.repost_parts_confirmed(&headers, &encoded.body).await
+            } {
                 Ok(returned_id) => {
                     if let Some(server_id) = returned_id {
                         if server_id != message_id {
