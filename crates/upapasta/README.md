@@ -41,3 +41,6 @@ When configured, uploads are encrypted and the generated NZB carries
 `<meta type="yenc_encrypted">true</meta>` with the `<meta type="password">`
 transport password. See the root pesto README's Encryption section for the
 wire format and status.
+
+Heads up: encrypted uploads need a downloader that supports this encryption.
+An ordinary downloader cannot decrypt them.

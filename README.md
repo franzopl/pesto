@@ -590,6 +590,9 @@ fail-closed on unsupported values.
 Conforming downloaders detect `yenc_encrypted` and decrypt using the password
 in `<meta type="password">` (or from their own configured sources).
 
+Heads up: encrypted uploads need a downloader that supports this encryption.
+An ordinary downloader cannot decrypt them and will only get unreadable data.
+
 ### CLI usage
 
 ```bash
