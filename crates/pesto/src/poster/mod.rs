@@ -38,6 +38,8 @@ use identity::{
     resolve_date,
 };
 mod outcome;
+#[cfg(test)]
+pub(crate) use outcome::{nth_safe_segment_index, safe_index_rank};
 pub use outcome::{
     nzb_write_decision, should_write_season_nzb, FailedTask, NzbWriteDecision, PostOutcome,
     PostedSegment,
@@ -47,6 +49,7 @@ mod orchestrator;
 mod pipeline;
 mod prepare;
 pub use orchestrator::post_files_inner_with_release_prefix;
+pub(crate) use prepare::ReleaseLayout;
 mod producer;
 mod result;
 pub use result::repost_failed_tasks;
@@ -73,9 +76,19 @@ struct FileMeta {
     size: u64,
     /// This file's 1-based position among every file in the release (data
     /// files, then the PAR2 index, then the PAR2 volumes) — used for the
-    /// `--file-counter` `[filenum/total]` subject prefix. Meaningless
-    /// (left as `0`) when `Shared::total_files` is `0`, i.e. the flag is off.
+    /// `--file-counter` `[filenum/total]` subject prefix and, for encrypted
+    /// uploads, for `ReleaseLayout::segment_identity`. Meaningful only when
+    /// `Shared::total_files > 0`; encrypted uploads always assign it, while
+    /// unencrypted uploads zero it when `--file-counter` is off.
     file_index: u32,
+    /// Preserved size/mtime fingerprint for resume invalidation.
+    /// `mtime: None` for PAR2-generated files (no on-disk source to compare
+    /// against).
+    fingerprint: crate::resume::FileFingerprint,
+}
+
+fn par2_volume_ordinal(data_files: usize, publish_index: bool, volume_index: usize) -> u32 {
+    data_files as u32 + 1 + u32::from(publish_index) + volume_index as u32
 }
 
 /// How many dedicated yEnc workers fill the ready-article queue.
@@ -318,8 +331,11 @@ async fn post_pregenerated_release(
             .release_prefix
             .as_deref()
             .map(|prefix| layout::volume_name(prefix, *vol));
-        let index_offset = u32::from(shared.config.obfuscate.policy().publish_par2_index);
-        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+        let file_index = par2_volume_ordinal(
+            metas.len(),
+            shared.config.obfuscate.policy().publish_par2_index,
+            vol_idx,
+        );
         push_par2_file(&vol_path, vol_name, wire_override, file_index, shared, tx).await?;
     }
     Ok(())
@@ -430,6 +446,17 @@ async fn post_data_files(
             };
 
             i += 1;
+            // Encrypted uploads only: the layout planner is encryption-gated
+            // (see `prepare_resources`), so unencrypted uploads leave the
+            // index at 0 — meaningless without a bootstrap.
+            let segment_index = if shared.encryption_adapter.is_some() {
+                shared
+                    .release_layout
+                    .segment_identity(meta.file_index, i)
+                    .context("valid segment identity for planned data file")?
+            } else {
+                0
+            };
             if tx
                 .send(make_task(
                     meta.clone(),
@@ -437,6 +464,7 @@ async fn post_data_files(
                     total_parts,
                     offset,
                     buf,
+                    segment_index,
                     file_crc32,
                     &shared.config,
                 ))
@@ -520,11 +548,12 @@ async fn push_par2_file(
         from,
         date,
         size,
-        file_index: if shared.config.file_counter {
+        file_index: if shared.config.file_counter || shared.encryption_adapter.is_some() {
             file_index
         } else {
             0
         },
+        fingerprint: crate::resume::FileFingerprint { size, mtime: None },
     });
 
     // Whole-file CRC-32 accumulated as this same loop reads the file for
@@ -540,13 +569,25 @@ async fn push_par2_file(
         file.read_exact(&mut buf).await?;
         crc.update(&buf);
         let file_crc32 = (i as u32 == last_idx).then(|| crc.finalize());
+        let part_number = i as u32 + 1;
+        // Encryption-gated, like the data path in `post_data_files`: PAR2
+        // files only carry a segment identity for encrypted uploads.
+        let segment_index = if shared.encryption_adapter.is_some() {
+            shared
+                .release_layout
+                .segment_identity(file_index, part_number)
+                .context("valid segment identity for planned PAR2 file")?
+        } else {
+            0
+        };
         if tx
             .send(make_task(
                 meta.clone(),
-                i as u32 + 1,
+                part_number,
                 total,
                 offset,
                 buf,
+                segment_index,
                 file_crc32,
                 &shared.config,
             ))
@@ -561,12 +602,14 @@ async fn push_par2_file(
 
 /// Build a `PostTask`, generating per-article identities for the two
 /// article-level modes; otherwise copies them from `FileMeta`.
+#[allow(clippy::too_many_arguments)]
 fn make_task(
     meta: Arc<FileMeta>,
     part: u32,
     total: u32,
     offset: u64,
     data: Vec<u8>,
+    segment_index: u32,
     file_crc32: Option<u32>,
     config: &Config,
 ) -> PostTask {
@@ -597,12 +640,22 @@ fn make_task(
             )
         }
     };
+    // Digest only for encrypted segments: a nonzero index exists only when
+    // the encryption adapter planned the release (0 is never a permitted
+    // index — Body Encryption Standard v1.2 §8), so this mirrors
+    // `shared.encryption_adapter.is_some()` at every call site.
+    let plaintext_digest = (segment_index != 0).then(|| {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(&data).into()
+    });
     PostTask {
         meta,
         part,
         total,
         offset,
         data,
+        segment_index,
+        plaintext_digest,
         subject_name,
         yenc_name,
         from,

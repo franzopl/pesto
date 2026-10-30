@@ -58,6 +58,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- Ordinary (unencrypted) uploads no longer scan every article body for a
+  leading `.` before posting. That check was only ever needed for
+  `--encrypt` articles — their salt bootstrap and FF1-encrypted control
+  lines can legitimately start with `.` and need RFC 3977 dot-stuffing —
+  while the plain yEnc encoder already escapes a leading `.`, so the scan
+  always found nothing and only cost CPU on the posting hot path. The
+  scan and stuffing now run solely on the encrypted posting path
+  (`post_parts_encrypted` / `enqueue_post_encrypted` /
+  `repost_parts_confirmed_encrypted`); ordinary posting is back to the
+  original direct write, with the invariant kept as a debug-only assert.
 - Multi-file PAR2 sets (per-run and `--season`) now list and order files by
   File ID as the PAR2 spec, par2cmdline and ParPar do, so they match ParPar
   byte for byte. `--resume` discards state recorded by an older version when
@@ -91,6 +101,14 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 - Linux ARM64 release artifact `pesto-linux-aarch64`, built natively against
   Debian 12 / glibc 2.36 and validated with the full package test suite (#199).
+- **Opt-in yEnc body and control-line encryption (`--encrypt`).**
+  Per-segment AEAD encryption using XChaCha20-Poly1305 before yEnc encoding, and NIST SP 800-38G FF1 Radix 253 format-preserving encryption of yEnc control lines (`=ybegin`, `=ypart`, `=yend`, `=yencryption`) per the experimental yEnc Encryption Standards v1.2. The `--encrypt-password` alias was removed: `--encrypt[=PASSWORD]` is the only encryption flag form.
+- **NZB encryption metadata.**
+  Encrypted uploads emit `<meta type="yenc_encrypted">true</meta>` (alongside the optional `yenc_version`/`yenc_cipher` provenance metas emitted by the writer) in the NZB `<head>`; segment elements stay plain NZB 1.1. `NzbMeta`'s earlier provisional provenance fields were replaced by the single `yenc_encrypted` flag (the writer still emits the optional provenance metas and readers gate fail-closed on unsupported values), and `Config`/`FileConfig` gain the `[encryption]` section.
+
+### Changed
+
+- **`repost_failed_tasks` signature update**: adds an `adapter: Option<Arc<UploadEncryptionAdapter>>` argument for encrypted article retry; ordinary callers pass `None`.
 - Repeatable `--exclude <GLOB>` and `--no-exclude`, with root-level TOML
   `exclude` and `no_exclude` keys. Exclusions prune discovered directories,
   warn for skipped entries, and reject an empty upload. Explicit file arguments

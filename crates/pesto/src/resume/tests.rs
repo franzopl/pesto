@@ -1,6 +1,6 @@
 use super::*;
 
-fn fp(article_size: u64) -> RunFingerprint {
+pub(crate) fn fp(article_size: u64) -> RunFingerprint {
     RunFingerprint {
         article_size,
         obfuscate: ObfuscateMode::None,
@@ -15,6 +15,7 @@ fn fp(article_size: u64) -> RunFingerprint {
         compress_password: None,
         line_length: 128,
         par2_layout: 0,
+        encrypt_password: None,
     }
 }
 

@@ -20,7 +20,7 @@ use sugo::state::{AppState, SharedState};
 /// Spawn a fake NNTP server that only understands `BODY` and `QUIT`. `known`
 /// maps bare Message-IDs to the article body the client should get back;
 /// anything else gets a `430`.
-pub fn spawn_fake_server(known: HashMap<&'static str, Vec<u8>>) -> SocketAddr {
+pub fn spawn_fake_server(known: HashMap<String, Vec<u8>>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -35,7 +35,7 @@ pub fn spawn_fake_server(known: HashMap<&'static str, Vec<u8>>) -> SocketAddr {
     addr
 }
 
-fn handle_connection(stream: TcpStream, known: HashMap<&'static str, Vec<u8>>) {
+fn handle_connection(stream: TcpStream, known: HashMap<String, Vec<u8>>) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -116,4 +116,22 @@ pub fn build_state_with_config_path(
     config_path: PathBuf,
 ) -> SharedState {
     AppState::new(config, data_dir, Some(config_path))
+}
+
+pub fn fixture_kdf_input() -> &'static str {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../pesto/test-vectors/body_encryption.json");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let fixture: serde_json::Value =
+        serde_json::from_str(&content).expect("body_encryption.json must parse");
+    static VALUE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VALUE
+        .get_or_init(|| {
+            fixture["vectors"][0]["password"]
+                .as_str()
+                .expect("body_encryption.json vectors[0].password")
+                .to_owned()
+        })
+        .as_str()
 }

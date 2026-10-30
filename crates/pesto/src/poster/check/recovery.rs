@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::config::Config;
+use crate::crypto::UploadEncryptionAdapter;
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::{ProgressEvent, ProgressSender};
 
@@ -51,6 +52,10 @@ pub(crate) async fn recover_missing(
     segments: Vec<PostedSegment>,
     events: Option<&ProgressSender>,
     mut slots: Vec<ConnectionSlot>,
+    // Upload encryption adapter (`Some` for an encrypted upload): every
+    // recovery repost re-encrypts with the same salt/segment index — see
+    // `repost_one`'s doc comment.
+    adapter: Option<Arc<UploadEncryptionAdapter>>,
 ) -> RecoverOutcome {
     if segments.is_empty() || slots.is_empty() {
         return RecoverOutcome {
@@ -82,6 +87,7 @@ pub(crate) async fn recover_missing(
         let recovered = Arc::clone(&recovered);
         let inconclusive = Arc::clone(&inconclusive);
         let events = events.cloned();
+        let adapter = adapter.clone();
 
         workers.push(tokio::spawn(async move {
             loop {
@@ -90,7 +96,15 @@ pub(crate) async fn recover_missing(
 
                 slot.retarget(seg.server_idx);
 
-                let ok = match repost_one(&config, &mut slot, &seg, &groups).await {
+                let ok = match repost_one(
+                    &config,
+                    adapter.as_deref(),
+                    &mut slot,
+                    &seg,
+                    &groups,
+                )
+                .await
+                {
                     Ok(new_seg) => {
                         tokio::time::sleep(Duration::from_secs(config.check_delay_secs)).await;
                         match slot.ensure_connected().await {

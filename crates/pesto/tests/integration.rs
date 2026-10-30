@@ -125,6 +125,7 @@ async fn posts_every_segment_to_a_mock_server() {
         compress_volume_size: None,
         nzb_title: None,
         nzb_password: None,
+        encrypt_password: None,
         nzb_category: None,
         nzb_tags: vec![],
         tmdb_id: None,
@@ -532,6 +533,7 @@ async fn resume_with_different_article_size_discards_stale_state_instead_of_corr
         par2_effort: 1.0,
         compress_volume_size: None,
         compress_password: None,
+        encrypt_password: None,
         line_length: 128,
         par2_layout: 0,
     });
@@ -624,6 +626,7 @@ async fn resume_reuses_the_full_shared_prefix_across_runs() {
         par2_effort: 1.0,
         compress_volume_size: None,
         compress_password: None,
+        encrypt_password: None,
         line_length: config.line_length,
         par2_layout: 0,
     });

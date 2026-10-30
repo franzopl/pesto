@@ -145,15 +145,18 @@ pub async fn run_job(state: &Arc<AppState>, job_id: Uuid) -> Result<()> {
         .await;
     });
 
-    let outcome = penne::download::download_queue(
+    let decryptor = penne::nzb::download_decryptor(&parsed.meta)?;
+
+    let outcome = penne::download::download_queue_with_decryptor(
         &queue,
         &config.server_tiers,
         &dest_dir,
         config.retries,
         Some(tx),
+        decryptor,
     )
     .await?;
-    // `download_queue` owns the only sender clone, so the channel closes on
+    // `download_queue_with_decryptor` owns the only sender clone, so the channel closes on
     // its own once it returns; this just waits for the forwarder's last
     // update to land before moving on to the next phase.
     forward_task.await.ok();

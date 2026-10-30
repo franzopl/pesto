@@ -12,10 +12,9 @@
 //! output name can be reused for an unrelated or edited file, or with
 //! different posting parameters (`--article-size`, `--obfuscate`,
 //! `--compress`, `--par2`, `--file-counter`) that change how the input is
-//! chunked and named.
-//! [`RunFingerprint`] and [`FileFingerprint`] guard against exactly that —
-//! a run-level mismatch discards the whole state, a per-file mismatch
-//! discards only that file's segments.
+//! chunked and named. [`RunFingerprint`] and [`FileFingerprint`] guard
+//! against that — a run-level mismatch discards the whole state, a per-file
+//! mismatch discards only that file's segments.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,9 +37,7 @@ pub struct RunFingerprint {
     pub par2_percent: u8,
     /// `--file-counter`: toggling it changes every subject in the release
     /// (the `[filenum/total]` prefix), so a mismatch must discard the state
-    /// the same way an `--obfuscate`/`--par2` change does — otherwise a
-    /// resumed run's reused Message-IDs would be recorded against a subject
-    /// that no longer matches what the original run actually posted.
+    /// the same way an `--obfuscate`/`--par2` change does.
     pub file_counter: bool,
     /// Geometry / compression options that change the posted bytes without
     /// touching `article_size` or `par2_percent`. `#[serde(default)]` so a
@@ -57,6 +54,8 @@ pub struct RunFingerprint {
     /// never store the password itself.
     #[serde(default)]
     pub compress_password: Option<String>,
+    #[serde(default)]
+    pub encrypt_password: Option<String>,
     #[serde(default)]
     pub line_length: usize,
     /// See [`Config::par2_effort`]. A state written before this field
@@ -95,6 +94,7 @@ impl RunFingerprint {
             par2_recovery_count: config.par2_recovery_count,
             compress_volume_size: config.compress_volume_size.clone(),
             compress_password: config.compress_password.as_deref().map(hash_secret),
+            encrypt_password: config.encrypt_password.as_deref().map(hash_secret),
             line_length: config.line_length,
             par2_effort: config.par2_effort,
             par2_layout: if config.par2 > 0 { PAR2_LAYOUT } else { 0 },
@@ -205,34 +205,46 @@ pub struct PersistedWireIdentity {
     pub unix_date: Option<u64>,
 }
 
+/// Upload session identity: 16-byte salt, complete layout and ordered source names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSessionIdentity {
+    pub salt: [u8; 16],
+    pub layout: crate::poster::ReleaseLayout,
+    /// Ordered data file names in posting order. Replaced sources with
+    /// identical part counts must rotate salt (nonce-reuse guard).
+    /// `#[serde(default)]` so pre-identity state files load but fail this
+    /// comparison and rotate rather than trust a count-only match.
+    #[serde(default)]
+    pub source_names: Vec<String>,
+}
+
 /// Persistent state for a single upload session.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResumeState {
     /// Posting parameters this state was recorded under. `None` for a fresh
-    /// state (nothing recorded yet) or a state file written before this
-    /// field existed — in either case there is nothing to compare against
-    /// yet, so `validate_run` treats it as compatible and starts tracking.
+    /// state or one written before this field existed — either way nothing
+    /// to compare against, so `validate_run` treats it as compatible.
     fingerprint: Option<RunFingerprint>,
     /// The obfuscated archive stem this release was compressed under, when
-    /// `--compress`+`--obfuscate` produced one. Randomly generated fresh on
-    /// every run by default — recorded here so a `--resume` run with a
-    /// matching fingerprint can reuse the *same* name instead of generating
-    /// a new one, which would otherwise make this file's segments
-    /// unresumable (the resume key is this very name). See issue #18's
-    /// resume follow-up discussion.
+    /// `--compress`+`--obfuscate` produced one. Recorded so a `--resume`
+    /// run with a matching fingerprint reuses the *same* name (the resume
+    /// key is this very name). See issue #18's resume follow-up discussion.
     archive_stem: Option<String>,
-    /// The shared wire name prefix and sender identity every file in an
-    /// `ObfuscateMode::FullShared` run posts under — see
-    /// `ObfuscateMode::FullShared`. Randomly generated fresh on every run by
-    /// default; recorded here for the same reason as `archive_stem`, so a
-    /// `--resume` run reuses the same identity instead of a new one.
+    /// Shared wire name prefix/sender for an `ObfuscateMode::FullShared`
+    /// run; recorded so `--resume` reuses the same identity.
     release_prefix: Option<String>,
     release_from: Option<String>,
     /// Per-file identity, keyed by `file_name`.
     files: HashMap<String, FileFingerprint>,
     /// Key: `"{file_name}\0{part}"`.
     segments: HashMap<String, SegmentRecord>,
+    /// Session identity (salt, layout, ordered source names).
+    #[serde(default)]
+    session_identity: Option<UploadSessionIdentity>,
+    /// Set when the session was invalidated so the spool directory is cleared.
+    #[serde(skip)]
+    session_invalidated: bool,
 }
 
 impl ResumeState {
@@ -254,7 +266,7 @@ impl ResumeState {
                     .with_context(|| format!("reading resume state `{}`", path.display()));
             }
         };
-        match serde_json::from_str(&text) {
+        match serde_json::from_str::<Self>(&text) {
             Ok(state) => Ok(state),
             Err(_) => Ok(Self::default()),
         }
@@ -290,16 +302,66 @@ impl ResumeState {
     pub fn validate_run(&mut self, current: &RunFingerprint) -> bool {
         if let Some(stored) = &self.fingerprint {
             if stored != current {
-                self.segments.clear();
-                self.files.clear();
-                self.archive_stem = None;
-                self.release_prefix = None;
-                self.release_from = None;
+                self.invalidate_session();
                 self.fingerprint = Some(current.clone());
                 return false;
             }
         }
         self.fingerprint = Some(current.clone());
+        true
+    }
+
+    /// Record (or update) the upload session identity.
+    pub fn set_session_identity(&mut self, identity: UploadSessionIdentity) {
+        self.session_identity = Some(identity);
+    }
+
+    /// The opaque 16-byte session salt recorded for this state, if any.
+    pub fn session_salt(&self) -> Option<&[u8; 16]> {
+        self.session_identity.as_ref().map(|s| &s.salt)
+    }
+
+    /// Invalidate the entire upload session, clearing session identity (salt,
+    /// layout, source names), all segment records, all file fingerprints,
+    /// archive stem, and shared release identity. Used when the encrypted
+    /// session can no longer be trusted: a changed posting fingerprint,
+    /// layout, or source set can reuse the same key/index space over
+    /// *different* plaintext, so the salt must be regenerated and every
+    /// record dropped.
+    pub fn invalidate_session(&mut self) {
+        self.session_invalidated = true;
+        self.session_identity = None;
+        self.segments.clear();
+        self.files.clear();
+        self.archive_stem = None;
+        self.release_prefix = None;
+        self.release_from = None;
+    }
+
+    /// Take and clear the session_invalidated dirty bit (set by
+    /// `validate_run`/`invalidate_session`). `prepare_resources` consumes
+    /// it to clear the spool directory along with the invalidated state.
+    pub fn take_session_invalidated(&mut self) -> bool {
+        std::mem::take(&mut self.session_invalidated)
+    }
+
+    /// Validate the current release layout and ordered source identity
+    /// against this session's recorded identity. A mismatch (including a
+    /// stored identity without source names) invalidates the session and
+    /// returns `false`. (The posting fingerprint is validated separately
+    /// by `validate_run`.)
+    pub fn validate_session(
+        &mut self,
+        current_layout: &crate::poster::ReleaseLayout,
+        current_source_names: &[String],
+    ) -> bool {
+        if let Some(stored) = &self.session_identity {
+            if stored.layout != *current_layout || stored.source_names != current_source_names {
+                self.invalidate_session();
+                return false;
+            }
+        }
+
         true
     }
 
@@ -340,6 +402,11 @@ impl ResumeState {
             Some(stored) => stored == current,
             None => true,
         }
+    }
+
+    /// Whether this state file has a recorded fingerprint for `file_name`.
+    pub fn has_file(&self, file_name: &str) -> bool {
+        self.files.contains_key(file_name)
     }
 
     /// Record (or update) a file's fingerprint.
@@ -432,4 +499,8 @@ impl ResumeState {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod session_tests;

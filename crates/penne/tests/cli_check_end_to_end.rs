@@ -86,6 +86,8 @@ fn write_nzb(dir: &Path) -> std::path::PathBuf {
         server_idx: 0,
         file_index: 0,
         total_files: 0,
+        segment_index: 0,
+        plaintext_digest: None,
     };
     let xml = pesto::nzb::generate(
         &["alt.binaries.test".to_string()],

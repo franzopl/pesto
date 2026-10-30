@@ -1,4 +1,4 @@
-use super::minimal_file;
+use super::{fixture_kdf_input, minimal_file};
 use crate::config::*;
 
 #[test]
@@ -203,4 +203,50 @@ fn file_upload_rate_used_when_cli_absent() {
     .unwrap();
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
     assert_eq!(cfg.upload_rate, 1024);
+}
+
+#[test]
+fn cli_overrides_encrypt_password() {
+    let cfg = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some(fixture_kdf_input().to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(cfg.encrypt_password.as_deref(), Some(fixture_kdf_input()));
+}
+
+#[test]
+fn cli_rejects_empty_encrypt_password() {
+    let result = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("".into()),
+            ..Default::default()
+        },
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn cli_accepts_independent_archive_and_encrypt_passwords() {
+    let cfg = Config::resolve(
+        minimal_file(),
+        Overrides {
+            encrypt_password: Some("conformance-fixture-encrypt-password".into()),
+            compress_password: Some("conformance-fixture-archive-password".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.encrypt_password.as_deref(),
+        Some("conformance-fixture-encrypt-password")
+    );
+    assert_eq!(
+        cfg.compress_password.as_deref(),
+        Some("conformance-fixture-archive-password")
+    );
 }

@@ -117,8 +117,17 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         par2_slice_size,
         recovery_count,
         total_files,
+        release_layout,
+        encryption_adapter,
         initial_pool,
-    } = prepare_resources(config, &metas, initial_segments).await?;
+    } = prepare_resources(
+        config,
+        &metas,
+        initial_segments,
+        resume_arc.as_ref(),
+        spool_dir_owned.as_deref(),
+    )
+    .await?;
 
     let shared = Arc::new(Shared {
         config: config.clone(),
@@ -141,6 +150,8 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
         release_from,
         run_id,
         total_files,
+        release_layout,
+        encryption_adapter,
         check_tx: Mutex::new(None),
     });
 
@@ -283,6 +294,7 @@ async fn run(options: RunOptions<'_>) -> Result<PostOutcome> {
             Some(Arc::clone(&shared.cancelled)),
             check_slots,
             shared.resume.clone(),
+            shared.encryption_adapter.clone(),
         ))
     } else {
         None
@@ -387,6 +399,7 @@ async fn recover_or_repost(
         info!(count = n, "retrying segments that failed during upload");
         let recovered = repost_failed_tasks(
             config,
+            shared.encryption_adapter.clone(),
             &failed_tasks,
             &shared.post_group,
             shared.events.as_ref(),
@@ -524,6 +537,7 @@ async fn recover_or_repost(
                 candidates,
                 shared.events.as_ref(),
                 std::mem::take(&mut post_slots),
+                shared.encryption_adapter.clone(),
             )
             .await;
             post_slots = recovered.slots;
