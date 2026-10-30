@@ -509,7 +509,16 @@ pub(super) async fn worker(
                     }
                 };
                 let t_post = Instant::now();
-                match conn.post_parts(&p.headers, &p.encoded.body).await {
+                // Encrypted articles are the only ones whose bodies can
+                // start a line with '.', so only they take the scanning
+                // `*_encrypted` posting path; ordinary uploads keep the
+                // original direct write (no per-article dot scan).
+                let post_result = if shared.encryption_adapter.is_some() {
+                    conn.post_parts_encrypted(&p.headers, &p.encoded.body).await
+                } else {
+                    conn.post_parts(&p.headers, &p.encoded.body).await
+                };
+                match post_result {
                     Ok(returned_id) => {
                         // Some servers substitute their own Message-ID at
                         // accept time and echo it back in the 240 response
@@ -619,9 +628,18 @@ pub(super) async fn worker(
                         }
                     };
 
-                    // Enqueue all articles without flushing.
+                    // Enqueue all articles without flushing. Only
+                    // encrypted articles take the scanning `*_encrypted`
+                    // path (see the sequential path above).
+                    let encrypted = shared.encryption_adapter.is_some();
                     for p in &pending {
-                        if let Err(e) = conn.enqueue_post(&p.headers, &p.encoded.body).await {
+                        let enqueued = if encrypted {
+                            conn.enqueue_post_encrypted(&p.headers, &p.encoded.body)
+                                .await
+                        } else {
+                            conn.enqueue_post(&p.headers, &p.encoded.body).await
+                        };
+                        if let Err(e) = enqueued {
                             break 'use_conn (true, format!("{e:#}"));
                         }
                     }

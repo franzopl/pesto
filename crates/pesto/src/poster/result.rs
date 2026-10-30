@@ -375,7 +375,13 @@ pub async fn repost_failed_tasks(
         let mut ok = false;
         for attempt in 1..=max_retries {
             match slot.ensure_connected().await {
-                Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
+                // Only encrypted reposts take the scanning `*_encrypted`
+                // path; ordinary ones keep the direct write.
+                Ok(conn) => match if adapter.is_some() {
+                    conn.post_parts_encrypted(&headers, &encoded.body).await
+                } else {
+                    conn.post_parts(&headers, &encoded.body).await
+                } {
                     Ok(returned_id) => {
                         // See the main post path for why: some servers
                         // substitute their own Message-ID at accept time.

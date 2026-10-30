@@ -60,6 +60,16 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- Ordinary (unencrypted) uploads no longer scan every article body for a
+  leading `.` before posting. That check was only ever needed for
+  `--encrypt` articles — their salt bootstrap and FF1-encrypted control
+  lines can legitimately start with `.` and need RFC 3977 dot-stuffing —
+  while the plain yEnc encoder already escapes a leading `.`, so the scan
+  always found nothing and only cost CPU on the posting hot path. The
+  scan and stuffing now run solely on the encrypted posting path
+  (`post_parts_encrypted` / `enqueue_post_encrypted` /
+  `repost_parts_confirmed_encrypted`); ordinary posting is back to the
+  original direct write, with the invariant kept as a debug-only assert.
 - Under `full`, `article` and `full-shared`, an obfuscated recovery volume's
   yEnc name keeps its `.volNNN+NNN.par2` suffix instead of only `.par2`.
   NZBGet otherwise renamed every volume to `+01` and counted one recovery

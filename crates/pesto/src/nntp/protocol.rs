@@ -50,9 +50,10 @@ pub(super) fn is_dot_terminator(line: &[u8]) -> bool {
 
 /// True when any line of a yEnc body starts with `.`.
 ///
-/// The poster relies on the encoder never producing that (see
-/// [`post_parts_inner`] / [`NntpConnection::enqueue_post`]); this is the
-/// predicate those `debug_assert!`s use.
+/// The ordinary poster relies on the encoder never producing that (the
+/// `debug_assert!` in `write_body` guards it at zero release cost); only
+/// the encrypted posting path scans with this predicate at runtime, since
+/// encrypted control lines can legitimately start with '.'.
 pub(crate) fn yenc_body_has_leading_dot(body: &[u8]) -> bool {
     body.starts_with(b".") || body.windows(2).any(|w| w == b"\n.")
 }
