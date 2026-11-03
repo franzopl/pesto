@@ -12,6 +12,8 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-03
+
 ### Added
 
 - PAR2 sets for files with non-ASCII names now carry a Unicode Filename

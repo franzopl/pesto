@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-03
+
 ### Added
 
 - PAR2 sets now include a Unicode Filename (`UniFileN`) packet after the File
