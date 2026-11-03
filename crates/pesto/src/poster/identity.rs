@@ -1,6 +1,5 @@
 //! Published paths, wire identities and stable per-run naming decisions.
 
-use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
@@ -53,17 +52,44 @@ pub(super) fn par2_release_base(name: &str) -> &str {
     par2_base(trimmed)
 }
 
-/// Return an opaque yEnc filename, retaining `.par2` for recovery volumes.
+/// Return an opaque yEnc filename, retaining the PAR2 technical suffix.
 pub(super) fn obfuscated_yenc_name(real_name: &str) -> String {
-    let name = obfuscated_name();
-    if Path::new(real_name)
-        .extension()
-        .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("par2"))
-    {
-        format!("{name}.par2")
-    } else {
-        name
+    with_par2_suffix(obfuscated_name(), real_name)
+}
+
+/// Append `real_name`'s PAR2 suffix (`.volNNN+NNN.par2` or `.par2`) to an
+/// opaque stem; non-PAR2 names get the stem alone.
+///
+/// NZBGet's direct rename (`DirectRenamer::BuildNewParName`, v26.1) keeps a
+/// `.volNNN+NNN.par2` suffix from the downloaded name and otherwise invents
+/// `.volNNN+01.PAR2`; par-check then counts the recovery blocks it can still
+/// fetch from that `+NN`. Without the real suffix every volume looks like one
+/// block, and a repair needing more blocks than there are volumes fails
+/// without fetching them. The suffix only states volume geometry, which the
+/// volume's own Recovery Slice packets already carry.
+pub(super) fn with_par2_suffix(stem: String, real_name: &str) -> String {
+    match par2_suffix(real_name) {
+        Some(suffix) => format!("{stem}{suffix}"),
+        None => stem,
     }
+}
+
+/// The trailing `.volNNN+NNN.par2` of a recovery volume, `.par2` of an index,
+/// or `None` for a non-PAR2 name. Matching is ASCII case-insensitive.
+fn par2_suffix(name: &str) -> Option<&str> {
+    // ASCII lowercasing keeps byte offsets, so indices map back onto `name`.
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".par2")?;
+    let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let start = stem
+        .rfind(".vol")
+        .filter(|&at| {
+            stem[at + 4..]
+                .split_once('+')
+                .is_some_and(|(first, count)| is_digits(first) && is_digits(count))
+        })
+        .unwrap_or(stem.len());
+    Some(&name[start..])
 }
 
 /// Canonical relative path presented to download clients and PAR2 FileDesc.
@@ -276,9 +302,25 @@ mod tests {
     }
 
     #[test]
-    fn obfuscated_yenc_name_preserves_only_the_par2_extension() {
-        assert!(obfuscated_yenc_name("recovery.PAR2").ends_with(".par2"));
+    fn obfuscated_yenc_name_preserves_only_the_par2_suffix() {
+        assert!(obfuscated_yenc_name("recovery.PAR2").ends_with(".PAR2"));
+        assert!(!obfuscated_yenc_name("recovery.PAR2").contains("recovery"));
         assert!(!obfuscated_yenc_name("movie.mkv").contains(".mkv"));
+
+        let volume = obfuscated_yenc_name("Show/movie.mkv.vol007+008.par2");
+        assert!(volume.ends_with(".vol007+008.par2"), "{volume}");
+        assert!(!volume.contains("movie"), "{volume}");
+        assert!(obfuscated_yenc_name("big.vol1023+1024.PAR2").ends_with(".vol1023+1024.PAR2"));
+    }
+
+    #[test]
+    fn par2_suffix_requires_a_well_formed_volume_marker() {
+        assert_eq!(par2_suffix("a.vol000+001.par2"), Some(".vol000+001.par2"));
+        assert_eq!(par2_suffix("a.par2"), Some(".par2"));
+        assert_eq!(par2_suffix("a.volume.par2"), Some(".par2"));
+        assert_eq!(par2_suffix("a.vol12.par2"), Some(".par2"));
+        assert_eq!(par2_suffix("a.vol+1.par2"), Some(".par2"));
+        assert_eq!(par2_suffix("a.mkv"), None);
     }
 
     #[test]

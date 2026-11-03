@@ -9,6 +9,7 @@ use crate::config::{Config, ObfuscateMode};
 use crate::nntp::pool::ConnectionSlot;
 use crate::yenc;
 
+use super::super::identity::obfuscated_yenc_name;
 use super::PostedSegment;
 
 /// Re-read `seg`'s slice from disk, re-encode it, and post it under a fresh
@@ -46,7 +47,7 @@ pub(super) async fn repost_one(
         ),
         ObfuscateMode::Article => (
             obfuscated_name(),
-            obfuscated_name(),
+            obfuscated_yenc_name(&seg.subject_name),
             random_from(),
             super::super::resolve_date(config.date.as_deref()),
         ),

@@ -192,6 +192,18 @@ fn article_obfuscation_gives_every_segment_independent_wire_identity() {
     for (subject, yenc) in names.iter().zip(&yenc_names) {
         assert_ne!(*subject, yenc, "Subject and yEnc name must be independent");
     }
+    let par2_names: Vec<_> = yenc_names
+        .iter()
+        .filter(|name| name.ends_with(".par2"))
+        .collect();
+    assert!(!par2_names.is_empty(), "no PAR2 article: {yenc_names:?}");
+    assert!(
+        par2_names
+            .iter()
+            .all(|name| name.ends_with(".vol000+001.par2") && !name.contains("movie")),
+        "every opaque recovery-volume yEnc name must keep its volume suffix \
+         so NZBGet can count its recovery blocks: {par2_names:?}"
+    );
 }
 
 #[test]
@@ -266,5 +278,10 @@ fn full_keeps_yenc_stable_per_physical_file() {
         par2_names.len(),
         1,
         "the opaque PAR2 yEnc name must retain its technical extension for client cleanup: {yenc_counts:?}"
+    );
+    assert!(
+        par2_names[0].ends_with(".vol000+001.par2") && !par2_names[0].contains("movie"),
+        "the opaque recovery-volume yEnc name must keep its volume suffix \
+         so NZBGet can count its recovery blocks: {par2_names:?}"
     );
 }

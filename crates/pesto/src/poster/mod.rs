@@ -35,7 +35,7 @@ mod identity;
 pub use identity::pick_post_group;
 use identity::{
     normalize_client_path, obfuscated_yenc_name, par2_release_base, persisted_identity,
-    resolve_date,
+    resolve_date, with_par2_suffix,
 };
 mod outcome;
 pub use outcome::{
@@ -487,9 +487,10 @@ async fn push_par2_file(
             name.clone()
         } else {
             // NZBGet uses the yEnc name while collecting recovery volumes;
-            // retain only the technical extension so it cleans them up after
-            // repair without exposing the real volume name.
-            format!("{}.par2", obfuscated_name_with_prefix(prefix))
+            // retain only the technical `.volNNN+NNN.par2` suffix so it can
+            // count the blocks it may fetch for repair and clean the volumes
+            // up afterwards, without exposing the real volume name.
+            with_par2_suffix(obfuscated_name_with_prefix(prefix), &real_name)
         };
         (name, yenc, shared.release_from.clone().unwrap_or_default())
     } else {
