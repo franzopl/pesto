@@ -46,13 +46,12 @@ const PADDING_RATIO_THRESHOLD: f64 = 1.15;
 /// wins. Otherwise:
 ///
 /// - With a [`CreateOptions::slice_unit`], the slice size is a whole multiple
-///   of the unit, chosen by [`aligned_slice_size`]: a unit lost in transit
-///   (pesto passes its article size) then damages exactly one slice.
+///   of the unit: a unit lost in transit (pesto passes its article size)
+///   then damages exactly one slice.
 /// - Without one, or when the aligned size would pad many small files, the
-///   heuristic targets [`TARGET_SLICES`] × effort slices, then halves the
-///   slice size while padding from small files (common on Blu-ray/DVD disc
-///   structures) inflates the set by more than 15 %, up to
-///   [`MAX_SLICES_PADDING_OPT`] slices.
+///   heuristic targets 2000 × effort slices, then halves the slice size
+///   while padding from small files (common on Blu-ray/DVD disc structures)
+///   inflates the set by more than 15 %, up to 6000 slices.
 ///
 /// Reducing slice size does not increase peak memory usage: recovery buffer
 /// memory ≈ recovery_count × slice_size ≈ total_padded × pct/100, which is
