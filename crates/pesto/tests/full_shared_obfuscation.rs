@@ -526,6 +526,13 @@ async fn full_shared_obfuscation_par2_set_shares_prefix_with_content() {
             "PAR2 article's yEnc name= `{yenc_name}` (subject `{subject}`) \
              doesn't start with the shared wire prefix `{prefix}-`"
         );
+        // NZBGet counts fetchable recovery blocks from this suffix.
+        let par2_suffix = name.rfind(".vol").map_or(".par2", |at| &name[at..]);
+        assert!(
+            yenc_name.ends_with(par2_suffix),
+            "PAR2 article's yEnc name= `{yenc_name}` (subject `{subject}`) \
+             lost its `{par2_suffix}` suffix"
+        );
         checked_par2 += 1;
     }
     assert!(checked_par2 > 0, "no PAR2 articles were captured to check");

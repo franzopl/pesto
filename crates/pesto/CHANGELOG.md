@@ -58,6 +58,12 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ### Fixed
 
+- Under `full`, `article` and `full-shared`, an obfuscated recovery volume's
+  yEnc name keeps its `.volNNN+NNN.par2` suffix instead of only `.par2`.
+  NZBGet otherwise renamed every volume to `+01` and counted one recovery
+  block per volume, so a repair needing more blocks than there were volumes
+  failed without fetching them. A `--check` repost under `article` also keeps
+  the suffix now.
 - Multi-file PAR2 sets (per-run and `--season`) now list and order files by
   File ID as the PAR2 spec, par2cmdline and ParPar do, so they match ParPar
   byte for byte. `--resume` discards state recorded by an older version when

@@ -52,8 +52,13 @@ looks obfuscated. PAR2 FileDesc remains the authoritative rename source for
 the modes that retain a canonical client path.
 
 For an obfuscated PAR2 recovery volume, Pesto keeps the random yEnc stem but
-adds only the `.par2` extension. This exposes no real filename and lets
-clients classify and remove recovery data after a successful repair.
+adds only the technical `.volNNN+NNN.par2` suffix (`.par2` for an index).
+This exposes no real filename and lets clients classify and remove recovery
+data after a successful repair. The suffix is required for NZBGet repair: its
+direct rename keeps a `.volNNN+NNN.par2` suffix and otherwise renames every
+volume to `.volNNN+01.PAR2`, then counts the blocks it can still fetch from
+that `+NN`. The suffix states only volume geometry, which the volume's own
+Recovery Slice packets already carry.
 
 Pesto strips one common outer input directory because the downloader creates
 the job directory, preserves every directory below it, rejects `.`/`..`, empty
@@ -119,8 +124,11 @@ where that external binary is unavailable:
 
 - `full` uses one stable opaque yEnc name per physical file,
   including each PAR2 volume, while keeping Subject and From fragmented per
-  article. The recovery-volume yEnc name retains only `.par2` so NZBGet can
-  classify it for final cleanup. This is intentionally not the legacy strict
+  article. The recovery-volume yEnc name retains only `.volNNN+NNN.par2` so
+  NZBGet can count its recovery blocks and classify it for final cleanup. A
+  2026-11-03 NZBGet 26.1 run showed the earlier `.par2`-only name failing a
+  repair that needed more blocks than there were volumes, in both `full` and
+  `article`. This is intentionally not the legacy strict
   `article` mode.
 - A raw FileDesc path `Árvore/legenda-ação.txt` retained the correct contents
   but became the mojibake path `Ãrvore/legenda-aÃ§Ã£o.txt`. Inspection of
