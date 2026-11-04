@@ -9,6 +9,7 @@ use crate::progress::{ProgressEvent, ProgressSender};
 use crate::resume::ResumeState;
 
 use super::outcome::{FailedTask, PostedSegment};
+use super::prepare::ReleaseLayout;
 
 pub(super) struct Shared {
     pub(super) config: Config,
@@ -75,6 +76,10 @@ pub(super) struct Shared {
     /// before PAR2 encoding actually starts. `0` when `config.file_counter`
     /// is off, which callers treat as "no counter" (see `FileMeta::file_index`).
     pub(super) total_files: u32,
+    /// Complete, immutable release layout for segment identity derivation.
+    pub(super) release_layout: Arc<ReleaseLayout>,
+    /// Optional encryption adapter configured for this upload session.
+    pub encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
     /// Sender into the streaming STAT queue. `prepare_ready` arm 2
     /// (re-STAT a stored id, no POST) needs this; the POST path uses it
     /// after a 240. Taken (dropped) before `finish_and_drain` so the

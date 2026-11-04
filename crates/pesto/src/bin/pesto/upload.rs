@@ -247,8 +247,17 @@ pub(super) fn reuse_or_generate_archive_stem(
     let mut state = pesto::resume::ResumeState::load(rp).unwrap_or_default();
     // Normalizes the loaded state first: a fingerprint mismatch clears any
     // stale archive_stem (and segments/files) before we look at it, so an
-    // incompatible prior run's name is never reused.
-    state.validate_run(&fingerprint);
+    // incompatible prior run's name is never reused. When validation failed,
+    // also clear the on-disk spool next to persisting the new fingerprint:
+    // this path runs during compression, before `prepare_resources` (the
+    // spool-clearing owner on the posting path) is reached, and if
+    // compression then fails or is cancelled the saved state would otherwise
+    // claim the new fingerprint while the spool still holds articles encoded
+    // under the old one, which the next resume would replay unchecked
+    // (R11-PU-01).
+    if !state.validate_run(&fingerprint) {
+        pesto::spool::remove_all(&pesto::spool::spool_dir(rp));
+    }
     if let Some(stem) = state.archive_stem() {
         return stem.to_string();
     }
@@ -450,6 +459,75 @@ mod tests {
         );
         let state = pesto::resume::ResumeState::load(&state_path).unwrap();
         assert_eq!(state.archive_stem(), Some(second.as_str()));
+    }
+
+    #[test]
+    fn fingerprint_change_in_stem_path_clears_stale_spool() {
+        // R11-PU-01 regression: the stem helper runs during compression,
+        // before `prepare_resources`. If it persists the new fingerprint
+        // while a stale spool remains, a later cancelled/failed compression
+        // leaves state claiming the new identity over old-geometry spool
+        // bytes that the next resume replays without a fingerprint check.
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = true;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("release.pesto-state");
+
+        let _first = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        // Seed a spool entry as a prior interrupted run would have left it.
+        let spool_dir = pesto::spool::spool_dir(&state_path);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(pesto::spool::write(
+            &spool_dir,
+            "archive.7z",
+            1,
+            "stale@example.com",
+            b"headers",
+            b"stale-old-geometry-body",
+        ))
+        .unwrap();
+        assert!(pesto::spool::read(&spool_dir, "archive.7z", 1).is_some());
+
+        // Fingerprint change (different --article-size) through the same
+        // early compression-path call: the stale spool must not survive.
+        config.article_size = 384_000;
+        let _second = reuse_or_generate_archive_stem(Some(&state_path), &config);
+
+        assert!(
+            !spool_dir.exists() || pesto::spool::read(&spool_dir, "archive.7z", 1).is_none(),
+            "fingerprint change in the stem path must clear the stale spool"
+        );
+    }
+
+    #[test]
+    fn compatible_resume_in_stem_path_keeps_spool() {
+        // The spool cleanup above must only fire on a fingerprint mismatch:
+        // a compatible resume keeps its spool for replay.
+        let mut config = test_config(768_000, ObfuscateMode::Full, Some("7z"), 0);
+        config.resume = true;
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("release.pesto-state");
+
+        let first = reuse_or_generate_archive_stem(Some(&state_path), &config);
+        let spool_dir = pesto::spool::spool_dir(&state_path);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(pesto::spool::write(
+            &spool_dir,
+            "archive.7z",
+            1,
+            "kept@example.com",
+            b"headers",
+            b"body",
+        ))
+        .unwrap();
+
+        let second = reuse_or_generate_archive_stem(Some(&state_path), &config);
+        assert_eq!(first, second);
+        assert!(
+            pesto::spool::read(&spool_dir, "archive.7z", 1).is_some(),
+            "compatible resume must not clear the spool"
+        );
     }
 
     fn inputs(names: &[&str]) -> Vec<InputFile> {

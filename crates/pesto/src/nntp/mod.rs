@@ -167,9 +167,12 @@ impl Connection {
     /// Post an article whose headers and yEnc body are held in separate buffers.
     ///
     /// This avoids copying the body (typically ~768 KB) into a combined buffer.
-    /// The headers are dot-stuffed for RFC 3977 compliance. The body is written
-    /// directly without dot-stuffing because the yEnc encoder already escapes
-    /// any `'.'` that would appear at a line start (yEnc spec §4).
+    /// The headers are dot-stuffed for RFC 3977 compliance. The ordinary yEnc
+    /// body is written directly without dot-stuffing because the yEnc encoder
+    /// already escapes any `'.'` that would appear at a line start (yEnc
+    /// spec §4) — ordinary uploads pay no extra scan for it. Encrypted
+    /// articles, whose control lines are rewritten after encoding and *can*
+    /// start with '.', go through [`Self::post_parts_encrypted`] instead.
     ///
     /// A `441` duplicate rejection (`already_exists`) is treated as success —
     /// see `already_exists` for why that's the right call when we don't yet
@@ -179,7 +182,22 @@ impl Connection {
     /// different) Message-ID in its `240` response — see
     /// `extract_returned_message_id` — or `None` when it didn't say.
     pub async fn post_parts(&mut self, headers: &[u8], body: &[u8]) -> Result<Option<String>> {
-        self.post_parts_inner(headers, body, true).await
+        self.post_parts_inner(headers, body, true, false).await
+    }
+
+    /// Like [`Self::post_parts`], for an encrypted article (`--encrypt`).
+    ///
+    /// Encrypted control lines (the random Line 1 bootstrap salt or an FF1
+    /// ciphertext line) CAN start with '.', so the body is scanned and
+    /// dot-stuffed when needed — see `write_body`. That scan is the only
+    /// extra cost over [`Self::post_parts`] and is paid solely by encrypted
+    /// uploads, never by ordinary ones.
+    pub async fn post_parts_encrypted(
+        &mut self,
+        headers: &[u8],
+        body: &[u8],
+    ) -> Result<Option<String>> {
+        self.post_parts_inner(headers, body, true, true).await
     }
 
     /// Like [`Self::post_parts`], but for re-posting an article a STAT pass already
@@ -202,7 +220,17 @@ impl Connection {
         headers: &[u8],
         body: &[u8],
     ) -> Result<Option<String>> {
-        self.post_parts_inner(headers, body, false).await
+        self.post_parts_inner(headers, body, false, false).await
+    }
+
+    /// Like [`Self::repost_parts_confirmed`], for an encrypted article — the
+    /// body takes the dot-stuffing path of [`Self::post_parts_encrypted`].
+    pub async fn repost_parts_confirmed_encrypted(
+        &mut self,
+        headers: &[u8],
+        body: &[u8],
+    ) -> Result<Option<String>> {
+        self.post_parts_inner(headers, body, false, true).await
     }
 
     async fn post_parts_inner(
@@ -210,6 +238,7 @@ impl Connection {
         headers: &[u8],
         body: &[u8],
         dedup_as_success: bool,
+        encrypted: bool,
     ) -> Result<Option<String>> {
         let resp = self.command("POST").await?;
         if resp.code != 340 {
@@ -219,20 +248,7 @@ impl Connection {
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
-
-        // Body is *not* dot-stuffed. yEnc already escapes a '.' that would
-        // start a line (draft v1.3 §4 / `=ybegin` line wrap), so stuffing
-        // here would be a second pass over every article on the hot path.
-        debug_assert!(
-            !yenc_body_has_leading_dot(body),
-            "yEnc body must not contain a line starting with '.'; \
-             NNTP would treat it as end-of-article"
-        );
-        self.write_all_timeout(body).await?;
-        if !body.ends_with(b"\r\n") {
-            self.write_all_timeout(b"\r\n").await?;
-        }
-        self.write_all_timeout(b".\r\n").await?;
+        self.write_body(body, encrypted).await?;
         self.flush_timeout().await?;
 
         let resp = self.read_response().await?;
@@ -256,21 +272,71 @@ impl Connection {
     /// rejects POST with a non-340 code, [`Self::read_post_response`] returns an
     /// error and the caller must invalidate the connection.
     pub async fn enqueue_post(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+        self.enqueue_post_inner(headers, body, false).await
+    }
+
+    /// Like [`Self::enqueue_post`], for an encrypted article — the body takes
+    /// the dot-stuffing path of [`Self::post_parts_encrypted`].
+    pub async fn enqueue_post_encrypted(&mut self, headers: &[u8], body: &[u8]) -> Result<()> {
+        self.enqueue_post_inner(headers, body, true).await
+    }
+
+    async fn enqueue_post_inner(
+        &mut self,
+        headers: &[u8],
+        body: &[u8],
+        encrypted: bool,
+    ) -> Result<()> {
         self.write_all_timeout(b"POST\r\n").await?;
         let mut stuffed_headers = Vec::with_capacity(headers.len() + 4);
         dot_stuff(headers, &mut stuffed_headers);
         self.write_all_timeout(&stuffed_headers).await?;
-        debug_assert!(
-            !yenc_body_has_leading_dot(body),
-            "yEnc body must not contain a line starting with '.'; \
-             NNTP would treat it as end-of-article"
-        );
-        self.write_all_timeout(body).await?;
+        self.write_body(body, encrypted).await?;
+        Ok(())
+    }
+
+    /// Write one article body onto the wire, ending the POST data with the
+    /// `.` terminator line.
+    ///
+    /// For an ordinary body (`encrypted == false`) the body is *not*
+    /// dot-stuffed and *not* scanned: standard yEnc escapes a '.' that would
+    /// start a line (yEnc draft v1.3 §4 / `=ybegin` line wrap), so an
+    /// ordinary body never contains a line starting with '.', and scanning
+    /// for one here would be a second pass over every article on the hot
+    /// path that always finds nothing. The `debug_assert!` keeps that
+    /// invariant checked in debug builds at zero release cost.
+    ///
+    /// Only encrypted bodies (`encrypted == true`, the `--encrypt` path)
+    /// are scanned: their control lines are rewritten after yEnc encoding —
+    /// the random Line 1 bootstrap salt and the FF1 ciphertext lines use the
+    /// 253-byte Alphabet, which excludes NUL/CR/LF but includes 0x2E ('.') —
+    /// so an encrypted line CAN start with '.', and a valid salt may even
+    /// begin with the bytes `=ybegin`. Stuffing is therefore decided purely
+    /// from the actual leading-dot bytes (RFC 3977 §3.1.1; Body Std v1.2 §9
+    /// transport boundary) — never from a wire-prefix shortcut — and only
+    /// on this path.
+    /// A body not ending in CRLF gets one appended before the terminator.
+    async fn write_body(&mut self, body: &[u8], encrypted: bool) -> Result<()> {
+        if encrypted {
+            if yenc_body_has_leading_dot(body) {
+                let mut stuffed_body = Vec::with_capacity(body.len() + 16);
+                dot_stuff(body, &mut stuffed_body);
+                self.write_all_timeout(&stuffed_body).await?;
+            } else {
+                self.write_all_timeout(body).await?;
+            }
+        } else {
+            debug_assert!(
+                !yenc_body_has_leading_dot(body),
+                "yEnc body must not contain a line starting with '.'; \
+                 NNTP would treat it as end-of-article"
+            );
+            self.write_all_timeout(body).await?;
+        }
         if !body.ends_with(b"\r\n") {
             self.write_all_timeout(b"\r\n").await?;
         }
-        self.write_all_timeout(b".\r\n").await?;
-        Ok(())
+        self.write_all_timeout(b".\r\n").await
     }
 
     /// Flush all enqueued articles to the server. Call once after all
@@ -602,3 +668,5 @@ impl Connection {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_posting;

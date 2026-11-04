@@ -18,10 +18,80 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::resume::PersistedWireIdentity;
 
 const V2_MAGIC: &[u8; 4] = b"PST2";
+const V3_MAGIC: &[u8; 4] = b"PST3";
+
+/// Encryption identity stamped into every spool entry written by the poster
+/// (Round 12 PU12-01 / DECISIONS Q3(a)): the creating run's encryption mode
+/// and, for encrypted runs, a fingerprint of its session salt. Replay only
+/// accepts an entry whose stamp matches the current run exactly, so spool
+/// bytes created as plaintext can never be replayed into an encrypted NZB
+/// (or vice versa), and a salt rotation invalidates old entries even when
+/// the spool directory itself survived. The fingerprint is a SHA-256 digest
+/// of the salt — it identifies the salt without carrying it, and is never
+/// logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpoolEncryptionStamp {
+    pub encrypted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salt_fingerprint: Option<String>,
+}
+
+impl SpoolEncryptionStamp {
+    /// Stamp for an ordinary (unencrypted) run.
+    pub fn ordinary() -> Self {
+        Self {
+            encrypted: false,
+            salt_fingerprint: None,
+        }
+    }
+
+    /// Stamp for an encrypted run using `salt` as its session salt.
+    pub fn encrypted(salt: &[u8; 16]) -> Self {
+        let digest = Sha256::digest(salt);
+        let mut fingerprint = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            use std::fmt::Write;
+            let _ = write!(&mut fingerprint, "{b:02x}");
+        }
+        Self {
+            encrypted: true,
+            salt_fingerprint: Some(fingerprint),
+        }
+    }
+
+    /// Stamp for the run an encryption adapter belongs to, or the ordinary
+    /// stamp when the run has no adapter.
+    pub fn for_adapter(adapter: Option<&crate::crypto::UploadEncryptionAdapter>) -> Self {
+        match adapter {
+            Some(adapter) => Self::encrypted(&adapter.salt()),
+            None => Self::ordinary(),
+        }
+    }
+
+    /// Whether an entry carrying `entry_stamp` may be replayed by a run
+    /// stamped `self`. Legacy entries written before stamps existed carry
+    /// no stamp: they may only be replayed by an ordinary run (encrypted
+    /// runs always wrote stamped entries through the poster, so an
+    /// unstamped entry is never trusted with ciphertext).
+    pub fn allows_replay(&self, entry_stamp: Option<&Self>) -> bool {
+        match entry_stamp {
+            Some(stamp) => stamp == self,
+            None => !self.encrypted,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SpoolEnvelope {
+    wire_identity: Option<PersistedWireIdentity>,
+    encryption_stamp: Option<SpoolEncryptionStamp>,
+}
 
 /// Directory holding spooled articles for one upload session — a sibling of
 /// the `.pesto-state` file (not nested inside it, since that path is a
@@ -44,6 +114,9 @@ pub struct SpooledArticle {
     pub headers: Vec<u8>,
     pub body: Vec<u8>,
     pub wire_identity: Option<PersistedWireIdentity>,
+    /// Encryption stamp of the run that created this entry, if the entry
+    /// was written with one (all poster-written entries carry it).
+    pub encryption_stamp: Option<SpoolEncryptionStamp>,
 }
 
 /// Persist a fully-encoded article to the spool, creating the directory on
@@ -58,7 +131,7 @@ pub async fn write(
     headers: &[u8],
     body: &[u8],
 ) -> Result<()> {
-    write_inner(dir, file_name, part, message_id, headers, body, None).await
+    write_inner(dir, file_name, part, message_id, headers, body, None, None).await
 }
 
 /// Versioned spool writer used by the poster. Unlike the legacy public
@@ -73,6 +146,7 @@ pub(crate) async fn write_with_identity(
     headers: &[u8],
     body: &[u8],
     wire_identity: &PersistedWireIdentity,
+    encryption_stamp: &SpoolEncryptionStamp,
 ) -> Result<()> {
     write_inner(
         dir,
@@ -82,6 +156,7 @@ pub(crate) async fn write_with_identity(
         headers,
         body,
         Some(wire_identity),
+        Some(encryption_stamp),
     )
     .await
 }
@@ -95,26 +170,36 @@ async fn write_inner(
     headers: &[u8],
     body: &[u8],
     wire_identity: Option<&PersistedWireIdentity>,
+    encryption_stamp: Option<&SpoolEncryptionStamp>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(dir)
         .await
         .with_context(|| format!("creating spool directory `{}`", dir.display()))?;
-    // PST2 layout: [magic][u32 identity_len][identity JSON], followed by the
+    // PST3 layout: [magic][u32 envelope_len][envelope JSON], followed by the
     // legacy [u32 id_len][id][u32 headers_len][headers][body] payload. The
-    // body is raw (non-UTF-8) yEnc bytes, so the small binary envelope avoids
-    // copying it through a general-purpose serialization format.
-    let identity = wire_identity
-        .map(serde_json::to_vec)
-        .transpose()
-        .context("serialising spool wire identity")?;
-    let identity_len = identity.as_ref().map_or(0, Vec::len);
+    // envelope carries both the wire identity and the encryption stamp.
+    // PST2 ([magic][u32 identity_len][bare identity JSON]) entries remain
+    // readable. The body is raw (non-UTF-8) yEnc bytes, so the small binary
+    // envelope avoids copying it through a general-purpose serialization format.
+    let envelope = if wire_identity.is_some() || encryption_stamp.is_some() {
+        Some(
+            serde_json::to_vec(&SpoolEnvelope {
+                wire_identity: wire_identity.cloned(),
+                encryption_stamp: encryption_stamp.cloned(),
+            })
+            .context("serialising spool envelope")?,
+        )
+    } else {
+        None
+    };
+    let envelope_len = envelope.as_ref().map_or(0, Vec::len);
     let mut buf = Vec::with_capacity(
-        V2_MAGIC.len() + 4 + identity_len + 4 + message_id.len() + 4 + headers.len() + body.len(),
+        V3_MAGIC.len() + 4 + envelope_len + 4 + message_id.len() + 4 + headers.len() + body.len(),
     );
-    if let Some(identity) = identity {
-        buf.extend_from_slice(V2_MAGIC);
-        buf.extend_from_slice(&(identity.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&identity);
+    if let Some(envelope) = envelope {
+        buf.extend_from_slice(V3_MAGIC);
+        buf.extend_from_slice(&(envelope.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&envelope);
     }
     buf.extend_from_slice(&(message_id.len() as u32).to_le_bytes());
     buf.extend_from_slice(message_id.as_bytes());
@@ -129,15 +214,23 @@ async fn write_inner(
 
 fn parse(buf: &[u8]) -> Option<SpooledArticle> {
     let mut pos = 0usize;
-    let wire_identity = if buf.starts_with(V2_MAGIC) {
+    let (wire_identity, encryption_stamp) = if buf.starts_with(V3_MAGIC) {
+        pos += V3_MAGIC.len();
+        let envelope_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        let envelope: SpoolEnvelope =
+            serde_json::from_slice(buf.get(pos..pos + envelope_len)?).ok()?;
+        pos += envelope_len;
+        (envelope.wire_identity, envelope.encryption_stamp)
+    } else if buf.starts_with(V2_MAGIC) {
         pos += V2_MAGIC.len();
         let identity_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
         pos += 4;
         let identity = serde_json::from_slice(buf.get(pos..pos + identity_len)?).ok()?;
         pos += identity_len;
-        Some(identity)
+        (Some(identity), None)
     } else {
-        None
+        (None, None)
     };
     let id_len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
     pos += 4;
@@ -153,6 +246,7 @@ fn parse(buf: &[u8]) -> Option<SpooledArticle> {
         headers,
         body,
         wire_identity,
+        encryption_stamp,
     })
 }
 
@@ -228,11 +322,16 @@ mod tests {
                 b"headers",
                 b"body",
                 &identity,
+                &SpoolEncryptionStamp::ordinary(),
             ))
             .unwrap();
 
         let entry = read(&spool, "movie.bin", 1).unwrap();
         assert_eq!(entry.wire_identity, Some(identity));
+        assert_eq!(
+            entry.encryption_stamp,
+            Some(SpoolEncryptionStamp::ordinary())
+        );
     }
 
     #[test]
@@ -274,6 +373,51 @@ mod tests {
             .unwrap();
         remove_all(&spool);
         assert!(!spool.exists());
+    }
+
+    #[test]
+    fn stamped_spool_round_trips_encryption_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("release.pesto-spool");
+        let identity = PersistedWireIdentity {
+            subject_name: "subject-token".into(),
+            yenc_name: "yenc-token".into(),
+            from: "Poster <opaque@example.com>".into(),
+            date: None,
+            unix_date: None,
+        };
+        let stamp = SpoolEncryptionStamp::encrypted(&[0x42u8; 16]);
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(write_with_identity(
+                &spool,
+                "movie.bin",
+                1,
+                "id@example.com",
+                b"headers",
+                b"body",
+                &identity,
+                &stamp,
+            ))
+            .unwrap();
+
+        let entry = read(&spool, "movie.bin", 1).unwrap();
+        assert_eq!(entry.wire_identity, Some(identity));
+        assert_eq!(entry.encryption_stamp, Some(stamp));
+    }
+
+    #[test]
+    fn stamp_allows_only_matching_replay() {
+        let encrypted_a = SpoolEncryptionStamp::encrypted(&[0x11u8; 16]);
+        let encrypted_b = SpoolEncryptionStamp::encrypted(&[0x22u8; 16]);
+        let ordinary = SpoolEncryptionStamp::ordinary();
+        assert!(encrypted_a.allows_replay(Some(&encrypted_a)));
+        assert!(!encrypted_a.allows_replay(Some(&encrypted_b)));
+        assert!(!encrypted_a.allows_replay(Some(&ordinary)));
+        assert!(!encrypted_a.allows_replay(None));
+        assert!(ordinary.allows_replay(Some(&ordinary)));
+        assert!(ordinary.allows_replay(None));
+        assert!(!ordinary.allows_replay(Some(&encrypted_a)));
     }
 
     #[test]

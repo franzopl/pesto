@@ -6,6 +6,71 @@ use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
+/// Map a 1-based ordinal (rank) to the ordinal-th permitted segment index:
+/// the monotonic sequence over `u32` that skips every value forbidden by the
+/// index framing rule (yEnc Body Encryption Standard v1.2 §8): `0` is never
+/// valid, and neither is any index whose big-endian `uint32_be` encoding
+/// contains a `0x0A` (LF) or `0x0D` (CR) byte, because such bytes would split
+/// Line 1 on the wire.
+///
+/// Ordinals 1-9 map to indices 1-9; ordinal 10→11, 11→12, 12→14, 13→15
+/// (skipping 10 and 13); crossing 266/269 follows the same rule. Monotonic
+/// and injective by construction. Returns `None` when the ordinal's safe
+/// index would exceed `u32::MAX` — callers fail layout construction cleanly
+/// instead of panicking.
+///
+/// Used CENTRALLY by [`super::ReleaseLayout::segment_identity`] so every
+/// identity consumer (data paths and the PAR2 path) gets safe indices, with
+/// identity finalized before salt/KDF.
+///
+/// Implementation note: the permitted `u32` values are exactly the four-digit
+/// numerals over the 254-symbol alphabet `u32_be bytes ∖ {0x0A, 0x0D}` —
+/// i.e. rank `n` written in base 254, each digit `d` mapped back to its
+/// permitted byte `d + (d >= 10) + (d >= 12)` (skipping the 0x0A/0x0D byte
+/// values). This is the exact inverse of that digit encoding, O(1) with no
+/// iteration; equivalence with the naive enumeration is property-tested in
+/// this module and exercised by the `index_allocation.json` conformance
+/// vectors.
+pub(crate) fn nth_safe_segment_index(ordinal: u64) -> Option<u32> {
+    if ordinal == 0 {
+        return None;
+    }
+    // Four-digit base-254 capacity: the last permitted u32 value is
+    // 0xFFFFFFFF (digits 253,253,253,253 → bytes 255,255,255,255).
+    if ordinal > 254u64.pow(4) - 1 {
+        return None;
+    }
+    let mut value: u32 = 0;
+    let mut n = ordinal;
+    // Extract base-254 digits least-significant first, mapping each to its
+    // permitted big-endian byte.
+    let mut digits = [0u32; 4];
+    for digit in &mut digits {
+        *digit = (n % 254) as u32;
+        n /= 254;
+    }
+    for &digit in digits.iter().rev() {
+        let byte = digit + u32::from(digit >= 10) + u32::from(digit >= 12);
+        value = (value << 8) | byte;
+    }
+    Some(value)
+}
+
+/// The 1-based rank of `index` in the permitted-index sequence: how many
+/// permitted values are `<= index`. The next assigned safe index after a
+/// forbidden candidate is therefore `nth_safe_segment_index(rank)`. Test
+/// helper (see `nzb::tests::encryption_metadata::index_allocation_vectors_exercise_the_allocator`).
+#[cfg(test)]
+pub(crate) fn safe_index_rank(index: u32) -> u64 {
+    let bytes = index.to_be_bytes();
+    let mut rank: u64 = 0;
+    for &b in &bytes {
+        // Permitted bytes below `b`: all except 0x0A and 0x0D.
+        rank = rank * 254 + u64::from(b) - u64::from(b > 0x0A) - u64::from(b > 0x0D);
+    }
+    rank
+}
+
 /// A posted segment, retained for later `.nzb` generation.
 ///
 /// `file_path`, `subject_name` and `from` are `Arc`-shared rather than owned
@@ -73,6 +138,16 @@ pub struct PostedSegment {
     /// alone, long after `Shared` is gone.
     pub file_index: u32,
     pub total_files: u32,
+    /// Segment index across the release for encrypted uploads.
+    pub segment_index: u32,
+    /// SHA-256 of the segment's plaintext bytes, recorded when this segment
+    /// was encrypted for upload (`None` for ordinary uploads and segments
+    /// reconstructed from a parsed `.nzb`). A reread-based repost
+    /// (`check::repost_one`) refuses to re-encrypt when the re-read bytes no
+    /// longer match this digest: two distinct plaintexts must never be
+    /// published under one (salt, `segment_index`) identity — Body
+    /// Encryption Standard v1.2 §8.
+    pub plaintext_digest: Option<[u8; 32]>,
 }
 
 /// A segment that failed to post during the upload run. Carries enough
@@ -116,6 +191,14 @@ pub struct FailedTask {
     /// end-of-run retry can rebuild the identical subject.
     pub file_index: u32,
     pub total_files: u32,
+    /// Segment index across the release for encrypted uploads.
+    pub segment_index: u32,
+    /// SHA-256 of the segment's plaintext bytes at original-encode time
+    /// (`None` for ordinary uploads) — see `PostedSegment::plaintext_digest`.
+    /// The end-of-run blind retry refuses to re-encrypt a re-read that no
+    /// longer matches: the original salt/segment index already authenticated
+    /// the old bytes (Body Encryption Standard v1.2 §8).
+    pub plaintext_digest: Option<[u8; 32]>,
 }
 
 /// The result of a posting run.
@@ -276,5 +359,77 @@ mod tests {
         let had_failures = post_failures || missing_confirmed || inconclusive;
         assert!(had_failures);
         assert!(!should_write_season_nzb(false, had_failures, false));
+    }
+}
+
+#[cfg(test)]
+mod index_framing_tests {
+    use super::*;
+
+    /// Index framing rule (yEnc Body Encryption Standard v1.2 §8): `0` is
+    /// never a valid index, and any index whose big-endian `uint32_be`
+    /// encoding contains a `0x0A` (LF) or `0x0D` (CR) byte would split Line 1
+    /// on the wire and is forbidden.
+    fn is_safe_segment_index(segment_index: u32) -> bool {
+        segment_index != 0
+            && segment_index
+                .to_be_bytes()
+                .iter()
+                .all(|&b| b != 0x0A && b != 0x0D)
+    }
+
+    fn forbidden(i: u32) -> bool {
+        i == 0 || i.to_be_bytes().iter().any(|&b| b == 0x0A || b == 0x0D)
+    }
+
+    #[test]
+    fn allocator_skips_all_four_forbidden_indices() {
+        // Production allocator: each forbidden candidate's rank maps to
+        // the next permitted index (10→11, 13→14, 266→267, 269→270).
+        for (candidate, expected) in [(10u32, 11u32), (13, 14), (266, 267), (269, 270)] {
+            let rank = safe_index_rank(candidate);
+            assert_eq!(
+                nth_safe_segment_index(rank),
+                Some(expected),
+                "forbidden candidate {candidate} must be skipped to {expected}"
+            );
+        }
+        // Neighbors of the forbidden values are permitted themselves.
+        for idx in [9u32, 11, 12, 14, 265, 267, 268, 270] {
+            assert!(is_safe_segment_index(idx));
+        }
+    }
+
+    #[test]
+    fn nth_safe_segment_index_equivalent_to_naive_enumeration() {
+        // Equivalence: the base-254 digit allocator must
+        // agree with the naive "next permitted value" enumeration over a
+        // range that crosses the byte-boundary carries (0xFF→0x00) and both
+        // forbidden pairs at every byte position.
+        let mut expected = 1u32;
+        for ordinal in 1u64..=70000u64 {
+            while forbidden(expected) {
+                expected += 1;
+            }
+            assert_eq!(
+                nth_safe_segment_index(ordinal),
+                Some(expected),
+                "ordinal {ordinal} must map to the enumerated {expected}"
+            );
+            expected += 1;
+        }
+    }
+
+    #[test]
+    fn nth_safe_segment_index_full_capacity_ends_exactly_at_u32_max() {
+        // Exhaustion/boundary: the permitted alphabet has 254 symbols per
+        // byte, so the capacity is 254^4 ordinals and the last permitted
+        // u32 value is 0xFFFFFFFF itself (digits 253 → byte 255 at every
+        // position; 0xFF is not forbidden).
+        assert_eq!(nth_safe_segment_index(254u64.pow(4) - 1), Some(u32::MAX));
+        // Capacity + 1 is exhausted: None, no panic.
+        assert_eq!(nth_safe_segment_index(254u64.pow(4)), None);
+        assert_eq!(nth_safe_segment_index(u64::from(u32::MAX)), None);
+        assert_eq!(nth_safe_segment_index(u64::from(u32::MAX) + 1), None);
     }
 }

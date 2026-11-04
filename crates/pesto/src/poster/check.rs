@@ -138,6 +138,10 @@ struct Inner {
     first_checks: AtomicUsize,
     first_misses: AtomicUsize,
     resume: Option<Arc<Mutex<ResumeState>>>,
+    /// Upload encryption adapter (`Some` for an encrypted upload): a repost
+    /// must re-encrypt with the same salt/segment index — see
+    /// `repost_one`'s doc comment.
+    encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
 }
 
 impl Inner {
@@ -338,6 +342,7 @@ pub struct CheckDrain {
 /// slot. The caller carves those slots out of the configured total (see
 /// `post_files_with_progress_and_cancel`) so the run never exceeds what the
 /// user asked for — workers never open their own TCP.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_check_coordinator(
     config: Config,
     groups: Vec<String>,
@@ -346,6 +351,10 @@ pub fn spawn_check_coordinator(
     cancel: Option<Arc<AtomicBool>>,
     check_slots: Vec<ConnectionSlot>,
     resume: Option<Arc<Mutex<ResumeState>>>,
+    // Upload encryption adapter: `Some` for an encrypted upload, so a STAT
+    // repost re-encrypts with the same salt/segment identity instead of
+    // leaking plaintext (Body Std v1.2 §8).
+    encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
 ) -> CheckCoordinatorHandle {
     let servers: Arc<Vec<_>> = Arc::new(config.all_servers().collect());
     let n_workers = check_slots.len();
@@ -370,6 +379,7 @@ pub fn spawn_check_coordinator(
         first_checks: AtomicUsize::new(0),
         first_misses: AtomicUsize::new(0),
         resume,
+        encryption_adapter,
     });
 
     let (tx, mut rx) = mpsc::unbounded_channel::<PostedSegment>();
@@ -640,7 +650,15 @@ async fn handle_confirmed_miss(
         return;
     }
 
-    match repost_one(&inner.config, slot, &item.seg, &inner.groups).await {
+    match repost_one(
+        &inner.config,
+        inner.encryption_adapter.as_deref(),
+        slot,
+        &item.seg,
+        &inner.groups,
+    )
+    .await
+    {
         Ok(new_seg) => {
             let reposted = inner.reposted_count.fetch_add(1, Ordering::Relaxed) + 1;
             inner.emit(ProgressEvent::CheckReposted {

@@ -37,6 +37,7 @@ pub mod article;
 pub mod cancel;
 pub mod compress;
 pub mod config;
+pub mod crypto;
 pub mod history;
 pub mod hooks;
 pub mod logging;

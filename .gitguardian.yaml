@@ -1,0 +1,9 @@
+version: 2
+
+secret:
+  # Published conformance-fixture values (public vectors, not credentials).
+  ignored_matches:
+    - name: published conformance fixture password
+      match: public-conformance-vector-key-2026
+    - name: published conformance wrong password
+      match: conformance-fixture-wrong-password

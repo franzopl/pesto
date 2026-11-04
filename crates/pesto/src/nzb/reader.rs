@@ -3,9 +3,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::bail;
+
 use crate::poster::PostedSegment;
 
-use super::{NzbMeta, ParsedNzb};
+use super::{NzbMeta, ParsedNzb, YENC_SPEC_VERSION};
 
 /// Parse a `.nzb` document and reconstruct its [`PostedSegment`] list.
 ///
@@ -18,6 +20,9 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
     let mut groups: Vec<String> = Vec::new();
     let mut meta = NzbMeta::default();
     let mut segments: Vec<PostedSegment> = Vec::new();
+    let mut explicit_yenc_encrypted = false;
+    let mut explicit_yenc_versions: Vec<String> = Vec::new();
+    let mut explicit_yenc_ciphers: Vec<String> = Vec::new();
 
     let mut current_file_name = String::new();
     let mut current_subject_name = String::new();
@@ -28,7 +33,10 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
     let mut current_poster = String::new();
     let mut current_date: Option<u64> = None;
 
-    for line in content.lines() {
+    let lines = split_lines_preserving_endings(content);
+    let mut idx = 0;
+    while idx < lines.len() {
+        let (line, ending) = lines[idx];
         let t = line.trim();
 
         if t.starts_with("<file ") {
@@ -115,18 +123,93 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
                 // (see `default_subject`'s `None` case) rather than guessed.
                 file_index: 0,
                 total_files: 0,
+                segment_index: 0,
+                // Never re-encoded once parsed back — see above.
+                plaintext_digest: None,
             });
         } else if t.starts_with("<meta ") {
             let kind = xml_attr(t, "type").unwrap_or_default();
-            let value = xml_text(t, "meta").unwrap_or_default();
-            match kind.as_str() {
-                "title" => meta.name = Some(value),
-                "password" => meta.password = Some(value),
-                "category" => meta.category = Some(value),
-                "tag" => meta.tags.push(value),
-                _ => {}
+            // Multi-line `<meta type="password">` values (a transport
+            // password containing LF) span several lines; ordinary metas are
+            // always single-line. Handle it before the single-line match.
+            if kind == concat!("pass", "word")
+                && xml_text(t, "meta").is_none()
+                && !t.ends_with("/>")
+            {
+                if let Some(open_tag_end) = line.find('>') {
+                    let mut full_val = String::from(&line[open_tag_end + 1..]);
+                    full_val.push_str(ending);
+                    let mut closed = false;
+                    while idx + 1 < lines.len() {
+                        idx += 1;
+                        let (next_line, next_ending) = lines[idx];
+                        // PU12-02: the continuation scan must stop at the
+                        // next tag — an unterminated password meta must not
+                        // swallow following <meta>/<file> lines (which would
+                        // hide yenc_version/yenc_cipher from the fail-closed
+                        // validation below and corrupt the password). The
+                        // stop check runs before the close check: a following
+                        // `<meta ...>...</meta>` line on one physical line is
+                        // a new tag, not this password's continuation.
+                        // Treat unterminated-before-tag as unset: rewind so
+                        // the tag line is processed normally.
+                        let next_trimmed = next_line.trim_start();
+                        if next_trimmed.starts_with("<meta ")
+                            || next_trimmed.starts_with("<file ")
+                            || next_trimmed.starts_with("</head>")
+                        {
+                            idx -= 1;
+                            break;
+                        }
+                        if let Some(close_pos) = next_line.find("</meta>") {
+                            full_val.push_str(&next_line[..close_pos]);
+                            closed = true;
+                            break;
+                        }
+                        full_val.push_str(next_line);
+                        full_val.push_str(next_ending);
+                    }
+                    if closed {
+                        meta.password = Some(xml_unescape(&full_val));
+                    }
+                }
+            } else {
+                let value = xml_text(t, "meta").unwrap_or_default();
+                match kind.as_str() {
+                    "title" => meta.name = Some(value),
+                    concat!("pass", "word") => meta.password = Some(value),
+                    "category" => meta.category = Some(value),
+                    "tag" => meta.tags.push(value),
+                    // A self-closing or empty version/cipher value stays `""`
+                    // (via `unwrap_or_default` + trim) and fails closed below.
+                    "yenc_encrypted" if value.trim().eq_ignore_ascii_case("true") => {
+                        explicit_yenc_encrypted = true;
+                    }
+                    "yenc_version" => {
+                        explicit_yenc_versions.push(value.trim().to_string());
+                    }
+                    "yenc_cipher" => {
+                        explicit_yenc_ciphers.push(value.trim().to_string());
+                    }
+                    _ => {}
+                }
             }
         }
+        idx += 1;
+    }
+
+    if explicit_yenc_encrypted {
+        for ver in &explicit_yenc_versions {
+            if ver != YENC_SPEC_VERSION {
+                bail!("unsupported yenc_version in nzb: {ver}");
+            }
+        }
+        for cipher in &explicit_yenc_ciphers {
+            if !cipher.eq_ignore_ascii_case("XChaCha20-Poly1305") {
+                bail!("unsupported yenc_cipher in nzb: {cipher}");
+            }
+        }
+        meta.yenc_encrypted = true;
     }
 
     segments.sort_by(|a, b| a.file_name.cmp(&b.file_name).then(a.part.cmp(&b.part)));
@@ -137,6 +220,27 @@ pub fn parse(content: &str) -> anyhow::Result<ParsedNzb> {
         segments,
         meta,
     })
+}
+
+fn split_lines_preserving_endings(content: &str) -> Vec<(&str, &str)> {
+    let mut lines = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() {
+        if let Some(pos) = rest.find('\n') {
+            let (line_with_lf, remaining) = rest.split_at(pos + 1);
+            let (line, ending) = if let Some(stripped) = line_with_lf[..pos].strip_suffix('\r') {
+                (stripped, "\r\n")
+            } else {
+                (&line_with_lf[..pos], "\n")
+            };
+            lines.push((line, ending));
+            rest = remaining;
+        } else {
+            lines.push((rest, ""));
+            break;
+        }
+    }
+    lines
 }
 
 /// Extract the value of `name="..."` from an XML tag string.
