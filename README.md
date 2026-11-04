@@ -359,16 +359,17 @@ are documented in [docs/obfuscation.md](docs/obfuscation.md).
 | Mode | Subject | yEnc `name=` | `From` header | Real path in `.nzb` |
 |------|---------|--------------|---------------|----------------------|
 | `none` (default) | real name | real name | config value | yes |
-| `full` | random, 10–30 chars, independent per file | random, 10–30 chars, independent per file | random per file | yes |
+| `full` | random, unique per article | opaque random, stable per physical file | random per article | yes |
 | `full-shared` | one shared random prefix for the whole release | shared prefix + own random suffix per file | shared for the whole release | yes |
 | `light` | one shared random prefix for the whole release | same string as Subject | shared for the whole release | wire Subject |
-| `header-fragmented` | independent random name per article | opaque random name per physical file | random per article | yes |
 
-`full` randomises everything on the wire using variable-length alphanumeric
-strings (`[A-Za-z0-9]`, 10–30 characters) and a random sender address with a
-random TLD. The real file names are only in the `.nzb` you keep, or recoverable
-through the PAR2 set. `light` is the deliberate exception: its NZB repeats the
-wire Subject so the same opaque token can be searched on public indexers.
+`full` randomises Subject and From independently for every article, using
+variable-length alphanumeric strings (`[A-Za-z0-9]`, 10–30 characters) and a
+random sender address with a random TLD, while a physical file retains one
+opaque yEnc `name=` for client-safe multipart assembly. The real file names are
+only in the `.nzb` you keep, or recoverable through the PAR2 set. `light` is
+the deliberate exception: its NZB repeats the wire Subject so the same opaque
+token can be searched on public indexers.
 
 Every mode above except `light` writes the canonical client path into the
 `.nzb` it generates, regardless of what went out on the wire. `light` instead
@@ -454,15 +455,15 @@ pesto --obfuscate=light --par2=5 --file-counter ./MyShow.S01/
 | `none` | Real filenames | ✓ Good | None |
 | `full-shared` | Shared random name | ✓ Good | Moderate |
 | `light` | Shared random name, Subject = yEnc name exactly | ✓ Good (strongest signal) | Moderate |
-| `full` | Per-file random names | ✗ Poor | High |
-| `header-fragmented` | Per-article headers, per-file opaque yEnc name | ✗ Header-only | High |
+| `full` | Per-article headers, per-file opaque yEnc name | ✗ Poor | High |
 
-### Header-fragmented mode
+### Legacy header-fragmented alias
 
-`--obfuscate=header-fragmented` gives every article an independent Subject and
-From header while retaining one opaque yEnc `name=` for every physical file.
-That lets SABnzbd and NZBGet assemble and clean multipart data/PAR2 files, but
-a body-aware observer can group a physical file's articles by its yEnc name.
+`--obfuscate=header-fragmented` is accepted as a compatibility alias for
+`--obfuscate=full`. It emits the same client-safe contract: each article has
+an independent Subject and From while every physical file retains one opaque
+yEnc `name=`. A body-aware observer can therefore group a physical file's
+articles by its yEnc name.
 
 ```bash
 pesto --obfuscate=header-fragmented movie.mkv
@@ -488,10 +489,9 @@ regardless of which `--obfuscate` mode is active.
 | Mode | Subject | yEnc `name=` | `From` | Real name in `.nzb` | Indexer grouping | Tool fingerprint avoided | + `--password` |
 |------|---------|---------------|--------|----------------------|-------------------|--------------------------|-----------------|
 | `none` | real name | real name | config value | yes (trivially) | yes, by real name | n/a — nothing hidden | archive content encrypted; release still searchable by real name |
-| `full` | random, per file | random, per file (≠ Subject) | random, per file | yes | no — each file is its own unrelated identity | yes | archive content also encrypted; still only the `.nzb`/PAR2 recover it |
+| `full` | random, per **article** | opaque random, per **physical file** (≠ Subject) | random, per article | yes | no — only a body-aware observer can group one physical file | yes | archive content also encrypted; still only the `.nzb`/PAR2 recover it |
 | `full-shared` | shared prefix, whole release | shared prefix + own random suffix (≠ Subject) | shared, whole release | yes | yes, by shared prefix | yes | same, plus content encrypted |
 | `light` | shared prefix, whole release | **identical to Subject** | shared, whole release | yes | yes, strongest signal (exact Subject/yEnc match) | **no** — that exact match is the point | same, plus content encrypted |
-| `header-fragmented` | random, per **article** | opaque random, per **physical file** | random, per article | yes | only to a body-aware observer, per file | yes | same, plus content encrypted; conventional client assembly still works |
 
 Quick guidance:
 - **Public, no privacy need** → `none`.
@@ -502,13 +502,14 @@ Quick guidance:
   one unit** → `full-shared` (the default recommendation) or `light` if your
   indexer specifically needs an exact Subject/yEnc `name=` match to group
   correctly (confirm empirically — `full-shared` is right for most).
-- **Extra header fragmentation while keeping conventional client cleanup** →
-  `header-fragmented`.
 
 The hidden legacy `article` mode (and its `paranoid` alias) retains the stricter
 per-article yEnc behavior for existing configurations. It has no conventional
-multipart PAR2 repair/cleanup guarantee and is not a replacement for
-`header-fragmented`.
+multipart PAR2 repair/cleanup guarantee and is not a replacement for `full`.
+
+`--file-counter` is rejected with `full` and `article`: its release-wide
+`[N/M]` Subject prefix would link files those modes keep unrelated on the
+wire. Use `full-shared` or `light` when the counter is required.
 
 ---
 
@@ -1139,7 +1140,7 @@ Environment variables available to the pre-hook:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, `header-fragmented`, or legacy `article` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or legacy `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 
@@ -1167,7 +1168,7 @@ following environment variables:
 | `PESTO_CATEGORY` | Value of `--nzb-category` (empty when not set) |
 | `PESTO_NZB_TITLE` | Value of `--nzb-title` (empty when not set) |
 | `PESTO_NZB_NAME` | Deprecated alias of `PESTO_NZB_TITLE`, same value |
-| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, `header-fragmented`, or legacy `article` |
+| `PESTO_OBFUSCATE` | Obfuscation mode in use: `none`, `light`, `full-shared`, `full`, or legacy `article` |
 | `PESTO_PAR2` | PAR2 redundancy percentage (e.g. `10`) |
 | `PESTO_TAGS` | Space-separated list of NZB tags (empty when none) |
 | `PESTO_WIRE_SUBJECT` | The actual `Subject:` header sent to the NNTP server for the first posted file — differs from the real filename under `--obfuscate` (empty when nothing was posted) |
@@ -1264,7 +1265,7 @@ picked up automatically — no config change needed.
 | `--article-size <BYTES>` | `posting.article_size` | `768000` | Target segment size in bytes |
 | `--line-length <CHARS>` | `posting.line_length` | `128` | yEnc encoded line length |
 | `--retries <N>` | `posting.retries` | `3` | Post attempts per segment |
-| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`, `header-fragmented`; bare flag = `full` (`article` hidden/experimental, `paranoid` alias accepted) |
+| `--obfuscate[=MODE]` | `posting.obfuscate` | `none` | `none`, `light`, `full-shared`, `full`; `header-fragmented` is a compatibility alias; bare flag = `full` (`article` hidden/experimental, `paranoid` alias accepted) |
 | `--date <VALUE>` | `posting.date` | server-supplied | `now`, deprecated `random` (last 2 h), or an RFC 2822 timestamp |
 | `--no-archive` | `posting.no_archive` | off | Add `X-No-Archive: yes` to every article |
 | `--message-id-domain <D>` | `posting.message_id_domain` | random | Fixed domain for `Message-ID` headers |
