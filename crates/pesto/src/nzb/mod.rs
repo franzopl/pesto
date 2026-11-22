@@ -8,6 +8,10 @@ mod model;
 mod reader;
 mod writer;
 
+/// yEnc encryption specification version emitted in `<meta type="yenc_version">`
+/// and accepted by the reader (Body Encryption Standard v1.2).
+pub const YENC_SPEC_VERSION: &str = "1.2";
+
 use model::*;
 #[cfg(test)]
 use reader::*;

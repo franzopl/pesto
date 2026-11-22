@@ -94,6 +94,12 @@ category has no `dir` of its own or doesn't match anything configured.
 
 Every call needs `?apikey=<key>` matching `[web].api_key`.
 
+## Encrypted releases
+
+See `penne`'s README ("Encrypted releases"): Sugo runs the same pipeline and
+automatically authenticates/decrypts articles for NZBs carrying
+`<meta type="yenc_encrypted">true</meta>`.
+
 ## Architecture
 
 - `src/job/` — the job model (including per-file progress, speed/ETA, and

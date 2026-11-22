@@ -24,8 +24,8 @@ use super::par2::{
 use super::shared::Shared;
 use super::task::{PostTask, TaskDispatcher};
 use super::{
-    make_task, par2_output_dir, par2_release_base, par2_temp_dir, push_par2_file,
-    spawn_double_buffered_reader, FileMeta,
+    make_task, par2_output_dir, par2_release_base, par2_temp_dir, par2_volume_ordinal,
+    push_par2_file, spawn_double_buffered_reader, FileMeta,
 };
 /// Pad the accumulated real bytes to the full PAR2 slice size and forward
 /// the slice to the background [`Par2Worker`]. Leaves `accum` empty (or
@@ -465,6 +465,17 @@ pub(super) async fn producer(
                         if let Some(tx) = &tx_opt {
                             // Send buf to the worker; the worker will return it to
                             // the pool (Phase 12b) after encoding the article.
+                            // Encryption-gated (see `prepare_resources`):
+                            // unencrypted uploads have no bootstrap/index and
+                            // the empty layout returns `None`.
+                            let identity = if shared.encryption_adapter.is_some() {
+                                shared
+                                    .release_layout
+                                    .segment_identity(meta.file_index, i)
+                                    .context("valid segment identity for planned data file")?
+                            } else {
+                                0
+                            };
                             if tx
                                 .send(make_task(
                                     meta.clone(),
@@ -472,6 +483,7 @@ pub(super) async fn producer(
                                     total_parts,
                                     offset,
                                     buf,
+                                    identity,
                                     file_crc32,
                                     &shared.config,
                                 ))
@@ -712,6 +724,7 @@ pub(super) async fn producer(
                 file.flush().await.with_context(|| {
                     format!("flushing PAR2 recovery volume `{}`", vol_path.display())
                 })?;
+                drop(file);
                 par2_materialized_bytes += pkt.len() as u64;
                 shared.emit(crate::progress::ProgressEvent::Par2SliceWritten);
 
@@ -721,9 +734,11 @@ pub(super) async fn producer(
                             .release_prefix
                             .as_deref()
                             .map(|prefix| layout::volume_name(prefix, *vol));
-                        let index_offset =
-                            u32::from(shared.config.obfuscate.policy().publish_par2_index);
-                        let file_index = metas.len() as u32 + 1 + index_offset + vol_idx as u32;
+                        let file_index = par2_volume_ordinal(
+                            metas.len(),
+                            shared.config.obfuscate.policy().publish_par2_index,
+                            vol_idx,
+                        );
                         push_par2_file(&vol_path, vol_name, wire_override, file_index, &shared, tx)
                             .await?;
                     }

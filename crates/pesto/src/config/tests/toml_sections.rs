@@ -1,3 +1,4 @@
+use super::fixture_kdf_input;
 use crate::config::*;
 
 #[test]
@@ -385,4 +386,38 @@ fn file_nzb_tags_used_when_cli_absent() {
     .unwrap();
     let cfg = Config::resolve(file, Overrides::default()).unwrap();
     assert_eq!(cfg.nzb_tags, vec!["config-a", "config-b"]);
+}
+
+#[test]
+fn toml_encryption_section_sets_password() {
+    let toml_text = format!(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [encryption]
+        password = "{}"
+        "#,
+        fixture_kdf_input()
+    );
+    let file: FileConfig = toml::from_str(&toml_text).unwrap();
+    let cfg = Config::resolve(file, Overrides::default()).unwrap();
+    assert_eq!(cfg.encrypt_password.as_deref(), Some(fixture_kdf_input()));
+}
+
+#[test]
+fn toml_encryption_section_empty_password_rejected() {
+    let file: FileConfig = toml::from_str(
+        r#"
+        [server]
+        host = "h"
+        [posting]
+        groups = ["alt.test"]
+        [encryption]
+        password = ""
+        "#,
+    )
+    .unwrap();
+    assert!(Config::resolve(file, Overrides::default()).is_err());
 }

@@ -21,6 +21,12 @@ use super::identity::{normalize_client_path, obfuscated_yenc_name, resolve_date}
 use super::par2::par2_geometry;
 use super::FileMeta;
 
+#[path = "prepare/layout.rs"]
+pub(crate) mod layout_mod;
+pub use layout_mod::ReleaseLayout;
+#[allow(unused_imports)]
+pub(crate) use layout_mod::{par2_base_packets_len, par2_volume_len};
+
 /// Validate any loaded resume state, prepare the spool directory and generate
 /// the once-per-run shared release identity used by `light`/`full-shared`
 /// obfuscation. Returns `(resume, resume_path, spool_dir, release_prefix,
@@ -70,6 +76,18 @@ pub(super) fn prepare_resume(
     } else {
         None
     };
+
+    // PU12-01 (Q3(a), second half): this run must not destroy spool entries
+    // merely because there is no non-empty resume state to validate them
+    // against. The type-1 spool exists precisely for the case where the
+    // state file was never written: a segment that was encoded, spooled and
+    // possibly posted, but whose acknowledgement was lost before the run
+    // could record it. Per-entry provenance is enforced at replay time by
+    // the worker instead: an entry is only replayed when its encryption
+    // stamp matches this run exactly (encrypted runs never accept unstamped
+    // or mismatched entries). `prepare_resources` still clears the spool
+    // whenever a loaded session is invalidated (changed fingerprint, layout
+    // or source set), which is the case where stale bytes are dangerous.
 
     // Posting parameters that change how the whole input is chunked or
     // named — compared against whatever fingerprint a loaded state was
@@ -197,26 +215,32 @@ pub(super) async fn prepare_inputs(
             bail!("multiple inputs normalize to the same client path `{client_path}`");
         }
         let size = md.len();
+        let mtime = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let file_fp = crate::resume::FileFingerprint { size, mtime };
 
         if let Some(resume) = &resume_arc {
-            let mtime = md
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            let file_fp = crate::resume::FileFingerprint { size, mtime };
             let mut state = resume.lock().unwrap();
+            let known_file = state.has_file(&real_name);
             if !state.file_matches(&real_name, &file_fp) {
-                if config.par2 > 0 {
+                if state.session_salt().is_some() && config.encrypt_password.is_some() {
+                    eprintln!(
+                        "resume: `{real_name}` changed size or modification time since the \
+                         saved session state was recorded — invalidating entire session"
+                    );
+                    // The session_invalidated flag set here makes
+                    // `prepare_resources` clear the spool directory too.
+                    state.invalidate_session();
+                } else if config.par2 > 0 {
                     // PAR2 recovery blocks are computed over the whole
-                    // recovery set together, not per file — one file's
+                    // recovery set together, not per file, so one file's
                     // content changing invalidates every volume's segments
-                    // too, not just this file's own (see
-                    // `forget_all_segments`'s doc comment). PAR2 volumes
-                    // never go through this per-file check themselves
-                    // (they're generated later, straight into the posting
-                    // queue — see `push_par2_file`), so this is the only
-                    // place that can catch it.
+                    // too (see `forget_all_segments`'s doc comment). PAR2
+                    // volumes never go through this per-file check
+                    // themselves, so this is the only place that can catch it.
                     eprintln!(
                         "resume: `{real_name}` changed size or modification time since the \
                          saved state was recorded — ignoring all saved segments, including \
@@ -231,6 +255,23 @@ pub(super) async fn prepare_inputs(
                     );
                     state.forget_file(&real_name);
                 }
+            } else if state.session_salt().is_some()
+                && config.encrypt_password.is_some()
+                && !known_file
+            {
+                // A source name the encrypted session never recorded: the
+                // input set itself changed (e.g. `b.bin` replaced by
+                // `c.bin` at the same ordinal/part count). The count-only
+                // release layout would still match, silently reusing the
+                // old salt/index space over different plaintext, so the
+                // whole encrypted session must rotate (yEnc Body Encryption
+                // Standard v1.2 §8: indices are stable only for the same
+                // session's segments).
+                eprintln!(
+                    "resume: `{real_name}` is not part of the saved encrypted session's \
+                     source set — invalidating entire session"
+                );
+                state.invalidate_session();
             }
             state.record_file(&real_name, file_fp);
         }
@@ -313,8 +354,9 @@ pub(super) async fn prepare_inputs(
             date,
             size: md.len(),
             // Assigned below, once `metas`' final posting order is settled —
-            // see the `config.file_counter` pass after the File-ID sort.
+            // see the natural order pass after the File-ID sort.
             file_index: 0,
+            fingerprint: file_fp,
         }));
     }
 
@@ -336,19 +378,15 @@ pub(super) async fn prepare_inputs(
         metas = keyed.into_iter().map(|(_, meta)| meta).collect();
     }
 
-    // `--file-counter`'s `[filenum/total]` numbers every file in the release,
-    // so it can only be assigned now that the full file list is settled — not
-    // at push time above.
+    // Assign `file_index` based on the release's natural filename order
+    // (`part1.rar` is index 1, `part2.rar` is index 2). This order is
+    // independent of `metas`' processing order (File-ID sort for PAR2).
     //
-    // The number must follow the release's own order (`part1.rar` is `[1/N]`,
-    // the PAR2 set closes it out), *not* `metas`' order: the File-ID sort
-    // above keys on an MD5, i.e. it shuffles the volumes with respect to their
-    // volume numbers. Indexers sort a collection by Subject and the counter is
-    // the Subject's leading field, so inheriting that order listed the release
-    // scrambled — a real upload came out with `part4.rar` as `[1/14]`.
-    // `metas` itself stays in File-ID order, since the producer feeds PAR2
-    // slices in that order and the par2 spec requires it (see the sort above).
-    if config.file_counter {
+    // The rank pass is gated exactly like upstream: `--file-counter` needs
+    // the `[filenum/total]` prefix, and encrypted uploads need the ordinal
+    // for `ReleaseLayout::segment_identity`. Unencrypted uploads without the
+    // flag keep the upstream zeroed index.
+    if config.file_counter || config.encrypt_password.is_some() {
         let mut order: Vec<usize> = (0..metas.len()).collect();
         order.sort_by(|&a, &b| natural_cmp(&metas[a].real_name, &metas[b].real_name));
         let mut rank = vec![0u32; metas.len()];
@@ -388,6 +426,8 @@ pub(super) struct RunResources {
     pub(super) par2_slice_size: usize,
     pub(super) recovery_count: usize,
     pub(super) total_files: u32,
+    pub(super) release_layout: Arc<ReleaseLayout>,
+    pub(super) encryption_adapter: Option<Arc<crate::crypto::UploadEncryptionAdapter>>,
     pub(super) initial_pool: Vec<Vec<u8>>,
 }
 
@@ -397,6 +437,8 @@ pub(super) async fn prepare_resources(
     config: &Config,
     metas: &[Arc<FileMeta>],
     initial_segments: u64,
+    resume_arc: Option<&Arc<Mutex<ResumeState>>>,
+    spool_dir: Option<&Path>,
 ) -> Result<RunResources> {
     let servers: Arc<Vec<crate::config::ServerEntry>> = Arc::new(config.all_servers().collect());
     // This validation intentionally happens before workers exist, so a bad
@@ -479,6 +521,96 @@ pub(super) async fn prepare_resources(
         0
     };
 
+    // The release layout (segment-identity planner) only exists for
+    // encrypted uploads: unencrypted uploads have no bootstrap, no nonce
+    // and no index, so running the planner there only adds a hand-written
+    // PAR2 packet-size prediction that can fail or panic on an upload that
+    // never needed it. `FileMeta::file_index` is assigned when
+    // `--file-counter` or encryption needs it; the plain path never reads
+    // it back.
+    let release_layout = Arc::new(if config.encrypt_password.is_some() {
+        ReleaseLayout::build(metas, config, recovery_count, par2_slice_size)?
+    } else {
+        ReleaseLayout::empty()
+    });
+
+    if config.encrypt_password.is_some() {
+        if let Some(resume) = resume_arc {
+            let mut state = resume.lock().unwrap();
+            let source_names: Vec<String> =
+                metas.iter().map(|meta| meta.real_name.clone()).collect();
+            let was_invalidated = state.take_session_invalidated();
+            let valid = state.validate_session(&release_layout, &source_names);
+            if was_invalidated || !valid {
+                if !valid {
+                    eprintln!(
+                        "resume: release layout or encrypted source set changed since the \
+                         saved state was recorded — clearing session identity, records, \
+                         and spool"
+                    );
+                } else {
+                    eprintln!(
+                        "resume: posting parameters changed since the saved state was recorded \
+                         — clearing session identity, records, and spool"
+                    );
+                }
+                state.invalidate_session();
+                if let Some(dir) = spool_dir {
+                    crate::spool::remove_all(dir);
+                }
+                // T14: `invalidate_session` also clears every per-file
+                // fingerprint — including the ones `prepare_inputs` just
+                // recorded for this run's *current* sources. Re-record the
+                // complete current set so the replacement session (fresh
+                // salt) still knows every file's identity; without this a
+                // later resume sees `files: {}` and can skip stale accepted
+                // articles under changed content.
+                for meta in metas {
+                    state.record_file(&meta.real_name, meta.fingerprint);
+                }
+            }
+        }
+    } else if let Some(resume) = resume_arc {
+        // T15: an invalidated session (e.g. encrypted run → ordinary
+        // resume) must still clear the spool even though this run itself
+        // is ordinary: replayed ciphertext would be posted into an
+        // unmarked NZB. The spool reader cannot distinguish those bytes.
+        let mut state = resume.lock().unwrap();
+        if state.take_session_invalidated() {
+            if let Some(dir) = spool_dir {
+                crate::spool::remove_all(dir);
+            }
+        }
+    }
+
+    let encryption_adapter = if let Some(ref password) = config.encrypt_password {
+        let salt = if let Some(resume) = resume_arc {
+            let mut state = resume.lock().unwrap();
+            if let Some(existing_salt) = state.session_salt() {
+                *existing_salt
+            } else {
+                let fresh_salt = crate::crypto::generate_alphabet_salt();
+                // Persist the complete ordered source identity with the
+                // salt so a later `--resume` validates names as well as
+                // part counts (T13).
+                state.set_session_identity(crate::resume::UploadSessionIdentity {
+                    salt: fresh_salt,
+                    layout: (*release_layout).clone(),
+                    source_names: metas.iter().map(|meta| meta.real_name.clone()).collect(),
+                });
+                fresh_salt
+            }
+        } else {
+            crate::crypto::generate_alphabet_salt()
+        };
+        let session = Arc::new(crate::crypto::EncryptionSession::new(password, salt)?);
+        Some(Arc::new(crate::crypto::UploadEncryptionAdapter::new(
+            session,
+        )))
+    } else {
+        None
+    };
+
     Ok(RunResources {
         servers,
         proxy_status,
@@ -490,6 +622,8 @@ pub(super) async fn prepare_resources(
         par2_slice_size,
         recovery_count,
         total_files,
+        release_layout,
+        encryption_adapter,
         initial_pool,
     })
 }

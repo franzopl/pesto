@@ -15,7 +15,7 @@ use crate::yenc;
 
 use super::outcome::PostedSegment;
 use super::persisted_identity;
-use super::result::commit_result;
+use super::result::{commit_result, record_failure};
 use super::shared::Shared;
 use super::task::{PostTask, ReadyArticle, TaskDispatcher};
 /// Per-worker token-bucket rate limiter.
@@ -118,13 +118,30 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                     part: task.part,
                     total: task.total,
                     message_id: existing.message_id,
-                    bytes: existing.bytes,
+                    bytes: if shared.encryption_adapter.is_some() {
+                        // Consistent with commit_result (Body Encryption
+                        // Standard v1.2 §2.1).
+                        task.data.len() as u64
+                    } else {
+                        existing.bytes
+                    },
                     from: Arc::from(from),
                     date,
                     full_crc32: task.file_crc32.unwrap_or(0),
                     server_idx: existing.server_idx,
                     file_index: task.meta.file_index,
                     total_files: shared.total_files,
+                    // The article was already posted encrypted under this
+                    // identity (yEnc Body Encryption Standard v1.2 §8); a
+                    // later `--check` repost of it must reuse the same
+                    // segment index, so it survives the resume re-injection.
+                    segment_index: task.segment_index,
+                    // Skipped/ReStatStoredId segments are never re-encoded
+                    // in this run, so no fresh digest exists here; a later
+                    // reread-based repost of a *pre-schema* resume record
+                    // has no digest either, which only ever weakens to the
+                    // pre-T04 behavior (no gate), never to plaintext.
+                    plaintext_digest: None,
                 };
                 shared.results.lock().unwrap().push(seg.clone());
                 if action == ResumeAction::ReStatStoredId {
@@ -163,6 +180,26 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
             );
             None
         }
+        Some(entry) => {
+            // PU12-01 (Q3(a), first half): replay only entries stamped by a
+            // run with the same encryption mode and salt fingerprint as
+            // this run. A mismatch (plain↔encrypted, or a rotated salt)
+            // falls back to a fresh encode under the current identity —
+            // never post the stale bytes verbatim.
+            let current_stamp = crate::spool::SpoolEncryptionStamp::for_adapter(
+                shared.encryption_adapter.as_deref(),
+            );
+            if current_stamp.allows_replay(entry.encryption_stamp.as_ref()) {
+                Some(entry)
+            } else {
+                warn!(
+                    file = %task.meta.real_name,
+                    part = task.part,
+                    "ignoring spool entry whose encryption stamp does not match this run"
+                );
+                None
+            }
+        }
         entry => entry,
     };
 
@@ -186,19 +223,55 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         let t_enc = Instant::now();
         let file_crc32 = task.file_crc32;
         let mut encode_buf = shared.acquire_encode_buf();
-        let encoded = yenc::encode_part_into(
-            &task.yenc_name,
-            task.meta.size,
-            yenc::PartSpec {
-                number: task.part,
-                total: task.total,
-                offset: task.offset,
-            },
-            &task.data,
-            shared.config.line_length,
-            file_crc32,
-            &mut encode_buf,
-        );
+        let spec = yenc::PartSpec {
+            number: task.part,
+            total: task.total,
+            offset: task.offset,
+        };
+        let encoded = if let Some(adapter) = &shared.encryption_adapter {
+            match adapter.encode_article(
+                &task.yenc_name,
+                task.meta.size,
+                spec,
+                &task.data,
+                shared.config.line_length,
+                task.segment_index,
+                &mut encode_buf,
+            ) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    let err_msg = format!("failed to encrypt article segment: {e}");
+                    warn!(
+                        file = %task.meta.real_name,
+                        part = task.part,
+                        error = %e,
+                        "failed to encrypt article segment"
+                    );
+                    let message_id =
+                        generate_message_id(shared.config.message_id_domain.as_deref());
+                    record_failure(shared, &task.meta, &task, message_id, &err_msg);
+                    let raw_bytes = task.data.len() as u64;
+                    shared.release_buffer(task.data);
+                    shared.emit(ProgressEvent::SegmentDone {
+                        file: task.meta.real_name.clone(),
+                        bytes: raw_bytes,
+                        ok: false,
+                    });
+                    shared.release_encode_buf(encode_buf);
+                    return None;
+                }
+            }
+        } else {
+            yenc::encode_part_into(
+                &task.yenc_name,
+                task.meta.size,
+                spec,
+                &task.data,
+                shared.config.line_length,
+                file_crc32,
+                &mut encode_buf,
+            )
+        };
         let encode_time = t_enc.elapsed();
         let message_id = generate_message_id(shared.config.message_id_domain.as_deref());
         let (rfc_date, _ts) = &task.date;
@@ -222,6 +295,9 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
         if let Some(dir) = &shared.spool_dir {
             let identity =
                 persisted_identity(&task.subject_name, &task.yenc_name, &task.from, &task.date);
+            let stamp = crate::spool::SpoolEncryptionStamp::for_adapter(
+                shared.encryption_adapter.as_deref(),
+            );
             if let Err(e) = crate::spool::write_with_identity(
                 dir,
                 &task.meta.real_name,
@@ -230,6 +306,7 @@ async fn prepare_ready(shared: &Arc<Shared>, mut task: PostTask) -> Option<Ready
                 &headers,
                 &encoded.body,
                 &identity,
+                &stamp,
             )
             .await
             {
@@ -368,7 +445,15 @@ pub(super) async fn worker(
                     part: p.task.part,
                     total: p.task.total,
                     message_id: p.message_id,
-                    bytes: (p.headers.len() + p.encoded.body.len()) as u64,
+                    // NZB `<segment bytes>` semantics (Body Encryption
+                    // Standard v1.2 §2.1): encrypted
+                    // releases declare the plaintext segment length,
+                    // ordinary uploads the wire-article length.
+                    bytes: if shared.encryption_adapter.is_some() {
+                        p.task.data.len() as u64
+                    } else {
+                        (p.headers.len() + p.encoded.body.len()) as u64
+                    },
                     from: Arc::from(p.task.from.as_str()),
                     date: p.date.clone(),
                     full_crc32: p.task.file_crc32.unwrap_or(0),
@@ -377,6 +462,8 @@ pub(super) async fn worker(
                     server_idx: 0,
                     file_index: p.task.meta.file_index,
                     total_files: shared.total_files,
+                    segment_index: p.task.segment_index,
+                    plaintext_digest: p.task.plaintext_digest,
                 });
                 let bytes = p.task.data.len() as u64;
                 shared.release_buffer(p.task.data);
@@ -422,7 +509,16 @@ pub(super) async fn worker(
                     }
                 };
                 let t_post = Instant::now();
-                match conn.post_parts(&p.headers, &p.encoded.body).await {
+                // Encrypted articles are the only ones whose bodies can
+                // start a line with '.', so only they take the scanning
+                // `*_encrypted` posting path; ordinary uploads keep the
+                // original direct write (no per-article dot scan).
+                let post_result = if shared.encryption_adapter.is_some() {
+                    conn.post_parts_encrypted(&p.headers, &p.encoded.body).await
+                } else {
+                    conn.post_parts(&p.headers, &p.encoded.body).await
+                };
+                match post_result {
                     Ok(returned_id) => {
                         // Some servers substitute their own Message-ID at
                         // accept time and echo it back in the 240 response
@@ -532,9 +628,18 @@ pub(super) async fn worker(
                         }
                     };
 
-                    // Enqueue all articles without flushing.
+                    // Enqueue all articles without flushing. Only
+                    // encrypted articles take the scanning `*_encrypted`
+                    // path (see the sequential path above).
+                    let encrypted = shared.encryption_adapter.is_some();
                     for p in &pending {
-                        if let Err(e) = conn.enqueue_post(&p.headers, &p.encoded.body).await {
+                        let enqueued = if encrypted {
+                            conn.enqueue_post_encrypted(&p.headers, &p.encoded.body)
+                                .await
+                        } else {
+                            conn.enqueue_post(&p.headers, &p.encoded.body).await
+                        };
+                        if let Err(e) = enqueued {
                             break 'use_conn (true, format!("{e:#}"));
                         }
                     }

@@ -130,9 +130,12 @@ pub(super) enum Command {
         /// config file's `download_dir`, or the current directory.
         #[arg(long)]
         out_dir: Option<PathBuf>,
-        /// Archive extraction password. Overrides the `.nzb`'s own
-        /// `<meta type="password">`, if any — useful for obfuscated
-        /// releases that don't carry the password in the `.nzb` itself.
+        /// Password. Overrides the `.nzb`'s own `<meta type="password">`,
+        /// if any. When the NZB carries the `yenc_encrypted` marker this is
+        /// also the transport (yEnc-decryption) password; without the marker
+        /// it is used only for downstream archive extraction — useful for
+        /// obfuscated releases that don't carry the password in the `.nzb`
+        /// itself.
         #[arg(long)]
         password: Option<String>,
         /// Only check that every segment is still present on the

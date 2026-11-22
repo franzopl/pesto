@@ -65,6 +65,36 @@ pub(crate) fn par2_geometry_from_sizes(sizes: &[u64], config: &Config) -> (usize
     }
 }
 
+/// Compute the exact byte length of PAR2 base packets (Main + Creator + FileDesc + IFSC)
+/// without performing any file reads or hashes.
+pub(crate) fn par2_base_packets_len(metas: &[Arc<FileMeta>], par2_slice_size: usize) -> u64 {
+    let mut total: u64 = 64 + 12 + 16 * metas.len() as u64; // Main packet
+    total += 72; // Creator packet ("pesto")
+    let s = par2_slice_size.max(1);
+    for meta in metas {
+        let path_len = meta.client_path.len();
+        let padded_path = (path_len + 3) & !3;
+        total += 64 + 56 + padded_path as u64; // File Description
+
+        let slice_count = if meta.size == 0 {
+            0
+        } else {
+            (meta.size as usize).div_ceil(s)
+        };
+        total += 64 + 16 + 20 * slice_count as u64; // IFSC
+    }
+    total
+}
+
+/// Compute the exact byte length of a PAR2 recovery volume.
+pub(crate) fn par2_volume_len(
+    base_packets_len: u64,
+    recovery_slice_count: u32,
+    par2_slice_size: usize,
+) -> u64 {
+    base_packets_len + (recovery_slice_count as u64) * (68 + par2_slice_size as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

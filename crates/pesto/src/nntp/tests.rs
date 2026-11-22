@@ -4,7 +4,7 @@ use std::sync::Arc;
 impl Connection {
     /// Construct a `Connection` from any bidirectional stream. Used in tests to
     /// inject a mock transport without opening a real TCP/TLS connection.
-    fn from_stream(
+    pub(super) fn from_stream(
         s: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     ) -> Self {
         Connection {
@@ -167,6 +167,10 @@ fn already_exists_rejects_genuine_failures() {
 fn yenc_body_has_leading_dot_detects_first_and_later_lines() {
     assert!(yenc_body_has_leading_dot(b".hidden\r\n"));
     assert!(yenc_body_has_leading_dot(b"ok\r\n.bad\r\n"));
+    // Bare-LF line starts count too: `dot_stuff` stuffs after every `\n`,
+    // so the predicate must agree with it (R11-PC-08).
+    assert!(yenc_body_has_leading_dot(b"ok\n.bad\n"));
+    assert!(!yenc_body_has_leading_dot(b"ok\na.b\n"));
     assert!(!yenc_body_has_leading_dot(b"ok\r\na.b\r\n"));
     assert!(!yenc_body_has_leading_dot(b""));
 }
@@ -226,10 +230,14 @@ fn dot_stuff_consecutive_dot_lines() {
 
 /// Write `responses` to the server half of a duplex pair before the test
 /// begins so they are immediately available for the `Connection` to read.
-async fn mock_conn(responses: &[u8]) -> (Connection, tokio::io::DuplexStream) {
+pub(super) async fn mock_conn_shared(responses: &[u8]) -> (Connection, tokio::io::DuplexStream) {
     let (client, mut server) = tokio::io::duplex(4096);
     server.write_all(responses).await.unwrap();
     (Connection::from_stream(client), server)
+}
+
+async fn mock_conn(responses: &[u8]) -> (Connection, tokio::io::DuplexStream) {
+    mock_conn_shared(responses).await
 }
 
 #[tokio::test]

@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 use crate::article::{default_subject, Article};
 use crate::config::Config;
+use crate::crypto::UploadEncryptionAdapter;
 use crate::nntp::pool::ConnectionSlot;
 use crate::progress::{ProgressEvent, ProgressSender};
 use crate::resume::SegmentRecord;
@@ -37,6 +38,16 @@ pub(super) fn commit_result(
     date: (Option<String>, Option<u64>),
     server_idx: usize,
 ) {
+    // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
+    // §2.1): for encrypted releases the declared bytes are
+    // the dot-unstuffed PLAINTEXT segment length (they must equal the AAD
+    // `segmentBytes`), while ordinary uploads keep the upstream wire-article
+    // length.
+    let nzb_bytes = if shared.encryption_adapter.is_some() {
+        task.data.len() as u64
+    } else {
+        wire_bytes as u64
+    };
     if posted {
         if let Some(resume) = &shared.resume {
             // In-memory only — no disk write here. Every commit used to
@@ -58,7 +69,7 @@ pub(super) fn commit_result(
                 task.part,
                 SegmentRecord {
                     message_id: message_id.clone(),
-                    bytes: wire_bytes as u64,
+                    bytes: nzb_bytes,
                     confirmed: false,
                     check_disabled: !shared.config.check,
                     server_idx,
@@ -86,13 +97,15 @@ pub(super) fn commit_result(
             part: task.part,
             total: task.total,
             message_id,
-            bytes: wire_bytes as u64,
+            bytes: nzb_bytes,
             from: Arc::from(task.from.as_str()),
             date,
             full_crc32: task.file_crc32.unwrap_or(0),
             server_idx,
             file_index: task.meta.file_index,
             total_files: shared.total_files,
+            segment_index: task.segment_index,
+            plaintext_digest: task.plaintext_digest,
         };
         shared.results.lock().unwrap().push(seg.clone());
         if let Some(tx) = shared.check_tx.lock().unwrap().as_ref() {
@@ -196,6 +209,8 @@ pub(super) fn record_failure(
         full_crc32: task.file_crc32.unwrap_or(0),
         file_index: meta.file_index,
         total_files: shared.total_files,
+        segment_index: task.segment_index,
+        plaintext_digest: task.plaintext_digest,
     });
 }
 
@@ -204,8 +219,17 @@ pub(super) fn record_failure(
 /// `message_id` below for why). Returns the `PostedSegment`s that were
 /// successfully posted; tasks that exhaust all retries are silently dropped
 /// (the caller can compare lengths to detect persistent failures).
+///
+/// `adapter` is the upload's [`UploadEncryptionAdapter`]: when present, the
+/// retried article is re-encrypted with the *same* salt and
+/// `FailedTask::segment_index` the original copy used, so the reposted wire
+/// output is identical in identity to the first attempt. Reposting
+/// plaintext for an encrypted upload would leak the file contents on the
+/// wire and produce an article undecryptable under the NZB's declared
+/// `yenc_encrypted` provenance (Body Encryption Standard v1.2 §8).
 pub async fn repost_failed_tasks(
     config: &Config,
+    adapter: Option<Arc<UploadEncryptionAdapter>>,
     failed: &[FailedTask],
     groups: &[String],
     events: Option<&ProgressSender>,
@@ -256,20 +280,64 @@ pub async fn repost_failed_tasks(
             continue;
         }
 
+        // PESTO-FINAL-1 (Body Encryption Standard v1.2 §8): the original
+        // salt + segment index already authenticated the plaintext this task
+        // encrypted. If the source changed since then, re-encrypting the
+        // re-read bytes under that same identity would publish a second,
+        // different plaintext under one authenticated identity — refuse the
+        // retry and leave the segment failed, exactly like the read-failure
+        // branches above. Describe the condition only: no digests, keys or
+        // plaintext bytes are logged.
+        if let Some(expected) = task.plaintext_digest {
+            use sha2::{Digest, Sha256};
+            if Sha256::digest(&buf).as_slice() != expected.as_slice() {
+                warn!(
+                    file = %task.file_name,
+                    part = task.part,
+                    "retry: source file changed since the original encrypted \
+                     attempt; refusing to re-post it under the same segment \
+                     identity"
+                );
+                continue;
+            }
+        }
+
         let spec = yenc::PartSpec {
             number: task.part,
             total: task.total,
             offset,
         };
         let file_crc32 = (task.part == task.total).then_some(task.full_crc32);
-        let encoded = yenc::encode_part(
-            &task.yenc_name,
-            task.file_size,
-            spec,
-            &buf,
-            config.line_length,
-            file_crc32,
-        );
+        // Encrypted uploads re-run the full encryption adapter with the
+        // original salt + segment index (the adapter derives the same nonce
+        // from the same index, and the session salt is the run's persistent
+        // one) so the retried article is the authenticated wire form, not
+        // plaintext (Body Std v1.2 §8). Unencrypted uploads keep
+        // the plain `encode_part` path unchanged.
+        let encoded = match adapter.as_ref() {
+            Some(adapter) => {
+                let mut encode_buf = Vec::new();
+                adapter
+                    .encode_article(
+                        &task.yenc_name,
+                        task.file_size,
+                        spec,
+                        &buf,
+                        config.line_length,
+                        task.segment_index,
+                        &mut encode_buf,
+                    )
+                    .context("retry: failed to re-encrypt article segment")?
+            }
+            None => yenc::encode_part(
+                &task.yenc_name,
+                task.file_size,
+                spec,
+                &buf,
+                config.line_length,
+                file_crc32,
+            ),
+        };
         // Re-post with the *same* Message-ID the in-run attempts used, so a
         // server that already has the article (lost `240` ack) deduplicates it
         // via `435 Already exists` instead of accepting a duplicate under a
@@ -291,11 +359,29 @@ pub async fn repost_failed_tasks(
         };
         let headers = article.build_headers();
         let wire_bytes = (headers.len() + encoded.body.len()) as u64;
+        // NZB `<segment bytes>` semantics (Body Encryption Standard v1.2
+        // §2.1): encrypted releases declare the PLAINTEXT segment length
+        // (it must equal the AAD `segmentBytes`), ordinary uploads the
+        // wire-article length — identical to `commit_result` and
+        // `check::repost_one`. Without this, a recovered encrypted article
+        // decrypts fine but Penne's size check rejects the NZB
+        // (SEGMENT_BYTES_MISMATCH).
+        let nzb_bytes = if adapter.is_some() {
+            buf.len() as u64
+        } else {
+            wire_bytes
+        };
 
         let mut ok = false;
         for attempt in 1..=max_retries {
             match slot.ensure_connected().await {
-                Ok(conn) => match conn.post_parts(&headers, &encoded.body).await {
+                // Only encrypted reposts take the scanning `*_encrypted`
+                // path; ordinary ones keep the direct write.
+                Ok(conn) => match if adapter.is_some() {
+                    conn.post_parts_encrypted(&headers, &encoded.body).await
+                } else {
+                    conn.post_parts(&headers, &encoded.body).await
+                } {
                     Ok(returned_id) => {
                         // See the main post path for why: some servers
                         // substitute their own Message-ID at accept time.
@@ -347,13 +433,15 @@ pub async fn repost_failed_tasks(
                 part: task.part,
                 total: task.total,
                 message_id,
-                bytes: wire_bytes,
+                bytes: nzb_bytes,
                 server_idx: slot.server_idx(),
                 from: Arc::from(task.from.as_str()),
                 date: task.date.clone(),
                 full_crc32: task.full_crc32,
                 file_index: task.file_index,
                 total_files: task.total_files,
+                segment_index: task.segment_index,
+                plaintext_digest: task.plaintext_digest,
             });
             if let Some(tx) = events {
                 let _ = tx.send(ProgressEvent::PostRetryRecovered {

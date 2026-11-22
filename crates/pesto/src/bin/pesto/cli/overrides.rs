@@ -87,6 +87,7 @@ impl Cli {
                 })
             }),
             nzb_password: self.nzb_password.clone(),
+            encrypt_password: self.encrypt.clone(),
             nzb_category: self.nzb_category.clone(),
             nzb_tags: self.nzb_tag.clone(),
             tmdb: self.tmdb.clone(),
