@@ -12,6 +12,13 @@ changelogs (`crates/penne/CHANGELOG.md`, `crates/parmesan/CHANGELOG.md`).
 
 ## [Unreleased]
 
+### Fixed
+
+- Building from source no longer fails at dependency fetch. `bdinfo-rs-core`
+  1.0.1 now comes from crates.io instead of the `agentjp/bdinfo-rs` git
+  repository, which is gone. The crates.io release was published from the
+  same commit the lockfile pinned, so the code is unchanged (#226).
+
 ## [0.11.0] — 2026-11-03
 
 ### Added
