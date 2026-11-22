@@ -7,6 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-11-21
+
+### Fixed
+
+- Building from source no longer fails at dependency fetch. The workspace's
+  `bdinfo-rs-core` dependency, pulled in through `pesto-poster`, pointed at a
+  GitHub repository that no longer exists. It now comes from crates.io at the
+  same version and commit, so the code is unchanged (#226, #227).
+
 ## [0.7.0] — 2026-10-26
 
 ### Added
