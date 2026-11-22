@@ -188,7 +188,7 @@ optional and its absence degrades gracefully — `--nfo` falls back to a
 directory listing instead.
 
 Blu-ray disc analysis (`--nfo` on a BDMV folder) is handled in-process by
-[`bdinfo-rs-core`](https://github.com/agentjp/bdinfo-rs) (LGPL-2.1), which is
+[`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core) (LGPL-2.1), which is
 compiled into the pesto binary. No external BDInfo tool is required.
 
 ---
@@ -1194,7 +1194,7 @@ to a recursive directory listing. The path is exposed as `PESTO_NFO` to every
 hook script.
 
 For Blu-ray disc structures (`BDMV/` layout), pesto uses
-[`bdinfo-rs-core`](https://github.com/agentjp/bdinfo-rs) — a memory-safe,
+[`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core) — a memory-safe,
 pure-Rust Blu-ray analyzer compiled directly into the binary. No external tool
 is needed. It handles playlist selection, stream analysis, and QUICK SUMMARY
 generation in-process. The mediainfo fallback path is kept for the rare case

@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 lexical-sort = "0.3"
 unicode-width = "0.2"
-bdinfo-rs-core = { version = "=1.0.1", git = "https://github.com/agentjp/bdinfo-rs", tag = "v1.0.1" }
+bdinfo-rs-core = "=1.0.1"
 self-replace = "1.5.0"
 semver = "1.0.28"
 

@@ -253,7 +253,8 @@ dependencies = [
 [[package]]
 name = "bdinfo-rs-core"
 version = "1.0.1"
-source = "git+https://github.com/agentjp/bdinfo-rs?tag=v1.0.1#7a69d5184fc2a53ee845fa9cbd3765656a424b0e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5819fc36de48e4875974fd1f4000d55ad338b182defe02830a796940fe1d044"
 dependencies = [
  "roxmltree",
  "thiserror 2.0.18",
